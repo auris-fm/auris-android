@@ -2,6 +2,12 @@
 
 This file provides guidance to AI coding assistants (Claude Code, Cursor, Windsurf, etc.) when working with code in this repository.
 
+## Constitution
+
+- The project constitution lives at `.specify/memory/constitution.md`.
+- Plan/spec/tasks artifacts under `.specify/templates/` must satisfy constitution checks.
+- If guidance conflicts, follow the constitution for implementation and quality gates.
+
 ## Common Commands
 
 ### Building

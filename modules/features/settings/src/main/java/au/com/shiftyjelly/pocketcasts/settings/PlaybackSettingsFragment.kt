@@ -293,6 +293,19 @@ class PlaybackSettingsFragment : BaseFragment() {
                             )
                         }
 
+                        SettingsItems.SETTINGS_VOICE_SAMPLE_RETENTION -> {
+                            VoiceSampleRetention(
+                                saved = settings.voiceSampleRetentionEnabled.flow.collectAsState().value,
+                                onSave = {
+                                    analyticsTracker.track(
+                                        AnalyticsEvent.SETTINGS_GENERAL_VOICE_SAMPLE_RETENTION_TOGGLED,
+                                        mapOf("enabled" to it),
+                                    )
+                                    settings.voiceSampleRetentionEnabled.set(it, updateModifiedAt = true)
+                                },
+                            )
+                        }
+
                         SettingsItems.SETTINGS_INTELLIGENT_PLAYBACK -> {
                             IntelligentPlaybackResumption(
                                 saved = settings.intelligentPlaybackResumption.flow.collectAsState().value,
@@ -541,6 +554,15 @@ class PlaybackSettingsFragment : BaseFragment() {
     )
 
     @Composable
+    private fun VoiceSampleRetention(saved: Boolean, onSave: (Boolean) -> Unit) = SettingRow(
+        primaryText = stringResource(LR.string.settings_voice_sample_retention),
+        secondaryText = stringResource(LR.string.settings_voice_sample_retention_summary),
+        toggle = SettingRowToggle.Switch(checked = saved),
+        modifier = Modifier.toggleable(value = saved, role = Role.Switch) { onSave(!saved) },
+        indent = false,
+    )
+
+    @Composable
     private fun IntelligentPlaybackResumption(saved: Boolean, onSave: (Boolean) -> Unit) = SettingRow(
         primaryText = stringResource(LR.string.settings_playback_resumption),
         secondaryText = stringResource(LR.string.settings_playback_resumption_summary),
@@ -656,6 +678,7 @@ private enum class SettingsItems {
     SETTINGS_SKIP_BACK_TIME,
     SETTINGS_KEEP_SCREEN_AWAKE,
     SETTINGS_OPEN_PLAYER_AUTOMATICALLY,
+    SETTINGS_VOICE_SAMPLE_RETENTION,
     SETTINGS_INTELLIGENT_PLAYBACK,
     SETTINGS_PLAY_UP_NEXT_EPISODE,
     SETTINGS_ADJUST_REMAINING_TIME,

@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.ui
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.SearchManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
@@ -153,6 +154,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.opml.OpmlImportTask
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
 import au.com.shiftyjelly.pocketcasts.repositories.playback.UpNextSource
+import au.com.shiftyjelly.pocketcasts.repositories.playback.voicecontrol.VoiceCommandRouter
 import au.com.shiftyjelly.pocketcasts.repositories.playlist.Playlist
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.EpisodeManager
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.PodcastManager
@@ -336,6 +338,13 @@ class MainActivity :
 
     private lateinit var binding: ActivityMainBinding
     private lateinit var navigator: BottomNavigator
+    private val voiceCommandRouter by lazy(LazyThreadSafetyMode.NONE) {
+        VoiceCommandRouter.createDefault(
+            playbackManager = playbackManager,
+            settings = settings,
+            analyticsTracker = analyticsTracker,
+        )
+    }
 
     private val onboardingLauncher: ActivityResultLauncher<Intent> = registerForActivityResult(OnboardingActivityContract()) { result ->
         when (result) {
@@ -1643,12 +1652,19 @@ class MainActivity :
                 }
 
                 is PlayFromSearchDeepLink -> {
-                    playbackManager.mediaSessionManager.playFromSearchExternal(deepLink.query)
+                    val routed = dispatchVoiceCommandIfEligible(deepLink.query)
+                    if (!routed) {
+                        playbackManager.mediaSessionManager.playFromSearchExternal(deepLink.query)
+                    }
                 }
 
                 is AssistantDeepLink -> {
-                    // This is what the assistant sends us when it doesn't know what to do and just opens the app. Assume the user wants to play.
-                    playbackManager.playQueue()
+                    val assistantQuery = extractAssistantQuery(intent)
+                    val routed = dispatchVoiceCommandIfEligible(assistantQuery)
+                    if (!routed) {
+                        // Assistant opened the app without a voice command payload.
+                        playbackManager.playQueue()
+                    }
                 }
 
                 is SignInDeepLink -> {
@@ -1687,6 +1703,33 @@ class MainActivity :
             val fragment = PodcastListFragment.newInstance(discoverList)
             addFragment(fragment)
         }
+    }
+
+    private fun extractAssistantQuery(intent: Intent): String? {
+        return intent.extras?.getString(SearchManager.QUERY)
+            ?: intent.extras?.getString(Intent.EXTRA_TEXT)
+            ?: intent.extras?.getString("query")
+    }
+
+    private fun dispatchVoiceCommandIfEligible(rawUtterance: String?): Boolean {
+        if (rawUtterance.isNullOrBlank()) {
+            return false
+        }
+        if (!FeatureFlag.isEnabled(Feature.HANDS_FREE_VOICE_CONTROL)) {
+            return false
+        }
+
+        launch {
+            val routingResult = voiceCommandRouter.route(
+                utterance = rawUtterance,
+                isPlaybackActive = playbackManager.isPlaying(),
+                isNetworkAvailable = Network.isConnected(this@MainActivity),
+                retentionEnabled = settings.voiceSampleRetentionEnabled.value,
+            )
+            viewModel.emitVoiceCommandFeedback(routingResult.outcome.userFeedbackType)
+        }
+
+        return true
     }
 
     private fun openReferralClaim(code: String) {

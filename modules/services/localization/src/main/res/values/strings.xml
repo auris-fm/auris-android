@@ -1559,6 +1559,8 @@
     <string name="settings_notification_vibrate_never">Never</string>
     <string name="settings_open_player_automatically">Open player automatically</string>
     <string name="settings_open_player_automatically_summary">If on, the full-screen player will open when you start playing a podcast episode.</string>
+    <string name="settings_voice_sample_retention">Voice sample retention</string>
+    <string name="settings_voice_sample_retention_summary">If on, anonymized voice samples can be retained for up to 30 days to improve recognition quality.</string>
     <string name="settings_other_media_actions">Other media actions</string>
     <string name="settings_playback_resumption">Intelligent playback resumption</string>
     <string name="settings_playback_resumption_summary">If on, Pocket Casts will go back a little in episodes you resume so you can catch up more comfortably.</string>
@@ -1593,6 +1595,10 @@
     <string name="settings_show_artwork_details">This will also show artwork on connected Bluetooth devices, watches, etc.</string>
     <string name="settings_skip_back_time">Skip back time</string>
     <string name="settings_skip_back_time_summary">10 seconds</string>
+    <string name="voice_command_success">Voice command completed</string>
+    <string name="voice_command_not_supported">That voice command is not supported yet</string>
+    <string name="voice_command_failed">Couldn\'t complete that voice command</string>
+    <string name="voice_command_wake_word_needed">Say \"Hey Pocket Casts\" first</string>
     <string name="settings_skip_forward_time">Skip forward time</string>
     <string name="settings_skip_forward_time_summary">30 seconds</string>
     <string name="settings_storage">Storage</string>

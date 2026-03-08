@@ -156,6 +156,14 @@ enum class Feature(
         hasFirebaseRemoteFlag = true,
         hasDevToggle = true,
     ),
+    HANDS_FREE_VOICE_CONTROL(
+        key = "hands_free_voice_control",
+        title = "Hands-Free Voice Control",
+        defaultValue = isDebugOrPrototypeBuild,
+        tier = FeatureTier.Free,
+        hasFirebaseRemoteFlag = true,
+        hasDevToggle = true,
+    ),
     NEW_INSTALLMENT_PLAN(
         key = "new_installment_plan",
         title = "New Installment Plan",

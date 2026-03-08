@@ -635,6 +635,12 @@ class SettingsImpl @Inject constructor(
         sharedPrefs = sharedPreferences,
     )
 
+    override val voiceSampleRetentionEnabled = UserSetting.BoolPref(
+        sharedPrefKey = "voiceSampleRetentionEnabled",
+        defaultValue = true,
+        sharedPrefs = sharedPreferences,
+    )
+
     override val autoDownloadUnmeteredOnly = UserSetting.BoolPref(
         sharedPrefKey = "autoDownloadOnlyDownloadOnWifi",
         defaultValue = true,

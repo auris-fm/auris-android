@@ -281,6 +281,8 @@ enum class AnalyticsEvent(val key: String) {
     PLAYBACK_EPISODE_DURATION_CHANGED("playback_episode_duration_changed"),
     PLAYBACK_FOREGROUND_SERVICE_ERROR("playback_foreground_service_error"),
     PLAYBACK_EPISODE_POSITION_CHANGED_ON_SYNC("playback_episode_position_changed_on_sync"),
+    VOICE_COMMAND_OUTCOME_RECORDED("voice_command_outcome_recorded"),
+    VOICE_COMMAND_ARBITRATION_RECORDED("voice_command_arbitration_recorded"),
 
     /* Privacy */
     PRIVACY_SHOWN("privacy_shown"),
@@ -644,6 +646,7 @@ enum class AnalyticsEvent(val key: String) {
     SETTINGS_GENERAL_MEDIA_NOTIFICATION_CONTROLS_ORDER_CHANGED("settings_general_media_notification_controls_order_changed"),
     SETTINGS_GENERAL_AUTOPLAY_TOGGLED("settings_general_autoplay_toggled"),
     SETTINGS_GENERAL_USE_REAL_TIME_FOR_PLAYBACK_REMAINING_TIME("settings_use_real_time_for_playback_remaining_time"),
+    SETTINGS_GENERAL_VOICE_SAMPLE_RETENTION_TOGGLED("settings_general_voice_sample_retention_toggled"),
 
     /* Settings - Headphone controls */
     SETTINGS_HEADPHONE_CONTROLS_SHOWN("settings_headphone_controls_shown"),

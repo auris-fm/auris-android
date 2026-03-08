@@ -67,3 +67,11 @@ sentry.properties
 .kotlin
 
 developer.properties
+out/
+*.class
+*.log
+.env*
+Thumbs.db
+*.tmp
+*.swp
+.vscode/

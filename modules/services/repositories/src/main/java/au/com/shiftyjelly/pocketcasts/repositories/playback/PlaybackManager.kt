@@ -559,6 +559,7 @@ open class PlaybackManager @Inject constructor(
         SourceView.PROFILE,
         SourceView.EPISODE_SWIPE_ACTION,
         SourceView.TASKER,
+        SourceView.VOICE_COMMAND,
         SourceView.UNKNOWN,
         SourceView.UP_NEXT,
         SourceView.UP_NEXT_HISTORY,

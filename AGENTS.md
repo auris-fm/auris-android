@@ -218,3 +218,12 @@ The Room database has 122 migration versions. When modifying entities:
 ### Analytics
 
 Use `AnalyticsTracker` service for event tracking. Analytics are integrated with Automattic Tracks.
+
+## Active Technologies
+- Kotlin (Android, AGP/Kotlin from current Gradle setup) + AndroidX, Hilt, Coroutines/Flow, existing DeepLinkFactory + (001-hands-free-mode)
+- N/A for MVP (no Room/DataStore schema changes) (001-hands-free-mode)
+- Kotlin (Android; existing repo toolchain) + AndroidX, Hilt, Coroutines/Flow, `PlaybackManager`, (001-hands-free-voice-control)
+- Existing app settings + retained anonymized voice samples (30-day policy), no Room (001-hands-free-voice-control)
+
+## Recent Changes
+- 001-hands-free-mode: Added Kotlin (Android, AGP/Kotlin from current Gradle setup) + AndroidX, Hilt, Coroutines/Flow, existing DeepLinkFactory +

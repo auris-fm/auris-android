@@ -16,6 +16,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.bookmark.BookmarkManager
 import au.com.shiftyjelly.pocketcasts.repositories.endofyear.EndOfYearManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
+import au.com.shiftyjelly.pocketcasts.repositories.playback.voicecontrol.FeedbackType
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.EpisodeManager
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.PodcastManager
 import au.com.shiftyjelly.pocketcasts.repositories.user.UserManager
@@ -197,6 +198,18 @@ class MainActivityViewModel
                     ),
                 )
             }
+        }
+    }
+
+    fun emitVoiceCommandFeedback(feedbackType: FeedbackType) {
+        val messageResId = when (feedbackType) {
+            FeedbackType.SUCCESS -> LR.string.voice_command_success
+            FeedbackType.UNSUPPORTED -> LR.string.voice_command_not_supported
+            FeedbackType.FAILED -> LR.string.voice_command_failed
+            FeedbackType.IGNORED -> LR.string.voice_command_wake_word_needed
+        }
+        viewModelScope.launch {
+            _snackbarMessage.emit(messageResId)
         }
     }
 

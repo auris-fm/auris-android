@@ -49,6 +49,7 @@ enum class SourceView(val analyticsValue: String) {
     STARRED("starred"),
     STATS("stats"),
     TASKER("tasker"),
+    VOICE_COMMAND("voice_command"),
     UNKNOWN("unknown"),
     UP_NEXT("up_next"),
     UP_NEXT_HISTORY("up_next_history"),

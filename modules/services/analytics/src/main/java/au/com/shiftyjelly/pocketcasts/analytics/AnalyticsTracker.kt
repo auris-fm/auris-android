@@ -61,6 +61,42 @@ class AnalyticsTracker(
         )
     }
 
+    fun trackVoiceArbitration(
+        source: String,
+        latencyMs: Long,
+        lateSourceIgnored: Boolean,
+    ) {
+        track(
+            AnalyticsEvent.VOICE_COMMAND_ARBITRATION_RECORDED,
+            mapOf(
+                "source" to source,
+                "latency_ms" to latencyMs,
+                "late_source_ignored" to lateSourceIgnored,
+            ),
+        )
+    }
+
+    fun trackVoiceCommandOutcome(
+        resultType: String,
+        feedbackType: String,
+        selectedSource: String?,
+        intentType: String?,
+    ) {
+        track(
+            AnalyticsEvent.VOICE_COMMAND_OUTCOME_RECORDED,
+            buildMap {
+                put("result_type", resultType)
+                put("feedback_type", feedbackType)
+                if (selectedSource != null) {
+                    put("selected_source", selectedSource)
+                }
+                if (intentType != null) {
+                    put("intent_type", intentType)
+                }
+            },
+        )
+    }
+
     fun trackOnboardingIntroCarouselShown(flow: String) {
         trackWithFlow(event = AnalyticsEvent.ONBOARDING_INTRO_CAROUSEL_SHOWN, flow = flow)
     }

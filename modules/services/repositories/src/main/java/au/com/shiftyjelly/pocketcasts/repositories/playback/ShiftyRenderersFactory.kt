@@ -11,6 +11,7 @@ import androidx.media3.exoplayer.audio.AudioRendererEventListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilters
 import au.com.shiftyjelly.pocketcasts.models.type.TrimMode
 import au.com.shiftyjelly.pocketcasts.repositories.user.StatsManager
 
@@ -26,6 +27,7 @@ class ShiftyRenderersFactory(
 ) : DefaultRenderersFactory(context),
     AnalyticsListener {
     private var playbackSpeed = 0f
+    private var practiceFilters: PracticeFilters = PracticeFilters()
     private var internalRenderer: ShiftyAudioRendererV2? = null
     private var audioSink: AudioSink? = null
     private var processorChain: ShiftyAudioProcessorChain? = null
@@ -46,8 +48,14 @@ class ShiftyRenderersFactory(
         internalRenderer?.customAudio?.playbackSpeed = playbackSpeed
     }
 
+    fun setPracticeFilters(practiceFilters: PracticeFilters) {
+        this.practiceFilters = practiceFilters
+        processorChain?.applyPracticeFiltersForNextUpdate(practiceFilters)
+    }
+
     override fun buildAudioSink(context: Context, enableFloatOutput: Boolean, enableAudioOutputPlaybackParameters: Boolean): AudioSink {
-        processorChain = ShiftyAudioProcessorChain(customAudio)
+        processorChain = ShiftyAudioProcessorChain(customAudio, context)
+        processorChain?.applyPracticeFiltersForNextUpdate(practiceFilters)
         return DefaultAudioSink.Builder(context)
             .setAudioProcessorChain(processorChain!!)
             .setEnableFloatOutput(enableFloatOutput)

@@ -9,6 +9,7 @@ import au.com.shiftyjelly.pocketcasts.models.entity.BaseEpisode
 import au.com.shiftyjelly.pocketcasts.models.entity.Podcast
 import au.com.shiftyjelly.pocketcasts.models.entity.UserEpisode
 import au.com.shiftyjelly.pocketcasts.models.to.PlaybackEffects
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilters
 import au.com.shiftyjelly.pocketcasts.models.type.UserEpisodeServerStatus
 import au.com.shiftyjelly.pocketcasts.repositories.extensions.getArtworkUrl
 import au.com.shiftyjelly.pocketcasts.repositories.stats.PlaybackStatsCollector
@@ -181,6 +182,10 @@ class CastPlayer(
         return false
     }
 
+    override fun supportsPracticeFilters(): Boolean {
+        return false
+    }
+
     override fun supportsVideo(): Boolean {
         return true
     }
@@ -207,6 +212,10 @@ class CastPlayer(
             this@CastPlayer.playbackEffects = playbackEffects
             setPlayerEffects()
         }
+    }
+
+    override suspend fun setPracticeFilters(practiceFilters: PracticeFilters) {
+        // Cast playback does not support local DSP-based practice filters.
     }
 
     private fun setPlayerEffects() {

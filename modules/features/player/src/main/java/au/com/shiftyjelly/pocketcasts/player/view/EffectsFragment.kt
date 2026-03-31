@@ -6,6 +6,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.CompoundButton
+import android.widget.SeekBar
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.MaterialTheme
@@ -29,7 +30,10 @@ import au.com.shiftyjelly.pocketcasts.compose.components.SegmentedTabBarDefaults
 import au.com.shiftyjelly.pocketcasts.compose.theme
 import au.com.shiftyjelly.pocketcasts.localization.helper.TimeHelper
 import au.com.shiftyjelly.pocketcasts.models.entity.Podcast
+import au.com.shiftyjelly.pocketcasts.models.to.NoiseEnvironmentMode
 import au.com.shiftyjelly.pocketcasts.models.to.PlaybackEffects
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilters
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilterApplyStatus
 import au.com.shiftyjelly.pocketcasts.models.type.TrimMode
 import au.com.shiftyjelly.pocketcasts.player.R
 import au.com.shiftyjelly.pocketcasts.player.databinding.FragmentEffectsBinding
@@ -47,6 +51,7 @@ import au.com.shiftyjelly.pocketcasts.utils.extensions.roundedSpeed
 import au.com.shiftyjelly.pocketcasts.views.extensions.updateTint
 import au.com.shiftyjelly.pocketcasts.views.fragments.BaseDialogFragment
 import com.automattic.eventhorizon.PlaybackContentType
+import com.automattic.eventhorizon.PlaybackEffectSettingsChangedEvent
 import com.automattic.eventhorizon.PlaybackEffectSettingsViewAppearedEvent
 import com.automattic.eventhorizon.PlaybackEffectSpeedChangedEvent
 import com.automattic.eventhorizon.PlaybackEffectTrimSilenceAmountChangedEvent
@@ -61,6 +66,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlin.time.Duration.Companion.milliseconds
 import au.com.shiftyjelly.pocketcasts.localization.R as LR
 
 @AndroidEntryPoint
@@ -81,7 +87,10 @@ class EffectsFragment :
     private val viewModel: PlayerViewModel by activityViewModels()
     private var binding: FragmentEffectsBinding? = null
     private val trimToggleGroupButtonIds = arrayOf(R.id.trimLow, R.id.trimMedium, R.id.trimHigh)
+    private var latestPracticeFilterUiState = PlayerViewModel.PracticeFilterUiState()
+    private var isUpdatingNoiseVolumeControl: Boolean = false
     private var playbackSpeedTrackingDebouncer: Debouncer = Debouncer()
+    private var practiceNoiseVolumeTrackingDebouncer: Debouncer = Debouncer(waitDuration = 150.milliseconds)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -107,6 +116,11 @@ class EffectsFragment :
             update(podcastEffectsPair)
             ensureExpanded()
         }
+        viewModel.practiceFilterUiStateLive.observe(viewLifecycleOwner) { practiceFilterUiState ->
+            updatePracticeFilterUi(practiceFilterUiState)
+            ensureExpanded()
+        }
+        setupPracticeNoiseVolumeControl()
 
         updateTrimState()
 
@@ -160,6 +174,8 @@ class EffectsFragment :
 
             binding?.switchTrim?.updateTint(tintColor, playerContrast01)
             binding?.switchVolume?.updateTint(tintColor, playerContrast01)
+            binding?.switchPracticeMasking?.updateTint(tintColor, playerContrast01)
+            binding?.switchPracticeLowPass?.updateTint(tintColor, playerContrast01)
 
             val trimButtonTextColor = ColorStateList(
                 arrayOf(
@@ -174,7 +190,58 @@ class EffectsFragment :
             binding?.trimLow?.setTextColor(trimButtonTextColor)
             binding?.trimMedium?.setTextColor(trimButtonTextColor)
             binding?.trimHigh?.setTextColor(trimButtonTextColor)
+            binding?.practiceNoiseModeCoffeeShop?.setTextColor(trimButtonTextColor)
+            binding?.practiceNoiseModeBusyStreet?.setTextColor(trimButtonTextColor)
+            binding?.practiceNoiseModeMeetingRoom?.setTextColor(trimButtonTextColor)
         }
+    }
+
+    private fun updatePracticeFilterUi(practiceFilterUiState: PlayerViewModel.PracticeFilterUiState) {
+        val binding = binding ?: return
+        latestPracticeFilterUiState = practiceFilterUiState
+
+        binding.switchPracticeMasking.setOnCheckedChangeListener(null)
+        binding.switchPracticeLowPass.setOnCheckedChangeListener(null)
+
+        binding.switchPracticeMasking.isChecked = practiceFilterUiState.filters.isVoiceMaskingEnabled
+        binding.switchPracticeLowPass.isChecked = practiceFilterUiState.filters.isLowPassEnabled
+
+        binding.switchPracticeMasking.setOnCheckedChangeListener(this)
+        binding.switchPracticeLowPass.setOnCheckedChangeListener(this)
+
+        val noiseModeButtonId = when (practiceFilterUiState.filters.noiseMode) {
+            NoiseEnvironmentMode.COFFEE_SHOP -> R.id.practiceNoiseModeCoffeeShop
+            NoiseEnvironmentMode.BUSY_STREET -> R.id.practiceNoiseModeBusyStreet
+            NoiseEnvironmentMode.MEETING_ROOM -> R.id.practiceNoiseModeMeetingRoom
+        }
+        binding.practiceNoiseModeToggleGroup.removeOnButtonCheckedListener(this)
+        if (binding.practiceNoiseModeToggleGroup.checkedButtonId != noiseModeButtonId) {
+            binding.practiceNoiseModeToggleGroup.check(noiseModeButtonId)
+        }
+        binding.practiceNoiseModeToggleGroup.addOnButtonCheckedListener(this)
+
+        isUpdatingNoiseVolumeControl = true
+        binding.practiceNoiseVolumeSeek.progress =
+            PracticeNoiseUiMapper.noiseVolumeProgress(practiceFilterUiState.filters)
+        updateNoiseVolumeLabel(practiceFilterUiState.filters)
+        isUpdatingNoiseVolumeControl = false
+
+        val statusMessage = when (practiceFilterUiState.applyStatus) {
+            PracticeFilterApplyStatus.FAILED_UNSUPPORTED -> getString(LR.string.player_effects_practice_unavailable)
+            PracticeFilterApplyStatus.FAILED_PROCESSING -> {
+                practiceFilterUiState.statusMessage ?: getString(LR.string.player_effects_practice_unavailable)
+            }
+            PracticeFilterApplyStatus.PENDING,
+            PracticeFilterApplyStatus.APPLIED,
+            -> getString(LR.string.player_effects_practice_filters_detail)
+        }
+        binding.practiceFilterStatusLabel.text = statusMessage
+        binding.switchPracticeMasking.isEnabled = practiceFilterUiState.isControlEnabled
+        binding.switchPracticeLowPass.isEnabled = practiceFilterUiState.isControlEnabled
+        binding.practiceNoiseModeCoffeeShop.isEnabled = practiceFilterUiState.isControlEnabled
+        binding.practiceNoiseModeBusyStreet.isEnabled = practiceFilterUiState.isControlEnabled
+        binding.practiceNoiseModeMeetingRoom.isEnabled = practiceFilterUiState.isControlEnabled
+        binding.practiceNoiseVolumeSeek.isEnabled = practiceFilterUiState.isControlEnabled
     }
 
     private fun changePlaybackSpeed(effects: PlaybackEffects, podcast: Podcast, amount: Double) {
@@ -256,6 +323,10 @@ class EffectsFragment :
             }
             effects.isVolumeBoosted = isChecked
             viewModel.saveEffects(effects, podcast)
+        } else if (buttonView.id == binding.switchPracticeMasking.id) {
+            updatePracticeFilters(currentPracticeFiltersFromUi())
+        } else if (buttonView.id == binding.switchPracticeLowPass.id) {
+            updatePracticeFilters(currentPracticeFiltersFromUi())
         }
     }
 
@@ -278,7 +349,82 @@ class EffectsFragment :
                 }
                 viewModel.saveEffects(effects, podcast)
             }
+        } else if (group.id == binding.practiceNoiseModeToggleGroup.id && isChecked) {
+            if (
+                checkedId != R.id.practiceNoiseModeCoffeeShop &&
+                checkedId != R.id.practiceNoiseModeBusyStreet &&
+                checkedId != R.id.practiceNoiseModeMeetingRoom
+            ) return
+            latestPracticeFilterUiState = latestPracticeFilterUiState.copy(filters = currentPracticeFiltersFromUi())
+            updatePracticeFilters(currentPracticeFiltersFromUi())
         }
+    }
+
+    private fun updatePracticeFilters(filters: PracticeFilters, trackEvent: Boolean = true) {
+        viewModel.setPracticeFilters(filters)
+        if (trackEvent) {
+            trackPlaybackEffectsEvent { sourceView, contentType, settingType ->
+                PlaybackEffectSettingsChangedEvent(
+                    source = sourceView.analyticsValue,
+                    contentType = contentType,
+                    settings = settingType,
+                )
+            }
+        }
+    }
+
+    private fun currentPracticeFiltersFromUi(): PracticeFilters {
+        val binding = binding ?: return latestPracticeFilterUiState.filters
+        val noiseMode = when (binding.practiceNoiseModeToggleGroup.checkedButtonId) {
+            R.id.practiceNoiseModeBusyStreet -> NoiseEnvironmentMode.BUSY_STREET
+            R.id.practiceNoiseModeMeetingRoom -> NoiseEnvironmentMode.MEETING_ROOM
+            else -> NoiseEnvironmentMode.COFFEE_SHOP
+        }
+        return PracticeNoiseUiMapper.filtersFromUi(
+            noiseMode = noiseMode,
+            noiseVolumeProgress = binding.practiceNoiseVolumeSeek.progress,
+            isVoiceMaskingEnabled = binding.switchPracticeMasking.isChecked,
+            isLowPassEnabled = binding.switchPracticeLowPass.isChecked,
+        )
+    }
+
+    private fun setupPracticeNoiseVolumeControl() {
+        val binding = binding ?: return
+        binding.practiceNoiseVolumeSeek.max = 100
+
+        val listener = object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (isUpdatingNoiseVolumeControl) return
+                val filters = currentPracticeFiltersFromUi()
+                updateNoiseVolumeLabel(filters)
+                if (!fromUser) return
+                viewLifecycleOwner.lifecycleScope.launch {
+                    practiceNoiseVolumeTrackingDebouncer.debounce {
+                        updatePracticeFilters(currentPracticeFiltersFromUi(), trackEvent = false)
+                    }
+                }
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                if (isUpdatingNoiseVolumeControl) return
+                updatePracticeFilters(currentPracticeFiltersFromUi())
+            }
+        }
+
+        binding.practiceNoiseVolumeSeek.setOnSeekBarChangeListener(listener)
+    }
+
+    private fun updateNoiseVolumeLabel(filters: PracticeFilters) {
+        val binding = binding ?: return
+        val volume = PracticeNoiseUiMapper.noiseVolumeProgress(filters)
+
+        binding.practiceNoiseVolumeLabel.text = getString(
+            LR.string.player_effects_practice_noise_tuning_value,
+            getString(LR.string.player_effects_practice_noise_intensity),
+            volume,
+        )
     }
 
     override fun onClick(view: View) {

@@ -248,6 +248,14 @@ enum class Feature(
         hasFirebaseRemoteFlag = true,
         hasDevToggle = true,
     ),
+    AUDIO_OFFLOAD(
+        key = "audio_offload",
+        title = "Audio offload (disable when effects are active)",
+        defaultValue = isDebugOrPrototypeBuild,
+        tier = FeatureTier.Free,
+        hasFirebaseRemoteFlag = false,
+        hasDevToggle = true,
+    ),
 }
 
 sealed class FeatureTier {

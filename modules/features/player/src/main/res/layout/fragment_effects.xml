@@ -260,6 +260,191 @@
                 app:layout_constraintLeft_toLeftOf="@id/trimSilenceLabel"
                 app:layout_constraintTop_toBottomOf="@id/volumeLabel" />
 
+            <View
+                android:id="@+id/practiceFilterDivider"
+                android:layout_width="0dp"
+                android:layout_height="@dimen/divider_height"
+                android:layout_marginTop="24dp"
+                android:background="?attr/player_contrast_05"
+                app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/detailVolumeLabel" />
+
+            <ImageView
+                android:id="@+id/iconPracticeFilter"
+                android:layout_width="29dp"
+                android:layout_height="29dp"
+                android:layout_marginTop="32dp"
+                android:padding="2dp"
+                android:src="@drawable/ic_effects_on"
+                app:layout_constraintLeft_toLeftOf="@id/iconSpeed"
+                app:layout_constraintTop_toBottomOf="@id/practiceFilterDivider"
+                app:tint="?attr/player_contrast_02"
+                android:importantForAccessibility="no" />
+
+            <TextView
+                android:id="@+id/practiceFilterLabel"
+                style="@style/DarkSubtitle1"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="@string/player_effects_practice_filters"
+                android:textColor="?attr/player_contrast_01"
+                app:layout_constraintLeft_toLeftOf="@id/speedLabel"
+                app:layout_constraintRight_toRightOf="@id/btnSpeedUp"
+                app:layout_constraintTop_toTopOf="@id/iconPracticeFilter" />
+
+            <TextView
+                android:id="@+id/practiceNoiseLabel"
+                style="@style/DarkSubtitle1"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:text="@string/player_effects_practice_add_noise"
+                android:textColor="?attr/player_contrast_01"
+                app:layout_constraintLeft_toLeftOf="@id/practiceFilterLabel"
+                app:layout_constraintRight_toRightOf="@id/btnSpeedUp"
+                app:layout_constraintTop_toBottomOf="@id/practiceFilterLabel" />
+
+            <TextView
+                android:id="@+id/practiceNoiseModeLabel"
+                style="@style/DarkSubtitle2"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="@string/player_effects_practice_noise_mode"
+                android:textColor="?attr/player_contrast_02"
+                app:layout_constraintLeft_toLeftOf="@id/practiceNoiseLabel"
+                app:layout_constraintRight_toRightOf="@id/btnSpeedUp"
+                app:layout_constraintTop_toBottomOf="@id/practiceNoiseLabel" />
+
+            <com.google.android.material.button.MaterialButtonToggleGroup
+                android:id="@+id/practiceNoiseModeToggleGroup"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                app:layout_constraintLeft_toLeftOf="@id/practiceNoiseLabel"
+                app:layout_constraintRight_toRightOf="@id/btnSpeedUp"
+                app:layout_constraintTop_toBottomOf="@id/practiceNoiseModeLabel"
+                app:selectionRequired="true"
+                app:singleSelection="true">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/practiceNoiseModeCoffeeShop"
+                    style="@style/TrimMode.Button.Left"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:minWidth="0dp"
+                    android:text="@string/player_effects_practice_noise_mode_coffee_shop"
+                    android:textAllCaps="false"
+                    app:backgroundTint="@color/trim_mode_background"
+                    app:strokeColor="@color/trim_stroke_color" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/practiceNoiseModeBusyStreet"
+                    style="?attr/materialButtonOutlinedStyle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:minWidth="0dp"
+                    android:text="@string/player_effects_practice_noise_mode_busy_street"
+                    android:textAllCaps="false"
+                    app:backgroundTint="@color/trim_mode_background"
+                    app:strokeColor="@color/trim_stroke_color" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/practiceNoiseModeMeetingRoom"
+                    style="@style/TrimMode.Button.Right"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:minWidth="0dp"
+                    android:text="@string/player_effects_practice_noise_mode_meeting_room"
+                    android:textAllCaps="false"
+                    app:backgroundTint="@color/trim_mode_background"
+                    app:strokeColor="@color/trim_stroke_color" />
+            </com.google.android.material.button.MaterialButtonToggleGroup>
+
+            <LinearLayout
+                android:id="@+id/practiceNoiseTuningContainer"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="vertical"
+                app:layout_constraintLeft_toLeftOf="@id/practiceNoiseLabel"
+                app:layout_constraintRight_toRightOf="@id/btnSpeedUp"
+                app:layout_constraintTop_toBottomOf="@id/practiceNoiseModeToggleGroup">
+
+                <TextView
+                    android:id="@+id/practiceNoiseVolumeLabel"
+                    style="@style/DarkSubtitle2"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/player_effects_practice_noise_intensity"
+                    android:textColor="?attr/player_contrast_02" />
+
+                <SeekBar
+                    android:id="@+id/practiceNoiseVolumeSeek"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:max="100" />
+            </LinearLayout>
+
+            <Switch
+                android:id="@+id/switchPracticeMasking"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:contentDescription="@string/player_effects_practice_mask_voice"
+                app:layout_constraintRight_toRightOf="@id/btnSpeedUp"
+                app:layout_constraintTop_toBottomOf="@id/practiceNoiseTuningContainer"
+                app:theme="@style/SwitchStyle" />
+
+            <TextView
+                android:id="@+id/practiceMaskingLabel"
+                style="@style/DarkSubtitle1"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:text="@string/player_effects_practice_mask_voice"
+                android:textColor="?attr/player_contrast_01"
+                app:layout_constraintLeft_toLeftOf="@id/practiceNoiseLabel"
+                app:layout_constraintRight_toLeftOf="@id/switchPracticeMasking"
+                app:layout_constraintTop_toTopOf="@id/switchPracticeMasking" />
+
+            <Switch
+                android:id="@+id/switchPracticeLowPass"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:contentDescription="@string/player_effects_practice_low_pass"
+                app:layout_constraintRight_toRightOf="@id/btnSpeedUp"
+                app:layout_constraintTop_toBottomOf="@id/switchPracticeMasking"
+                app:theme="@style/SwitchStyle" />
+
+            <TextView
+                android:id="@+id/practiceLowPassLabel"
+                style="@style/DarkSubtitle1"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:text="@string/player_effects_practice_low_pass"
+                android:textColor="?attr/player_contrast_01"
+                app:layout_constraintLeft_toLeftOf="@id/practiceNoiseLabel"
+                app:layout_constraintRight_toLeftOf="@id/switchPracticeLowPass"
+                app:layout_constraintTop_toTopOf="@id/switchPracticeLowPass" />
+
+            <TextView
+                android:id="@+id/practiceFilterStatusLabel"
+                style="@style/DarkSubtitle2"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:paddingBottom="20dp"
+                android:text="@string/player_effects_practice_filters_detail"
+                android:textColor="?attr/player_contrast_02"
+                app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintLeft_toLeftOf="@id/practiceNoiseLabel"
+                app:layout_constraintRight_toRightOf="@id/switchPracticeLowPass"
+                app:layout_constraintTop_toBottomOf="@id/switchPracticeLowPass" />
+
         </androidx.constraintlayout.widget.ConstraintLayout>
     </androidx.core.widget.NestedScrollView>
 </FrameLayout>

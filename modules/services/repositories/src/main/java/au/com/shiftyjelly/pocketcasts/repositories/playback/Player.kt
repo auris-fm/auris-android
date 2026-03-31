@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.repositories.playback
 import au.com.shiftyjelly.pocketcasts.models.entity.BaseEpisode
 import au.com.shiftyjelly.pocketcasts.models.entity.Podcast
 import au.com.shiftyjelly.pocketcasts.models.to.PlaybackEffects
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilters
 
 sealed interface EpisodeLocation {
     val episode: BaseEpisode
@@ -44,6 +45,7 @@ interface Player {
     suspend fun pause()
     suspend fun stop()
     suspend fun setPlaybackEffects(playbackEffects: PlaybackEffects)
+    suspend fun setPracticeFilters(practiceFilters: PracticeFilters)
     suspend fun seekToTimeMs(positionMs: Int)
     suspend fun isPlaying(): Boolean
     suspend fun isBuffering(): Boolean
@@ -52,6 +54,7 @@ interface Player {
     suspend fun bufferedPercentage(): Int
     fun supportsTrimSilence(): Boolean
     fun supportsVolumeBoost(): Boolean
+    fun supportsPracticeFilters(): Boolean
     fun supportsVideo(): Boolean
     fun setVolume(volume: Float)
     fun setPodcast(podcast: Podcast?)

@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.repositories.playback
 import android.os.SystemClock
 import au.com.shiftyjelly.pocketcasts.models.entity.BaseEpisode
 import au.com.shiftyjelly.pocketcasts.models.to.PlaybackEffects
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilters
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -190,4 +191,10 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
     }
 
     override suspend fun setPlaybackEffects(playbackEffects: PlaybackEffects) {}
+
+    override suspend fun setPracticeFilters(practiceFilters: PracticeFilters) {}
+
+    override fun supportsPracticeFilters(): Boolean {
+        return true
+    }
 }

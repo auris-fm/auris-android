@@ -30,6 +30,8 @@ import au.com.shiftyjelly.pocketcasts.models.to.Chapter
 import au.com.shiftyjelly.pocketcasts.models.to.Chapters
 import au.com.shiftyjelly.pocketcasts.models.to.DbChapter
 import au.com.shiftyjelly.pocketcasts.models.to.PlaybackEffects
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilters
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilterApplyStatus
 import au.com.shiftyjelly.pocketcasts.models.type.EpisodePlayingStatus
 import au.com.shiftyjelly.pocketcasts.models.type.UserEpisodeServerStatus
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
@@ -1152,6 +1154,41 @@ open class PlaybackManager @Inject constructor(
         }
     }
 
+    fun updatePracticeFilters(practiceFilters: PracticeFilters) {
+        launch {
+            val player = player
+            val supportsPracticeFilters = player?.supportsPracticeFilters() == true
+            val applyStatus: PracticeFilterApplyStatus
+            val applyMessage: String?
+
+            if (!practiceFilters.isAnyEnabled) {
+                player?.setPracticeFilters(practiceFilters)
+                applyStatus = PracticeFilterApplyStatus.APPLIED
+                applyMessage = null
+            } else if (supportsPracticeFilters) {
+                player.setPracticeFilters(practiceFilters)
+                applyStatus = PracticeFilterApplyStatus.APPLIED
+                applyMessage = null
+            } else {
+                applyStatus = PracticeFilterApplyStatus.FAILED_UNSUPPORTED
+                applyMessage = "This practice filter is unavailable for the current playback output."
+            }
+
+            withContext(Dispatchers.Main) {
+                playbackStateRelay.blockingFirst().let { playbackState ->
+                    playbackStateRelay.accept(
+                        playbackState.copy(
+                            practiceFilters = practiceFilters,
+                            practiceFilterApplyStatus = applyStatus,
+                            practiceFilterMessage = applyMessage,
+                            lastChangeFrom = LastChangeFrom.OnPracticeFilterChanged.value,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
     private val removeMutex = Mutex()
     fun removeEpisode(episodeToRemove: BaseEpisode?, source: SourceView, userInitiated: Boolean = true, shouldShuffleUpNext: Boolean = false) {
         launch {
@@ -2070,6 +2107,7 @@ open class PlaybackManager @Inject constructor(
 
         // audio effects
         player?.setPlaybackEffects(playbackEffects)
+        updatePracticeFilters(playbackState.practiceFilters)
 
         episodeManager.updatePlaybackInteractionDate(episode)
 
@@ -2675,6 +2713,7 @@ open class PlaybackManager @Inject constructor(
         OnCompletion("onCompletion"),
         OnDurationAvailable("onDurationAvailable"),
         OnEffectsChanged("effectsChanged"),
+        OnPracticeFilterChanged("practiceFilterChanged"),
         OnPlay("play"),
         OnPlayerError("onPlayerError"),
         OnPlayerPaused("onPlayerPaused"),

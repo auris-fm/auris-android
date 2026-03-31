@@ -19,6 +19,8 @@ import au.com.shiftyjelly.pocketcasts.models.to.Chapter
 import au.com.shiftyjelly.pocketcasts.models.to.ChapterSummaryData
 import au.com.shiftyjelly.pocketcasts.models.to.Chapters
 import au.com.shiftyjelly.pocketcasts.models.to.PlaybackEffects
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilters
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilterApplyStatus
 import au.com.shiftyjelly.pocketcasts.models.type.EpisodeViewSource
 import au.com.shiftyjelly.pocketcasts.player.view.UpNextPlaying
 import au.com.shiftyjelly.pocketcasts.player.view.bookmark.BookmarkArguments
@@ -109,6 +111,12 @@ class PlayerViewModel @Inject constructor(
         get() = Dispatchers.Default
 
     data class PodcastEffectsData(val podcast: Podcast, val effects: PlaybackEffects, val showCustomEffectsSettings: Boolean = true)
+    data class PracticeFilterUiState(
+        val filters: PracticeFilters = PracticeFilters(),
+        val applyStatus: PracticeFilterApplyStatus = PracticeFilterApplyStatus.APPLIED,
+        val statusMessage: String? = null,
+        val isControlEnabled: Boolean = true,
+    )
     data class PlayerHeader(
         val positionMs: Int = 0,
         val durationMs: Int = -1,
@@ -272,6 +280,19 @@ class PlayerViewModel @Inject constructor(
         .observeOn(AndroidSchedulers.mainThread())
     val effectsLive = effectsObservable.toLiveData()
 
+    val practiceFilterUiStateObservable: Flowable<PracticeFilterUiState> = playbackStateObservable
+        .map { playbackState ->
+            PracticeFilterUiState(
+                filters = playbackState.practiceFilters,
+                applyStatus = playbackState.practiceFilterApplyStatus,
+                statusMessage = playbackState.practiceFilterMessage,
+                isControlEnabled = true,
+            )
+        }
+        .distinctUntilChanged()
+        .toFlowable(BackpressureStrategy.LATEST)
+    val practiceFilterUiStateLive: LiveData<PracticeFilterUiState> = practiceFilterUiStateObservable.toLiveData()
+
     private val _navigationState: MutableSharedFlow<NavigationState> = MutableSharedFlow()
     val navigationState = _navigationState.asSharedFlow()
 
@@ -416,7 +437,11 @@ class PlayerViewModel @Inject constructor(
                 skipBackwardInSecs = skipBackwardInSecs,
                 skipForwardInSecs = skipForwardInSecs,
                 isSleepRunning = sleepTimerState.isSleepTimerRunning,
-                isEffectsOn = !effects.usingDefaultValues,
+                isEffectsOn = !effects.usingDefaultValues ||
+                    (
+                        playbackState.practiceFilters.isAnyEnabled &&
+                            playbackState.practiceFilterApplyStatus == PracticeFilterApplyStatus.APPLIED
+                        ),
                 playbackEffects = effects,
                 adjustRemainingTimeDuration = adjustRemainingTimeDuration,
                 isBuffering = playbackState.isBuffering,
@@ -696,6 +721,10 @@ class PlayerViewModel @Inject constructor(
             }
             playbackManager.updatePlayerEffects(effects)
         }
+    }
+
+    fun setPracticeFilters(filters: PracticeFilters) {
+        playbackManager.updatePracticeFilters(filters)
     }
 
     fun onEffectsSettingsSegmentedTabSelected(podcast: Podcast, selectedTab: PlaybackEffectsSettingsTab) {

@@ -4,6 +4,8 @@ import androidx.annotation.StringRes
 import au.com.shiftyjelly.pocketcasts.models.entity.BaseEpisode
 import au.com.shiftyjelly.pocketcasts.models.entity.Podcast
 import au.com.shiftyjelly.pocketcasts.models.to.Chapters
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilters
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilterApplyStatus
 import au.com.shiftyjelly.pocketcasts.models.type.TrimMode
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
 
@@ -26,6 +28,9 @@ data class PlaybackState(
     val playbackSpeed: Double = 1.0,
     val trimMode: TrimMode = TrimMode.OFF,
     val isVolumeBoosted: Boolean = false,
+    val practiceFilters: PracticeFilters = PracticeFilters(),
+    val practiceFilterApplyStatus: PracticeFilterApplyStatus = PracticeFilterApplyStatus.APPLIED,
+    val practiceFilterMessage: String? = null,
     // when transientLoss is true the foreground service won't be stopped
     val transientLoss: Boolean = false,
 ) {
@@ -82,6 +87,17 @@ data class PlaybackState(
                 playbackSpeed = playbackEffects.playbackSpeed,
                 trimMode = playbackEffects.trimMode,
                 isVolumeBoosted = playbackEffects.isVolumeBoosted,
+                practiceFilters = if (sameEpisode) previousPlaybackState.practiceFilters else PracticeFilters(),
+                practiceFilterApplyStatus = if (sameEpisode) {
+                    previousPlaybackState.practiceFilterApplyStatus
+                } else {
+                    PracticeFilterApplyStatus.APPLIED
+                },
+                practiceFilterMessage = if (sameEpisode) {
+                    previousPlaybackState.practiceFilterMessage
+                } else {
+                    null
+                },
                 lastChangeFrom = lastChangeFrom.value,
             )
         }

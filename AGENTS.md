@@ -212,3 +212,10 @@ The Room database has 122 migration versions. When modifying entities:
 ### Analytics
 
 Use `AnalyticsTracker` service for event tracking. Analytics are integrated with Automattic Tracks.
+
+## Active Technologies
+- Kotlin (Android modules; JVM target managed by Gradle convention plugins) + AndroidX Media3 (ExoPlayer audio pipeline), Hilt DI, Kotlin Coroutines + Flow, RxJava2 (existing player flows), Room/Settings persistence infrastructure (001-listening-practice-filters)
+- Existing playback effects settings pathways (global settings and/or per-podcast effects state), plus in-memory active playback state (001-listening-practice-filters)
+
+## Recent Changes
+- 001-listening-practice-filters: Added Kotlin (Android modules; JVM target managed by Gradle convention plugins) + AndroidX Media3 (ExoPlayer audio pipeline), Hilt DI, Kotlin Coroutines + Flow, RxJava2 (existing player flows), Room/Settings persistence infrastructure

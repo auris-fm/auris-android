@@ -67,3 +67,14 @@ sentry.properties
 .kotlin
 
 developer.properties
+
+# Additional Kotlin/IDE/log/env ignores
+out/
+*.class
+*.jar
+*.log
+.env*
+Thumbs.db
+*.tmp
+*.swp
+.vscode/

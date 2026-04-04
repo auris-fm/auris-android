@@ -723,8 +723,15 @@ class PlayerViewModel @Inject constructor(
         }
     }
 
-    fun setPracticeFilters(filters: PracticeFilters) {
-        playbackManager.updatePracticeFilters(filters)
+    fun setPracticeFilters(filters: PracticeFilters, podcast: Podcast? = effectsLive.value?.podcast) {
+        viewModelScope.launch(ioDispatcher) {
+            if (podcast?.overrideGlobalEffects == true) {
+                podcastManager.updatePracticeFiltersBlocking(podcast, filters)
+            } else {
+                settings.globalPracticeFilters.set(filters, updateModifiedAt = true)
+            }
+            playbackManager.updatePracticeFilters(filters)
+        }
     }
 
     fun onEffectsSettingsSegmentedTabSelected(podcast: Podcast, selectedTab: PlaybackEffectsSettingsTab) {
@@ -736,8 +743,10 @@ class PlayerViewModel @Inject constructor(
             podcastManager.updateOverrideGlobalEffectsBlocking(podcast, override)
 
             val effects = if (override) podcast.playbackEffects else settings.globalPlaybackEffects.value
+            val practiceFilters = if (override) podcast.practiceFilters else settings.globalPracticeFilters.value
             podcast.overrideGlobalEffects = override
             saveEffects(effects, podcast)
+            playbackManager.updatePracticeFilters(practiceFilters)
         }
         trackPlaybackEffectsEvent { sourceView, contentType, settingType ->
             PlaybackEffectSettingsChangedEvent(

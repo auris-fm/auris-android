@@ -110,7 +110,7 @@ import au.com.shiftyjelly.pocketcasts.localization.R as LR
         BlazeAd::class,
         PlaybackStatsEvent::class,
     ],
-    version = 127,
+    version = 128,
     exportSchema = true,
     autoMigrations = [
         AutoMigration(from = 81, to = 82, spec = AppDatabase.Companion.DeleteSilenceRemovedMigration::class),
@@ -1436,6 +1436,33 @@ abstract class AppDatabase : RoomDatabase() {
             database.execSQL("ALTER TABLE podcasts ADD COLUMN explicit INTEGER")
         }
 
+        val MIGRATION_127_128 = addMigration(127, 128) { database ->
+            val podcastColumns = getColumnNames(database, "podcasts")
+            val podcastColumnsToAdd = listOf(
+                "practice_background_noise_enabled" to "INTEGER NOT NULL DEFAULT 0",
+                "practice_background_noise_enabled_modified" to "INTEGER",
+                "practice_noise_mode" to "TEXT NOT NULL DEFAULT 'COFFEE_SHOP'",
+                "practice_noise_mode_modified" to "INTEGER",
+                "practice_noise_intensity" to "REAL NOT NULL DEFAULT 0.55",
+                "practice_noise_intensity_modified" to "INTEGER",
+                "practice_voice_masking_enabled" to "INTEGER NOT NULL DEFAULT 0",
+                "practice_voice_masking_enabled_modified" to "INTEGER",
+                "practice_low_pass_enabled" to "INTEGER NOT NULL DEFAULT 0",
+                "practice_low_pass_enabled_modified" to "INTEGER",
+            )
+            for ((column, definition) in podcastColumnsToAdd) {
+                if (column !in podcastColumns) {
+                    database.execSQL("ALTER TABLE podcasts ADD COLUMN $column $definition")
+                }
+            }
+            // Repair devices that ran an earlier branch iteration of MIGRATION_124_125
+            // which added practice columns to podcasts instead of has_generated_transcript
+            val episodeColumns = getColumnNames(database, "podcast_episodes")
+            if ("has_generated_transcript" !in episodeColumns) {
+                database.execSQL("ALTER TABLE podcast_episodes ADD COLUMN has_generated_transcript INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun addMigrations(databaseBuilder: Builder<AppDatabase>, context: Context) {
             databaseBuilder.addMigrations(
                 addMigration(1, 2) { },
@@ -1853,6 +1880,7 @@ abstract class AppDatabase : RoomDatabase() {
                 MIGRATION_124_125,
                 MIGRATION_125_126,
                 MIGRATION_126_127,
+                MIGRATION_127_128,
             )
         }
 

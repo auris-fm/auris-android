@@ -166,6 +166,61 @@ class ShiftyNoiseAudioProcessorTest {
     }
 
     @Test
+    fun `sample backed noise maintains a steady audible floor across time`() {
+        val output = renderSampleBackedNoiseWithTuning(
+            mode = NoiseEnvironmentMode.COFFEE_SHOP,
+            intensity = 1f,
+            eventfulness = 0.5f,
+            spatialMotion = 0.5f,
+        )
+
+        val windowedRms = windowedRms(output, windowSize = 4_410)
+        val quietestWindow = windowedRms.minOrNull() ?: 0f
+        val loudestWindow = windowedRms.maxOrNull() ?: 0f
+
+        assertTrue(
+            "quietestWindow=$quietestWindow loudestWindow=$loudestWindow",
+            quietestWindow > (loudestWindow * 0.45f),
+        )
+    }
+
+    @Test
+    fun `sample backed noise at max intensity reaches strong output energy`() {
+        val output = renderSampleBackedNoiseWithTuning(
+            mode = NoiseEnvironmentMode.COFFEE_SHOP,
+            intensity = 1f,
+            eventfulness = 0.5f,
+            spatialMotion = 0.5f,
+        )
+
+        val highRms = rms(output)
+
+        assertTrue("highRms=$highRms", highRms > 450f)
+    }
+
+    @Test
+    fun `sample backed noise keeps lower volume settings useful and max volume strong`() {
+        val quarterOutput = renderSampleBackedNoiseWithTuning(
+            mode = NoiseEnvironmentMode.COFFEE_SHOP,
+            intensity = 0.25f,
+            eventfulness = 0.5f,
+            spatialMotion = 0.5f,
+        )
+        val maxOutput = renderSampleBackedNoiseWithTuning(
+            mode = NoiseEnvironmentMode.COFFEE_SHOP,
+            intensity = 1f,
+            eventfulness = 0.5f,
+            spatialMotion = 0.5f,
+        )
+
+        val quarterRms = rms(quarterOutput)
+        val maxRms = rms(maxOutput)
+
+        assertTrue("quarterRms=$quarterRms", quarterRms > 180f)
+        assertTrue("maxRms=$maxRms", maxRms > 650f)
+    }
+
+    @Test
     fun `zero noise intensity produces silence for silent input`() {
         val output = renderNoiseWithTuning(
             mode = NoiseEnvironmentMode.COFFEE_SHOP,
@@ -358,6 +413,13 @@ class ShiftyNoiseAudioProcessorTest {
             value * value
         } / samples.size.toDouble()
         return sqrt(meanSquare).toFloat()
+    }
+
+    private fun windowedRms(samples: List<Int>, windowSize: Int): List<Float> {
+        return samples
+            .chunked(windowSize)
+            .filter { it.isNotEmpty() }
+            .map(::rms)
     }
 
     private fun averageDelta(samples: List<Int>): Float {

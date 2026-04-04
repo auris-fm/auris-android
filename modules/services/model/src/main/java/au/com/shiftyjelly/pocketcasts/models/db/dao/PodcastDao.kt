@@ -396,6 +396,33 @@ abstract class PodcastDao {
         updateTrimSilenceModeBlocking(trimMode, uuid, modified)
     }
 
+    @Query(
+        """
+            UPDATE podcasts
+            SET practice_background_noise_enabled = :isBackgroundNoiseEnabled,
+                practice_background_noise_enabled_modified = :modified,
+                practice_noise_mode = :noiseMode,
+                practice_noise_mode_modified = :modified,
+                practice_noise_intensity = :noiseIntensity,
+                practice_noise_intensity_modified = :modified,
+                practice_voice_masking_enabled = :isVoiceMaskingEnabled,
+                practice_voice_masking_enabled_modified = :modified,
+                practice_low_pass_enabled = :isLowPassEnabled,
+                practice_low_pass_enabled_modified = :modified,
+                sync_status = 0
+            WHERE uuid = :uuid
+        """,
+    )
+    abstract fun updatePracticeFiltersBlocking(
+        isBackgroundNoiseEnabled: Boolean,
+        noiseMode: String,
+        noiseIntensity: Float,
+        isVoiceMaskingEnabled: Boolean,
+        isLowPassEnabled: Boolean,
+        uuid: String,
+        modified: Date = Date(),
+    )
+
     @Query("UPDATE podcasts SET episodes_sort_order = :episodesSortType, episodes_sort_order_modified = :modified, sync_status = 0  WHERE uuid = :uuid")
     abstract fun updateEpisodesSortTypeBlocking(episodesSortType: EpisodesSortType, uuid: String, modified: Date = Date())
 

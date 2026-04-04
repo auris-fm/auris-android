@@ -14,6 +14,7 @@ import au.com.shiftyjelly.pocketcasts.models.to.AutoArchiveInactive
 import au.com.shiftyjelly.pocketcasts.models.to.AutoArchiveLimit
 import au.com.shiftyjelly.pocketcasts.models.to.PlaybackEffects
 import au.com.shiftyjelly.pocketcasts.models.to.PodcastGrouping
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilters
 import au.com.shiftyjelly.pocketcasts.models.type.EpisodeDownloadStatus
 import au.com.shiftyjelly.pocketcasts.models.type.EpisodesSortType
 import au.com.shiftyjelly.pocketcasts.models.type.PodcastsSortType
@@ -553,6 +554,17 @@ class PodcastManagerImpl @Inject constructor(
         launch {
             updateTrimModeBlocking(podcast, effects.trimMode)
         }
+    }
+
+    override fun updatePracticeFiltersBlocking(podcast: Podcast, filters: PracticeFilters) {
+        podcastDao.updatePracticeFiltersBlocking(
+            isBackgroundNoiseEnabled = filters.isBackgroundNoiseEnabled,
+            noiseMode = filters.noiseMode.name,
+            noiseIntensity = filters.noiseIntensity,
+            isVoiceMaskingEnabled = filters.isVoiceMaskingEnabled,
+            isLowPassEnabled = filters.isLowPassEnabled,
+            uuid = podcast.uuid,
+        )
     }
 
     override fun updateEpisodesSortTypeBlocking(podcast: Podcast, episodesSortType: EpisodesSortType) {

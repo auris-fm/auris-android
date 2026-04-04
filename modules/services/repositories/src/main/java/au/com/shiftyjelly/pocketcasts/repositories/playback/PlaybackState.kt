@@ -73,6 +73,11 @@ data class PlaybackState(
             } else {
                 settings.globalPlaybackEffects.value
             }
+            val resolvedPracticeFilters = if (podcast != null && podcast.overrideGlobalEffects) {
+                podcast.practiceFilters
+            } else {
+                settings.globalPracticeFilters.value
+            }
 
             return PlaybackState(
                 state = state,
@@ -87,7 +92,11 @@ data class PlaybackState(
                 playbackSpeed = playbackEffects.playbackSpeed,
                 trimMode = playbackEffects.trimMode,
                 isVolumeBoosted = playbackEffects.isVolumeBoosted,
-                practiceFilters = if (sameEpisode) previousPlaybackState.practiceFilters else PracticeFilters(),
+                practiceFilters = if (sameEpisode) {
+                    previousPlaybackState.practiceFilters
+                } else {
+                    resolvedPracticeFilters
+                },
                 practiceFilterApplyStatus = if (sameEpisode) {
                     previousPlaybackState.practiceFilterApplyStatus
                 } else {

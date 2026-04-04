@@ -187,6 +187,9 @@ class SubscribeManager @Inject constructor(
                     podcast.copyPlaybackEffects(
                         sourcePodcast = localPodcast,
                     )
+                    podcast.copyPracticeFilters(
+                        sourcePodcast = localPodcast,
+                    )
                 }
                 if (canDownloadEpisodesAfterFollowPodcast(subscribed, shouldAutoDownload)) {
                     LogBuffer.i(LogBuffer.TAG_BACKGROUND_TASKS, "Update auto download status for $podcastUuid")

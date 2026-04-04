@@ -15,8 +15,10 @@ import au.com.shiftyjelly.pocketcasts.models.to.AutoArchiveAfterPlaying
 import au.com.shiftyjelly.pocketcasts.models.to.AutoArchiveInactive
 import au.com.shiftyjelly.pocketcasts.models.to.AutoArchiveLimit
 import au.com.shiftyjelly.pocketcasts.models.to.Bundle
+import au.com.shiftyjelly.pocketcasts.models.to.NoiseEnvironmentMode
 import au.com.shiftyjelly.pocketcasts.models.to.PlaybackEffects
 import au.com.shiftyjelly.pocketcasts.models.to.PodcastGrouping
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilters
 import au.com.shiftyjelly.pocketcasts.models.type.EpisodesSortType
 import au.com.shiftyjelly.pocketcasts.models.type.TrimMode
 import au.com.shiftyjelly.pocketcasts.utils.extensions.unidecode
@@ -57,6 +59,16 @@ data class Podcast(
     @ColumnInfo(name = "playback_speed_modified") var playbackSpeedModified: Date? = null,
     @ColumnInfo(name = "volume_boosted") var isVolumeBoosted: Boolean = false,
     @ColumnInfo(name = "volume_boosted_modified") var volumeBoostedModified: Date? = null,
+    @ColumnInfo(name = "practice_background_noise_enabled") var isPracticeBackgroundNoiseEnabled: Boolean = false,
+    @ColumnInfo(name = "practice_background_noise_enabled_modified") var practiceBackgroundNoiseEnabledModified: Date? = null,
+    @ColumnInfo(name = "practice_noise_mode") var practiceNoiseModeName: String = NoiseEnvironmentMode.COFFEE_SHOP.name,
+    @ColumnInfo(name = "practice_noise_mode_modified") var practiceNoiseModeModified: Date? = null,
+    @ColumnInfo(name = "practice_noise_intensity") var practiceNoiseIntensity: Float = PracticeFilters().noiseIntensity,
+    @ColumnInfo(name = "practice_noise_intensity_modified") var practiceNoiseIntensityModified: Date? = null,
+    @ColumnInfo(name = "practice_voice_masking_enabled") var isPracticeVoiceMaskingEnabled: Boolean = false,
+    @ColumnInfo(name = "practice_voice_masking_enabled_modified") var practiceVoiceMaskingEnabledModified: Date? = null,
+    @ColumnInfo(name = "practice_low_pass_enabled") var isPracticeLowPassEnabled: Boolean = false,
+    @ColumnInfo(name = "practice_low_pass_enabled_modified") var practiceLowPassEnabledModified: Date? = null,
     @ColumnInfo(name = "is_folder") var isFolder: Boolean = false,
     @ColumnInfo(name = "subscribed") var isSubscribed: Boolean = false,
     @ColumnInfo(name = "show_notifications") var isShowNotifications: Boolean = false,
@@ -170,11 +182,17 @@ data class Podcast(
     val isSilenceRemoved: Boolean
         get() = trimMode != TrimMode.OFF
 
+    var practiceNoiseMode: NoiseEnvironmentMode
+        get() = runCatching { NoiseEnvironmentMode.valueOf(practiceNoiseModeName) }.getOrDefault(NoiseEnvironmentMode.COFFEE_SHOP)
+        set(value) {
+            practiceNoiseModeName = value.name
+        }
+
     val canShare: Boolean
         get() = !isPrivate
 
     val isUsingEffects: Boolean
-        get() = overrideGlobalEffects && (isSilenceRemoved || isVolumeBoosted || playbackSpeed != 1.0)
+        get() = overrideGlobalEffects && (isSilenceRemoved || isVolumeBoosted || playbackSpeed != 1.0 || practiceFilters.isAnyEnabled)
 
     val playbackEffects: PlaybackEffects
         get() {
@@ -184,6 +202,15 @@ data class Podcast(
             effects.isVolumeBoosted = isVolumeBoosted
             return effects
         }
+
+    val practiceFilters: PracticeFilters
+        get() = PracticeFilters(
+            isBackgroundNoiseEnabled = isPracticeBackgroundNoiseEnabled,
+            noiseMode = practiceNoiseMode,
+            noiseIntensity = practiceNoiseIntensity,
+            isVoiceMaskingEnabled = isPracticeVoiceMaskingEnabled,
+            isLowPassEnabled = isPracticeLowPassEnabled,
+        )
 
     @Suppress("DEPRECATION_ERROR")
     var folderUuid: String?
@@ -331,6 +358,31 @@ data class Podcast(
         sourcePodcast.trimModeModified?.takeIf { trimModeModified?.before(it) ?: true }?.let {
             trimMode = sourcePodcast.trimMode
             trimModeModified = sourcePodcast.trimModeModified
+        }
+    }
+
+    fun copyPracticeFilters(
+        sourcePodcast: Podcast,
+    ) {
+        sourcePodcast.practiceBackgroundNoiseEnabledModified?.takeIf { practiceBackgroundNoiseEnabledModified?.before(it) ?: true }?.let {
+            isPracticeBackgroundNoiseEnabled = sourcePodcast.isPracticeBackgroundNoiseEnabled
+            practiceBackgroundNoiseEnabledModified = sourcePodcast.practiceBackgroundNoiseEnabledModified
+        }
+        sourcePodcast.practiceNoiseModeModified?.takeIf { practiceNoiseModeModified?.before(it) ?: true }?.let {
+            practiceNoiseMode = sourcePodcast.practiceNoiseMode
+            practiceNoiseModeModified = sourcePodcast.practiceNoiseModeModified
+        }
+        sourcePodcast.practiceNoiseIntensityModified?.takeIf { practiceNoiseIntensityModified?.before(it) ?: true }?.let {
+            practiceNoiseIntensity = sourcePodcast.practiceNoiseIntensity
+            practiceNoiseIntensityModified = sourcePodcast.practiceNoiseIntensityModified
+        }
+        sourcePodcast.practiceVoiceMaskingEnabledModified?.takeIf { practiceVoiceMaskingEnabledModified?.before(it) ?: true }?.let {
+            isPracticeVoiceMaskingEnabled = sourcePodcast.isPracticeVoiceMaskingEnabled
+            practiceVoiceMaskingEnabledModified = sourcePodcast.practiceVoiceMaskingEnabledModified
+        }
+        sourcePodcast.practiceLowPassEnabledModified?.takeIf { practiceLowPassEnabledModified?.before(it) ?: true }?.let {
+            isPracticeLowPassEnabled = sourcePodcast.isPracticeLowPassEnabled
+            practiceLowPassEnabledModified = sourcePodcast.practiceLowPassEnabledModified
         }
     }
 }

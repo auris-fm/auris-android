@@ -11,6 +11,7 @@ import au.com.shiftyjelly.pocketcasts.models.to.NoiseEnvironmentMode
 import java.nio.ByteOrder
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.pow
 import kotlin.math.sin
 
 @OptIn(UnstableApi::class)
@@ -108,20 +109,28 @@ internal class ShiftyNoiseAudioProcessor(
                 if (intensityValue <= 0f) {
                     frameNoise = 0
                 } else {
-                    val eventfulnessValue = eventfulness.coerceIn(0f, 1f)
-                    val ambientFloor = (0.12f + (0.2f * eventfulnessValue))
-                        .coerceIn(0.12f, 0.5f)
-                    val envelope = if (pulseActive) {
-                        val accent = pulseEnvelope(framesIntoSegment, pulseFrames)
-                        ambientFloor + ((1f - ambientFloor) * accent)
+                    val outputIntensity = outputGainForIntensity(intensityValue)
+                    val sampleScene = renderSampleScene()
+                    frameNoise = if (sampleScene != null) {
+                        (sampleScene * outputIntensity * SAMPLE_SCENE_OUTPUT_GAIN)
+                            .coerceIn(-4_200f, 4_200f)
+                            .toInt()
                     } else {
-                        ambientFloor
+                        val eventfulnessValue = eventfulness.coerceIn(0f, 1f)
+                        val ambientFloor = (0.12f + (0.2f * eventfulnessValue))
+                            .coerceIn(0.12f, 0.5f)
+                        val envelope = if (pulseActive) {
+                            val accent = pulseEnvelope(framesIntoSegment, pulseFrames)
+                            ambientFloor + ((1f - ambientFloor) * accent)
+                        } else {
+                            ambientFloor
+                        }
+                        val shapedScene = generateEnvironmentNoise(profile)
+                        val intensityGain = outputIntensity * SYNTH_SCENE_OUTPUT_GAIN
+                        (shapedScene * pulseNoiseAmplitude * envelope * intensityGain)
+                            .coerceIn(-4_200f, 4_200f)
+                            .toInt()
                     }
-                    val shapedScene = generateEnvironmentNoise(profile)
-                    val intensityGain = intensityValue * 1.8f
-                    frameNoise = (shapedScene * pulseNoiseAmplitude * envelope * intensityGain)
-                        .coerceIn(-4_200f, 4_200f)
-                        .toInt()
                 }
             }
 
@@ -270,8 +279,6 @@ internal class ShiftyNoiseAudioProcessor(
     }
 
     private fun generateEnvironmentNoise(profile: EnvironmentProfile): Float {
-        renderSampleScene()?.let { return it }
-
         val white = nextNoiseSampleNormalized()
         val clampedEventfulness = eventfulness.coerceIn(0f, 1f)
         val clampedMotion = spatialMotion.coerceIn(0f, 1f)
@@ -613,6 +620,10 @@ internal class ShiftyNoiseAudioProcessor(
         return min + (unit * span).toLong()
     }
 
+    private fun outputGainForIntensity(intensity: Float): Float {
+        return intensity.coerceIn(0f, 1f).pow(INTENSITY_RESPONSE_EXPONENT) * INTENSITY_OUTPUT_BOOST
+    }
+
     private fun profileForMode(mode: NoiseEnvironmentMode): EnvironmentProfile {
         return when (mode) {
             NoiseEnvironmentMode.COFFEE_SHOP -> EnvironmentProfile(
@@ -751,6 +762,10 @@ internal class ShiftyNoiseAudioProcessor(
         const val DEFAULT_INTENSITY: Float = 0.55f
         const val DEFAULT_EVENTFULNESS: Float = 0.5f
         const val DEFAULT_SPATIAL_MOTION: Float = 0.5f
+        private const val INTENSITY_RESPONSE_EXPONENT: Float = 0.8f
+        private const val INTENSITY_OUTPUT_BOOST: Float = 1.35f
+        private const val SYNTH_SCENE_OUTPUT_GAIN: Float = 1.8f
         private const val SAMPLE_SCENE_GAIN: Float = 10f
+        private const val SAMPLE_SCENE_OUTPUT_GAIN: Float = 2_100f
     }
 }

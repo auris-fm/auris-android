@@ -9,8 +9,10 @@ import androidx.core.content.edit
 import androidx.work.NetworkType
 import au.com.shiftyjelly.pocketcasts.models.to.AutoArchiveAfterPlaying
 import au.com.shiftyjelly.pocketcasts.models.to.AutoArchiveInactive
+import au.com.shiftyjelly.pocketcasts.models.to.NoiseEnvironmentMode
 import au.com.shiftyjelly.pocketcasts.models.to.PlaybackEffects
 import au.com.shiftyjelly.pocketcasts.models.to.PodcastGrouping
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilters
 import au.com.shiftyjelly.pocketcasts.models.to.RefreshState
 import au.com.shiftyjelly.pocketcasts.models.type.AutoDownloadLimitSetting
 import au.com.shiftyjelly.pocketcasts.models.type.Membership
@@ -726,6 +728,45 @@ class SettingsImpl @Inject constructor(
         }
     }
 
+    override val globalPracticeFilters = object : UserSetting<PracticeFilters>(
+        sharedPrefKey = "globalPracticeFilters",
+        sharedPrefs = sharedPreferences,
+    ) {
+        override fun get(): PracticeFilters {
+            val default = PracticeFilters()
+            val persisted = sharedPreferences.getString(sharedPrefKey, null) ?: return default
+            val parts = persisted.split(",")
+            if (parts.size < 7) return default
+
+            val noiseMode = parts.getOrNull(1)?.let(::parseNoiseEnvironmentMode) ?: default.noiseMode
+
+            return PracticeFilters(
+                isBackgroundNoiseEnabled = parts.getOrNull(0)?.toBooleanStrictOrNull() ?: default.isBackgroundNoiseEnabled,
+                noiseMode = noiseMode,
+                noiseIntensity = parts.getOrNull(2)?.toFloatOrNull() ?: default.noiseIntensity,
+                noiseEventfulness = parts.getOrNull(3)?.toFloatOrNull() ?: default.noiseEventfulness,
+                noiseSpatialMotion = parts.getOrNull(4)?.toFloatOrNull() ?: default.noiseSpatialMotion,
+                isVoiceMaskingEnabled = parts.getOrNull(5)?.toBooleanStrictOrNull() ?: default.isVoiceMaskingEnabled,
+                isLowPassEnabled = parts.getOrNull(6)?.toBooleanStrictOrNull() ?: default.isLowPassEnabled,
+            )
+        }
+
+        override fun persist(value: PracticeFilters, commit: Boolean) {
+            val encoded = listOf(
+                value.isBackgroundNoiseEnabled.toString(),
+                value.noiseMode.name,
+                value.noiseIntensity.toString(),
+                value.noiseEventfulness.toString(),
+                value.noiseSpatialMotion.toString(),
+                value.isVoiceMaskingEnabled.toString(),
+                value.isLowPassEnabled.toString(),
+            ).joinToString(",")
+            sharedPrefs.edit(commit) {
+                putString(sharedPrefKey, encoded)
+            }
+        }
+    }
+
     private val globalPlaybackSpeed = UserSetting.PrefFromFloat(
         sharedPrefKey = "globalPlaybackSpeed",
         defaultValue = 1.0,
@@ -751,6 +792,10 @@ class SettingsImpl @Inject constructor(
         defaultValue = false,
         sharedPrefs = sharedPreferences,
     )
+
+    private fun parseNoiseEnvironmentMode(value: String): NoiseEnvironmentMode? {
+        return runCatching { NoiseEnvironmentMode.valueOf(value) }.getOrNull()
+    }
 
     override fun getMigratedVersionCode(): Int {
         return getInt("MIGRATED_VERSION_CODE", 0)

@@ -11,6 +11,7 @@ import au.com.shiftyjelly.pocketcasts.models.to.AutoArchiveInactive
 import au.com.shiftyjelly.pocketcasts.models.to.AutoArchiveLimit
 import au.com.shiftyjelly.pocketcasts.models.to.PlaybackEffects
 import au.com.shiftyjelly.pocketcasts.models.to.PodcastGrouping
+import au.com.shiftyjelly.pocketcasts.models.to.PracticeFilters
 import au.com.shiftyjelly.pocketcasts.models.type.EpisodeDownloadStatus
 import au.com.shiftyjelly.pocketcasts.models.type.EpisodesSortType
 import au.com.shiftyjelly.pocketcasts.models.type.TrimMode
@@ -85,6 +86,7 @@ interface PodcastManager {
     fun updateVolumeBoostedBlocking(podcast: Podcast, override: Boolean)
     fun updatePlaybackSpeedBlocking(podcast: Podcast, speed: Double)
     fun updateEffectsBlocking(podcast: Podcast, effects: PlaybackEffects)
+    fun updatePracticeFiltersBlocking(podcast: Podcast, filters: PracticeFilters)
     fun updateEpisodesSortTypeBlocking(podcast: Podcast, episodesSortType: EpisodesSortType)
     suspend fun updateShowNotifications(podcastUuid: String, show: Boolean)
     suspend fun updatePodcastPositions(podcasts: List<Podcast>)

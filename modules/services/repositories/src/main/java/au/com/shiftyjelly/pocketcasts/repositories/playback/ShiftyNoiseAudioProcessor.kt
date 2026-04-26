@@ -471,10 +471,11 @@ internal class ShiftyNoiseAudioProcessor(
             }
         } ?: return 0f
 
-        val sample = sampleAt(selectedBed, currentBedPosition)
+        val sample = loopedBedSample(selectedBed, currentBedPosition)
+        val crossfadeFrames = bedLoopCrossfadeFrames(selectedBed)
         currentBedPosition += currentBedStep
         while (currentBedPosition >= selectedBed.samples.size) {
-            currentBedPosition -= selectedBed.samples.size
+            currentBedPosition = currentBedPosition - selectedBed.samples.size + crossfadeFrames
         }
         return sample
     }
@@ -548,6 +549,48 @@ internal class ShiftyNoiseAudioProcessor(
         val next = (base + 1).coerceAtMost(clip.samples.lastIndex)
         val fraction = (position - base).coerceIn(0f, 1f)
         return clip.samples[base] + ((clip.samples[next] - clip.samples[base]) * fraction)
+    }
+
+    private fun loopedBedSample(clip: PracticeNoiseSamples.Clip, position: Float): Float {
+        if (clip.samples.isEmpty()) return 0f
+
+        val clipLength = clip.samples.size.toFloat()
+        val wrappedPosition = wrapPosition(position, clipLength)
+        val crossfadeFrames = bedLoopCrossfadeFrames(clip)
+        val tailCrossfadeStart = clipLength - crossfadeFrames
+
+        if (crossfadeFrames > 1f && wrappedPosition >= tailCrossfadeStart) {
+            val progress = ((wrappedPosition - tailCrossfadeStart) / crossfadeFrames).coerceIn(0f, 1f)
+            val tail = sampleAtLooped(clip, wrappedPosition)
+            val head = sampleAtLooped(clip, wrappedPosition - tailCrossfadeStart)
+            return tail + ((head - tail) * progress)
+        }
+
+        return sampleAtLooped(clip, wrappedPosition)
+    }
+
+    private fun sampleAtLooped(clip: PracticeNoiseSamples.Clip, position: Float): Float {
+        if (clip.samples.isEmpty()) return 0f
+
+        val clipLength = clip.samples.size.toFloat()
+        val wrappedPosition = wrapPosition(position, clipLength)
+        val base = wrappedPosition.toInt().coerceIn(0, clip.samples.lastIndex)
+        val next = (base + 1) % clip.samples.size
+        val fraction = (wrappedPosition - base).coerceIn(0f, 1f)
+        return clip.samples[base] + ((clip.samples[next] - clip.samples[base]) * fraction)
+    }
+
+    private fun wrapPosition(position: Float, clipLength: Float): Float {
+        if (clipLength <= 0f) return 0f
+        val wrapped = position % clipLength
+        return if (wrapped < 0f) wrapped + clipLength else wrapped
+    }
+
+    private fun bedLoopCrossfadeFrames(clip: PracticeNoiseSamples.Clip): Float {
+        if (clip.samples.size <= 2) return 0f
+        val maxAllowed = ((clip.samples.size - 1) / 2).coerceAtLeast(1)
+        val suggested = (clip.samples.size / 8).coerceAtLeast(8)
+        return suggested.coerceAtMost(BED_LOOP_MAX_CROSSFADE_SAMPLES).coerceAtMost(maxAllowed).toFloat()
     }
 
     private fun overlayEnvelope(frame: Long, total: Long, fade: Long): Float {
@@ -767,5 +810,6 @@ internal class ShiftyNoiseAudioProcessor(
         private const val SYNTH_SCENE_OUTPUT_GAIN: Float = 1.8f
         private const val SAMPLE_SCENE_GAIN: Float = 10f
         private const val SAMPLE_SCENE_OUTPUT_GAIN: Float = 2_100f
+        private const val BED_LOOP_MAX_CROSSFADE_SAMPLES: Int = 2_048
     }
 }

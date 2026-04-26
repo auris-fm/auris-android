@@ -221,6 +221,47 @@ class ShiftyNoiseAudioProcessorTest {
     }
 
     @Test
+    fun `sample backed bed loop avoids seam sized discontinuities`() {
+        val clip = PracticeNoiseSamples.Clip(
+            sampleRate = 1_000,
+            samples = FloatArray(64) { index ->
+                if (index == 63) {
+                    -0.9f
+                } else {
+                    -0.2f + (0.006f * index)
+                }
+            },
+        )
+        val processor = ShiftyNoiseAudioProcessor(
+            sampleSource = {
+                PracticeNoiseSamples.ModeSamples(
+                    beds = listOf(clip),
+                    speech = emptyList(),
+                )
+            },
+        ).apply {
+            enabled = true
+            environmentMode = NoiseEnvironmentMode.COFFEE_SHOP
+            intensity = 1f
+            eventfulness = 0f
+            spatialMotion = 0f
+        }
+        processor.configure(AudioProcessor.AudioFormat(1_000, 1, C.ENCODING_PCM_16BIT))
+        processor.flush(AudioProcessor.StreamMetadata.DEFAULT)
+
+        processor.queueInput(pcm16ConstantBuffer(sample = 0, sampleCount = 512))
+        val output = readPcm16Samples(processor.output).map { it.toInt() }
+        val deltas = adjacentDeltas(output)
+        val baselineDelta = percentile(deltas, 0.95f)
+        val maxDelta = deltas.maxOrNull() ?: 0
+
+        assertTrue(
+            "maxDelta=$maxDelta baselineDelta=$baselineDelta",
+            maxDelta < (baselineDelta * 6f),
+        )
+    }
+
+    @Test
     fun `zero noise intensity produces silence for silent input`() {
         val output = renderNoiseWithTuning(
             mode = NoiseEnvironmentMode.COFFEE_SHOP,
@@ -429,6 +470,22 @@ class ShiftyNoiseAudioProcessorTest {
             total += abs((samples[index] - samples[index - 1]).toFloat())
         }
         return total / (samples.size - 1)
+    }
+
+    private fun adjacentDeltas(samples: List<Int>): List<Int> {
+        if (samples.size < 2) return emptyList()
+        return buildList(samples.size - 1) {
+            for (index in 1 until samples.size) {
+                add(abs(samples[index] - samples[index - 1]))
+            }
+        }
+    }
+
+    private fun percentile(values: List<Int>, fraction: Float): Float {
+        if (values.isEmpty()) return 0f
+        val sorted = values.sorted()
+        val index = ((sorted.lastIndex) * fraction.coerceIn(0f, 1f)).toInt()
+        return sorted[index].toFloat()
     }
 
     private fun <T> longestRun(values: List<T>, predicate: (T) -> Boolean): Int {

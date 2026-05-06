@@ -2,17 +2,18 @@
 
 ## Summary
 
-Add a local, hands-free voice control mode for Android playback. When enabled, the app listens while the playback UI or playback
-context is active and the audio route is a headset or earbuds, so users can control playback while jogging, biking, doing house work,
-or otherwise avoiding touch interaction.
+Add local, hands-free voice control as a core Android playback capability. After first-run setup, the app listens while the playback UI
+or playback context is active and the audio route is a headset or earbuds, so users can control playback while jogging, biking, doing
+house work, or otherwise avoiding touch interaction.
 
-The feature should not require a wake phrase. It should support natural phrasing, accents, slang, and multiple languages by using a
-downloaded local model stack. Playback execution must remain deterministic: the model can interpret intent, but only validated intents
-owned by Pocket Casts can affect playback.
+Voice control is the main product interaction, not an auxiliary integration. It should not require a wake phrase. It should support
+natural phrasing, accents, slang, and multiple languages by using a downloaded local model stack. Playback execution must remain
+deterministic: the model can interpret intent, but only validated intents owned by Pocket Casts can affect playback.
 
 ## Goals
 
 - Fast response for common playback controls.
+- Treat voice control as the primary playback control surface.
 - Fully local recognition and intent interpretation after any required model download.
 - Android-first implementation.
 - No wake phrase requirement for ordinary use.
@@ -25,7 +26,7 @@ owned by Pocket Casts can affect playback.
 ## Non-Goals
 
 - Cloud speech recognition or cloud LLM inference.
-- Replacing Android media controls, headset button controls, Android Auto, or Tasker integration.
+- Removing Android media controls, headset button controls, Android Auto, or Tasker integration.
 - Always listening outside the playback UI or playback context.
 - Listening on speaker output.
 - Letting model output directly call arbitrary playback APIs.
@@ -76,7 +77,8 @@ PlaybackManager
 
 `VoiceControlGate` is a standalone policy engine. It combines small, independently testable rules:
 
-- `UserEnabledRule`
+- `UserNotDisabledRule`
+- `OperationalKillSwitchRule`
 - `PlaybackContextActiveRule`
 - `HeadsetRouteRule`
 - `HeadsetMicrophoneRule`
@@ -94,8 +96,9 @@ Each rule returns:
 - `Unknown(reason)`
 
 The combined gate emits a `StateFlow<VoiceControlGateState>` with the full rule breakdown for diagnostics and settings UI. The first
-release should require the user-enabled, playback-context-active, headset-route, headset-microphone, microphone-permission, not-casting,
-not-in-call, and model-ready rules. Battery saver and device support can start as warnings unless testing shows they need to block.
+release should require the user-not-disabled, operational-kill-switch, playback-context-active, headset-route, headset-microphone,
+microphone-permission, not-casting, not-in-call, and model-ready rules. Battery saver and device support can start as warnings unless
+testing shows they need to block.
 
 `PlaybackContextActiveRule` should mean the user is in a valid playback context, not that audio is currently playing. A current episode
 must exist, and the player UI/session must be active enough that playback commands are meaningful. Paused playback remains allowed, so
@@ -244,9 +247,9 @@ paths, the first implementation phase must include a spike that measures:
 
 ## Lifecycle
 
-1. User enables Voice Control in settings.
-2. App requests microphone permission and presents the headset-only privacy model.
-3. Model manager downloads or verifies the selected local model.
+1. First-run setup requests microphone permission, presents the headset-only privacy model, and prepares the local model.
+2. Model manager downloads or verifies the selected local model.
+3. Voice control becomes available as a default playback capability.
 4. User enters a playback context with a current episode. Playback may be playing or paused.
 5. Gate checks playback context, headset route, microphone, casting, call state, model readiness, and permission.
 6. Service enters foreground microphone mode.
@@ -255,7 +258,7 @@ paths, the first implementation phase must include a spike that measures:
 9. Valid playback intent is executed through `VoicePlaybackIntentExecutor`.
 10. Service keeps listening while gate remains allowed.
 11. Listening stops immediately when the playback context ends, the current episode is cleared, headset disconnects, route changes to
-    speaker, casting starts, call state blocks, permission is revoked, or user disables the feature.
+    speaker, casting starts, call state blocks, permission is revoked, or the user explicitly disables voice control.
 
 ## Latency Strategy
 
@@ -279,11 +282,13 @@ Target response for common commands should be under one second after the user fi
 
 ## Privacy and UX
 
-- The feature is opt-in.
+- Voice control is a core product capability, but first-run setup must be explicit because microphone permission and local model download
+  are user-visible commitments.
 - The app explains that voice audio is processed locally.
 - Downloaded models are managed on-device.
 - A persistent notification indicates active listening.
-- Settings show current status: active, blocked by route, blocked by model download, blocked by permission, or disabled.
+- Settings show current status: active, blocked by route, blocked by model download, blocked by permission, disabled by user, or disabled
+  by operational kill switch.
 - No raw audio should be logged.
 - Debug logging should include only command type, confidence buckets, gate state, and latency.
 
@@ -301,7 +306,7 @@ Target response for common commands should be under one second after the user fi
 
 ## Rollout Plan
 
-Use a feature flag and staged milestones:
+Voice control is core product functionality, but delivery should still use staged engineering gates and an operational kill switch:
 
 1. Prototype gate state, headset route detection, microphone capture, and energy segmenter.
 2. Prototype Gemma 4 E2B Android inference and measure latency, memory, battery, and audio support.
@@ -310,7 +315,7 @@ Use a feature flag and staged milestones:
 5. Add chapter title matching.
 6. Add transcript-assisted section jumps.
 7. Internal dogfood with diagnostics.
-8. Limited beta with feature flag.
+8. Limited release with kill-switch monitoring.
 9. Broader release after false positive, latency, and battery thresholds are met.
 
 ## Testing Strategy

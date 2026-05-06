@@ -7,7 +7,7 @@ context is active and the audio route is a headset or earbuds, so users can cont
 or otherwise avoiding touch interaction.
 
 The feature should not require a wake phrase. It should support natural phrasing, accents, slang, and multiple languages by using a
-downloaded local model stack. Playback execution must remain deterministic: the model can interpret intent, but only typed commands
+downloaded local model stack. Playback execution must remain deterministic: the model can interpret intent, but only validated intents
 owned by Pocket Casts can affect playback.
 
 ## Goals
@@ -63,10 +63,10 @@ VoiceAudioSegmenter
 VoiceRecognizer
         |
         v
-VoiceCommandInterpreter
+VoiceIntentInterpreter
         |
         v
-VoicePlaybackCommandExecutor
+VoicePlaybackIntentExecutor
         |
         v
 PlaybackManager
@@ -164,22 +164,22 @@ The provider boundary is required because Gemma 4 Android support and audio-inpu
 Gemma 4 and mobile deployment paths, and LiteRT-LM lists Android Kotlin support and Gemma4-E2B, but direct audio behavior must be tested
 on target devices before committing to it as the only provider.
 
-### VoiceCommandInterpreter
+### VoiceIntentInterpreter
 
-`VoiceCommandInterpreter` maps flexible language into a closed set of commands.
+`VoiceIntentInterpreter` maps flexible language into a closed set of playback intents.
 
 ```kotlin
-sealed interface VoicePlaybackCommand {
-    data object Pause : VoicePlaybackCommand
-    data object Resume : VoicePlaybackCommand
-    data class SeekRelative(val deltaMs: Long) : VoicePlaybackCommand
-    data class SeekAbsolute(val positionMs: Long) : VoicePlaybackCommand
-    data object NextEpisode : VoicePlaybackCommand
-    data object NextChapter : VoicePlaybackCommand
-    data object PreviousChapter : VoicePlaybackCommand
-    data class ChapterByIndex(val index: Int) : VoicePlaybackCommand
-    data class ChapterByTitle(val query: String) : VoicePlaybackCommand
-    data class SetPlaybackSpeed(val speed: Double) : VoicePlaybackCommand
+sealed interface VoicePlaybackIntent {
+    data object Pause : VoicePlaybackIntent
+    data object Resume : VoicePlaybackIntent
+    data class SeekRelative(val deltaMs: Long) : VoicePlaybackIntent
+    data class SeekAbsolute(val positionMs: Long) : VoicePlaybackIntent
+    data object NextEpisode : VoicePlaybackIntent
+    data object NextChapter : VoicePlaybackIntent
+    data object PreviousChapter : VoicePlaybackIntent
+    data class ChapterByIndex(val index: Int) : VoicePlaybackIntent
+    data class ChapterByTitle(val query: String) : VoicePlaybackIntent
+    data class SetPlaybackSpeed(val speed: Double) : VoicePlaybackIntent
 }
 ```
 
@@ -199,10 +199,10 @@ discarded. High-risk commands should require stronger confidence than reversible
 - Higher risk: next episode, mark played, archive, delete. Higher-risk commands should be excluded from the MVP executor policy even if
   command types exist for later rollout stages.
 
-### VoicePlaybackCommandExecutor
+### VoicePlaybackIntentExecutor
 
-The executor is the only class allowed to mutate playback based on voice commands. It maps typed commands to existing `PlaybackManager`
-APIs and records source-specific analytics.
+The executor is the only class allowed to mutate playback based on voice recognition. It maps validated intents to existing
+`PlaybackManager` APIs and records source-specific analytics.
 
 Suggested source value:
 
@@ -252,7 +252,7 @@ paths, the first implementation phase must include a spike that measures:
 6. Service enters foreground microphone mode.
 7. Segmenter listens for candidate utterances.
 8. Candidate utterance is passed to recognizer and interpreter.
-9. Valid typed command is executed through `VoicePlaybackCommandExecutor`.
+9. Valid playback intent is executed through `VoicePlaybackIntentExecutor`.
 10. Service keeps listening while gate remains allowed.
 11. Listening stops immediately when the playback context ends, the current episode is cleared, headset disconnects, route changes to
     speaker, casting starts, call state blocks, permission is revoked, or user disables the feature.
@@ -305,7 +305,7 @@ Use a feature flag and staged milestones:
 
 1. Prototype gate state, headset route detection, microphone capture, and energy segmenter.
 2. Prototype Gemma 4 E2B Android inference and measure latency, memory, battery, and audio support.
-3. Implement typed command interpreter and executor for core commands.
+3. Implement typed intent interpreter and executor for core commands.
 4. Add settings UI and model manager.
 5. Add chapter title matching.
 6. Add transcript-assisted section jumps.
@@ -330,7 +330,7 @@ Integration tests:
 - Playback pauses while context remains active -> service remains active.
 - Headset disconnect -> service stops.
 - Cast starts -> service stops.
-- Valid utterance -> typed command -> `PlaybackManager` call.
+- Valid utterance -> typed intent -> `PlaybackManager` call.
 - Low-confidence or invalid model output -> no playback mutation.
 
 Manual/device tests:

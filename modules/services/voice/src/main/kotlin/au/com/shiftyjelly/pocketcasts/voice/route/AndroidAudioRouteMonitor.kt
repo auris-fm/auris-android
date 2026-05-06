@@ -48,30 +48,44 @@ class AndroidAudioRouteMonitor @Inject constructor(
 
         val outputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
         val inputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).toList()
-        val hasHeadsetInput = inputDevices.any { it.isHeadsetInput() }
 
-        return when {
-            outputDevices.any { it.isHeadsetOutput() } -> AudioRoute.Headset(hasMicrophone = hasHeadsetInput)
-            outputDevices.any { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER } -> AudioRoute.Speaker
-            outputDevices.any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP } -> AudioRoute.BluetoothA2dpOnly
-            else -> AudioRoute.Unknown
+        return classifyRoute(
+            outputDeviceTypes = outputDevices.map { it.type },
+            inputDeviceTypes = inputDevices.map { it.type },
+        )
+    }
+
+    internal companion object {
+        fun classifyRoute(
+            outputDeviceTypes: List<Int>,
+            inputDeviceTypes: List<Int>,
+        ): AudioRoute {
+            val hasHeadsetInput = inputDeviceTypes.any { it.isHeadsetInput() }
+
+            return when {
+                outputDeviceTypes.any { it.isHeadsetOutput() } -> AudioRoute.Headset(hasMicrophone = hasHeadsetInput)
+                outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP } -> AudioRoute.BluetoothA2dpOnly
+                outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER } -> AudioRoute.Speaker
+                else -> AudioRoute.Unknown
+            }
         }
-    }
 
-    private fun AudioDeviceInfo.isHeadsetOutput(): Boolean {
-        return type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
-            type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
-            isBleHeadset()
-    }
+        private fun Int.isHeadsetOutput(): Boolean {
+            return this == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                this == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                this == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                isBleHeadset()
+        }
 
-    private fun AudioDeviceInfo.isHeadsetInput(): Boolean {
-        return type == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
-            type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
-            isBleHeadset()
-    }
+        private fun Int.isHeadsetInput(): Boolean {
+            return this == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                this == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                isBleHeadset()
+        }
 
-    private fun AudioDeviceInfo.isBleHeadset(): Boolean {
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            type == AudioDeviceInfo.TYPE_BLE_HEADSET
+        private fun Int.isBleHeadset(): Boolean {
+            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                this == AudioDeviceInfo.TYPE_BLE_HEADSET
+        }
     }
 }

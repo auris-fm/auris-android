@@ -23,10 +23,12 @@ class EnergyVoiceAudioSegmenter @javax.inject.Inject constructor(
         if (speechFrames > 0) {
             frames += frame
             silenceFrames += 1
-            if (speechFrames >= minimumSpeechFrames && silenceFrames >= trailingSilenceFrames) {
-                val segment = frames.toList()
+            if (silenceFrames >= trailingSilenceFrames) {
+                val segment = if (speechFrames >= minimumSpeechFrames) frames.toList() else null
                 reset()
-                return VoiceSegmenterResult.SpeechEnded(segment)
+                if (segment != null) {
+                    return VoiceSegmenterResult.SpeechEnded(segment)
+                }
             }
         }
 

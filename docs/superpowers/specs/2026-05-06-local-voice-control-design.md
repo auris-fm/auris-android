@@ -3,8 +3,8 @@
 ## Summary
 
 Add local, hands-free voice control as a core Android playback capability. After first-run setup, the app listens while the playback UI
-or playback context is active and the audio route is a headset or earbuds, so users can control playback while jogging, biking, doing
-house work, or otherwise avoiding touch interaction.
+or playback context is active and the current audio route satisfies the configured audio-route policy, so users can control playback
+while jogging, biking, doing house work, or otherwise avoiding touch interaction.
 
 Voice control is the main product interaction, not an auxiliary integration. It should not require a wake phrase. It should support
 natural phrasing, accents, slang, and multiple languages by using a downloaded local model stack. Playback execution must remain
@@ -17,7 +17,7 @@ deterministic: the model can interpret intent, but only validated intents owned 
 - Fully local recognition and intent interpretation after any required model download.
 - Android-first implementation.
 - No wake phrase requirement for ordinary use.
-- Listening only while the playback UI or playback context is active and the active route is headset/earbuds.
+- Listening only while the playback UI or playback context is active and the active route is allowed by `AudioRoutePolicyRule`.
 - Continue listening while playback is paused, so hands-free "resume" and seek commands still work.
 - Adjustable gate logic that can be tuned without changing recognition or playback command execution.
 - Natural multilingual command support instead of a narrow phrase grammar.
@@ -28,7 +28,7 @@ deterministic: the model can interpret intent, but only validated intents owned 
 - Cloud speech recognition or cloud LLM inference.
 - Removing Android media controls, headset button controls, Android Auto, or Tasker integration.
 - Always listening outside the playback UI or playback context.
-- Listening on speaker output.
+- Treating speaker output as equally safe as headset/earbud output in the first production milestone.
 - Letting model output directly call arbitrary playback APIs.
 - Solving Wear OS, Automotive, or casting in the first Android phone milestone.
 
@@ -80,8 +80,7 @@ PlaybackManager
 - `UserNotDisabledRule`
 - `OperationalKillSwitchRule`
 - `PlaybackContextActiveRule`
-- `HeadsetRouteRule`
-- `HeadsetMicrophoneRule`
+- `AudioRoutePolicyRule`
 - `MicrophonePermissionRule`
 - `NotCastingRule`
 - `NotInCallRule`
@@ -96,14 +95,22 @@ Each rule returns:
 - `Unknown(reason)`
 
 The combined gate emits a `StateFlow<VoiceControlGateState>` with the full rule breakdown for diagnostics and settings UI. The first
-release should require the user-not-disabled, operational-kill-switch, playback-context-active, headset-route, headset-microphone,
-microphone-permission, not-casting, not-in-call, and model-ready rules. Battery saver and device support can start as warnings unless
-testing shows they need to block.
+release should require the user-not-disabled, operational-kill-switch, playback-context-active, audio-route-policy, microphone-permission,
+not-casting, not-in-call, and model-ready rules. Battery saver and device support can start as warnings unless testing shows they need
+to block.
 
 `PlaybackContextActiveRule` should mean the user is in a valid playback context, not that audio is currently playing. A current episode
 must exist, and the player UI/session must be active enough that playback commands are meaningful. Paused playback remains allowed, so
 users can say "resume", "skip thirty", "go back", or "jump to chapter three" without touching the device. Listening stops when the user
 leaves the playback context, clears the current episode, or another required gate blocks.
+
+`AudioRoutePolicyRule` should keep route logic adjustable instead of baking in a permanent headset-only restriction. The first reliable
+production policy is `HeadsetOnly`, which allows wired headsets and Bluetooth earbuds/headsets with a usable microphone. The product
+direction should also include `SpeakerExperimental`, but that policy should stay blocked behind runtime capability checks and staged
+release data until speaker-mode false positives are understood. Speaker mode requires treating podcast playback as an echo source:
+Android acoustic echo cancellation and noise suppression should be used when available, but they are device-dependent and not sufficient
+on their own. A future speaker policy should combine playback-reference echo suppression, stricter segmenter thresholds, conservative
+intent confidence thresholds, and automatic fallback to `HeadsetOnly` after repeated suspected false positives.
 
 ### VoiceControlService
 
@@ -247,18 +254,18 @@ paths, the first implementation phase must include a spike that measures:
 
 ## Lifecycle
 
-1. First-run setup requests microphone permission, presents the headset-only privacy model, and prepares the local model.
+1. First-run setup requests microphone permission, presents the local-listening privacy model, and prepares the local model.
 2. Model manager downloads or verifies the selected local model.
 3. Voice control becomes available as a default playback capability.
 4. User enters a playback context with a current episode. Playback may be playing or paused.
-5. Gate checks playback context, headset route, microphone, casting, call state, model readiness, and permission.
+5. Gate checks playback context, audio route policy, microphone permission, casting, call state, model readiness, and permission.
 6. Service enters foreground microphone mode.
 7. Segmenter listens for candidate utterances.
 8. Candidate utterance is passed to recognizer and interpreter.
 9. Valid playback intent is executed through `VoicePlaybackIntentExecutor`.
 10. Service keeps listening while gate remains allowed.
-11. Listening stops immediately when the playback context ends, the current episode is cleared, headset disconnects, route changes to
-    speaker, casting starts, call state blocks, permission is revoked, or the user explicitly disables voice control.
+11. Listening stops immediately when the playback context ends, the current episode is cleared, the audio route becomes disallowed,
+    casting starts, call state blocks, permission is revoked, or the user explicitly disables voice control.
 
 ## Latency Strategy
 
@@ -274,7 +281,7 @@ Target response for common commands should be under one second after the user fi
 ## Battery Strategy
 
 - Never listen unless all required gates are allowed.
-- Use headset-only route to reduce false positives and avoid acoustic feedback.
+- Start with `HeadsetOnly` route policy to reduce false positives and avoid acoustic feedback.
 - Run only a tiny segmenter continuously.
 - Invoke Gemma 4 or heavier ASR only on completed candidate utterances.
 - Stop listening when the playback context ends, not merely because audio is paused.
@@ -295,7 +302,7 @@ Target response for common commands should be under one second after the user fi
 ## Error Handling
 
 - Headset disconnects: stop capture immediately and update state to `Blocked(HeadsetDisconnected)`.
-- Route changes to speaker: stop capture immediately.
+- Route changes to a disallowed route: stop capture immediately.
 - Model not ready: do not start service; show model download state.
 - Segmenter stuck in speech: timeout and reset.
 - Recognition timeout: discard clip and keep listening.
@@ -308,7 +315,7 @@ Target response for common commands should be under one second after the user fi
 
 Voice control is core product functionality, but delivery should still use staged engineering gates and an operational kill switch:
 
-1. Prototype gate state, headset route detection, microphone capture, and energy segmenter.
+1. Prototype gate state, audio route policy, microphone capture, and energy segmenter.
 2. Prototype Gemma 4 E2B Android inference and measure latency, memory, battery, and audio support.
 3. Implement typed intent interpreter and executor for core commands.
 4. Add settings UI and model manager.
@@ -340,7 +347,8 @@ Integration tests:
 
 Manual/device tests:
 
-- Wired headset, Bluetooth earbuds, and headset without microphone.
+- Wired headset, Bluetooth earbuds, headset without microphone, and speaker route with `SpeakerExperimental` disabled.
+- Speaker route with experimental echo suppression enabled on selected test devices.
 - Airplane mode after model download.
 - Battery saver.
 - Screen off.
@@ -354,6 +362,8 @@ Manual/device tests:
 - Gemma 4 audio input on Android needs validation for short-command latency and quality.
 - Continuous model warmup may be too memory intensive on lower-end devices.
 - Bluetooth headset microphones vary widely in quality and latency.
+- Speaker mode may be difficult to make reliable because podcast speech is semantically similar to user commands and room echo varies
+  by device, volume, environment, and distance from the phone.
 - Multilingual natural commands may need language-specific evaluation data.
 - False positives can still happen from nearby human speech, even without podcast feedback.
 

@@ -9,8 +9,8 @@ class DeterministicVoiceIntentInterpreter @javax.inject.Inject constructor() : V
             text == "resume" || text == "play" -> VoicePlaybackIntent.Resume
             text.contains("next chapter") -> VoicePlaybackIntent.NextChapter
             text.contains("previous chapter") || text.contains("last chapter") -> VoicePlaybackIntent.PreviousChapter
-            text.contains("skip") || text.contains("forward") -> VoicePlaybackIntent.SeekRelative(parseSeconds(text, 30) * 1000)
             text.contains("back") || text.contains("rewind") -> VoicePlaybackIntent.SeekRelative(-parseSeconds(text, 10) * 1000)
+            text.contains("skip") || text.contains("forward") -> VoicePlaybackIntent.SeekRelative(parseSeconds(text, 30) * 1000)
             else -> null
         }
     }

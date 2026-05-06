@@ -16,10 +16,58 @@ class DeterministicVoiceIntentInterpreterTest {
     }
 
     @Test
+    fun `parses skip back`() = runTest {
+        assertEquals(
+            VoicePlaybackIntent.SeekRelative(deltaMs = -10_000),
+            interpreter.interpret(VoiceRecognitionResult("skip back ten seconds", confidence = 0.95f)),
+        )
+    }
+
+    @Test
+    fun `parses rewind`() = runTest {
+        assertEquals(
+            VoicePlaybackIntent.SeekRelative(deltaMs = -10_000),
+            interpreter.interpret(VoiceRecognitionResult("rewind ten seconds", confidence = 0.95f)),
+        )
+    }
+
+    @Test
     fun `parses resume`() = runTest {
         assertEquals(
             VoicePlaybackIntent.Resume,
             interpreter.interpret(VoiceRecognitionResult("resume", confidence = 0.95f)),
+        )
+    }
+
+    @Test
+    fun `accepts minimum confidence`() = runTest {
+        assertEquals(
+            VoicePlaybackIntent.Resume,
+            interpreter.interpret(VoiceRecognitionResult("resume", confidence = 0.7f)),
+        )
+    }
+
+    @Test
+    fun `parses next chapter`() = runTest {
+        assertEquals(
+            VoicePlaybackIntent.NextChapter,
+            interpreter.interpret(VoiceRecognitionResult("next chapter", confidence = 0.95f)),
+        )
+    }
+
+    @Test
+    fun `parses previous chapter`() = runTest {
+        assertEquals(
+            VoicePlaybackIntent.PreviousChapter,
+            interpreter.interpret(VoiceRecognitionResult("previous chapter", confidence = 0.95f)),
+        )
+    }
+
+    @Test
+    fun `does not parse pause inside larger sentence`() = runTest {
+        assertEquals(
+            null,
+            interpreter.interpret(VoiceRecognitionResult("pause after this chapter", confidence = 0.95f)),
         )
     }
 

@@ -90,6 +90,7 @@ include(":modules:services:servers")
 include(":modules:services:ui")
 include(":modules:services:utils")
 include(":modules:services:views")
+include(":modules:services:voice")
 include(":modules:services:sharedtest")
 
 val developerProperties = loadPropertiesFromFile(File("${rootDir.path}/developer.properties"))

@@ -2,9 +2,9 @@
 
 ## Summary
 
-Add a local, hands-free voice control mode for Android playback. When enabled, the app listens only while playback is active and the
-audio route is a headset or earbuds, so users can control playback while jogging, biking, doing house work, or otherwise avoiding
-touch interaction.
+Add a local, hands-free voice control mode for Android playback. When enabled, the app listens while the playback UI or playback
+context is active and the audio route is a headset or earbuds, so users can control playback while jogging, biking, doing house work,
+or otherwise avoiding touch interaction.
 
 The feature should not require a wake phrase. It should support natural phrasing, accents, slang, and multiple languages by using a
 downloaded local model stack. Playback execution must remain deterministic: the model can interpret intent, but only typed commands
@@ -16,7 +16,8 @@ owned by Pocket Casts can affect playback.
 - Fully local recognition and intent interpretation after any required model download.
 - Android-first implementation.
 - No wake phrase requirement for ordinary use.
-- Listening only while playback is active and the active route is headset/earbuds.
+- Listening only while the playback UI or playback context is active and the active route is headset/earbuds.
+- Continue listening while playback is paused, so hands-free "resume" and seek commands still work.
 - Adjustable gate logic that can be tuned without changing recognition or playback command execution.
 - Natural multilingual command support instead of a narrow phrase grammar.
 - Reuse existing playback, chapter, transcript, and analytics infrastructure.
@@ -25,7 +26,7 @@ owned by Pocket Casts can affect playback.
 
 - Cloud speech recognition or cloud LLM inference.
 - Replacing Android media controls, headset button controls, Android Auto, or Tasker integration.
-- Always listening while playback is stopped.
+- Always listening outside the playback UI or playback context.
 - Listening on speaker output.
 - Letting model output directly call arbitrary playback APIs.
 - Solving Wear OS, Automotive, or casting in the first Android phone milestone.
@@ -76,7 +77,7 @@ PlaybackManager
 `VoiceControlGate` is a standalone policy engine. It combines small, independently testable rules:
 
 - `UserEnabledRule`
-- `PlaybackActiveRule`
+- `PlaybackContextActiveRule`
 - `HeadsetRouteRule`
 - `HeadsetMicrophoneRule`
 - `MicrophonePermissionRule`
@@ -93,12 +94,13 @@ Each rule returns:
 - `Unknown(reason)`
 
 The combined gate emits a `StateFlow<VoiceControlGateState>` with the full rule breakdown for diagnostics and settings UI. The first
-release should require the user-enabled, playback-active, headset-route, headset-microphone, microphone-permission, not-casting,
+release should require the user-enabled, playback-context-active, headset-route, headset-microphone, microphone-permission, not-casting,
 not-in-call, and model-ready rules. Battery saver and device support can start as warnings unless testing shows they need to block.
 
-`PlaybackActiveRule` should mean a local playback session has a current episode and is either playing or inside a short voice-control
-grace window after a voice pause command. This keeps "resume" possible after "pause" without continuing to listen indefinitely while
-playback is stopped.
+`PlaybackContextActiveRule` should mean the user is in a valid playback context, not that audio is currently playing. A current episode
+must exist, and the player UI/session must be active enough that playback commands are meaningful. Paused playback remains allowed, so
+users can say "resume", "skip thirty", "go back", or "jump to chapter three" without touching the device. Listening stops when the user
+leaves the playback context, clears the current episode, or another required gate blocks.
 
 ### VoiceControlService
 
@@ -245,15 +247,15 @@ paths, the first implementation phase must include a spike that measures:
 1. User enables Voice Control in settings.
 2. App requests microphone permission and presents the headset-only privacy model.
 3. Model manager downloads or verifies the selected local model.
-4. Playback starts.
-5. Gate checks active playback, headset route, microphone, casting, call state, model readiness, and permission.
+4. User enters a playback context with a current episode. Playback may be playing or paused.
+5. Gate checks playback context, headset route, microphone, casting, call state, model readiness, and permission.
 6. Service enters foreground microphone mode.
 7. Segmenter listens for candidate utterances.
 8. Candidate utterance is passed to recognizer and interpreter.
 9. Valid typed command is executed through `VoicePlaybackCommandExecutor`.
 10. Service keeps listening while gate remains allowed.
-11. Listening stops immediately when playback stops, headset disconnects, route changes to speaker, casting starts, call state blocks,
-    permission is revoked, or user disables the feature.
+11. Listening stops immediately when the playback context ends, the current episode is cleared, headset disconnects, route changes to
+    speaker, casting starts, call state blocks, permission is revoked, or user disables the feature.
 
 ## Latency Strategy
 
@@ -272,7 +274,7 @@ Target response for common commands should be under one second after the user fi
 - Use headset-only route to reduce false positives and avoid acoustic feedback.
 - Run only a tiny segmenter continuously.
 - Invoke Gemma 4 or heavier ASR only on completed candidate utterances.
-- Stop listening when playback is paused/stopped for longer than a short grace period.
+- Stop listening when the playback context ends, not merely because audio is paused.
 - Add diagnostics for segmenter duty cycle, model invocations, average inference time, and gate state.
 
 ## Privacy and UX
@@ -324,7 +326,8 @@ Unit tests:
 
 Integration tests:
 
-- Playback starts -> gate allowed -> service starts.
+- Playback context opens with a current episode -> gate allowed -> service starts.
+- Playback pauses while context remains active -> service remains active.
 - Headset disconnect -> service stops.
 - Cast starts -> service stops.
 - Valid utterance -> typed command -> `PlaybackManager` call.

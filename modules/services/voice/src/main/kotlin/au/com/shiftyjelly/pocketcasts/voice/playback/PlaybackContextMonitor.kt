@@ -8,12 +8,14 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import javax.inject.Singleton
 
 sealed interface PlaybackContext {
     data class Active(val currentEpisodeUuid: String) : PlaybackContext
     data object Inactive : PlaybackContext
 }
 
+@Singleton
 class PlaybackContextMonitor @javax.inject.Inject constructor(
     playbackManager: PlaybackManager,
     @ApplicationScope

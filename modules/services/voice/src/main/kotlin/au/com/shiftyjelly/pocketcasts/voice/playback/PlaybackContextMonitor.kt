@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voice.playback
 
+import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
 import kotlinx.coroutines.CoroutineScope
@@ -13,8 +14,9 @@ sealed interface PlaybackContext {
     data object Inactive : PlaybackContext
 }
 
-class PlaybackContextMonitor(
+class PlaybackContextMonitor @javax.inject.Inject constructor(
     playbackManager: PlaybackManager,
+    @ApplicationScope
     scope: CoroutineScope,
 ) {
     val context: StateFlow<PlaybackContext> = playbackManager.playbackStateFlow

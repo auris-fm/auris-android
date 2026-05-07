@@ -7,6 +7,22 @@ import org.junit.Test
 
 class VoicePlaybackIntentExecutorTest {
     @Test
+    fun `pause pauses sink`() = runTest {
+        val sink = FakeVoicePlaybackSink()
+        VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.Pause)
+
+        assertEquals(listOf("pause"), sink.calls)
+    }
+
+    @Test
+    fun `resume resumes sink`() = runTest {
+        val sink = FakeVoicePlaybackSink()
+        VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.Resume)
+
+        assertEquals(listOf("resume"), sink.calls)
+    }
+
+    @Test
     fun `relative positive seek skips forward`() = runTest {
         val sink = FakeVoicePlaybackSink()
         VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.SeekRelative(30_000))
@@ -20,6 +36,78 @@ class VoicePlaybackIntentExecutorTest {
         VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.SeekRelative(-10_000))
 
         assertEquals(listOf("skipBackward:10"), sink.calls)
+    }
+
+    @Test
+    fun `relative positive sub-second seek does nothing`() = runTest {
+        val sink = FakeVoicePlaybackSink()
+        VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.SeekRelative(999))
+
+        assertEquals(emptyList<String>(), sink.calls)
+    }
+
+    @Test
+    fun `relative negative sub-second seek does nothing`() = runTest {
+        val sink = FakeVoicePlaybackSink()
+        VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.SeekRelative(-999))
+
+        assertEquals(emptyList<String>(), sink.calls)
+    }
+
+    @Test
+    fun `relative zero seek does nothing`() = runTest {
+        val sink = FakeVoicePlaybackSink()
+        VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.SeekRelative(0))
+
+        assertEquals(emptyList<String>(), sink.calls)
+    }
+
+    @Test
+    fun `negative absolute seek clamps to zero`() = runTest {
+        val sink = FakeVoicePlaybackSink()
+        VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.SeekAbsolute(-1))
+
+        assertEquals(listOf("seekTo:0"), sink.calls)
+    }
+
+    @Test
+    fun `next chapter advances sink chapter`() = runTest {
+        val sink = FakeVoicePlaybackSink()
+        VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.NextChapter)
+
+        assertEquals(listOf("nextChapter"), sink.calls)
+    }
+
+    @Test
+    fun `previous chapter rewinds sink chapter`() = runTest {
+        val sink = FakeVoicePlaybackSink()
+        VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.PreviousChapter)
+
+        assertEquals(listOf("previousChapter"), sink.calls)
+    }
+
+    @Test
+    fun `chapter by index selects sink chapter`() = runTest {
+        val sink = FakeVoicePlaybackSink()
+        VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.ChapterByIndex(2))
+
+        assertEquals(listOf("chapterByIndex:2"), sink.calls)
+    }
+
+    @Test
+    fun `chapter by title does nothing`() = runTest {
+        val sink = FakeVoicePlaybackSink()
+        VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.ChapterByTitle("intro"))
+
+        assertEquals(emptyList<String>(), sink.calls)
+    }
+
+    @Test
+    fun `set playback speed does nothing`() = runTest {
+        val sink = FakeVoicePlaybackSink()
+        VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.SetPlaybackSpeed(1.25))
+
+        assertEquals(emptyList<String>(), sink.calls)
     }
 
     private class FakeVoicePlaybackSink : VoicePlaybackSink {

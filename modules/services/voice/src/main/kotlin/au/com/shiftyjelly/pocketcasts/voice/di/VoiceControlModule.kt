@@ -22,6 +22,7 @@ import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
+import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 
 @Module
@@ -35,6 +36,7 @@ abstract class VoiceControlModule {
 
     companion object {
         @Provides
+        @Singleton
         fun provideVoiceControlGate(
             playbackContextMonitor: PlaybackContextMonitor,
             audioRouteMonitor: AudioRouteMonitor,

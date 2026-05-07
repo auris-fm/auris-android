@@ -29,9 +29,13 @@ import kotlinx.coroutines.CoroutineScope
 @InstallIn(SingletonComponent::class)
 abstract class VoiceControlModule {
     @Binds abstract fun bindVoiceAudioSegmenter(impl: EnergyVoiceAudioSegmenter): VoiceAudioSegmenter
+
     @Binds abstract fun bindVoiceRecognizer(impl: NoOpVoiceRecognizer): VoiceRecognizer
+
     @Binds abstract fun bindVoiceIntentInterpreter(impl: DeterministicVoiceIntentInterpreter): VoiceIntentInterpreter
+
     @Binds abstract fun bindVoicePlaybackSink(impl: PlaybackManagerVoicePlaybackSink): VoicePlaybackSink
+
     @Binds abstract fun bindAudioRouteMonitor(impl: AndroidAudioRouteMonitor): AudioRouteMonitor
 
     companion object {

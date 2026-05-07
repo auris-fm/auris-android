@@ -34,16 +34,19 @@ class AudioRoutePolicyRule(
         return when (policy) {
             VoiceControlAudioRoutePolicy.HeadsetOnly -> when (route) {
                 AudioRoute.Headset(hasMicrophone = true) -> VoiceControlRuleState.Allowed
+
                 is AudioRoute.Headset,
                 AudioRoute.BluetoothA2dpOnly,
                 AudioRoute.Speaker,
                 AudioRoute.Unknown,
                 -> disallowed
             }
+
             VoiceControlAudioRoutePolicy.SpeakerExperimental -> when (route) {
                 AudioRoute.Headset(hasMicrophone = true),
                 AudioRoute.Speaker,
                 -> VoiceControlRuleState.Allowed
+
                 is AudioRoute.Headset,
                 AudioRoute.BluetoothA2dpOnly,
                 AudioRoute.Unknown,

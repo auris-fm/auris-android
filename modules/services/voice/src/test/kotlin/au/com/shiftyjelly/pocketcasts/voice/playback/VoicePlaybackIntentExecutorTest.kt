@@ -112,13 +112,29 @@ class VoicePlaybackIntentExecutorTest {
 
     private class FakeVoicePlaybackSink : VoicePlaybackSink {
         val calls = mutableListOf<String>()
-        override suspend fun pause() { calls += "pause" }
-        override suspend fun resume() { calls += "resume" }
-        override suspend fun skipForward(seconds: Int) { calls += "skipForward:$seconds" }
-        override suspend fun skipBackward(seconds: Int) { calls += "skipBackward:$seconds" }
-        override suspend fun seekTo(positionMs: Int) { calls += "seekTo:$positionMs" }
-        override fun nextChapter() { calls += "nextChapter" }
-        override fun previousChapter() { calls += "previousChapter" }
-        override fun chapterByIndex(index: Int) { calls += "chapterByIndex:$index" }
+        override suspend fun pause() {
+            calls += "pause"
+        }
+        override suspend fun resume() {
+            calls += "resume"
+        }
+        override suspend fun skipForward(seconds: Int) {
+            calls += "skipForward:$seconds"
+        }
+        override suspend fun skipBackward(seconds: Int) {
+            calls += "skipBackward:$seconds"
+        }
+        override suspend fun seekTo(positionMs: Int) {
+            calls += "seekTo:$positionMs"
+        }
+        override fun nextChapter() {
+            calls += "nextChapter"
+        }
+        override fun previousChapter() {
+            calls += "previousChapter"
+        }
+        override fun chapterByIndex(index: Int) {
+            calls += "chapterByIndex:$index"
+        }
     }
 }

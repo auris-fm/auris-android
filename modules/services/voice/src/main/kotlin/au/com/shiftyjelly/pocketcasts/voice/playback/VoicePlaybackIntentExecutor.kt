@@ -12,17 +12,25 @@ class VoicePlaybackIntentExecutor @Inject constructor(
     suspend fun execute(intent: VoicePlaybackIntent) {
         when (intent) {
             VoicePlaybackIntent.Pause -> sink.pause()
+
             VoicePlaybackIntent.Resume -> sink.resume()
+
             is VoicePlaybackIntent.SeekRelative -> {
                 val seconds = abs(intent.deltaMs / 1000)
                 if (seconds == 0) return
                 if (intent.deltaMs >= 0) sink.skipForward(seconds) else sink.skipBackward(seconds)
             }
+
             is VoicePlaybackIntent.SeekAbsolute -> sink.seekTo(intent.positionMs.coerceAtLeast(0))
+
             VoicePlaybackIntent.NextChapter -> sink.nextChapter()
+
             VoicePlaybackIntent.PreviousChapter -> sink.previousChapter()
+
             is VoicePlaybackIntent.ChapterByIndex -> sink.chapterByIndex(intent.index)
+
             is VoicePlaybackIntent.ChapterByTitle -> Unit
+
             is VoicePlaybackIntent.SetPlaybackSpeed -> Unit
         }
     }

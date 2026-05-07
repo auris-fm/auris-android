@@ -45,6 +45,7 @@ import au.com.shiftyjelly.pocketcasts.utils.featureflag.FeatureFlag
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBufferUncaughtExceptionHandler
 import au.com.shiftyjelly.pocketcasts.utils.log.RxJavaUncaughtExceptionHandling
+import au.com.shiftyjelly.pocketcasts.voice.service.VoiceControlServiceController
 import au.com.shiftyjelly.pocketcasts.widget.PlayerWidgetManager
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
@@ -138,6 +139,8 @@ class PocketCastsApplication :
     @Inject lateinit var appReviewManager: AppReviewManager
 
     @Inject lateinit var appReviewExceptionHandler: AppReviewExceptionHandler
+
+    @Inject lateinit var voiceControlServiceController: VoiceControlServiceController
 
     override fun onCreate() {
         if (BuildConfig.DEBUG) {

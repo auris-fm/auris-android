@@ -15,6 +15,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
             VoicePlaybackIntent.Resume -> sink.resume()
             is VoicePlaybackIntent.SeekRelative -> {
                 val seconds = abs(intent.deltaMs / 1000)
+                if (seconds == 0) return
                 if (intent.deltaMs >= 0) sink.skipForward(seconds) else sink.skipBackward(seconds)
             }
             is VoicePlaybackIntent.SeekAbsolute -> sink.seekTo(intent.positionMs.coerceAtLeast(0))

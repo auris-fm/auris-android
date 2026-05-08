@@ -1487,6 +1487,7 @@ The following were implemented after the foundation plan was completed:
 - **AudioRecord pipeline**: `MicrophoneCapture` → `EnergyVoiceAudioSegmenter` → `VoiceRecognizer`. Zero audio focus impact — media playback is never interrupted.
 - **Android SpeechRecognizer rejection**: Testing confirmed `SpeechRecognizer` inherently takes audio focus and interrupts media playback. It is incompatible with continuous listening and was removed from the pipeline.
 - **Service orchestration**: `VoiceControlServiceController` observes `VoiceControlGate` state and auto-starts/stops the foreground service.
+- **Microphone lifecycle**: Mic capture starts only when gate is fully allowed (playback active + headset connected + model ready). Mic stops immediately on gate block, app kill, or background without playback. Background with active playback keeps mic on for hands-free commands.
 
 ## Self-Review Notes
 

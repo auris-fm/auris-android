@@ -123,6 +123,14 @@ error recovery.
 Android microphone foreground-service requirements must be handled explicitly. The service should use a microphone foreground service
 type and a notification that clearly indicates voice control is active.
 
+The service lifecycle is strictly bound to gate state: microphone capture starts only when all required gates are allowed, and stops
+immediately when any required gate blocks. This means:
+
+- **App killed**: Process termination destroys the service and stops microphone capture.
+- **App background, no playback**: `PlaybackContextActiveRule` blocks → service stops → microphone off.
+- **App background, episode playing/paused**: Gate remains allowed → service continues → microphone active for hands-free commands.
+- **App foreground, no episode**: Gate blocks → service stops → microphone off.
+
 ### VoiceAudioSegmenter
 
 Add a new replaceable segmenter interface:
@@ -280,6 +288,10 @@ paths, the first implementation phase must include a spike that measures:
 10. Service keeps listening while gate remains allowed.
 11. Listening stops immediately when the playback context ends, the current episode is cleared, the audio route becomes disallowed,
     casting starts, call state blocks, permission is revoked, or the user explicitly disables voice control.
+12. **App killed or background without playback**: When the process is killed, the foreground service and microphone capture terminate
+    with it. When the app enters the background without an active playback episode, the gate's `PlaybackContextActiveRule` blocks,
+    the service stops, and microphone input ceases. Background playback (playing or paused episode) keeps the gate allowed and the
+    microphone active so hands-free commands remain available.
 
 ## Latency Strategy
 
@@ -294,10 +306,11 @@ Target response for common commands should be under one second after the user fi
 
 ## Battery Strategy
 
+- **Microphone is off by default**: Capture starts only when the gate is fully allowed. App killed or background without playback → mic off.
 - Never listen unless all required gates are allowed.
 - Start with `HeadsetOnly` route policy to reduce false positives and avoid acoustic feedback.
 - Run only a tiny segmenter continuously.
-- Invoke Gemma 4 or heavier ASR only on completed candidate utterances.
+- Invoke Vosk or Gemma 4 only on completed candidate utterances, not on every audio frame.
 - Stop listening when the playback context ends, not merely because audio is paused.
 - Add diagnostics for segmenter duty cycle, model invocations, average inference time, and gate state.
 

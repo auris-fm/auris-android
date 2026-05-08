@@ -152,27 +152,41 @@ Initial implementations:
 
 ### VoiceRecognizer
 
-`VoiceRecognizer` converts an utterance clip into text or structured speech-understanding candidates.
+`VoiceRecognizer` converts an utterance clip into text. The interface is the pluggable boundary between capture and interpretation:
 
 ```kotlin
 interface VoiceRecognizer {
-    suspend fun recognize(clip: VoiceUtteranceClip, context: VoiceRecognitionContext): VoiceRecognitionResult
+    suspend fun recognize(clip: VoiceUtteranceClip, context: VoiceRecognitionContext): VoiceRecognitionResult?
 }
 ```
 
-Primary provider:
+Providers are **swappable via a single Dagger `@Binds` line** in `VoiceControlModule`. Each provider shares the same interface; the rest
+of the pipeline does not know which one is active.
 
-- Downloaded Gemma 4 E2B-class local model through Google AI Edge / LiteRT-LM if Android latency, model size, audio support, and device
-  compatibility are acceptable in prototype testing.
+**Critical design constraint**: The recognizer must process `AudioRecord`-captured PCM buffers **without taking system audio focus**.
+Android's built-in `SpeechRecognizer` is unsuitable because it internally acquires audio focus and interrupts media playback. All
+providers below operate entirely in-process on already-captured audio.
 
-Fallback providers:
+Current providers:
 
-- Android on-device `SpeechRecognizer` for devices with suitable on-device support.
-- A later offline ASR provider if Gemma 4 audio support is not practical for short-command latency.
+- **Vosk** (active default): Offline, open-source ASR engine. Processes PCM frames via `acceptWaveForm()` directly — zero audio
+  interruption. Small English model (`vosk-model-small-en-us-0.15`, ~40 MB). Models are managed by `VoiceModelManager` which downloads
+  and extracts them on first launch. Well-suited for keyword-style deterministic commands.
 
-The provider boundary is required because Gemma 4 Android support and audio-input behavior need prototype validation. Official docs list
-Gemma 4 and mobile deployment paths, and LiteRT-LM lists Android Kotlin support and Gemma4-E2B, but direct audio behavior must be tested
-on target devices before committing to it as the only provider.
+- **Gemma 4 E2B** (placeholder, pending LiteRT-LM validation): Gemma 4 E2B supports multimodal input including audio. Via LiteRT-LM on
+  Android it could process audio segments directly and emit structured intent — potentially collapsing recognition + interpretation into
+  a single model pass. Implementation blocked on LiteRT-LM Android maturity and model binary availability. The provider skeleton exists
+  behind the same interface; swap and test when the runtime is ready.
+
+- **NoOpVoiceRecognizer**: Returns null. Used in unit tests.
+
+Provider selection in DI:
+
+```kotlin
+// Single-line swap:
+@Binds fun bindVoiceRecognizer(impl: VoskVoiceRecognizer): VoiceRecognizer
+@Binds fun bindVoiceRecognizer(impl: Gemma4VoiceRecognizer): VoiceRecognizer
+```
 
 ### VoiceIntentInterpreter
 
@@ -315,15 +329,19 @@ Target response for common commands should be under one second after the user fi
 
 Voice control is core product functionality, but delivery should still use staged engineering gates and an operational kill switch:
 
-1. Prototype gate state, audio route policy, microphone capture, and energy segmenter.
-2. Prototype Gemma 4 E2B Android inference and measure latency, memory, battery, and audio support.
-3. Implement typed intent interpreter and executor for core commands.
-4. Add settings UI and model manager.
-5. Add chapter title matching.
-6. Add transcript-assisted section jumps.
-7. Internal dogfood with diagnostics.
-8. Limited release with kill-switch monitoring.
-9. Broader release after false positive, latency, and battery thresholds are met.
+1. ✅ Prototype gate state, audio route policy, microphone capture, and energy segmenter.
+2. ✅ Implement typed intent interpreter and executor for core commands.
+3. ✅ Add pluggable VoiceRecognizer with Vosk (default) and Gemma 4 E2B (placeholder) providers.
+4. ✅ Add voice model manager with Vosk model download and extraction.
+5. ✅ Wire service orchestration: auto-start/stop based on gate state, foreground notification.
+6. Prototype Gemma 4 E2B Android inference and measure latency, memory, battery, and audio support.
+7. Add settings UI (enable/disable, route policy selector, gate status display).
+8. Add first-run setup and microphone permission UX.
+9. Add chapter title matching.
+10. Add transcript-assisted section jumps.
+11. Internal dogfood with diagnostics.
+12. Limited release with kill-switch monitoring.
+13. Broader release after false positive, latency, and battery thresholds are met.
 
 ## Testing Strategy
 
@@ -359,7 +377,11 @@ Manual/device tests:
 ## Open Risks
 
 - Android background microphone restrictions and OEM behavior may require foreground-service tuning.
-- Gemma 4 audio input on Android needs validation for short-command latency and quality.
+- **Android SpeechRecognizer is incompatible with continuous listening**: It acquires audio focus and interrupts/pauses media playback.
+  This was confirmed during testing and led to the AudioRecord + Vosk pipeline.
+- Gemma 4 audio input on Android needs validation for short-command latency and quality. LiteRT-LM maturity on Android is unverified.
+- Vosk model size (40 MB for small English) is acceptable but language expansion would increase download size. Model download should
+  prefer Wi-Fi.
 - Continuous model warmup may be too memory intensive on lower-end devices.
 - Bluetooth headset microphones vary widely in quality and latency.
 - Speaker mode may be difficult to make reliable because podcast speech is semantically similar to user commands and room echo varies
@@ -373,6 +395,9 @@ Manual/device tests:
 - Gemma mobile deployment docs: https://ai.google.dev/gemma/docs/integrations/mobile
 - LiteRT-LM overview: https://ai.google.dev/edge/litert-lm/overview
 - LiteRT-LM Android Kotlin docs: https://ai.google.dev/edge/litert-lm/android
+- Vosk offline speech recognition: https://alphacephei.com/vosk/
+- Vosk Android integration: https://github.com/alphacep/vosk-android
+- Vosk models: https://alphacephei.com/vosk/models
 - Android SpeechRecognizer API: https://developer.android.com/reference/android/speech/SpeechRecognizer
 - Android foreground service types: https://developer.android.com/develop/background-work/services/fg-service-types
 - Media3 SessionCommand API: https://developer.android.com/reference/androidx/media3/session/SessionCommand

@@ -1472,11 +1472,21 @@ If there are no edits after verification, do not create an empty commit.
 
 Create separate implementation plans for:
 
-- Gemma 4 / LiteRT-LM model manager, model download, runtime compatibility checks, and recognizer provider.
+- Gemma 4 / LiteRT-LM recognizer provider validation (provider skeleton exists, needs model binary and runtime testing).
 - First-run setup and settings UI.
 - Production speaker-mode echo suppression and false-positive evaluation.
 - Transcript-assisted section jumping.
 - Analytics source generation for voice control if `SourceViewType` does not already include a voice value.
+
+## Completed Beyond Foundation Scope
+
+The following were implemented after the foundation plan was completed:
+
+- **Pluggable VoiceRecognizer architecture**: `VoskVoiceRecognizer` (active, offline ASR processing AudioRecord PCM directly) and `Gemma4VoiceRecognizer` (placeholder for LiteRT-LM). Swappable via single `@Binds` line in `VoiceControlModule`.
+- **VoiceModelManager**: Downloads and extracts Vosk small English model (~40 MB) on first launch. Tracks download progress via `StateFlow<ModelDownloadState>`.
+- **AudioRecord pipeline**: `MicrophoneCapture` → `EnergyVoiceAudioSegmenter` → `VoiceRecognizer`. Zero audio focus impact — media playback is never interrupted.
+- **Android SpeechRecognizer rejection**: Testing confirmed `SpeechRecognizer` inherently takes audio focus and interrupts media playback. It is incompatible with continuous listening and was removed from the pipeline.
+- **Service orchestration**: `VoiceControlServiceController` observes `VoiceControlGate` state and auto-starts/stops the foreground service.
 
 ## Self-Review Notes
 

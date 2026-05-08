@@ -10,8 +10,9 @@ import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlRule
 import au.com.shiftyjelly.pocketcasts.voice.intent.DeterministicVoiceIntentInterpreter
 import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntentInterpreter
-import au.com.shiftyjelly.pocketcasts.voice.model.AndroidSpeechRecognizer
+import au.com.shiftyjelly.pocketcasts.voice.model.Gemma4VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognizer
+import au.com.shiftyjelly.pocketcasts.voice.model.VoskVoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackContextMonitor
 import au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackContextRule
 import au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackManagerVoicePlaybackSink
@@ -32,7 +33,8 @@ import kotlinx.coroutines.CoroutineScope
 abstract class VoiceControlModule {
     @Binds abstract fun bindVoiceAudioSegmenter(impl: EnergyVoiceAudioSegmenter): VoiceAudioSegmenter
 
-    @Binds abstract fun bindVoiceRecognizer(impl: AndroidSpeechRecognizer): VoiceRecognizer
+    // Swap recognizer: use VoskVoiceRecognizer or Gemma4VoiceRecognizer
+    @Binds abstract fun bindVoiceRecognizer(impl: VoskVoiceRecognizer): VoiceRecognizer
 
     @Binds abstract fun bindVoiceIntentInterpreter(impl: DeterministicVoiceIntentInterpreter): VoiceIntentInterpreter
 

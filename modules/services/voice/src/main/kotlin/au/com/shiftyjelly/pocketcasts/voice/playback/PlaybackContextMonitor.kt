@@ -11,7 +11,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 
 sealed interface PlaybackContext {
-    data class Active(val currentEpisodeUuid: String) : PlaybackContext
+    data class Active(val currentEpisodeUuid: String, val isPlaying: Boolean) : PlaybackContext
     data object Inactive : PlaybackContext
 }
 
@@ -28,7 +28,7 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
     private fun toPlaybackContext(playbackState: PlaybackState): PlaybackContext {
         val currentEpisodeUuid = playbackState.episodeUuid
         return if (currentEpisodeUuid.isNotBlank() && !playbackState.isStopped && !playbackState.isEmpty) {
-            PlaybackContext.Active(currentEpisodeUuid = currentEpisodeUuid)
+            PlaybackContext.Active(currentEpisodeUuid = currentEpisodeUuid, isPlaying = playbackState.isPlaying)
         } else {
             PlaybackContext.Inactive
         }

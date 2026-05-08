@@ -2,35 +2,47 @@ package au.com.shiftyjelly.pocketcasts.voice.service
 
 import android.app.Service
 import android.content.Intent
-import android.os.Bundle
 import android.os.IBinder
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
+import au.com.shiftyjelly.pocketcasts.voice.audio.EnergyVoiceAudioSegmenter
+import au.com.shiftyjelly.pocketcasts.voice.audio.MicrophoneCapture
+import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGateState
 import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntentInterpreter
-import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceRecognitionResult
+import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognitionContext
+import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognizer
+import au.com.shiftyjelly.pocketcasts.voice.model.VoiceUtteranceClip
+import au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackContextMonitor
 import au.com.shiftyjelly.pocketcasts.voice.playback.VoicePlaybackIntentExecutor
+import au.com.shiftyjelly.pocketcasts.voice.route.AndroidAudioRouteMonitor
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
 import timber.log.Timber
-import javax.inject.Inject
 
 @AndroidEntryPoint
 class VoiceControlService : Service() {
     @Inject lateinit var gate: VoiceControlGate
     @Inject lateinit var notificationManager: VoiceControlNotificationManager
+    @Inject lateinit var microphoneCapture: MicrophoneCapture
+    @Inject lateinit var segmenter: EnergyVoiceAudioSegmenter
+    @Inject lateinit var voiceRecognizer: VoiceRecognizer
     @Inject lateinit var voiceIntentInterpreter: VoiceIntentInterpreter
     @Inject lateinit var voicePlaybackIntentExecutor: VoicePlaybackIntentExecutor
+    @Inject lateinit var playbackContextMonitor: PlaybackContextMonitor
+    @Inject lateinit var audioRouteMonitor: AndroidAudioRouteMonitor
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private var speechRecognizer: SpeechRecognizer? = null
+    private var captureJob: Job? = null
+    private var speechFrames = mutableListOf<au.com.shiftyjelly.pocketcasts.voice.audio.PcmAudioFrame>()
     private var lastCommand: String? = null
     private var lastCommandTime: Long = 0L
 
@@ -53,7 +65,7 @@ class VoiceControlService : Service() {
         Timber.i("Voice control service starting")
 
         if (!hasRequiredPermissions()) {
-            Timber.w("Missing required permissions, stopping voice control")
+            Timber.w("Missing permissions, stopping")
             stopSelf()
             return
         }
@@ -63,77 +75,64 @@ class VoiceControlService : Service() {
 
         gate.state.onEach { state ->
             if (state is VoiceControlGateState.Blocked) {
-                Timber.w("Voice control gate blocked: ${state.rules}")
+                Timber.w("Gate blocked: ${state.rules}")
                 stopVoiceControl()
             }
         }.launchIn(serviceScope)
 
-        startSpeechRecognition()
+        startAudioCapture()
     }
 
-    private fun startSpeechRecognition() {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            Timber.w("Speech recognition not available on this device")
-            return
+    private fun startAudioCapture() {
+        captureJob?.cancel()
+        captureJob = serviceScope.launch(Dispatchers.IO) {
+            microphoneCapture.startCapture()
+                .catch { e -> Timber.e(e, "Capture error") }
+                .collect { frame -> processAudioFrame(frame) }
         }
+    }
 
-        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).also { recognizer ->
-            recognizer.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {
-                    Timber.i("Speech recognition ready - listening for commands")
-                }
-
-                override fun onBeginningOfSpeech() {
-                    Timber.i("Speech detected")
-                }
-
-                override fun onRmsChanged(rmsdB: Float) {}
-
-                override fun onBufferReceived(buffer: ByteArray?) {}
-
-                override fun onEndOfSpeech() {
-                    Timber.i("Speech ended - processing command")
-                }
-
-                override fun onError(error: Int) {
-                    Timber.w("Speech error: $error")
-                    restartRecognition()
-                }
-
-                override fun onResults(results: Bundle?) {
-                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val scores = results?.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
-                    val transcript = matches?.firstOrNull() ?: ""
-                    val confidence = scores?.firstOrNull() ?: 0f
-                    handleRecognition(VoiceRecognitionResult(transcript, confidence))
-                    restartRecognition()
-                }
-
-                override fun onPartialResults(partialResults: Bundle?) {}
-
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            })
-
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+    private suspend fun processAudioFrame(frame: au.com.shiftyjelly.pocketcasts.voice.audio.PcmAudioFrame) {
+        when (val result = segmenter.process(frame)) {
+            is VoiceSegmenterResult.SpeechStarted -> {
+                Timber.i("Speech started")
+                speechFrames.clear()
+                speechFrames.add(frame)
             }
-            recognizer.startListening(intent)
+            is VoiceSegmenterResult.SpeechContinuing -> {
+                speechFrames.add(frame)
+            }
+            is VoiceSegmenterResult.SpeechEnded -> {
+                speechFrames.addAll(result.frames)
+                Timber.i("Speech ended: ${speechFrames.size} frames")
+                val clip = VoiceUtteranceClip.fromFrames(speechFrames.toList())
+                speechFrames.clear()
+                processUtterance(clip)
+            }
+            is VoiceSegmenterResult.Rejected -> {
+                Timber.w("Segment rejected: ${result.reason}")
+                speechFrames.clear()
+            }
+            VoiceSegmenterResult.Silence -> { /* continue */ }
         }
     }
 
-    private fun restartRecognition() {
-        speechRecognizer?.destroy()
-        speechRecognizer = null
-        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(500) }
-        startSpeechRecognition()
+    private suspend fun processUtterance(clip: VoiceUtteranceClip) {
+        val recognitionContext = VoiceRecognitionContext(
+            playbackContext = playbackContextMonitor.context.value,
+            audioRoute = audioRouteMonitor.route.value,
+        )
+
+        val result = voiceRecognizer.recognize(clip, recognitionContext)
+        if (result != null) {
+            handleCommand(result)
+        }
     }
 
-    private fun handleRecognition(result: VoiceRecognitionResult) {
+    private suspend fun handleCommand(result: au.com.shiftyjelly.pocketcasts.voice.intent.VoiceRecognitionResult) {
         val now = System.currentTimeMillis()
         if (result.transcript == lastCommand && (now - lastCommandTime) < COMMAND_DEBOUNCE_MS) {
-            Timber.i("Debouncing duplicate: '${result.transcript}'")
+            Timber.i("Debounce: '${result.transcript}'")
             return
         }
         lastCommand = result.transcript
@@ -141,19 +140,19 @@ class VoiceControlService : Service() {
 
         Timber.i("Recognized: '${result.transcript}' (conf=${result.confidence})")
 
-        val intent = kotlinx.coroutines.runBlocking { voiceIntentInterpreter.interpret(result) }
+        val intent = voiceIntentInterpreter.interpret(result)
         if (intent != null) {
             Timber.i("Executing: $intent")
-            kotlinx.coroutines.runBlocking { voicePlaybackIntentExecutor.execute(intent) }
+            voicePlaybackIntentExecutor.execute(intent)
         } else {
-            Timber.w("No intent for: '${result.transcript}'")
+            Timber.w("No intent: '${result.transcript}'")
         }
     }
 
     private fun stopVoiceControl() {
         Timber.i("Stopping voice control service")
-        speechRecognizer?.destroy()
-        speechRecognizer = null
+        captureJob?.cancel()
+        microphoneCapture.stopCapture()
         notificationManager.cancelNotification()
         stopForeground(STOP_FOREGROUND_REMOVE)
         serviceScope.cancel()
@@ -161,12 +160,10 @@ class VoiceControlService : Service() {
     }
 
     private fun hasRequiredPermissions(): Boolean {
-        return hasPermission(android.Manifest.permission.RECORD_AUDIO) &&
-            hasPermission(android.Manifest.permission.FOREGROUND_SERVICE_MICROPHONE)
-    }
-
-    private fun hasPermission(permission: String): Boolean {
-        return checkSelfPermission(permission) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        return checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED &&
+            checkSelfPermission(android.Manifest.permission.FOREGROUND_SERVICE_MICROPHONE) ==
+            android.content.pm.PackageManager.PERMISSION_GRANTED
     }
 
     override fun onDestroy() {

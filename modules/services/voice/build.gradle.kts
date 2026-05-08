@@ -19,6 +19,7 @@ dependencies {
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.coroutines.core)
+    implementation(libs.vosk.android)
     implementation(libs.timber)
 
     implementation(projects.modules.services.analytics)

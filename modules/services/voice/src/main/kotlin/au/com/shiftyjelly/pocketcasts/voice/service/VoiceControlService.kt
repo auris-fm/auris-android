@@ -9,6 +9,7 @@ import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGateState
 import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntentInterpreter
+import au.com.shiftyjelly.pocketcasts.voice.model.VoiceModelManager
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceUtteranceClip
@@ -39,6 +40,7 @@ class VoiceControlService : Service() {
     @Inject lateinit var voicePlaybackIntentExecutor: VoicePlaybackIntentExecutor
     @Inject lateinit var playbackContextMonitor: PlaybackContextMonitor
     @Inject lateinit var audioRouteMonitor: AndroidAudioRouteMonitor
+    @Inject lateinit var voiceModelManager: VoiceModelManager
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var captureJob: Job? = null
@@ -80,7 +82,18 @@ class VoiceControlService : Service() {
             }
         }.launchIn(serviceScope)
 
-        startAudioCapture()
+        // Download model in background, then start capture
+        serviceScope.launch(Dispatchers.IO) {
+            voiceModelManager.ensureModel().fold(
+                onSuccess = {
+                    launch(Dispatchers.Main) { startAudioCapture() }
+                },
+                onFailure = { e ->
+                    Timber.e(e, "Model download failed, stopping")
+                    launch(Dispatchers.Main) { stopSelf() }
+                },
+            )
+        }
     }
 
     private fun startAudioCapture() {

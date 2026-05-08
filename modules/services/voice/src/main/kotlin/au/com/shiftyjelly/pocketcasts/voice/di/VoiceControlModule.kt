@@ -10,7 +10,6 @@ import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlRule
 import au.com.shiftyjelly.pocketcasts.voice.intent.DeterministicVoiceIntentInterpreter
 import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntentInterpreter
-import au.com.shiftyjelly.pocketcasts.voice.model.Gemma4VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voice.model.VoskVoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackContextMonitor

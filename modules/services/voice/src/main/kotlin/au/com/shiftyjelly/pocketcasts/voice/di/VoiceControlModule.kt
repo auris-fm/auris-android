@@ -3,6 +3,8 @@ package au.com.shiftyjelly.pocketcasts.voice.di
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.voice.audio.EnergyVoiceAudioSegmenter
+import au.com.shiftyjelly.pocketcasts.voice.audio.MicrophoneCapture
+import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceAudioSegmenter
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlRule
@@ -52,6 +54,15 @@ abstract class VoiceControlModule {
                 AudioRoutePolicyRule(audioRouteMonitor.route, settings.voiceControlAudioRoutePolicy.flow, scope),
             )
             return VoiceControlGate(rules = rules, scope = scope)
+        }
+
+        @Provides
+        @Singleton
+        fun provideVoiceAudioProcessor(
+            microphoneCapture: MicrophoneCapture,
+            voiceAudioSegmenter: VoiceAudioSegmenter,
+        ): VoiceAudioProcessor {
+            return VoiceAudioProcessor(microphoneCapture, voiceAudioSegmenter)
         }
     }
 }

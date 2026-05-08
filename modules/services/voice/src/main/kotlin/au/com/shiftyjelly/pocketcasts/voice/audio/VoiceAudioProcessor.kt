@@ -34,6 +34,9 @@ class VoiceAudioProcessor @Inject constructor(
                     is VoiceSegmenterResult.SpeechEnded -> {
                         Timber.i("Speech ended detected with ${result.frames.size} frames")
                     }
+                    is VoiceSegmenterResult.Rejected -> {
+                        Timber.w("Speech rejected: ${result.reason}")
+                    }
                     VoiceSegmenterResult.Silence -> {
                         // Silence detected
                     }

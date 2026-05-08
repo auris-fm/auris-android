@@ -6,6 +6,7 @@ import au.com.shiftyjelly.pocketcasts.voice.audio.EnergyVoiceAudioSegmenter
 import au.com.shiftyjelly.pocketcasts.voice.audio.MicrophoneCapture
 import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceAudioSegmenter
+import au.com.shiftyjelly.pocketcasts.voice.gate.UserNotDisabledRule
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlRule
 import au.com.shiftyjelly.pocketcasts.voice.intent.DeterministicVoiceIntentInterpreter
@@ -51,6 +52,7 @@ abstract class VoiceControlModule {
             @ApplicationScope scope: CoroutineScope,
         ): VoiceControlGate {
             val rules: List<VoiceControlRule> = listOf(
+                UserNotDisabledRule(settings, scope),
                 PlaybackContextRule(playbackContextMonitor.context, scope),
                 AudioRoutePolicyRule(audioRouteMonitor.route, settings.voiceControlAudioRoutePolicy.flow, scope),
             )

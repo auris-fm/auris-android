@@ -80,7 +80,7 @@ class VoiceControlNotificationManager @Inject constructor(
      */
     private fun createStopIntent(): Intent {
         return Intent(context, VoiceControlService::class.java).apply {
-            action = VoiceControlService.ACTION_STOP
+            action = "au.com.shiftyjelly.pocketcasts.voice.action.STOP"
         }
     }
 

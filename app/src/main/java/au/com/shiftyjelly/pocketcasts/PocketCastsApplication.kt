@@ -45,6 +45,7 @@ import au.com.shiftyjelly.pocketcasts.utils.featureflag.FeatureFlag
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBufferUncaughtExceptionHandler
 import au.com.shiftyjelly.pocketcasts.utils.log.RxJavaUncaughtExceptionHandling
+import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voice.service.VoiceControlServiceController
 import au.com.shiftyjelly.pocketcasts.widget.PlayerWidgetManager
 import coil3.ImageLoader
@@ -142,6 +143,8 @@ class PocketCastsApplication :
 
     @Inject lateinit var voiceControlServiceController: VoiceControlServiceController
 
+    @Inject lateinit var voiceControlGate: VoiceControlGate
+
     override fun onCreate() {
         if (BuildConfig.DEBUG) {
             StrictMode.setThreadPolicy(
@@ -203,6 +206,10 @@ class PocketCastsApplication :
             .setJobSchedulerJobIdRange(1000, 20000)
             .build()
 
+    private fun setupVoiceControl() {
+        voiceControlServiceController.startMonitoring(voiceControlGate)
+    }
+
     private fun setupApp() {
         LogBuffer.i("Application", "App started. ${settings.getVersion()} (${settings.getVersionCode()})")
 
@@ -217,6 +224,7 @@ class PocketCastsApplication :
             notificationManager.setupOffersNotifications()
             appLifecycleObserver.setup()
             PlaybackServiceToggle.ensureCorrectServiceEnabled(this@PocketCastsApplication)
+            setupVoiceControl()
 
             SingletonImageLoader.setSafe { coilImageLoader }
 

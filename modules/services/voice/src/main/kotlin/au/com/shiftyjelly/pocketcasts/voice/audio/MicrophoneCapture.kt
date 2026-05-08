@@ -8,14 +8,14 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import androidx.annotation.RequiresPermission
+import javax.inject.Inject
+import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import timber.log.Timber
-import javax.inject.Inject
-import javax.inject.Singleton
 
 @Singleton
 class MicrophoneCapture @Inject constructor() {
@@ -69,10 +69,12 @@ class MicrophoneCapture @Inject constructor() {
                         Timber.e("Invalid operation during audio capture")
                         throw MicrophoneCaptureException.ReadFailed("Invalid operation")
                     }
+
                     readResult == AudioRecord.ERROR_BAD_VALUE -> {
                         Timber.e("Bad value during audio capture")
                         throw MicrophoneCaptureException.ReadFailed("Bad value")
                     }
+
                     readResult != null && readResult > 0 -> {
                         val samples = audioBuffer.copyOf(readResult)
                         val frame = PcmAudioFrame(
@@ -81,6 +83,7 @@ class MicrophoneCapture @Inject constructor() {
                         )
                         trySend(frame)
                     }
+
                     else -> {
                         Timber.w("No audio data read: $readResult")
                     }

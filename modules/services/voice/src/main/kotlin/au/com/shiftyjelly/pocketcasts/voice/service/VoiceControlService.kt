@@ -7,9 +7,9 @@ import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.IBinder
+import au.com.shiftyjelly.pocketcasts.voice.audio.RejectionReason
 import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceSegmenterResult
-import au.com.shiftyjelly.pocketcasts.voice.audio.RejectionReason
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGateState
 import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntentInterpreter
@@ -21,6 +21,7 @@ import au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackContextMonitor
 import au.com.shiftyjelly.pocketcasts.voice.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voice.route.AndroidAudioRouteMonitor
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -31,17 +32,23 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.withTimeout
 import timber.log.Timber
-import javax.inject.Inject
 
 @AndroidEntryPoint
 class VoiceControlService : Service() {
     @Inject lateinit var gate: VoiceControlGate
+
     @Inject lateinit var voiceAudioProcessor: VoiceAudioProcessor
+
     @Inject lateinit var notificationManager: VoiceControlNotificationManager
+
     @Inject lateinit var voiceRecognizer: VoiceRecognizer
+
     @Inject lateinit var voiceIntentInterpreter: VoiceIntentInterpreter
+
     @Inject lateinit var voicePlaybackIntentExecutor: VoicePlaybackIntentExecutor
+
     @Inject lateinit var playbackContextMonitor: PlaybackContextMonitor
+
     @Inject lateinit var audioRouteMonitor: AndroidAudioRouteMonitor
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -110,31 +117,38 @@ class VoiceControlService : Service() {
                 Timber.i("Speech started - voice command detected")
                 requestAudioFocus()
             }
+
             is VoiceSegmenterResult.SpeechEnded -> {
                 Timber.i("Speech ended - processing ${result.frames.size} audio frames")
                 processVoiceSegment(result.frames)
             }
+
             is VoiceSegmenterResult.SpeechContinuing -> {
                 // Continue processing speech
             }
+
             is VoiceSegmenterResult.Rejected -> {
                 Timber.w("Speech segment rejected: ${result.reason}")
                 when (result.reason) {
                     RejectionReason.TooShort -> {
                         Timber.i("Speech was too short - ignoring")
                     }
+
                     RejectionReason.LowConfidence -> {
                         Timber.i("Speech confidence too low - ignoring")
                     }
+
                     RejectionReason.Timeout -> {
                         Timber.w("Speech timeout - segmenter stuck in speech, resetting")
                     }
+
                     RejectionReason.InvalidRoute -> {
                         Timber.w("Invalid audio route during capture")
                         stopVoiceControl()
                     }
                 }
             }
+
             VoiceSegmenterResult.Silence -> {
                 // Silence detected
             }
@@ -155,10 +169,12 @@ class VoiceControlService : Service() {
                     AudioManager.AUDIOFOCUS_GAIN -> {
                         Timber.i("Audio focus gained")
                     }
+
                     AudioManager.AUDIOFOCUS_LOSS -> {
                         Timber.i("Audio focus lost")
                         stopVoiceControl()
                     }
+
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                         Timber.i("Audio focus lost transient")
                     }
@@ -213,6 +229,7 @@ class VoiceControlService : Service() {
                 is kotlinx.coroutines.TimeoutCancellationException -> {
                     Timber.w("Voice recognition timeout after ${RECOGNITION_TIMEOUT_MS}ms")
                 }
+
                 else -> {
                     Timber.e(e, "Error during voice recognition")
                 }
@@ -255,8 +272,12 @@ class VoiceControlService : Service() {
     private fun isValidAudioRoute(route: au.com.shiftyjelly.pocketcasts.voice.route.AudioRoute): Boolean {
         return when (route) {
             is au.com.shiftyjelly.pocketcasts.voice.route.AudioRoute.Headset -> true
+
             is au.com.shiftyjelly.pocketcasts.voice.route.AudioRoute.Speaker -> true
-            is au.com.shiftyjelly.pocketcasts.voice.route.AudioRoute.BluetoothA2dpOnly -> false // No microphone
+
+            is au.com.shiftyjelly.pocketcasts.voice.route.AudioRoute.BluetoothA2dpOnly -> false
+
+            // No microphone
             is au.com.shiftyjelly.pocketcasts.voice.route.AudioRoute.Unknown -> false
         }
     }

@@ -2,12 +2,11 @@ package au.com.shiftyjelly.pocketcasts.voice.audio
 
 import kotlin.math.abs
 
-class EnergyVoiceAudioSegmenter @javax.inject.Inject constructor(
-    private val speechThreshold: Int = 700,
-    private val minimumSpeechFrames: Int = 3,
-    private val trailingSilenceFrames: Int = 4,
-    private val maxSpeechDurationMs: Long = 10_000, // 10 seconds max speech duration
-) : VoiceAudioSegmenter {
+class EnergyVoiceAudioSegmenter @javax.inject.Inject constructor() : VoiceAudioSegmenter {
+    private val speechThreshold: Int = 700
+    private val minimumSpeechFrames: Int = 3
+    private val trailingSilenceFrames: Int = 4
+    private val maxSpeechDurationMs: Long = 10_000 // 10 seconds max speech duration
     private val frames = mutableListOf<PcmAudioFrame>()
     private var speechFrames = 0
     private var silenceFrames = 0

@@ -2,17 +2,20 @@
 
 package au.com.shiftyjelly.pocketcasts.voice.audio
 
+import android.Manifest
+import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
-import javax.inject.Inject
-import javax.inject.Singleton
+import androidx.annotation.RequiresPermission
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import timber.log.Timber
+import javax.inject.Inject
+import javax.inject.Singleton
 
 @Singleton
 class MicrophoneCapture @Inject constructor() {
@@ -34,6 +37,7 @@ class MicrophoneCapture @Inject constructor() {
      * @return Flow of PcmAudioFrame objects containing audio samples
      * @throws MicrophoneCaptureException if audio capture initialization fails
      */
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun startCapture(): Flow<PcmAudioFrame> = callbackFlow {
         try {
             bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE_HZ, CHANNEL_CONFIG, AUDIO_FORMAT)
@@ -47,42 +51,38 @@ class MicrophoneCapture @Inject constructor() {
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
                 bufferSize * 2, // Double buffer for smoother capture
-            ).also {
-                if (it.state != AudioRecord.STATE_INITIALIZED) {
-                    throw MicrophoneCaptureException.InitializationFailed("AudioRecord not initialized")
-                }
-                it.startRecording()
-                Timber.i("Microphone capture started")
+            )
+
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                throw MicrophoneCaptureException.InitializationFailed("AudioRecord not initialized")
             }
+
+            audioRecord?.startRecording()
+            Timber.i("Microphone capture started")
 
             val audioBuffer = ShortArray(bufferSize / BYTES_PER_SAMPLE)
 
-            run loop@{
-                while (audioRecord?.state == AudioRecord.STATE_INITIALIZED) {
-                    val readResult = audioRecord?.read(audioBuffer, 0, audioBuffer.size)
-                    when {
-                        readResult == AudioRecord.ERROR_INVALID_OPERATION -> {
-                            Timber.e("Invalid operation during audio capture")
-                            throw MicrophoneCaptureException.ReadFailed("Invalid operation")
-                        }
-
-                        readResult == AudioRecord.ERROR_BAD_VALUE -> {
-                            Timber.e("Bad value during audio capture")
-                            throw MicrophoneCaptureException.ReadFailed("Bad value")
-                        }
-
-                        readResult != null && readResult > 0 -> {
-                            val samples = audioBuffer.copyOf(readResult)
-                            val frame = PcmAudioFrame(
-                                samples = samples,
-                                sampleRateHz = SAMPLE_RATE_HZ,
-                            )
-                            trySend(frame)
-                        }
-
-                        else -> {
-                            Timber.w("No audio data read: $readResult")
-                        }
+            while (audioRecord?.state == AudioRecord.STATE_INITIALIZED) {
+                val readResult = audioRecord?.read(audioBuffer, 0, audioBuffer.size)
+                when {
+                    readResult == AudioRecord.ERROR_INVALID_OPERATION -> {
+                        Timber.e("Invalid operation during audio capture")
+                        throw MicrophoneCaptureException.ReadFailed("Invalid operation")
+                    }
+                    readResult == AudioRecord.ERROR_BAD_VALUE -> {
+                        Timber.e("Bad value during audio capture")
+                        throw MicrophoneCaptureException.ReadFailed("Bad value")
+                    }
+                    readResult != null && readResult > 0 -> {
+                        val samples = audioBuffer.copyOf(readResult)
+                        val frame = PcmAudioFrame(
+                            samples = samples,
+                            sampleRateHz = SAMPLE_RATE_HZ,
+                        )
+                        trySend(frame)
+                    }
+                    else -> {
+                        Timber.w("No audio data read: $readResult")
                     }
                 }
             }

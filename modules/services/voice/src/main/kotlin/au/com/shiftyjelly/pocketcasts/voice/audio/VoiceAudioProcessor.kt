@@ -4,11 +4,11 @@ import au.com.shiftyjelly.pocketcasts.voice.audio.MicrophoneCapture
 import au.com.shiftyjelly.pocketcasts.voice.audio.PcmAudioFrame
 import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceAudioSegmenter
 import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceSegmenterResult
-import javax.inject.Inject
-import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import timber.log.Timber
+import javax.inject.Inject
+import javax.inject.Singleton
 
 @Singleton
 class VoiceAudioProcessor @Inject constructor(
@@ -28,15 +28,15 @@ class VoiceAudioProcessor @Inject constructor(
                     is VoiceSegmenterResult.SpeechStarted -> {
                         Timber.i("Speech started detected")
                     }
-
                     is VoiceSegmenterResult.SpeechContinuing -> {
                         // Continue processing speech
                     }
-
                     is VoiceSegmenterResult.SpeechEnded -> {
                         Timber.i("Speech ended detected with ${result.frames.size} frames")
                     }
-
+                    is VoiceSegmenterResult.Rejected -> {
+                        Timber.w("Speech rejected: ${result.reason}")
+                    }
                     VoiceSegmenterResult.Silence -> {
                         // Silence detected
                     }

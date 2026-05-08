@@ -34,7 +34,7 @@ class EnergyVoiceAudioSegmenterTest {
         segmenter.process(frame(shortArrayOf(0, 0)))
         val result = segmenter.process(frame(shortArrayOf(0, 0)))
 
-        assertEquals(VoiceSegmenterResult.Silence, result)
+        assertEquals(VoiceSegmenterResult.Rejected(RejectionReason.TooShort), result)
     }
 
     @Test

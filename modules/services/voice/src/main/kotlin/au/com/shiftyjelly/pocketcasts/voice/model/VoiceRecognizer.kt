@@ -16,4 +16,3 @@ class NoOpVoiceRecognizer @javax.inject.Inject constructor() : VoiceRecognizer {
         context: VoiceRecognitionContext,
     ): VoiceRecognitionResult? = null
 }
-

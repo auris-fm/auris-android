@@ -12,7 +12,12 @@ sealed interface VoicePlaybackIntent {
         val normalizedQuery: String = query.trim()
     }
     data object NextEpisode : VoicePlaybackIntent
-    data class SetPlaybackSpeed(val speed: Double? = null, val delta: Double? = null) : VoicePlaybackIntent
-    data class SetVolume(val volume: Int? = null, val delta: Int? = null) : VoicePlaybackIntent
+    data class SetSpeed(val speed: Double) : VoicePlaybackIntent
+    data class AdjustSpeed(val delta: Double) : VoicePlaybackIntent
+    data class SetVolume(val volume: Int) : VoicePlaybackIntent
+    data class AdjustVolume(val delta: Int) : VoicePlaybackIntent
     data class SleepTimer(val minutes: Int) : VoicePlaybackIntent
+    data class SetTrimMode(val mode: String) : VoicePlaybackIntent
+    data class SetVolumeBoost(val enabled: Boolean) : VoicePlaybackIntent
+    data class AddBookmark(val title: String) : VoicePlaybackIntent
 }

@@ -1,6 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.voice.model
 
-import android.content.Context
 import au.com.shiftyjelly.pocketcasts.voice.intent.VoicePlaybackIntent
 import com.google.ai.edge.litertlm.Backend
 import com.google.ai.edge.litertlm.ConversationConfig
@@ -9,7 +8,6 @@ import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Conversation
-import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -25,7 +23,6 @@ import timber.log.Timber
 @Singleton
 class Gemma4VoiceRecognizer @Inject constructor(
     private val modelManager: VoiceModelManager,
-    @ApplicationContext private val context: Context,
 ) : VoiceRecognizer {
 
     private var engine: Engine? = null
@@ -35,20 +32,43 @@ class Gemma4VoiceRecognizer @Inject constructor(
     private var modelPath: String? = null
 
     private val systemPrompt = """
-        You are a voice command processor for a podcast player. Given audio of a user speaking a playback command,
-        respond with ONLY a JSON object representing the closest matching intent. The user may speak in any language.
-        Available intents:
-        {"intent": "pause"}
-        {"intent": "resume"}
-        {"intent": "seek_relative", "delta_seconds": <positive integer>}
-        {"intent": "seek_absolute", "position_seconds": <positive integer>}
-        {"intent": "next_chapter"}
-        {"intent": "previous_chapter"}
-        {"intent": "chapter_by_index", "index": <non-negative integer>}
-        {"intent": "chapter_by_title", "query": "<chapter name>"}
-        {"intent": "set_speed", "speed": <0.5 to 5.0>}
-        For example, "暂停" → pause, "快进30秒" → seek_relative(30), "下一章" → next_chapter.
-        If the speech is not a playback command, respond with {"intent": "none"}.
+        You are a voice command processor for a podcast player. Given audio of a user speaking a
+        command, respond with ONLY a JSON object representing the closest matching intent. Include
+        the transcribed speech in a "text" field. The user may speak in any language. Available
+        intents:
+
+        {"intent": "pause", "text": "<transcribed speech>"}
+        {"intent": "resume", "text": "<transcribed speech>"}
+        {"intent": "seek_relative", "delta_seconds": <positive integer>, "text": "<transcribed speech>"}
+        {"intent": "seek_absolute", "position_seconds": <positive integer>, "text": "<transcribed speech>"}
+        {"intent": "next_chapter", "text": "<transcribed speech>"}
+        {"intent": "previous_chapter", "text": "<transcribed speech>"}
+        {"intent": "chapter_by_index", "index": <non-negative integer>, "text": "<transcribed speech>"}
+        {"intent": "chapter_by_title", "query": "<chapter name>", "text": "<transcribed speech>"}
+        {"intent": "next_episode", "text": "<transcribed speech>"}
+        {"intent": "set_speed", "speed": <0.5 to 5.0>, "text": "<transcribed speech>"}
+        {"intent": "set_speed", "delta": <signed increment>, "text": "<transcribed speech>"}
+        {"intent": "set_volume", "volume": <0 to 100>, "text": "<transcribed speech>"}
+        {"intent": "set_volume", "delta": <signed increment>, "text": "<transcribed speech>"}
+        {"intent": "sleep_timer", "minutes": <positive integer; 0 to cancel>, "text": "<transcribed speech>"}
+
+        Common aliases:
+        "play" → {"intent": "resume"} | "stop" → {"intent": "pause"}
+        "next" → {"intent": "next_chapter"} | "previous" → {"intent": "previous_chapter"}
+        "faster" / "speed up" → {"intent": "set_speed", "delta": 0.5}
+        "slower" / "slow down" → {"intent": "set_speed", "delta": -0.5}
+        "forward X" / "skip X" → {"intent": "seek_relative", "delta_seconds": X}
+        "go back X" → {"intent": "seek_relative", "delta_seconds": -X}
+        "turn off" → {"intent": "sleep_timer", "minutes": 0}
+        "volume up" → {"intent": "set_volume", "delta": 10}
+        "volume down" → {"intent": "set_volume", "delta": -10}
+
+        Examples:
+        "暂停" → {"intent": "pause", "text": "暂停"}
+        "快进30秒" → {"intent": "seek_relative", "delta_seconds": 30, "text": "快进30秒"}
+        "下一章" → {"intent": "next_chapter", "text": "下一章"}
+
+        If the speech is not a playback command, respond with {"intent": "none", "text": "<transcribed speech>"}.
     """.trimIndent()
 
     override suspend fun ensureReady(): Result<Unit> = withContext(Dispatchers.IO) {
@@ -164,6 +184,7 @@ class Gemma4VoiceRecognizer @Inject constructor(
                 }
                 "next_chapter" -> VoicePlaybackIntent.NextChapter
                 "previous_chapter" -> VoicePlaybackIntent.PreviousChapter
+                "next_episode" -> VoicePlaybackIntent.NextEpisode
                 "chapter_by_index" -> {
                     val index = json.optInt("index", -1)
                     if (index < 0) null else VoicePlaybackIntent.ChapterByIndex(index)
@@ -173,8 +194,22 @@ class Gemma4VoiceRecognizer @Inject constructor(
                     if (query.isBlank()) null else VoicePlaybackIntent.ChapterByTitle(query)
                 }
                 "set_speed" -> {
-                    val speed = json.optDouble("speed", -1.0)
-                    if (speed <= 0 || speed > 5) null else VoicePlaybackIntent.SetPlaybackSpeed(speed)
+                    val speed = if (json.has("speed")) json.optDouble("speed", -1.0) else -1.0
+                    val delta = if (json.has("delta")) json.optDouble("delta", 0.0) else null
+                    if (speed in 0.5..5.0) VoicePlaybackIntent.SetPlaybackSpeed(speed = speed)
+                    else if (delta != null && delta != 0.0) VoicePlaybackIntent.SetPlaybackSpeed(delta = delta)
+                    else null
+                }
+                "set_volume" -> {
+                    val volume = if (json.has("volume")) json.optInt("volume", -1) else -1
+                    val delta = if (json.has("delta")) json.optInt("delta", 0) else null
+                    if (volume in 0..100) VoicePlaybackIntent.SetVolume(volume = volume)
+                    else if (delta != null && delta != 0) VoicePlaybackIntent.SetVolume(delta = delta)
+                    else null
+                }
+                "sleep_timer" -> {
+                    val minutes = json.optInt("minutes", -1)
+                    if (minutes < 0) null else VoicePlaybackIntent.SleepTimer(minutes)
                 }
                 else -> {
                     Timber.w("Gemma 4: unknown intent '%s'", intent)

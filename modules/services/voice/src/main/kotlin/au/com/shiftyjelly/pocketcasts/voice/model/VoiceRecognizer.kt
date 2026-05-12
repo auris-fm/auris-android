@@ -4,6 +4,8 @@ import au.com.shiftyjelly.pocketcasts.voice.audio.PcmAudioFrame
 import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceRecognitionResult
 
 interface VoiceRecognizer {
+    suspend fun ensureReady(): Result<Unit>
+
     suspend fun recognize(
         clip: VoiceUtteranceClip,
         context: VoiceRecognitionContext,
@@ -11,6 +13,8 @@ interface VoiceRecognizer {
 }
 
 class NoOpVoiceRecognizer @javax.inject.Inject constructor() : VoiceRecognizer {
+    override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+
     override suspend fun recognize(
         clip: VoiceUtteranceClip,
         context: VoiceRecognitionContext,

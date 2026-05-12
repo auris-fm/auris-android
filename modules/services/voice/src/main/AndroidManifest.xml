@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
     <application>
+        <uses-native-library android:name="libOpenCL.so" android:required="false" />
         <service
             android:name=".service.VoiceControlService"
             android:exported="false"

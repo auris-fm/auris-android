@@ -61,10 +61,11 @@ class AndroidAudioRouteMonitor @Inject constructor(
             inputDeviceTypes: List<Int>,
         ): AudioRoute {
             val hasHeadsetInput = inputDeviceTypes.any { it.isHeadsetInput() }
+            val hasA2dp = outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
 
             return when {
                 outputDeviceTypes.any { it.isHeadsetOutput() } -> AudioRoute.Headset(hasMicrophone = hasHeadsetInput)
-                outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP } -> AudioRoute.BluetoothA2dpOnly
+                hasA2dp -> AudioRoute.Headset(hasMicrophone = true)
                 outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER } -> AudioRoute.Speaker
                 else -> AudioRoute.Unknown
             }

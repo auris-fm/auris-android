@@ -2,7 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voice.di
 
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
-import au.com.shiftyjelly.pocketcasts.voice.audio.EnergyVoiceAudioSegmenter
+import au.com.shiftyjelly.pocketcasts.voice.audio.WebRtcVoiceAudioSegmenter
 import au.com.shiftyjelly.pocketcasts.voice.audio.MicrophoneCapture
 import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceAudioSegmenter
@@ -31,9 +31,11 @@ import kotlinx.coroutines.CoroutineScope
 @Module
 @InstallIn(SingletonComponent::class)
 abstract class VoiceControlModule {
-    @Binds abstract fun bindVoiceAudioSegmenter(impl: EnergyVoiceAudioSegmenter): VoiceAudioSegmenter
+    @Binds abstract fun bindVoiceAudioSegmenter(impl: WebRtcVoiceAudioSegmenter): VoiceAudioSegmenter
 
-    // Swap recognizer: use VoskVoiceRecognizer or Gemma4VoiceRecognizer
+    // Vosk for ASR. Gemma4 E2B audio input causes a native SIGABRT in LiteRT-LM's
+    // AAudio/Oboe ring-buffer (releaseBuffer assertion) — a known bug in v0.10.0.
+    // Vosk processes PCM frames directly via acceptWaveForm() with zero audio interruption.
     @Binds abstract fun bindVoiceRecognizer(impl: VoskVoiceRecognizer): VoiceRecognizer
 
     @Binds abstract fun bindVoiceIntentInterpreter(impl: DeterministicVoiceIntentInterpreter): VoiceIntentInterpreter

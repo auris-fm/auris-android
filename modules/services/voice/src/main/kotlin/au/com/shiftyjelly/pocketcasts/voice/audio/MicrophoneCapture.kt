@@ -3,11 +3,13 @@
 package au.com.shiftyjelly.pocketcasts.voice.audio
 
 import android.Manifest
-import android.media.AudioAttributes
+import android.content.Context
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import androidx.annotation.RequiresPermission
+import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
@@ -18,13 +20,37 @@ import kotlinx.coroutines.flow.flowOn
 import timber.log.Timber
 
 @Singleton
-class MicrophoneCapture @Inject constructor() {
+class MicrophoneCapture @Inject constructor(
+    @ApplicationContext private val context: Context,
+) {
     companion object {
         internal const val SAMPLE_RATE_HZ = 16_000
         internal const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         internal const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         internal const val BYTES_PER_SAMPLE = 2 // 16-bit = 2 bytes
         internal val CHANNELS = 1 // Mono
+    }
+
+    private val audioManager: AudioManager by lazy {
+        context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    }
+
+    /**
+     * Use UNPROCESSED source to bypass Android 16 AAudio framework bug where
+     * capture+playback streams cause releaseBuffer assertion (mUnreleased out of range).
+     * When the AAudio layer applies AEC/AGC/NS to processed sources, it creates additional
+     * internal bookkeeping during co-existent capture-playback streams. UNPROCESSED skips
+     * all audio processing — fewer AAudio pipeline paths, reducing exposure to the bug.
+     * Falls back to VOICE_RECOGNITION (no AGC/noise suppression) if UNPROCESSED unavailable.
+     */
+    private val audioSource: Int by lazy {
+        if (audioManager.getProperty(AudioManager.PROPERTY_SUPPORT_AUDIO_SOURCE_UNPROCESSED) != null) {
+            Timber.i("Using UNPROCESSED audio source")
+            MediaRecorder.AudioSource.UNPROCESSED
+        } else {
+            Timber.i("UNPROCESSED not supported, falling back to VOICE_RECOGNITION")
+            MediaRecorder.AudioSource.VOICE_RECOGNITION
+        }
     }
 
     private var audioRecord: AudioRecord? = null
@@ -46,11 +72,11 @@ class MicrophoneCapture @Inject constructor() {
             }
 
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
+                audioSource,
                 SAMPLE_RATE_HZ,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
-                bufferSize * 2, // Double buffer for smoother capture
+                bufferSize * 3,
             )
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {

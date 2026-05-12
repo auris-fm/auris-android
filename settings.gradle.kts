@@ -34,6 +34,7 @@ dependencyResolutionManagement {
                 includeGroupByRegex("org.wordpress.*")
             }
         }
+        maven { setUrl("https://jitpack.io") }
     }
 }
 

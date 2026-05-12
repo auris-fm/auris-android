@@ -61,10 +61,7 @@ VoiceControlService
 VoiceAudioSegmenter
         |
         v
-VoiceRecognizer
-        |
-        v
-VoiceIntentInterpreter
+VoiceRecognizer (Gemma 4 E2B — ASR + Intent in one pass)
         |
         v
 VoicePlaybackIntentExecutor
@@ -72,6 +69,10 @@ VoicePlaybackIntentExecutor
         v
 PlaybackManager
 ```
+
+Gemma 4 E2B collapses ASR and intent interpretation into a single model inference.
+The separate `VoiceIntentInterpreter` layer was removed — the recognizer now returns
+`VoicePlaybackIntent` directly from the model's structured JSON output.
 
 ### VoiceControlGate
 
@@ -160,76 +161,44 @@ Initial implementations:
 
 ### VoiceRecognizer
 
-`VoiceRecognizer` converts an utterance clip into text. The interface is the pluggable boundary between capture and interpretation:
+`VoiceRecognizer` accepts an utterance clip and returns a typed playback intent directly. The interface collapses
+what was previously two stages (ASR text generation + deterministic intent parsing) into a single model pass:
 
 ```kotlin
 interface VoiceRecognizer {
-    suspend fun recognize(clip: VoiceUtteranceClip, context: VoiceRecognitionContext): VoiceRecognitionResult?
+    suspend fun ensureReady(): Result<Unit>
+    suspend fun recognize(clip: VoiceUtteranceClip, context: VoiceRecognitionContext): VoicePlaybackIntent?
 }
 ```
 
-Providers are **swappable via a single Dagger `@Binds` line** in `VoiceControlModule`. Each provider shares the same interface; the rest
-of the pipeline does not know which one is active.
-
 **Critical design constraint**: The recognizer must process `AudioRecord`-captured PCM buffers **without taking system audio focus**.
 Android's built-in `SpeechRecognizer` is unsuitable because it internally acquires audio focus and interrupts media playback. All
-providers below operate entirely in-process on already-captured audio.
+providers operate entirely in-process on already-captured audio via Oboe `AudioRecordCaptureEngine`.
 
-Current providers:
+The active provider is **Gemma 4 E2B** via LiteRT-LM:
 
-- **Vosk** (active default): Offline, open-source ASR engine. Processes PCM frames via `acceptWaveForm()` directly — zero audio
-  interruption. Small English model (`vosk-model-small-en-us-0.15`, ~40 MB). Models are managed by `VoiceModelManager` which downloads
-  and extracts them on first launch. Well-suited for keyword-style deterministic commands.
+- Audio PCM frames from the segmenter are passed to LiteRT-LM via `Content.AudioBytes()`.
+- The model outputs structured JSON (e.g. `{"intent": "seek_relative", "delta_seconds": 30}`).
+- The recognizer parses the JSON into `VoicePlaybackIntent`. Invalid or low-confidence output returns `null`.
+- ~2.6 GB model, downloaded and managed by `VoiceModelManager`.
 
-- **Gemma 4 E2B** (placeholder, pending LiteRT-LM validation): Gemma 4 E2B supports multimodal input including audio. Via LiteRT-LM on
-  Android it could process audio segments directly and emit structured intent — potentially collapsing recognition + interpretation into
-  a single model pass. Implementation blocked on LiteRT-LM Android maturity and model binary availability. The provider skeleton exists
-  behind the same interface; swap and test when the runtime is ready.
-
-- **NoOpVoiceRecognizer**: Returns null. Used in unit tests.
+No other providers are active. Vosk was removed as part of the architecture simplification — Gemma 4 E2B's
+multimodal input makes a separate ASR + rule-based intent pipeline unnecessary.
 
 Provider selection in DI:
 
 ```kotlin
-// Single-line swap:
-@Binds fun bindVoiceRecognizer(impl: VoskVoiceRecognizer): VoiceRecognizer
 @Binds fun bindVoiceRecognizer(impl: Gemma4VoiceRecognizer): VoiceRecognizer
 ```
 
-### VoiceIntentInterpreter
+### VoiceIntentInterpreter (Removed)
 
-`VoiceIntentInterpreter` maps flexible language into a closed set of playback intents.
+A separate `VoiceIntentInterpreter` layer was part of the initial design (Vosk ASR → text → rule-based parser → intent).
+Gemma 4 E2B's multimodal audio-to-structured-JSON capability eliminates this stage entirely. The recognizer now returns
+`VoicePlaybackIntent` directly from the model.
 
-```kotlin
-sealed interface VoicePlaybackIntent {
-    data object Pause : VoicePlaybackIntent
-    data object Resume : VoicePlaybackIntent
-    data class SeekRelative(val deltaMs: Long) : VoicePlaybackIntent
-    data class SeekAbsolute(val positionMs: Long) : VoicePlaybackIntent
-    data object NextEpisode : VoicePlaybackIntent
-    data object NextChapter : VoicePlaybackIntent
-    data object PreviousChapter : VoicePlaybackIntent
-    data class ChapterByIndex(val index: Int) : VoicePlaybackIntent
-    data class ChapterByTitle(val query: String) : VoicePlaybackIntent
-    data class SetPlaybackSpeed(val speed: Double) : VoicePlaybackIntent
-}
-```
-
-The interpreter receives playback context:
-
-- Current episode title and duration.
-- Current position.
-- Chapter titles, indices, and timestamps.
-- Available transcript excerpts or search index if loaded.
-- User locale and downloaded model language capabilities.
-
-The model must emit JSON or another strict structured format that is validated before execution. Invalid or low-confidence output is
-discarded. High-risk commands should require stronger confidence than reversible commands. Examples:
-
-- Low risk: skip forward/back, next chapter, previous chapter.
-- Medium risk: pause, resume, seek absolute.
-- Higher risk: next episode, mark played, archive, delete. Higher-risk commands should be excluded from the MVP executor policy even if
-  command types exist for later rollout stages.
+The `VoicePlaybackIntent` sealed interface is unchanged — it is the output type that both the old two-stage pipeline
+and the current single-pass pipeline produce, so `VoicePlaybackIntentExecutor` needs no modification.
 
 ### VoicePlaybackIntentExecutor
 
@@ -264,15 +233,14 @@ The executor should clamp seek positions to valid episode duration and reject co
 - Allow model deletion.
 - Provide fallback model selection.
 
-Gemma 4 E2B-class local inference is the preferred target. Because current docs indicate mobile support through LiteRT-LM and MediaPipe
-paths, the first implementation phase must include a spike that measures:
+The Gemma 4 E2B model (~2.6 GB, `litertlm` format on HuggingFace) is the active model. Performance measurement is ongoing:
 
-- Model download and storage size.
-- Cold start and warm inference latency.
-- Audio clip input support on Android.
-- Memory pressure during playback.
+- Cold start and warm inference latency on target devices.
+- Audio clip input support via LiteRT-LM `Content.AudioBytes()`.
+- Memory pressure during playback with model loaded.
 - Battery impact during repeated commands.
 - Quality on accented, slang-heavy, and multilingual commands.
+- Structured JSON output reliability and parse rate.
 
 ## Lifecycle
 
@@ -283,7 +251,7 @@ paths, the first implementation phase must include a spike that measures:
 5. Gate checks playback context, audio route policy, microphone permission, casting, call state, model readiness, and permission.
 6. Service enters foreground microphone mode.
 7. Segmenter listens for candidate utterances.
-8. Candidate utterance is passed to recognizer and interpreter.
+8. Candidate utterance is passed to recognizer, which returns a validated `VoicePlaybackIntent` or null.
 9. Valid playback intent is executed through `VoicePlaybackIntentExecutor`.
 10. Service keeps listening while gate remains allowed.
 11. Listening stops immediately when the playback context ends, the current episode is cleared, the audio route becomes disallowed,
@@ -310,7 +278,7 @@ Target response for common commands should be under one second after the user fi
 - Never listen unless all required gates are allowed.
 - Start with `HeadsetOnly` route policy to reduce false positives and avoid acoustic feedback.
 - Run only a tiny segmenter continuously.
-- Invoke Vosk or Gemma 4 only on completed candidate utterances, not on every audio frame.
+- Invoke Gemma 4 (the only recognizer) only on completed candidate utterances, not on every audio frame.
 - Stop listening when the playback context ends, not merely because audio is paused.
 - Add diagnostics for segmenter duty cycle, model invocations, average inference time, and gate state.
 
@@ -344,10 +312,10 @@ Voice control is core product functionality, but delivery should still use stage
 
 1. ✅ Prototype gate state, audio route policy, microphone capture, and energy segmenter.
 2. ✅ Implement typed intent interpreter and executor for core commands.
-3. ✅ Add pluggable VoiceRecognizer with Vosk (default) and Gemma 4 E2B (placeholder) providers.
-4. ✅ Add voice model manager with Vosk model download and extraction.
+3. ✅ Implement Gemma 4 E2B recognizer: single-pass audio-to-intent via LiteRT-LM, replacing separate Vosk ASR + rule-based parser.
+4. ✅ Add voice model manager with Gemma 4 E2B model download (~2.6 GB).
 5. ✅ Wire service orchestration: auto-start/stop based on gate state, foreground notification.
-6. Prototype Gemma 4 E2B Android inference and measure latency, memory, battery, and audio support.
+6. Measure Gemma 4 E2B Android inference latency, memory, battery, and audio quality.
 7. Add settings UI (enable/disable, route policy selector, gate status display).
 8. Add first-run setup and microphone permission UX.
 9. Add chapter title matching.
@@ -391,14 +359,20 @@ Manual/device tests:
 
 - Android background microphone restrictions and OEM behavior may require foreground-service tuning.
 - **Android SpeechRecognizer is incompatible with continuous listening**: It acquires audio focus and interrupts/pauses media playback.
-  This was confirmed during testing and led to the AudioRecord + Vosk pipeline.
-- Gemma 4 audio input on Android needs validation for short-command latency and quality. LiteRT-LM maturity on Android is unverified.
-- Vosk model size (40 MB for small English) is acceptable but language expansion would increase download size. Model download should
-  prefer Wi-Fi.
-- Continuous model warmup may be too memory intensive on lower-end devices.
+  This was confirmed during testing and led to the Oboe AudioRecord + LiteRT-LM pipeline.
+- Gemma 4 E2B audio input on Android needs validation for short-command latency and quality. The model is ~2.6 GB and inference
+  latency on mobile hardware is unmeasured.
+- LiteRT-LM has a known potential AAudio ring-buffer assertion (`releaseBuffer: mUnreleased out of range`) when using
+  `Content.AudioBytes()` or `Content.AudioFile()`. If this reproduces, alternate audio input paths or runtime configurations
+  should be evaluated.
+- Gemma 4 E2B model size (~2.6 GB) is significantly larger than the 40 MB Vosk model it replaces. Model download should prefer Wi-Fi.
+  Devices with limited storage may not accommodate the download.
+- Continuous model warmup may be too memory intensive on lower-end devices, requiring on-demand loading.
 - Bluetooth headset microphones vary widely in quality and latency.
 - Speaker mode may be difficult to make reliable because podcast speech is semantically similar to user commands and room echo varies
   by device, volume, environment, and distance from the phone.
+- Structured JSON parsing from model output is a new risk: the model may produce malformed JSON, hallucinate intent types, or
+  emit commands outside the `VoicePlaybackIntent` sealed interface.
 - Multilingual natural commands may need language-specific evaluation data.
 - False positives can still happen from nearby human speech, even without podcast feedback.
 
@@ -408,9 +382,6 @@ Manual/device tests:
 - Gemma mobile deployment docs: https://ai.google.dev/gemma/docs/integrations/mobile
 - LiteRT-LM overview: https://ai.google.dev/edge/litert-lm/overview
 - LiteRT-LM Android Kotlin docs: https://ai.google.dev/edge/litert-lm/android
-- Vosk offline speech recognition: https://alphacephei.com/vosk/
-- Vosk Android integration: https://github.com/alphacep/vosk-android
-- Vosk models: https://alphacephei.com/vosk/models
-- Android SpeechRecognizer API: https://developer.android.com/reference/android/speech/SpeechRecognizer
+- Gemma 4 E2B LiteRT-LM model on HuggingFace: https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm
 - Android foreground service types: https://developer.android.com/develop/background-work/services/fg-service-types
 - Media3 SessionCommand API: https://developer.android.com/reference/androidx/media3/session/SessionCommand

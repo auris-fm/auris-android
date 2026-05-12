@@ -51,6 +51,7 @@ class VoiceControlServiceController @Inject constructor(
                         Timber.i("VoiceControlServiceController: gate allowed but app backgrounded, deferring")
                     }
                 }
+
                 is VoiceControlGateState.Blocked -> stop()
             }
         }.launchIn(scope)

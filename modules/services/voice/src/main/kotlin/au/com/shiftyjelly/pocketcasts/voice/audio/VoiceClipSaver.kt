@@ -27,7 +27,7 @@ object VoiceClipSaver {
 
         val timestamp = dateFormat.format(Date())
         val sanitized = transcript.replace(Regex("[^a-zA-Z0-9_-]"), "_").take(40)
-        val file = File(dir, "VoiceCommand_${timestamp}_${sanitized}.wav")
+        val file = File(dir, "VoiceCommand_${timestamp}_$sanitized.wav")
 
         try {
             FileOutputStream(file).use { out ->
@@ -43,10 +43,10 @@ object VoiceClipSaver {
                 out.write(int32Le(fileSize))
                 out.write("WAVE".toByteArray())
                 out.write("fmt ".toByteArray())
-                out.write(int32Le(16))            // chunk size
-                out.write(int16Le(1))             // PCM format
-                out.write(int16Le(channels))      // mono
-                out.write(int32Le(sampleRate))    // sample rate
+                out.write(int32Le(16)) // chunk size
+                out.write(int16Le(1)) // PCM format
+                out.write(int16Le(channels)) // mono
+                out.write(int32Le(sampleRate)) // sample rate
                 out.write(int32Le(sampleRate * channels * bitsPerSample / 8)) // byte rate
                 out.write(int16Le(channels * bitsPerSample / 8)) // block align
                 out.write(int16Le(bitsPerSample)) // bits per sample

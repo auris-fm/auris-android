@@ -3,14 +3,14 @@ package au.com.shiftyjelly.pocketcasts.voice.service
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
-import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceAudioSegmenter
-import au.com.shiftyjelly.pocketcasts.voice.audio.MicrophoneCapture
-import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voice.BuildConfig
+import au.com.shiftyjelly.pocketcasts.voice.audio.MicrophoneCapture
+import au.com.shiftyjelly.pocketcasts.voice.audio.PcmAudioFrame
+import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceAudioSegmenter
 import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceClipSaver
+import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGateState
-import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntentInterpreter
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceUtteranceClip
@@ -23,6 +23,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.launchIn
@@ -33,19 +34,25 @@ import timber.log.Timber
 @AndroidEntryPoint
 class VoiceControlService : Service() {
     @Inject lateinit var gate: VoiceControlGate
+
     @Inject lateinit var notificationManager: VoiceControlNotificationManager
+
     @Inject lateinit var microphoneCapture: MicrophoneCapture
+
     @Inject lateinit var segmenter: VoiceAudioSegmenter
+
     @Inject lateinit var voiceRecognizer: VoiceRecognizer
-    @Inject lateinit var voiceIntentInterpreter: VoiceIntentInterpreter
+
     @Inject lateinit var voicePlaybackIntentExecutor: VoicePlaybackIntentExecutor
+
     @Inject lateinit var playbackContextMonitor: PlaybackContextMonitor
+
     @Inject lateinit var audioRouteMonitor: AndroidAudioRouteMonitor
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var captureJob: Job? = null
-    private var speechFrames = mutableListOf<au.com.shiftyjelly.pocketcasts.voice.audio.PcmAudioFrame>()
-    private var lastCommand: String? = null
+    private var speechFrames = mutableListOf<PcmAudioFrame>()
+    private var lastIntentType: String? = null
     private var lastCommandTime: Long = 0L
 
     companion object {
@@ -98,33 +105,39 @@ class VoiceControlService : Service() {
     private fun startAudioCapture() {
         captureJob?.cancel()
         captureJob = serviceScope.launch(Dispatchers.IO) {
-            microphoneCapture.startCapture()
-                .catch { e -> Timber.e(e, "Capture error") }
-                .collect { frame -> processAudioFrame(frame) }
+            while (isActive) {
+                microphoneCapture.startCapture()
+                    .catch { e -> Timber.e(e, "Capture stream ended, restarting") }
+                    .collect { frame -> processAudioFrame(frame) }
+                Timber.i("Capture stream completed, restarting")
+                kotlinx.coroutines.delay(100)
+            }
         }
     }
 
-    private suspend fun processAudioFrame(frame: au.com.shiftyjelly.pocketcasts.voice.audio.PcmAudioFrame) {
+    private suspend fun processAudioFrame(frame: PcmAudioFrame) {
         when (val result = segmenter.process(frame)) {
             is VoiceSegmenterResult.SpeechStarted -> {
                 Timber.i("Speech started")
                 speechFrames.clear()
                 speechFrames.add(frame)
             }
+
             is VoiceSegmenterResult.SpeechContinuing -> {
                 speechFrames.add(frame)
             }
+
             is VoiceSegmenterResult.SpeechEnded -> {
-                speechFrames.addAll(result.frames)
-                Timber.i("Speech ended: ${speechFrames.size} frames")
-                val clip = VoiceUtteranceClip.fromFrames(speechFrames.toList())
                 speechFrames.clear()
-                processUtterance(clip)
+                Timber.i("Speech ended: ${result.frames.size} frames")
+                processUtterance(VoiceUtteranceClip.fromFrames(result.frames))
             }
+
             is VoiceSegmenterResult.Rejected -> {
                 Timber.w("Segment rejected: ${result.reason}")
                 speechFrames.clear()
             }
+
             VoiceSegmenterResult.Silence -> { /* continue */ }
         }
     }
@@ -135,37 +148,32 @@ class VoiceControlService : Service() {
             audioRoute = audioRouteMonitor.route.value,
         )
 
-        val result = voiceRecognizer.recognize(clip, recognitionContext)
-        if (result != null) {
-            handleCommand(clip, result)
+        val intent = voiceRecognizer.recognize(clip, recognitionContext)
+        if (intent != null) {
+            handleIntent(clip, intent)
         }
     }
 
-    private suspend fun handleCommand(
+    private suspend fun handleIntent(
         clip: VoiceUtteranceClip,
-        result: au.com.shiftyjelly.pocketcasts.voice.intent.VoiceRecognitionResult,
+        intent: au.com.shiftyjelly.pocketcasts.voice.intent.VoicePlaybackIntent,
     ) {
         val now = System.currentTimeMillis()
-        if (result.transcript == lastCommand && (now - lastCommandTime) < COMMAND_DEBOUNCE_MS) {
-            Timber.i("Debounce: '${result.transcript}'")
+        val intentType = intent::class.simpleName ?: intent.toString()
+        if (intentType == lastIntentType && (now - lastCommandTime) < COMMAND_DEBOUNCE_MS) {
+            Timber.i("Debounce: $intentType")
             return
         }
-        lastCommand = result.transcript
+        lastIntentType = intentType
         lastCommandTime = now
 
-        Timber.i("Recognized: '${result.transcript}' (conf=${result.confidence})")
+        Timber.i("Executing: $intent")
 
         if (BuildConfig.DEBUG) {
-            VoiceClipSaver.save(clip, result.transcript)
+            VoiceClipSaver.save(clip, intent.toString())
         }
 
-        val intent = voiceIntentInterpreter.interpret(result)
-        if (intent != null) {
-            Timber.i("Executing: $intent")
-            voicePlaybackIntentExecutor.execute(intent)
-        } else {
-            Timber.w("No intent: '${result.transcript}'")
-        }
+        voicePlaybackIntentExecutor.execute(intent)
     }
 
     private fun stopVoiceControl() {

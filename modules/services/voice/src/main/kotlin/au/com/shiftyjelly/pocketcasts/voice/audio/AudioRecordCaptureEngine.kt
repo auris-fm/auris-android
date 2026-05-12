@@ -80,12 +80,15 @@ internal class AudioRecordCaptureEngine @Inject constructor(
                     readResult == AudioRecord.ERROR_INVALID_OPERATION -> {
                         throw MicrophoneCaptureException.ReadFailed("Invalid operation")
                     }
+
                     readResult == AudioRecord.ERROR_BAD_VALUE -> {
                         throw MicrophoneCaptureException.ReadFailed("Bad value")
                     }
+
                     readResult != null && readResult > 0 -> {
                         trySend(PcmAudioFrame(audioBuffer.copyOf(readResult), SAMPLE_RATE_HZ))
                     }
+
                     else -> { /* no data */ }
                 }
             }

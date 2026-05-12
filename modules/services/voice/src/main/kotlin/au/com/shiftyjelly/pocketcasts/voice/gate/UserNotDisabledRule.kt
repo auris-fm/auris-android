@@ -14,8 +14,11 @@ class UserNotDisabledRule(
 
     override val state: StateFlow<VoiceControlRuleState> = settings.voiceControlUserDisabled.flow
         .map { disabled ->
-            if (disabled) VoiceControlRuleState.Blocked("user_disabled")
-            else VoiceControlRuleState.Allowed
+            if (disabled) {
+                VoiceControlRuleState.Blocked("user_disabled")
+            } else {
+                VoiceControlRuleState.Allowed
+            }
         }
         .stateIn(scope, SharingStarted.Eagerly, VoiceControlRuleState.Allowed)
 }

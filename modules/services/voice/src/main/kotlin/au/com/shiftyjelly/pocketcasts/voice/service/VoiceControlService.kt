@@ -6,6 +6,8 @@ import android.os.IBinder
 import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceAudioSegmenter
 import au.com.shiftyjelly.pocketcasts.voice.audio.MicrophoneCapture
 import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceSegmenterResult
+import au.com.shiftyjelly.pocketcasts.voice.BuildConfig
+import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceClipSaver
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGateState
 import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntentInterpreter
@@ -135,11 +137,14 @@ class VoiceControlService : Service() {
 
         val result = voiceRecognizer.recognize(clip, recognitionContext)
         if (result != null) {
-            handleCommand(result)
+            handleCommand(clip, result)
         }
     }
 
-    private suspend fun handleCommand(result: au.com.shiftyjelly.pocketcasts.voice.intent.VoiceRecognitionResult) {
+    private suspend fun handleCommand(
+        clip: VoiceUtteranceClip,
+        result: au.com.shiftyjelly.pocketcasts.voice.intent.VoiceRecognitionResult,
+    ) {
         val now = System.currentTimeMillis()
         if (result.transcript == lastCommand && (now - lastCommandTime) < COMMAND_DEBOUNCE_MS) {
             Timber.i("Debounce: '${result.transcript}'")
@@ -149,6 +154,10 @@ class VoiceControlService : Service() {
         lastCommandTime = now
 
         Timber.i("Recognized: '${result.transcript}' (conf=${result.confidence})")
+
+        if (BuildConfig.DEBUG) {
+            VoiceClipSaver.save(clip, result.transcript)
+        }
 
         val intent = voiceIntentInterpreter.interpret(result)
         if (intent != null) {

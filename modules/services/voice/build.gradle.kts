@@ -8,6 +8,25 @@ android {
     namespace = "au.com.shiftyjelly.pocketcasts.voice"
     buildFeatures {
         buildConfig = true
+        prefab = true
+    }
+    ndkVersion = "27.0.12077973"
+    defaultConfig {
+        externalNativeBuild {
+            cmake {
+                cppFlags += listOf("-std=c++17", "-Wall", "-Werror")
+                arguments += listOf("-DANDROID_STL=c++_shared")
+            }
+        }
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 }
 
@@ -22,6 +41,7 @@ dependencies {
     implementation(libs.vosk.android)
     implementation(libs.android.vad.silero)
     implementation(libs.litertlm.android)
+    implementation(libs.oboe)
     implementation(libs.timber)
 
     implementation(projects.modules.services.analytics)

@@ -66,6 +66,7 @@ sentry.properties
 # Kotlin
 .kotlin
 
-developer.properties
+# C++
+.cxx
 
-.claude/settings.local.json
+developer.properties

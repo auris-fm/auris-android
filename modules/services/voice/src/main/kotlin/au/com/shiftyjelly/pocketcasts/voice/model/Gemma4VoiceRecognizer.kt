@@ -11,7 +11,6 @@ import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Conversation
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.ByteArrayOutputStream
-import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import javax.inject.Inject
@@ -72,9 +71,9 @@ class Gemma4VoiceRecognizer @Inject constructor(
             }
 
             try {
-                val audioFile = saveWavFile(clip)
+                val audioBytes = pcmToWav(clip)
                 val response = c.sendMessage(
-                    Contents.Companion.of(Content.AudioFile(audioFile.absolutePath)),
+                    Contents.Companion.of(Content.AudioBytes(audioBytes)),
                 )
                 val text = response.contents.contents
                     .filterIsInstance<Content.Text>()
@@ -188,19 +187,6 @@ class Gemma4VoiceRecognizer @Inject constructor(
         }
     }
 
-    private fun pcmToRawBytes(clip: VoiceUtteranceClip): ByteArray {
-        val totalSamples = clip.frames.sumOf { it.samples.size }
-        val buffer = ByteBuffer.allocate(totalSamples * 2).apply {
-            order(ByteOrder.LITTLE_ENDIAN)
-            for (frame in clip.frames) {
-                for (sample in frame.samples) {
-                    putShort(sample.toInt().coerceIn(-0x8000, 0x7FFF).toShort())
-                }
-            }
-        }
-        return buffer.array()
-    }
-
     private fun pcmToWav(clip: VoiceUtteranceClip): ByteArray {
         val sampleRate = clip.sampleRateHz
         val totalSamples = clip.frames.sumOf { it.samples.size }
@@ -233,14 +219,6 @@ class Gemma4VoiceRecognizer @Inject constructor(
         }
 
         return buffer.toByteArray()
-    }
-
-    private fun saveWavFile(clip: VoiceUtteranceClip): File {
-        val dir = File(context.cacheDir, "gemma4-audio")
-        dir.mkdirs()
-        val file = File(dir, "utterance.wav")
-        file.writeBytes(pcmToWav(clip))
-        return file
     }
 
     fun isModelReady(): Boolean = modelReady

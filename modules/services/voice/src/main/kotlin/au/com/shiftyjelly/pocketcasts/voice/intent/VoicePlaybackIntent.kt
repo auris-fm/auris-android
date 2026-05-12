@@ -11,5 +11,8 @@ sealed interface VoicePlaybackIntent {
     data class ChapterByTitle(val query: String) : VoicePlaybackIntent {
         val normalizedQuery: String = query.trim()
     }
-    data class SetPlaybackSpeed(val speed: Double) : VoicePlaybackIntent
+    data object NextEpisode : VoicePlaybackIntent
+    data class SetPlaybackSpeed(val speed: Double? = null, val delta: Double? = null) : VoicePlaybackIntent
+    data class SetVolume(val volume: Int? = null, val delta: Int? = null) : VoicePlaybackIntent
+    data class SleepTimer(val minutes: Int) : VoicePlaybackIntent
 }

@@ -1,9 +1,12 @@
 #include <jni.h>
+#include <mutex>
 #include "OboeAudioCapture.h"
 
-// All JNI functions below are called from the same Kotlin coroutine context
-// (Dispatchers.IO), so a single global pointer is safe.
+// gCapture is protected by gCaptureMutex for safe access from the
+// Kotlin Dispatchers.IO thread pool. The OboeAudioCapture instance
+// also has internal synchronization for its stream pointer.
 static OboeAudioCapture* gCapture = nullptr;
+static std::mutex gCaptureMutex;
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voice_audio_OboeNative_nativeStartCapture(
@@ -12,6 +15,8 @@ Java_au_com_shiftyjelly_pocketcasts_voice_audio_OboeNative_nativeStartCapture(
     jint sampleRate,
     jint channels)
 {
+    std::lock_guard<std::mutex> lock(gCaptureMutex);
+
     // Clean up any previous instance
     delete gCapture;
     gCapture = nullptr;
@@ -39,6 +44,8 @@ Java_au_com_shiftyjelly_pocketcasts_voice_audio_OboeNative_nativeReadAudioData(
     jclass /*clazz*/,
     jshortArray jBuffer)
 {
+    std::lock_guard<std::mutex> lock(gCaptureMutex);
+
     if (gCapture == nullptr || !gCapture->isActive()) {
         return 0;
     }
@@ -63,6 +70,7 @@ Java_au_com_shiftyjelly_pocketcasts_voice_audio_OboeNative_nativeStopCapture(
     JNIEnv* /*env*/,
     jclass /*clazz*/)
 {
+    std::lock_guard<std::mutex> lock(gCaptureMutex);
     if (gCapture != nullptr) {
         gCapture->stop();
     }
@@ -73,6 +81,7 @@ Java_au_com_shiftyjelly_pocketcasts_voice_audio_OboeNative_nativeCloseCapture(
     JNIEnv* /*env*/,
     jclass /*clazz*/)
 {
+    std::lock_guard<std::mutex> lock(gCaptureMutex);
     delete gCapture;
     gCapture = nullptr;
 }
@@ -82,5 +91,6 @@ Java_au_com_shiftyjelly_pocketcasts_voice_audio_OboeNative_nativeIsCapturing(
     JNIEnv* /*env*/,
     jclass /*clazz*/)
 {
+    std::lock_guard<std::mutex> lock(gCaptureMutex);
     return (gCapture != nullptr && gCapture->isActive()) ? JNI_TRUE : JNI_FALSE;
 }

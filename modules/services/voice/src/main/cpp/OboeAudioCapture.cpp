@@ -99,6 +99,7 @@ oboe::AudioStreamBuilder OboeAudioCapture::buildStreamBuilder() {
 }
 
 bool OboeAudioCapture::open() {
+    std::lock_guard<std::mutex> lock(mStreamMutex);
     if (mStream != nullptr) {
         return true; // already open
     }
@@ -121,6 +122,7 @@ bool OboeAudioCapture::open() {
 }
 
 bool OboeAudioCapture::start() {
+    std::lock_guard<std::mutex> lock(mStreamMutex);
     if (mStream == nullptr) {
         LOGE("Cannot start: stream is null");
         return false;
@@ -145,6 +147,7 @@ int32_t OboeAudioCapture::readData(int16_t* outBuffer, int32_t maxFrames) {
 void OboeAudioCapture::stop() {
     mActive.store(false, std::memory_order_release);
 
+    std::lock_guard<std::mutex> lock(mStreamMutex);
     if (mStream != nullptr) {
         oboe::Result result = mStream->requestStop();
         if (result != oboe::Result::OK) {
@@ -156,9 +159,15 @@ void OboeAudioCapture::stop() {
 }
 
 void OboeAudioCapture::close() {
-    stop();
+    if (mClosed.exchange(true, std::memory_order_acq_rel)) {
+        return; // already closed
+    }
 
+    mActive.store(false, std::memory_order_release);
+
+    std::lock_guard<std::mutex> lock(mStreamMutex);
     if (mStream != nullptr) {
+        mStream->requestStop();
         mStream->close();
         mStream = nullptr;
     }
@@ -171,7 +180,8 @@ void OboeAudioCapture::close() {
 }
 
 bool OboeAudioCapture::isActive() const {
-    return mActive.load(std::memory_order_acquire) && mStream != nullptr;
+    return mActive.load(std::memory_order_acquire)
+        && !mClosed.load(std::memory_order_acquire);
 }
 
 oboe::DataCallbackResult OboeAudioCapture::onAudioReady(
@@ -193,8 +203,12 @@ void OboeAudioCapture::onErrorAfterClose(
     oboe::Result error)
 {
     mActive.store(false, std::memory_order_release);
-    LOGE("Stream error after close: %s", oboe::convertToText(error));
 
-    // Stream was closed by Oboe; null the pointer so the JNI layer knows.
+    if (mClosed.load(std::memory_order_acquire)) {
+        return; // close() already cleaned up
+    }
+
+    std::lock_guard<std::mutex> lock(mStreamMutex);
     mStream = nullptr;
+    LOGE("Stream error after close: %s", oboe::convertToText(error));
 }

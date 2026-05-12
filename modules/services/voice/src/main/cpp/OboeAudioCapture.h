@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <oboe/Oboe.h>
 
 constexpr int32_t kSampleRate = 16000;
@@ -97,6 +98,8 @@ private:
     int32_t mSampleRate = kSampleRate;
     int32_t mChannelCount = kChannelCount;
     std::atomic<bool> mActive{false};
+    std::atomic<bool> mClosed{false};
+    std::mutex mStreamMutex;
 
     oboe::AudioStreamBuilder buildStreamBuilder();
 };

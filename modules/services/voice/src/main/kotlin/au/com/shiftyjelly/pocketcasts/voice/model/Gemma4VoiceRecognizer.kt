@@ -47,26 +47,42 @@ class Gemma4VoiceRecognizer @Inject constructor(
         {"intent": "chapter_by_title", "query": "<chapter name>", "text": "<transcribed speech>"}
         {"intent": "next_episode", "text": "<transcribed speech>"}
         {"intent": "set_speed", "speed": <0.5 to 5.0>, "text": "<transcribed speech>"}
-        {"intent": "set_speed", "delta": <signed increment>, "text": "<transcribed speech>"}
+        {"intent": "adjust_speed", "delta": <signed increment>, "text": "<transcribed speech>"}
         {"intent": "set_volume", "volume": <0 to 100>, "text": "<transcribed speech>"}
-        {"intent": "set_volume", "delta": <signed increment>, "text": "<transcribed speech>"}
+        {"intent": "adjust_volume", "delta": <signed increment>, "text": "<transcribed speech>"}
         {"intent": "sleep_timer", "minutes": <positive integer; 0 to cancel>, "text": "<transcribed speech>"}
+        {"intent": "set_trim", "mode": "off"|"low"|"medium"|"high", "text": "<transcribed speech>"}
+        {"intent": "set_volume_boost", "enabled": true|false, "text": "<transcribed speech>"}
+        {"intent": "add_bookmark", "title": "<bookmark label>", "text": "<transcribed speech>"}
 
         Common aliases:
         "play" → {"intent": "resume"} | "stop" → {"intent": "pause"}
         "next" → {"intent": "next_chapter"} | "previous" → {"intent": "previous_chapter"}
-        "faster" / "speed up" → {"intent": "set_speed", "delta": 0.5}
-        "slower" / "slow down" → {"intent": "set_speed", "delta": -0.5}
+        "faster" / "speed up" → {"intent": "adjust_speed", "delta": 0.5}
+        "slower" / "slow down" → {"intent": "adjust_speed", "delta": -0.5}
         "forward X" / "skip X" → {"intent": "seek_relative", "delta_seconds": X}
         "go back X" → {"intent": "seek_relative", "delta_seconds": -X}
         "turn off" → {"intent": "sleep_timer", "minutes": 0}
-        "volume up" → {"intent": "set_volume", "delta": 10}
-        "volume down" → {"intent": "set_volume", "delta": -10}
+        "volume up" → {"intent": "adjust_volume", "delta": 10}
+        "volume down" → {"intent": "adjust_volume", "delta": -10}
+        "set volume X" → {"intent": "set_volume", "volume": X}
+        "louder" → {"intent": "adjust_volume", "delta": 10}
+        "quieter" → {"intent": "adjust_volume", "delta": -10}
+        "trim silence" / "silence trimming" → {"intent": "set_trim", "mode": "medium"}
+        "no trim" → {"intent": "set_trim", "mode": "off"}
+        "boost" / "turn on boost" → {"intent": "set_volume_boost", "enabled": true}
+        "no boost" → {"intent": "set_volume_boost", "enabled": false}
+        "bookmark this" / "save this" → {"intent": "add_bookmark", "title": "Voice bookmark"}
+        "set speed X" → {"intent": "set_speed", "speed": X}
 
         Examples:
         "暂停" → {"intent": "pause", "text": "暂停"}
         "快进30秒" → {"intent": "seek_relative", "delta_seconds": 30, "text": "快进30秒"}
         "下一章" → {"intent": "next_chapter", "text": "下一章"}
+        "speed up" → {"intent": "adjust_speed", "delta": 0.5, "text": "speed up"}
+        "set volume to 70" → {"intent": "set_volume", "volume": 70, "text": "set volume to 70"}
+        "turn on trim" → {"intent": "set_trim", "mode": "medium", "text": "turn on trim"}
+        "bookmark this" → {"intent": "add_bookmark", "title": "Voice bookmark", "text": "bookmark this"}
 
         If the speech is not a playback command, respond with {"intent": "none", "text": "<transcribed speech>"}.
     """.trimIndent()

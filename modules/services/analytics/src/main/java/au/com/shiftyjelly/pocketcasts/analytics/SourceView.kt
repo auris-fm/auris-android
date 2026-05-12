@@ -234,6 +234,10 @@ enum class SourceView(
         key = "widget_player_small",
         analyticsValue = SourceViewType.WidgetPlayerSmall,
     ),
+    VOICE_COMMANDS(
+        key = "voice_commands",
+        analyticsValue = SourceViewType.Unknown,
+    ),
     ;
 
     companion object {

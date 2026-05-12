@@ -1489,6 +1489,22 @@ The following were implemented after the foundation plan was completed:
 - **Service orchestration**: `VoiceControlServiceController` observes `VoiceControlGate` state and auto-starts/stops the foreground service.
 - **Microphone lifecycle**: Mic capture starts only when gate is fully allowed (playback active + headset connected + model ready). Mic stops immediately on gate block, app kill, or background without playback. Background with active playback keeps mic on for hands-free commands.
 
+## Subsequent Phase: Gemma 4 E2B Simplification
+
+The following replaces Vosk ASR + DeterministicVoiceIntentInterpreter with Gemma 4 E2B single-pass audio-to-intent:
+
+See `task-group-gemma4-e2b-simplification.md` for the detailed implementation plan.
+
+### Key Changes
+
+- **VoiceRecognizer** interface now returns `VoicePlaybackIntent?` directly instead of `VoiceRecognitionResult?`.
+- **Gemma4VoiceRecognizer** becomes the only provider: feeds PCM audio to LiteRT-LM, parses structured JSON output.
+- **VoiceIntentInterpreter** interface and `DeterministicVoiceIntentInterpreter` are removed — ASR + intent parsing collapsed into one model.
+- **VoiceRecognitionResult** data class removed — no longer needed as an intermediate type.
+- **VoskVoiceRecognizer** removed along with Vosk library dependency.
+- **VoiceModelManager** promotes Gemma 4 E2B model management to primary (Vosk download/extraction removed).
+- **VoiceControlService** simplification: recognizer output goes directly to executor, no interpreter chaining.
+
 ## Self-Review Notes
 
 - Spec coverage: this foundation covers module structure, settings, gate policy, route policy, segmenter, deterministic intent boundary, executor, service shell, and test strategy. It intentionally excludes Gemma 4 runtime, model download UI, production speaker echo suppression, and transcript semantic search, which are listed as follow-up plans because each has separate device or UX risk.

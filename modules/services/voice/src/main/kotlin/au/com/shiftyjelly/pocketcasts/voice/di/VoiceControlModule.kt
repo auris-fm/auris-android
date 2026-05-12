@@ -2,17 +2,15 @@ package au.com.shiftyjelly.pocketcasts.voice.di
 
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
-import au.com.shiftyjelly.pocketcasts.voice.audio.WebRtcVoiceAudioSegmenter
 import au.com.shiftyjelly.pocketcasts.voice.audio.MicrophoneCapture
 import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceAudioSegmenter
+import au.com.shiftyjelly.pocketcasts.voice.audio.WebRtcVoiceAudioSegmenter
 import au.com.shiftyjelly.pocketcasts.voice.gate.UserNotDisabledRule
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlRule
-import au.com.shiftyjelly.pocketcasts.voice.intent.DeterministicVoiceIntentInterpreter
-import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntentInterpreter
+import au.com.shiftyjelly.pocketcasts.voice.model.Gemma4VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognizer
-import au.com.shiftyjelly.pocketcasts.voice.model.VoskVoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackContextMonitor
 import au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackContextRule
 import au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackManagerVoicePlaybackSink
@@ -33,12 +31,10 @@ import kotlinx.coroutines.CoroutineScope
 abstract class VoiceControlModule {
     @Binds abstract fun bindVoiceAudioSegmenter(impl: WebRtcVoiceAudioSegmenter): VoiceAudioSegmenter
 
-    // Vosk for ASR. Gemma4 E2B audio input causes a native SIGABRT in LiteRT-LM's
-    // AAudio/Oboe ring-buffer (releaseBuffer assertion) — a known bug in v0.10.0.
-    // Vosk processes PCM frames directly via acceptWaveForm() with zero audio interruption.
-    @Binds abstract fun bindVoiceRecognizer(impl: VoskVoiceRecognizer): VoiceRecognizer
-
-    @Binds abstract fun bindVoiceIntentInterpreter(impl: DeterministicVoiceIntentInterpreter): VoiceIntentInterpreter
+    // Gemma 4 E2B: single-model pass for ASR + structured intent generation via LiteRT-LM.
+    // Audio PCM frames from the segmenter are passed directly to the model, which returns
+    // structured JSON parsed into VoicePlaybackIntent.
+    @Binds abstract fun bindVoiceRecognizer(impl: Gemma4VoiceRecognizer): VoiceRecognizer
 
     @Binds abstract fun bindVoicePlaybackSink(impl: PlaybackManagerVoicePlaybackSink): VoicePlaybackSink
 

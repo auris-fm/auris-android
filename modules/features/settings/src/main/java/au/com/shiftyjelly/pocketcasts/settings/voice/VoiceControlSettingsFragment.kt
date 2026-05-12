@@ -30,9 +30,9 @@ import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.preferences.model.VoiceControlAudioRoutePolicy
 import au.com.shiftyjelly.pocketcasts.ui.theme.Theme
 import au.com.shiftyjelly.pocketcasts.utils.extensions.pxToDp
+import au.com.shiftyjelly.pocketcasts.views.fragments.BaseFragment
 import au.com.shiftyjelly.pocketcasts.voice.model.ModelDownloadState
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceModelManager
-import au.com.shiftyjelly.pocketcasts.views.fragments.BaseFragment
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 
@@ -40,6 +40,7 @@ import javax.inject.Inject
 class VoiceControlSettingsFragment : BaseFragment() {
 
     @Inject lateinit var settings: Settings
+
     @Inject lateinit var voiceModelManager: VoiceModelManager
 
     override fun onCreateView(
@@ -119,8 +120,11 @@ private fun VoiceControlSettingsPage(
                         role = Role.Switch,
                     ) {
                         onRoutePolicyChange(
-                            if (it) VoiceControlAudioRoutePolicy.SpeakerExperimental
-                            else VoiceControlAudioRoutePolicy.HeadsetOnly,
+                            if (it) {
+                                VoiceControlAudioRoutePolicy.SpeakerExperimental
+                            } else {
+                                VoiceControlAudioRoutePolicy.HeadsetOnly
+                            },
                         )
                     },
                     indent = false,
@@ -130,7 +134,6 @@ private fun VoiceControlSettingsPage(
                 val modelText = when (modelState) {
                     is ModelDownloadState.NotStarted -> if (modelReady) "Ready" else "Not downloaded"
                     is ModelDownloadState.Downloading -> "Downloading: ${modelState.progressPercent}%"
-                    is ModelDownloadState.Extracting -> "Extracting..."
                     is ModelDownloadState.Ready -> "Ready"
                     is ModelDownloadState.Failed -> "Download failed"
                 }

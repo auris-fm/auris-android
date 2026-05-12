@@ -38,7 +38,6 @@ dependencies {
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.coroutines.core)
-    implementation(libs.vosk.android)
     implementation(libs.android.vad.silero)
     implementation(libs.litertlm.android)
     implementation(libs.oboe)

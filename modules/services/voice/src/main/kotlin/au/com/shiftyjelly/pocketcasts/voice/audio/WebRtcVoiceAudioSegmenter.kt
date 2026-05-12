@@ -30,9 +30,13 @@ class WebRtcVoiceAudioSegmenter @Inject constructor(
     private var speechActive = false
     private var speechFrames = 0
     private var speechStartTimeMs: Long = 0L
+    private var consecutiveSilentFrames = 0
     private val accumulatedFrames = mutableListOf<PcmAudioFrame>()
     private val maxSpeechDurationMs = 5_000L
     private var cooldownUntilMs: Long = 0L
+
+    // 400ms of silence at ~64ms/frame = ~7 frames
+    private val silenceTimeoutFrames = 7
 
     /** Rolling buffer of recent frames to include as context before VAD triggers. */
     private val contextFrames = ArrayDeque<PcmAudioFrame>()
@@ -70,6 +74,7 @@ class WebRtcVoiceAudioSegmenter @Inject constructor(
         }
 
         if (currentSpeech) {
+            consecutiveSilentFrames = 0
             if (!speechActive) {
                 contextFrames.forEach { accumulatedFrames.add(it) }
             }
@@ -94,6 +99,12 @@ class WebRtcVoiceAudioSegmenter @Inject constructor(
         }
 
         if (speechActive) {
+            consecutiveSilentFrames++
+            if (consecutiveSilentFrames >= silenceTimeoutFrames) {
+                val segment = accumulatedFrames.toList()
+                reset()
+                return VoiceSegmenterResult.SpeechEnded(segment)
+            }
             accumulatedFrames.add(frame)
             return VoiceSegmenterResult.SpeechContinuing
         }
@@ -106,6 +117,7 @@ class WebRtcVoiceAudioSegmenter @Inject constructor(
         speechActive = false
         speechFrames = 0
         speechStartTimeMs = 0L
+        consecutiveSilentFrames = 0
         accumulatedFrames.clear()
         contextFrames.clear()
         cooldownUntilMs = System.currentTimeMillis() + 1500L

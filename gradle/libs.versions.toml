@@ -236,6 +236,8 @@ androidx-test-runner = { module = "androidx.test:runner", version.ref = "test" }
 
 # Voice
 vosk-android = "com.alphacephei:vosk-android:0.3.47"
+litertlm-android = "com.google.ai.edge.litertlm:litertlm-android:0.10.0"
+android-vad-silero = { module = "com.github.gkonovalov.android-vad:silero", version = "main-SNAPSHOT" }
 
 # Tracks
 automattic-crashlogging = { module = "com.automattic.tracks:crashlogging", version.ref = "tracks" }

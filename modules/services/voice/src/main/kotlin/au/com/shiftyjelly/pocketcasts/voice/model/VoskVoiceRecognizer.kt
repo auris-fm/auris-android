@@ -17,6 +17,10 @@ class VoskVoiceRecognizer @Inject constructor(
     private var model: org.vosk.Model? = null
     private var modelLoaded = false
 
+    override suspend fun ensureReady(): Result<Unit> = withContext(Dispatchers.IO) {
+        modelManager.ensureModel().map { Unit }
+    }
+
     override suspend fun recognize(
         clip: VoiceUtteranceClip,
         context: VoiceRecognitionContext,

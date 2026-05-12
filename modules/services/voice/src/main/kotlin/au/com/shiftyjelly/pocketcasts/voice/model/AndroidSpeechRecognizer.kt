@@ -19,6 +19,8 @@ class AndroidSpeechRecognizer @Inject constructor(
     @ApplicationContext private val context: Context,
 ) : VoiceRecognizer {
 
+    override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+
     override suspend fun recognize(
         clip: VoiceUtteranceClip,
         context: VoiceRecognitionContext,

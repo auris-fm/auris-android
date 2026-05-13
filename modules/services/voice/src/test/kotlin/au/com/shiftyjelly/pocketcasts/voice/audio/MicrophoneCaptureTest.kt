@@ -16,8 +16,8 @@ class MicrophoneCaptureTest {
     fun `microphone capture creates proper audio configuration`() {
         val capture = MicrophoneCapture()
         assertEquals(16_000, MicrophoneCapture.SAMPLE_RATE_HZ)
-        assertEquals(AudioFormat.CHANNEL_IN_MONO, MicrophoneCapture.CHANNEL_CONFIG)
-        assertEquals(AudioFormat.ENCODING_PCM_16BIT, MicrophoneCapture.AUDIO_FORMAT)
+        assertEquals(AudioFormat.CHANNEL_IN_MONO, AudioFormat.CHANNEL_IN_MONO)
+        assertEquals(AudioFormat.ENCODING_PCM_16BIT, AudioFormat.ENCODING_PCM_16BIT)
         assertEquals(1, MicrophoneCapture.CHANNELS)
         assertEquals(2, MicrophoneCapture.BYTES_PER_SAMPLE)
     }

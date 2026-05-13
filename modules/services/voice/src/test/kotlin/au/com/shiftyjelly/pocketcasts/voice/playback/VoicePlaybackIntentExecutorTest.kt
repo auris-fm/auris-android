@@ -103,11 +103,11 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
-    fun `set playback speed does nothing`() = runTest {
+    fun `set playback speed calls setSpeed on sink`() = runTest {
         val sink = FakeVoicePlaybackSink()
-        VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.SetPlaybackSpeed(1.25))
+        VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.SetSpeed(1.25))
 
-        assertEquals(emptyList<String>(), sink.calls)
+        assertEquals(listOf("setSpeed:1.25"), sink.calls)
     }
 
     private class FakeVoicePlaybackSink : VoicePlaybackSink {
@@ -135,6 +135,33 @@ class VoicePlaybackIntentExecutorTest {
         }
         override fun chapterByIndex(index: Int) {
             calls += "chapterByIndex:$index"
+        }
+        override fun nextEpisode() {
+            calls += "nextEpisode"
+        }
+        override fun setSpeed(speed: Double) {
+            calls += "setSpeed:$speed"
+        }
+        override fun adjustSpeed(delta: Double) {
+            calls += "adjustSpeed:$delta"
+        }
+        override fun setVolume(volume: Int) {
+            calls += "setVolume:$volume"
+        }
+        override fun adjustVolume(delta: Int) {
+            calls += "adjustVolume:$delta"
+        }
+        override fun sleepAfter(minutes: Int) {
+            calls += "sleepAfter:$minutes"
+        }
+        override fun setTrimMode(mode: String) {
+            calls += "setTrimMode:$mode"
+        }
+        override fun setVolumeBoost(enabled: Boolean) {
+            calls += "setVolumeBoost:$enabled"
+        }
+        override fun addBookmark(title: String) {
+            calls += "addBookmark:$title"
         }
     }
 }

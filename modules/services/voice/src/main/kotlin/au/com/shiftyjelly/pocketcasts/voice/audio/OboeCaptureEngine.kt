@@ -10,15 +10,6 @@ import kotlinx.coroutines.isActive
 import timber.log.Timber
 
 /**
- * Interface for audio capture engines so tests can mock without loading native code.
- */
-internal interface CaptureEngine {
-    fun startCapture(): Flow<PcmAudioFrame>
-    fun stopCapture()
-    val isRecording: Boolean
-}
-
-/**
  * Namespacing object for JNI native function declarations.
  *
  * Loads the pocketcasts_voice_capture native library at class initialization time.
@@ -52,12 +43,12 @@ internal object OboeConfig {
  *
  * All JNI calls are made from the single collector coroutine context.
  */
-internal class OboeCaptureEngine : CaptureEngine {
+internal class OboeCaptureEngine {
 
     @Volatile
     private var disposed = false
 
-    override fun startCapture(): Flow<PcmAudioFrame> = flow {
+    fun startCapture(): Flow<PcmAudioFrame> = flow {
         if (!OboeNative.nativeStartCapture(OboeConfig.SAMPLE_RATE_HZ, OboeConfig.CHANNELS)) {
             throw MicrophoneCaptureException.InitializationFailed("Oboe stream creation failed")
         }
@@ -82,10 +73,10 @@ internal class OboeCaptureEngine : CaptureEngine {
         }
     }.flowOn(Dispatchers.IO)
 
-    override fun stopCapture() {
+    fun stopCapture() {
         disposed = true
     }
 
-    override val isRecording: Boolean
+    val isRecording: Boolean
         get() = !disposed && OboeNative.nativeIsCapturing()
 }

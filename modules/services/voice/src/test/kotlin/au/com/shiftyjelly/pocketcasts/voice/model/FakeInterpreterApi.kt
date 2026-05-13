@@ -17,8 +17,23 @@ class FakeInterpreterApi : InterpreterApi {
         @Suppress("UNCHECKED_CAST")
         val outputArray = output as Array<FloatArray>
         if (outputArray.size > 0 && outputArray[0].size == embeddingDim) {
-            // Fill with zeros (deterministic - same input always produces same output)
-            outputArray[0].fill(0.0f)
+            // Compute a summary of the input so the output is deterministic per-input
+            // and non-zero (avoiding degenerate cosine-similarity with zero vectors).
+            val sum = when (input) {
+                is ByteBuffer -> {
+                    input.rewind()
+                    val buf = input.asFloatBuffer()
+                    var s = 0.0
+                    while (buf.hasRemaining()) s += buf.get().toDouble()
+                    s
+                }
+                else -> 0.0
+            }
+            val base = if (sum == 0.0) 1.0 else sum
+            val divisor = 80_000.0
+            for (i in outputArray[0].indices) {
+                outputArray[0][i] = (base / divisor).toFloat()
+            }
         }
     }
 

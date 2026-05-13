@@ -243,6 +243,7 @@ androidx-test-runner = { module = "androidx.test:runner", version.ref = "test" }
 # Voice
 oboe = "com.google.oboe:oboe:1.9.0"
 vosk-android = "com.alphacephei:vosk-android:0.3.47"
+litert-api = "com.google.ai.edge.litert:litert-api:1.4.2"
 litertlm-android = "com.google.ai.edge.litertlm:litertlm-android:0.11.0"
 android-vad-silero = { module = "com.github.gkonovalov.android-vad:silero", version = "main-SNAPSHOT" }
 

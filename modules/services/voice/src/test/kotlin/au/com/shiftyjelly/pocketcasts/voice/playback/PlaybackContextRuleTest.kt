@@ -30,12 +30,12 @@ class PlaybackContextRuleTest {
         val monitor = PlaybackContextMonitor(playbackManager, backgroundScope)
         runCurrent()
 
-        assertEquals(PlaybackContext.Active(currentEpisodeUuid = "episode-id"), monitor.context.value)
+        assertEquals(PlaybackContext.Active(currentEpisodeUuid = "episode-id", isPlaying = false), monitor.context.value)
     }
 
     @Test
     fun `current episode allows listening even when paused`() {
-        val rule = PlaybackContextRule(MutableStateFlow(PlaybackContext.Active(currentEpisodeUuid = "episode-id")))
+        val rule = PlaybackContextRule(MutableStateFlow(PlaybackContext.Active(currentEpisodeUuid = "episode-id", isPlaying = false)))
 
         assertEquals(VoiceControlRuleState.Allowed, rule.evaluate())
     }

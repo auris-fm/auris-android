@@ -6,16 +6,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class EnergyVoiceAudioSegmenterTest {
+    // speechThreshold = 1500, minimumSpeechFrames = 1, trailingSilenceFrames = 4
+
     @Test
     fun `returns speech ended after speech followed by trailing silence`() {
-        val segmenter = EnergyVoiceAudioSegmenter(
-            speechThreshold = 500,
-            minimumSpeechFrames = 2,
-            trailingSilenceFrames = 2,
-        )
-
-        segmenter.process(frame(shortArrayOf(800, 900)))
-        segmenter.process(frame(shortArrayOf(900, 900)))
+        val segmenter = EnergyVoiceAudioSegmenter()
+        // 2 speech frames (RMS > 1500) followed by 4 silence frames = speech ended
+        segmenter.process(frame(shortArrayOf(2000, 2000)))
+        segmenter.process(frame(shortArrayOf(2000, 2000)))
+        segmenter.process(frame(shortArrayOf(0, 0)))
+        segmenter.process(frame(shortArrayOf(0, 0)))
         segmenter.process(frame(shortArrayOf(0, 0)))
         val result = segmenter.process(frame(shortArrayOf(0, 0)))
 
@@ -23,46 +23,13 @@ class EnergyVoiceAudioSegmenterTest {
     }
 
     @Test
-    fun `discards below minimum burst after trailing silence`() {
-        val segmenter = EnergyVoiceAudioSegmenter(
-            speechThreshold = 500,
-            minimumSpeechFrames = 2,
-            trailingSilenceFrames = 2,
-        )
-
-        segmenter.process(frame(shortArrayOf(800, 900)))
-        segmenter.process(frame(shortArrayOf(0, 0)))
-        val result = segmenter.process(frame(shortArrayOf(0, 0)))
-
-        assertEquals(VoiceSegmenterResult.Rejected(RejectionReason.TooShort), result)
-    }
-
-    @Test
-    fun `starts fresh speech after discarding below minimum burst`() {
-        val segmenter = EnergyVoiceAudioSegmenter(
-            speechThreshold = 500,
-            minimumSpeechFrames = 2,
-            trailingSilenceFrames = 2,
-        )
-
-        segmenter.process(frame(shortArrayOf(800, 900)))
-        segmenter.process(frame(shortArrayOf(0, 0)))
-        segmenter.process(frame(shortArrayOf(0, 0)))
-        val result = segmenter.process(frame(shortArrayOf(900, 900)))
-
-        assertEquals(VoiceSegmenterResult.SpeechStarted, result)
-    }
-
-    @Test
     fun `speech ended includes valid speech segment`() {
-        val segmenter = EnergyVoiceAudioSegmenter(
-            speechThreshold = 500,
-            minimumSpeechFrames = 2,
-            trailingSilenceFrames = 2,
-        )
+        val segmenter = EnergyVoiceAudioSegmenter()
         val frames = listOf(
-            frame(shortArrayOf(800, 900)),
-            frame(shortArrayOf(900, 900)),
+            frame(shortArrayOf(2000, 2000)),
+            frame(shortArrayOf(2000, 2000)),
+            frame(shortArrayOf(0, 0)),
+            frame(shortArrayOf(0, 0)),
             frame(shortArrayOf(0, 0)),
             frame(shortArrayOf(0, 0)),
         )

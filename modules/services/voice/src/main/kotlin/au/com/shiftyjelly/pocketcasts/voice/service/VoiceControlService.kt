@@ -11,6 +11,9 @@ import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceClipSaver
 import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGateState
+import au.com.shiftyjelly.pocketcasts.voice.model.SpeakerEmbedder
+import au.com.shiftyjelly.pocketcasts.voice.model.VoiceEnrollmentManager
+import au.com.shiftyjelly.pocketcasts.voice.model.VoiceEnrollmentState
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceUtteranceClip
@@ -49,6 +52,10 @@ class VoiceControlService : Service() {
 
     @Inject lateinit var audioRouteMonitor: AndroidAudioRouteMonitor
 
+    @Inject lateinit var enrollmentManager: VoiceEnrollmentManager
+
+    @Inject lateinit var embedder: SpeakerEmbedder
+
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var captureJob: Job? = null
     private var speechFrames = mutableListOf<PcmAudioFrame>()
@@ -75,6 +82,22 @@ class VoiceControlService : Service() {
 
         if (!hasRequiredPermissions()) {
             Timber.w("Missing permissions, stopping")
+            stopSelf()
+            return
+        }
+
+        // Mandatory enrollment check
+        if (enrollmentManager.state.value !is VoiceEnrollmentState.Enrolled) {
+            Timber.w("Speaker not enrolled, showing enrollment notification")
+            val notification = notificationManager.createEnrollmentRequiredNotification()
+            startForeground(notificationManager.notificationId, notification)
+            stopSelf()
+            return
+        }
+
+        // Load speaker embedding model
+        if (!embedder.load()) {
+            Timber.e("Failed to load speaker embedding model, stopping")
             stopSelf()
             return
         }
@@ -143,6 +166,12 @@ class VoiceControlService : Service() {
     }
 
     private suspend fun processUtterance(clip: VoiceUtteranceClip) {
+        // Speaker verification gate
+        if (!enrollmentManager.verify(clip)) {
+            Timber.d("Speaker verification failed, discarding utterance")
+            return
+        }
+
         val recognitionContext = VoiceRecognitionContext(
             playbackContext = playbackContextMonitor.context.value,
             audioRoute = audioRouteMonitor.route.value,

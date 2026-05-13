@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
+    alias(libs.plugins.compose.compiler)
 }
 
 android {
@@ -9,6 +10,7 @@ android {
     buildFeatures {
         buildConfig = true
         prefab = true
+        compose = true
     }
     ndkVersion = "27.0.12077973"
     defaultConfig {
@@ -50,6 +52,12 @@ dependencies {
     implementation(projects.modules.services.preferences)
     implementation(projects.modules.services.repositories)
     implementation(projects.modules.services.utils)
+
+    implementation(platform(libs.compose.bom))
+    implementation(libs.compose.material)
+    implementation(libs.compose.ui)
+    implementation(libs.compose.foundation)
+    implementation(libs.compose.activity)
 
     testImplementation(libs.coroutines.test)
     testImplementation(libs.junit)

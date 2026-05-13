@@ -210,22 +210,35 @@ class Gemma4VoiceRecognizer @Inject constructor(
                     if (query.isBlank()) null else VoicePlaybackIntent.ChapterByTitle(query)
                 }
                 "set_speed" -> {
-                    val speed = if (json.has("speed")) json.optDouble("speed", -1.0) else -1.0
-                    val delta = if (json.has("delta")) json.optDouble("delta", 0.0) else null
-                    if (speed in 0.5..5.0) VoicePlaybackIntent.SetPlaybackSpeed(speed = speed)
-                    else if (delta != null && delta != 0.0) VoicePlaybackIntent.SetPlaybackSpeed(delta = delta)
-                    else null
+                    val speed = json.optDouble("speed", -1.0)
+                    if (speed in 0.5..5.0) VoicePlaybackIntent.SetSpeed(speed) else null
+                }
+                "adjust_speed" -> {
+                    val delta = json.optDouble("delta", 0.0)
+                    if (delta != 0.0) VoicePlaybackIntent.AdjustSpeed(delta) else null
                 }
                 "set_volume" -> {
-                    val volume = if (json.has("volume")) json.optInt("volume", -1) else -1
-                    val delta = if (json.has("delta")) json.optInt("delta", 0) else null
-                    if (volume in 0..100) VoicePlaybackIntent.SetVolume(volume = volume)
-                    else if (delta != null && delta != 0) VoicePlaybackIntent.SetVolume(delta = delta)
-                    else null
+                    val volume = json.optInt("volume", -1)
+                    if (volume in 0..100) VoicePlaybackIntent.SetVolume(volume) else null
+                }
+                "adjust_volume" -> {
+                    val delta = json.optInt("delta", 0)
+                    if (delta != 0) VoicePlaybackIntent.AdjustVolume(delta) else null
                 }
                 "sleep_timer" -> {
                     val minutes = json.optInt("minutes", -1)
                     if (minutes < 0) null else VoicePlaybackIntent.SleepTimer(minutes)
+                }
+                "set_trim" -> {
+                    val mode = json.optString("mode", "")
+                    if (mode in listOf("off", "low", "medium", "high")) VoicePlaybackIntent.SetTrimMode(mode) else null
+                }
+                "set_volume_boost" -> {
+                    VoicePlaybackIntent.SetVolumeBoost(json.optBoolean("enabled", false))
+                }
+                "add_bookmark" -> {
+                    val title = json.optString("title", "")
+                    if (title.isNotBlank()) VoicePlaybackIntent.AddBookmark(title) else null
                 }
                 else -> {
                     Timber.w("Gemma 4: unknown intent '%s'", intent)

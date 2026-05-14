@@ -4,10 +4,10 @@ import android.content.Context
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import org.tensorflow.lite.InterpreterApi
-import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
+import org.tensorflow.lite.InterpreterApi
+import timber.log.Timber
 
 @Singleton
 class SpeakerEmbedder @Inject constructor(

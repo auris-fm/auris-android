@@ -3,9 +3,9 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.di
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.SileroVadSegmenter
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioSegmenter
-import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.SileroVadSegmenter
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.UserNotDisabledRule
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRule

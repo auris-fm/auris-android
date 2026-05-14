@@ -27,6 +27,7 @@ class FakeInterpreterApi : InterpreterApi {
                     while (buf.hasRemaining()) s += buf.get().toDouble()
                     s
                 }
+
                 else -> 0.0
             }
             val base = if (sum == 0.0) 1.0 else sum
@@ -63,12 +64,10 @@ class FakeInterpreterApi : InterpreterApi {
         signatureKey: String?,
     ) = Unit
     override fun runSignature(inputs: Map<String, Any>, outputs: Map<String, Any>) = Unit
-    override fun getInputTensorFromSignature(signatureKey: String, inputName: String): Tensor =
-        throw UnsupportedOperationException()
+    override fun getInputTensorFromSignature(signatureKey: String, inputName: String): Tensor = throw UnsupportedOperationException()
     override fun getSignatureKeys(): Array<String> = emptyArray()
     override fun getSignatureInputs(signatureKey: String): Array<String> = emptyArray()
     override fun getSignatureOutputs(signatureKey: String): Array<String> = emptyArray()
-    override fun getOutputTensorFromSignature(signatureKey: String, outputName: String): Tensor =
-        throw UnsupportedOperationException()
+    override fun getOutputTensorFromSignature(signatureKey: String, outputName: String): Tensor = throw UnsupportedOperationException()
     override fun getLastNativeInferenceDurationNanoseconds(): Long? = null
 }

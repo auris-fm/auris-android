@@ -1,9 +1,9 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.model
 
+import kotlin.math.abs
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import kotlin.math.abs
 
 class SpeakerVerifierTest {
     private val verifier = SpeakerVerifier()

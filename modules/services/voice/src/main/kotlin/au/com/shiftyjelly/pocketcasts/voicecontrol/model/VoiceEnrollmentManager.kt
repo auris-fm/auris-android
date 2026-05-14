@@ -15,8 +15,11 @@ class VoiceEnrollmentManager @Inject constructor(
     private val verifier: SpeakerVerifier,
 ) {
     private val _state = MutableStateFlow<VoiceEnrollmentState>(
-        if (store.isEnrolled()) VoiceEnrollmentState.Enrolled(store.getEnrollmentTimestamp())
-        else VoiceEnrollmentState.NotEnrolled
+        if (store.isEnrolled()) {
+            VoiceEnrollmentState.Enrolled(store.getEnrollmentTimestamp())
+        } else {
+            VoiceEnrollmentState.NotEnrolled
+        },
     )
     val state: StateFlow<VoiceEnrollmentState> = _state.asStateFlow()
 

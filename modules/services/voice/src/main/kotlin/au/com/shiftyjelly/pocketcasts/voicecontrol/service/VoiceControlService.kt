@@ -15,23 +15,23 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.SpeakerEmbedder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceEnrollmentManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceEnrollmentState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
-import au.com.shiftyjelly.pocketcasts.voicecontrol.ui.EnrollmentActivity
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceUtteranceClip
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.ui.EnrollmentActivity
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import timber.log.Timber
 

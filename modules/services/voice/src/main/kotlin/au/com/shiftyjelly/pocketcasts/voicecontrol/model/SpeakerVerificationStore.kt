@@ -2,10 +2,10 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.model
 
 import android.content.Context
 import dagger.hilt.android.qualifiers.ApplicationContext
-import org.json.JSONArray
-import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
+import org.json.JSONArray
+import timber.log.Timber
 
 @Singleton
 class SpeakerVerificationStore @Inject constructor(

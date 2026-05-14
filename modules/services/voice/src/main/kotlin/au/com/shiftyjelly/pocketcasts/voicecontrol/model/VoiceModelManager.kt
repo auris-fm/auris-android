@@ -126,10 +126,3 @@ class VoiceModelManager @Inject constructor(
         Timber.i("Download complete: ${dest.length()} bytes")
     }
 }
-
-sealed interface ModelDownloadState {
-    data object NotStarted : ModelDownloadState
-    data class Downloading(val progressPercent: Int) : ModelDownloadState
-    data object Ready : ModelDownloadState
-    data class Failed(val reason: String) : ModelDownloadState
-}

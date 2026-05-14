@@ -27,6 +27,7 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import java.io.File
+import javax.inject.Named
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 
@@ -45,9 +46,11 @@ abstract class VoiceControlModule {
 
     companion object {
         @Provides @Singleton
+        @Named("whisperModel")
         fun provideWhisperModelFile(manager: ModelManager): File = manager.whisperModelFile
 
         @Provides @Singleton
+        @Named("smolLmModel")
         fun provideSmolLmModelFile(manager: ModelManager): File = manager.smolLmModelFile
 
         @Provides

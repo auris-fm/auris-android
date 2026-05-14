@@ -5,6 +5,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContext
 import java.io.File
 import javax.inject.Inject
+import javax.inject.Named
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -20,7 +21,7 @@ object LmNative {
 
 @Singleton
 open class SmolLmIntentParser @Inject constructor(
-    private val modelFile: File,
+    @Named("smolLmModel") private val modelFile: File,
 ) {
     @VisibleForTesting
     internal var nativeImpl: ((modelPath: String, prompt: String) -> String)? = null

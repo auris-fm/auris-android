@@ -33,9 +33,9 @@ import au.com.shiftyjelly.pocketcasts.ui.theme.Theme
 import au.com.shiftyjelly.pocketcasts.utils.extensions.pxToDp
 import au.com.shiftyjelly.pocketcasts.views.fragments.BaseFragment
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelDownloadState
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceEnrollmentManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceEnrollmentState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.ui.EnrollmentActivity
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -45,7 +45,7 @@ class VoiceControlSettingsFragment : BaseFragment() {
 
     @Inject lateinit var settings: Settings
 
-    @Inject lateinit var voiceModelManager: VoiceModelManager
+    @Inject lateinit var modelManager: ModelManager
 
     @Inject lateinit var enrollmentManager: VoiceEnrollmentManager
 
@@ -59,9 +59,9 @@ class VoiceControlSettingsFragment : BaseFragment() {
                 .collectAsState(false)
             val policy by settings.voiceControlAudioRoutePolicy.flow
                 .collectAsState(VoiceControlAudioRoutePolicy.HeadsetOnly)
-            val modelState by voiceModelManager.downloadState
+            val modelState by modelManager.downloadState
                 .collectAsState(ModelDownloadState.NotStarted)
-            val modelReady = voiceModelManager.isModelReady()
+            val modelReady = modelManager.areModelsReady()
             val enrollmentState by enrollmentManager.state
                 .collectAsState(VoiceEnrollmentState.NotEnrolled)
             val bottomInset = settings.bottomInset

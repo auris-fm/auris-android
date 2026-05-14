@@ -15,6 +15,7 @@ import au.com.shiftyjelly.pocketcasts.voice.model.SpeakerEmbedder
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceEnrollmentManager
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceEnrollmentState
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognitionContext
+import au.com.shiftyjelly.pocketcasts.voice.ui.EnrollmentActivity
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceUtteranceClip
 import au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackContextMonitor
@@ -88,9 +89,13 @@ class VoiceControlService : Service() {
 
         // Mandatory enrollment check
         if (enrollmentManager.state.value !is VoiceEnrollmentState.Enrolled) {
-            Timber.w("Speaker not enrolled, showing enrollment notification")
+            Timber.w("Speaker not enrolled, launching enrollment activity")
             val notification = notificationManager.createEnrollmentRequiredNotification()
             startForeground(notificationManager.notificationId, notification)
+            val enrollIntent = Intent(this, EnrollmentActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            startActivity(enrollIntent)
             stopSelf()
             return
         }

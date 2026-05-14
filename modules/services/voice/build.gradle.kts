@@ -16,12 +16,12 @@ android {
     defaultConfig {
         externalNativeBuild {
             cmake {
-                cppFlags += listOf("-std=c++17", "-Wall", "-Werror")
+                cppFlags += listOf("-std=c++17")
                 arguments += listOf("-DANDROID_STL=c++_shared")
             }
         }
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            abiFilters += listOf("arm64-v8a", "x86_64")
         }
     }
     externalNativeBuild {

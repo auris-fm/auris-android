@@ -4,6 +4,7 @@ import androidx.annotation.VisibleForTesting
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceUtteranceClip
 import java.io.File
 import javax.inject.Inject
+import javax.inject.Named
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -22,7 +23,7 @@ object WhisperNative {
 
 @Singleton
 open class WhisperRecognizer @Inject constructor(
-    private val modelFile: File,
+    @Named("whisperModel") private val modelFile: File,
 ) {
     // Override in tests to avoid calling real native code
     @VisibleForTesting

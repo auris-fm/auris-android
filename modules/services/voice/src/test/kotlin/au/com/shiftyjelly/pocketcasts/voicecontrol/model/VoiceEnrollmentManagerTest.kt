@@ -52,7 +52,9 @@ class VoiceEnrollmentManagerTest {
     }
 
     @Test(expected = IllegalArgumentException::class)
-    fun `rejects empty list`() { manager.enroll(emptyList()) }
+    fun `rejects empty list`() {
+        manager.enroll(emptyList())
+    }
 
     private fun makeClip(): VoiceUtteranceClip {
         val s = ShortArray(16000)

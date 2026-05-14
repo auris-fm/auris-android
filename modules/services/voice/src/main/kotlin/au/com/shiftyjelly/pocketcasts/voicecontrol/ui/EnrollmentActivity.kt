@@ -13,7 +13,9 @@ import javax.inject.Inject
 @AndroidEntryPoint
 class EnrollmentActivity : ComponentActivity() {
     @Inject lateinit var enrollmentManager: VoiceEnrollmentManager
+
     @Inject lateinit var microphoneCapture: MicrophoneCapture
+
     @Inject lateinit var segmenter: VoiceAudioSegmenter
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -24,7 +26,7 @@ class EnrollmentActivity : ComponentActivity() {
                     manager = enrollmentManager,
                     microphoneCapture = microphoneCapture,
                     segmenter = segmenter,
-                    onEnrolled = { finish() },
+                    onEnroll = { finish() },
                     onDismiss = { finish() },
                 )
             }

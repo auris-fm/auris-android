@@ -2,12 +2,12 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.model
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoicePlaybackIntent
 import com.google.ai.edge.litertlm.Backend
-import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Conversation
+import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
-import com.google.ai.edge.litertlm.Conversation
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -189,57 +189,74 @@ class Gemma4VoiceRecognizer @Inject constructor(
             @Suppress("NONEXHAUSTIVE_WHEN")
             when (intent) {
                 "pause" -> VoicePlaybackIntent.Pause
+
                 "resume" -> VoicePlaybackIntent.Resume
+
                 "seek_relative" -> {
                     val seconds = json.optDouble("delta_seconds", 30.0)
                     VoicePlaybackIntent.SeekRelative((seconds * 1000).toInt())
                 }
+
                 "seek_absolute" -> {
                     val seconds = json.optDouble("position_seconds", 0.0)
                     VoicePlaybackIntent.SeekAbsolute((seconds * 1000).toInt())
                 }
+
                 "next_chapter" -> VoicePlaybackIntent.NextChapter
+
                 "previous_chapter" -> VoicePlaybackIntent.PreviousChapter
+
                 "next_episode" -> VoicePlaybackIntent.NextEpisode
+
                 "chapter_by_index" -> {
                     val index = json.optInt("index", -1)
                     if (index < 0) null else VoicePlaybackIntent.ChapterByIndex(index)
                 }
+
                 "chapter_by_title" -> {
                     val query = json.optString("query", "")
                     if (query.isBlank()) null else VoicePlaybackIntent.ChapterByTitle(query)
                 }
+
                 "set_speed" -> {
                     val speed = json.optDouble("speed", -1.0)
                     if (speed in 0.5..5.0) VoicePlaybackIntent.SetSpeed(speed) else null
                 }
+
                 "adjust_speed" -> {
                     val delta = json.optDouble("delta", 0.0)
                     if (delta != 0.0) VoicePlaybackIntent.AdjustSpeed(delta) else null
                 }
+
                 "set_volume" -> {
                     val volume = json.optInt("volume", -1)
                     if (volume in 0..100) VoicePlaybackIntent.SetVolume(volume) else null
                 }
+
                 "adjust_volume" -> {
                     val delta = json.optInt("delta", 0)
                     if (delta != 0) VoicePlaybackIntent.AdjustVolume(delta) else null
                 }
+
                 "sleep_timer" -> {
                     val minutes = json.optInt("minutes", -1)
                     if (minutes < 0) null else VoicePlaybackIntent.SleepTimer(minutes)
                 }
+
                 "set_trim" -> {
                     val mode = json.optString("mode", "")
                     if (mode in listOf("off", "low", "medium", "high")) VoicePlaybackIntent.SetTrimMode(mode) else null
                 }
+
                 "set_volume_boost" -> {
                     VoicePlaybackIntent.SetVolumeBoost(json.optBoolean("enabled", false))
                 }
+
                 "add_bookmark" -> {
                     val title = json.optString("title", "")
                     if (title.isNotBlank()) VoicePlaybackIntent.AddBookmark(title) else null
                 }
+
                 else -> {
                     Timber.w("Gemma 4: unknown intent '%s'", intent)
                     null
@@ -261,13 +278,30 @@ class Gemma4VoiceRecognizer @Inject constructor(
         val buffer = ByteArrayOutputStream(totalSize)
         val header = ByteBuffer.allocate(headerSize).apply {
             order(ByteOrder.LITTLE_ENDIAN)
-            put('R'.code.toByte()); put('I'.code.toByte()); put('F'.code.toByte()); put('F'.code.toByte())
+            put('R'.code.toByte())
+            put('I'.code.toByte())
+            put('F'.code.toByte())
+            put('F'.code.toByte())
             putInt(36 + dataSize)
-            put('W'.code.toByte()); put('A'.code.toByte()); put('V'.code.toByte()); put('E'.code.toByte())
-            put('f'.code.toByte()); put('m'.code.toByte()); put('t'.code.toByte()); put(' '.code.toByte())
-            putInt(16); putShort(1); putShort(1); putInt(sampleRate)
-            putInt(sampleRate * 2); putShort(2); putShort(16)
-            put('d'.code.toByte()); put('a'.code.toByte()); put('t'.code.toByte()); put('a'.code.toByte())
+            put('W'.code.toByte())
+            put('A'.code.toByte())
+            put('V'.code.toByte())
+            put('E'.code.toByte())
+            put('f'.code.toByte())
+            put('m'.code.toByte())
+            put('t'.code.toByte())
+            put(' '.code.toByte())
+            putInt(16)
+            putShort(1)
+            putShort(1)
+            putInt(sampleRate)
+            putInt(sampleRate * 2)
+            putShort(2)
+            putShort(16)
+            put('d'.code.toByte())
+            put('a'.code.toByte())
+            put('t'.code.toByte())
+            put('a'.code.toByte())
             putInt(dataSize)
         }
 

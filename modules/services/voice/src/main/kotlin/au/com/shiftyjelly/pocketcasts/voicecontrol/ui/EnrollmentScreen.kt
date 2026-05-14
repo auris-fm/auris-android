@@ -16,6 +16,7 @@ import androidx.compose.material.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -30,11 +31,11 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceEnrollmentManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceEnrollmentState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceUtteranceClip
 import kotlinx.coroutines.Dispatchers
-import timber.log.Timber
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import timber.log.Timber
 
 private val PHRASES = listOf(
     "The weather is nice today",
@@ -47,18 +48,19 @@ fun EnrollmentScreen(
     manager: VoiceEnrollmentManager,
     microphoneCapture: MicrophoneCapture,
     segmenter: VoiceAudioSegmenter,
-    onEnrolled: () -> Unit,
+    onEnroll: () -> Unit,
     onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val state by manager.state.collectAsState()
     val scope = rememberCoroutineScope()
-    var step by remember { mutableStateOf(0) }
+    var step by remember { mutableIntStateOf(0) }
     var utterances by remember { mutableStateOf(listOf<VoiceUtteranceClip>()) }
     var isRecording by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(32.dp),
+        modifier = modifier.fillMaxSize().padding(32.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
@@ -69,7 +71,7 @@ fun EnrollmentScreen(
             is VoiceEnrollmentState.Enrolled -> {
                 Text("Your voice has been enrolled!")
                 Spacer(Modifier.height(16.dp))
-                Button(onClick = onEnrolled) { Text("Start Voice Control") }
+                Button(onClick = onEnroll) { Text("Start Voice Control") }
             }
 
             is VoiceEnrollmentState.Enrolling -> {

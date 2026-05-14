@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voice.model
 
 import android.content.Context
+import dagger.hilt.android.qualifiers.ApplicationContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import org.tensorflow.lite.InterpreterApi
@@ -10,7 +11,7 @@ import javax.inject.Singleton
 
 @Singleton
 class SpeakerEmbedder @Inject constructor(
-    private val context: Context,
+    @ApplicationContext private val context: Context,
 ) {
     companion object {
         private const val MODEL_FILE = "speaker_embed.tflite"

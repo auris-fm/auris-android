@@ -65,7 +65,8 @@ class AndroidAudioRouteMonitor @Inject constructor(
 
             return when {
                 outputDeviceTypes.any { it.isHeadsetOutput() } -> AudioRoute.Headset(hasMicrophone = hasHeadsetInput)
-                hasA2dp -> AudioRoute.Headset(hasMicrophone = true)
+                hasA2dp && hasHeadsetInput -> AudioRoute.Headset(hasMicrophone = true)
+                hasA2dp -> AudioRoute.BluetoothA2dpOnly
                 outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER } -> AudioRoute.Speaker
                 else -> AudioRoute.Unknown
             }

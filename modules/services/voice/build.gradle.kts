@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "au.com.shiftyjelly.pocketcasts.voice"
+    namespace = "au.com.shiftyjelly.pocketcasts.voicecontrol"
     buildFeatures {
         buildConfig = true
         prefab = true
@@ -42,6 +42,7 @@ dependencies {
     implementation(libs.coroutines.core)
     implementation(libs.android.vad.silero)
     implementation(libs.litert.api)
+    implementation(libs.litert.runtime)
     implementation(libs.litertlm.android)
     implementation(libs.oboe)
     implementation(libs.timber)

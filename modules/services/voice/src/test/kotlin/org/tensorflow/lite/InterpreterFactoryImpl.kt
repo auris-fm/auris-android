@@ -1,6 +1,6 @@
 package org.tensorflow.lite
 
-import au.com.shiftyjelly.pocketcasts.voice.model.FakeInterpreterApi
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.FakeInterpreterApi
 import java.io.File
 import java.nio.ByteBuffer
 import org.tensorflow.lite.nnapi.NnApiDelegate

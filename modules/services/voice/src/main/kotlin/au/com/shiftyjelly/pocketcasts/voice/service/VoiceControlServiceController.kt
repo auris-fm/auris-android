@@ -5,6 +5,9 @@ import android.content.Intent
 import au.com.shiftyjelly.pocketcasts.repositories.playback.AppLifecycleProvider
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGateState
+import au.com.shiftyjelly.pocketcasts.voice.model.VoiceEnrollmentManager
+import au.com.shiftyjelly.pocketcasts.voice.model.VoiceEnrollmentState
+import au.com.shiftyjelly.pocketcasts.voice.ui.EnrollmentActivity
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -21,11 +24,22 @@ import timber.log.Timber
 class VoiceControlServiceController @Inject constructor(
     @ApplicationContext private val context: Context,
     private val appLifecycleProvider: AppLifecycleProvider,
+    private val enrollmentManager: VoiceEnrollmentManager,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var isMonitoring = false
 
     fun start() {
+        // Prevent loop: if not enrolled, go directly to enrollment instead of
+        // starting the service (which would stop itself and re-trigger us).
+        if (enrollmentManager.state.value !is VoiceEnrollmentState.Enrolled) {
+            Timber.i("VoiceControlServiceController: not enrolled, launching enrollment activity")
+            val intent = Intent(context, EnrollmentActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            context.startActivity(intent)
+            return
+        }
         Timber.i("VoiceControlServiceController: starting service")
         context.startForegroundService(Intent(context, VoiceControlService::class.java))
     }

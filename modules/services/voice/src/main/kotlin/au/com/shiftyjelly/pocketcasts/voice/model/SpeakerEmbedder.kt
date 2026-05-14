@@ -48,7 +48,10 @@ class SpeakerEmbedder @Inject constructor(
     }
 
     fun embed(audio: FloatArray): FloatArray? {
-        val interp = interpreter ?: return null
+        val interp = interpreter ?: run {
+            if (!load()) return null
+            interpreter
+        } ?: return null
 
         // Resize input to match actual audio length (model has dynamic shape support)
         interp.resizeInput(0, intArrayOf(1, audio.size))

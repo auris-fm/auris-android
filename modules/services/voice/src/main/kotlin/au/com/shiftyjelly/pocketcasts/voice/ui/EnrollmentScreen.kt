@@ -106,7 +106,13 @@ fun EnrollmentScreen(
                                     utterances = utterances + clip
                                     step++
                                     if (step >= PHRASES.size) {
-                                        manager.enroll(utterances)
+                                        try {
+                                            manager.enroll(utterances)
+                                        } catch (e: Exception) {
+                                            errorMessage = "Enrollment failed: ${e.message}. Tap Record to try again."
+                                            utterances = emptyList()
+                                            step = 0
+                                        }
                                     }
                                 } else {
                                     errorMessage = "No speech detected. Please try again."

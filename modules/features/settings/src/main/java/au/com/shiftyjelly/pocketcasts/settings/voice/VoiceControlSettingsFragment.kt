@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.settings.voice
 
+import android.content.Intent
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.ViewGroup
@@ -32,7 +33,10 @@ import au.com.shiftyjelly.pocketcasts.ui.theme.Theme
 import au.com.shiftyjelly.pocketcasts.utils.extensions.pxToDp
 import au.com.shiftyjelly.pocketcasts.views.fragments.BaseFragment
 import au.com.shiftyjelly.pocketcasts.voice.model.ModelDownloadState
+import au.com.shiftyjelly.pocketcasts.voice.model.VoiceEnrollmentManager
+import au.com.shiftyjelly.pocketcasts.voice.model.VoiceEnrollmentState
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceModelManager
+import au.com.shiftyjelly.pocketcasts.voice.ui.EnrollmentActivity
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 
@@ -42,6 +46,8 @@ class VoiceControlSettingsFragment : BaseFragment() {
     @Inject lateinit var settings: Settings
 
     @Inject lateinit var voiceModelManager: VoiceModelManager
+
+    @Inject lateinit var enrollmentManager: VoiceEnrollmentManager
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -56,19 +62,26 @@ class VoiceControlSettingsFragment : BaseFragment() {
             val modelState by voiceModelManager.downloadState
                 .collectAsState(ModelDownloadState.NotStarted)
             val modelReady = voiceModelManager.isModelReady()
+            val enrollmentState by enrollmentManager.state
+                .collectAsState(VoiceEnrollmentState.NotEnrolled)
             val bottomInset = settings.bottomInset
                 .collectAsStateWithLifecycle(0)
+            val context = LocalContext.current
 
             VoiceControlSettingsPage(
                 enabled = !enabled,
                 routePolicy = policy,
                 modelReady = modelReady,
                 modelState = modelState,
+                enrollmentState = enrollmentState,
                 onEnabledChange = { checked ->
                     settings.voiceControlUserDisabled.set(!checked, updateModifiedAt = false)
                 },
                 onRoutePolicyChange = { newPolicy ->
                     settings.voiceControlAudioRoutePolicy.set(newPolicy, updateModifiedAt = false)
+                },
+                onEnrollClick = {
+                    context.startActivity(Intent(context, EnrollmentActivity::class.java))
                 },
                 onBackPress = { activity?.onBackPressedDispatcher?.onBackPressed() },
                 bottomInset = bottomInset.value.pxToDp(LocalContext.current).dp,
@@ -83,8 +96,10 @@ private fun VoiceControlSettingsPage(
     routePolicy: VoiceControlAudioRoutePolicy,
     modelReady: Boolean,
     modelState: ModelDownloadState,
+    enrollmentState: VoiceEnrollmentState,
     onEnabledChange: (Boolean) -> Unit,
     onRoutePolicyChange: (VoiceControlAudioRoutePolicy) -> Unit,
+    onEnrollClick: () -> Unit,
     onBackPress: () -> Unit,
     bottomInset: Dp,
 ) {
@@ -144,6 +159,23 @@ private fun VoiceControlSettingsPage(
                     indent = false,
                 )
             }
+            item {
+                val enrollmentText = when (enrollmentState) {
+                    is VoiceEnrollmentState.NotEnrolled -> "Not enrolled — tap to enroll your voice"
+                    is VoiceEnrollmentState.Enrolling -> "Enrolling..."
+                    is VoiceEnrollmentState.Enrolled -> "Enrolled"
+                }
+                SettingRow(
+                    primaryText = "Speaker Verification",
+                    secondaryText = enrollmentText,
+                    toggle = SettingRowToggle.None,
+                    modifier = Modifier.toggleable(
+                        value = false,
+                        role = Role.Button,
+                    ) { onEnrollClick() },
+                    indent = false,
+                )
+            }
         }
     }
 }
@@ -159,8 +191,10 @@ private fun VoiceControlSettingsPagePreview(
             routePolicy = VoiceControlAudioRoutePolicy.HeadsetOnly,
             modelReady = true,
             modelState = ModelDownloadState.Ready,
+            enrollmentState = VoiceEnrollmentState.NotEnrolled,
             onEnabledChange = {},
             onRoutePolicyChange = {},
+            onEnrollClick = {},
             onBackPress = {},
             bottomInset = 0.dp,
         )

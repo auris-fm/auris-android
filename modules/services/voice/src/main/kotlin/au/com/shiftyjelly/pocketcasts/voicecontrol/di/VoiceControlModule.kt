@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.di
 
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.WhisperRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.SileroVadSegmenter
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
@@ -9,7 +10,9 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioSegmenter
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.UserNotDisabledRule
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRule
-import au.com.shiftyjelly.pocketcasts.voicecontrol.model.Gemma4VoiceRecognizer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.SmolLmIntentParser
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.CascadedVoiceRecognizer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextRule
@@ -23,24 +26,30 @@ import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
+import java.io.File
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 
 @Module
 @InstallIn(SingletonComponent::class)
 abstract class VoiceControlModule {
+
     @Binds abstract fun bindVoiceAudioSegmenter(impl: SileroVadSegmenter): VoiceAudioSegmenter
 
-    // Gemma 4 E2B: single-model pass for ASR + structured intent generation via LiteRT-LM.
-    // Audio PCM frames from the segmenter are passed directly to the model, which returns
-    // structured JSON parsed into VoicePlaybackIntent.
-    @Binds abstract fun bindVoiceRecognizer(impl: Gemma4VoiceRecognizer): VoiceRecognizer
+    // Cascaded pipeline: Whisper ASR -> SmolLM2 360M intent parser
+    @Binds abstract fun bindVoiceRecognizer(impl: CascadedVoiceRecognizer): VoiceRecognizer
 
     @Binds abstract fun bindVoicePlaybackSink(impl: PlaybackManagerVoicePlaybackSink): VoicePlaybackSink
 
     @Binds abstract fun bindAudioRouteMonitor(impl: AndroidAudioRouteMonitor): AudioRouteMonitor
 
     companion object {
+        @Provides @Singleton
+        fun provideWhisperModelFile(manager: ModelManager): File = manager.whisperModelFile
+
+        @Provides @Singleton
+        fun provideSmolLmModelFile(manager: ModelManager): File = manager.smolLmModelFile
+
         @Provides
         @Singleton
         fun provideVoiceControlGate(

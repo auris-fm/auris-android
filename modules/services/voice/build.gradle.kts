@@ -43,7 +43,6 @@ dependencies {
     implementation(libs.android.vad.silero)
     implementation(libs.litert.api)
     implementation(libs.litert.runtime)
-    implementation(libs.litertlm.android)
     implementation(libs.oboe)
     implementation(libs.timber)
 

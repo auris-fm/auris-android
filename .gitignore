@@ -70,3 +70,6 @@ sentry.properties
 .cxx
 
 developer.properties
+
+# Claude Code local settings
+.claude/

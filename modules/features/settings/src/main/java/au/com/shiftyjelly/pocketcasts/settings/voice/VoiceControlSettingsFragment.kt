@@ -32,11 +32,11 @@ import au.com.shiftyjelly.pocketcasts.preferences.model.VoiceControlAudioRoutePo
 import au.com.shiftyjelly.pocketcasts.ui.theme.Theme
 import au.com.shiftyjelly.pocketcasts.utils.extensions.pxToDp
 import au.com.shiftyjelly.pocketcasts.views.fragments.BaseFragment
-import au.com.shiftyjelly.pocketcasts.voice.model.ModelDownloadState
-import au.com.shiftyjelly.pocketcasts.voice.model.VoiceEnrollmentManager
-import au.com.shiftyjelly.pocketcasts.voice.model.VoiceEnrollmentState
-import au.com.shiftyjelly.pocketcasts.voice.model.VoiceModelManager
-import au.com.shiftyjelly.pocketcasts.voice.ui.EnrollmentActivity
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelDownloadState
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceEnrollmentManager
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceEnrollmentState
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceModelManager
+import au.com.shiftyjelly.pocketcasts.voicecontrol.ui.EnrollmentActivity
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 

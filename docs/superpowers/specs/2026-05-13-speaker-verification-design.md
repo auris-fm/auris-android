@@ -29,7 +29,7 @@ Add speaker verification to voice control so that only the enrolled user's voice
 ### SpeakerEmbedder
 
 - Wraps a TFLite speaker embedding model (ECAPA-TDNN, ~10-15MB)
-- Runtime: `org.tensorflow:tensorflow-lite` (or LiteRT equivalent)
+- Runtime: `com.google.ai.edge.litert:litert-api:1.4.2` — shares the `libLiteRt.so` native library already bundled by `litertlm-android:0.11.0`. No additional native libs, ~50KB APK overhead.
 - Input: PCM 16kHz mono float array, variable length (adaptive pooling)
 - Output: 192-dim normalized float embedding vector
 - Runs on Dispatchers.IO, ~10-50ms per utterance

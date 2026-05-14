@@ -45,8 +45,8 @@ import au.com.shiftyjelly.pocketcasts.utils.featureflag.FeatureFlag
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBufferUncaughtExceptionHandler
 import au.com.shiftyjelly.pocketcasts.utils.log.RxJavaUncaughtExceptionHandling
-import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
-import au.com.shiftyjelly.pocketcasts.voice.service.VoiceControlServiceController
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
+import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlServiceController
 import au.com.shiftyjelly.pocketcasts.widget.PlayerWidgetManager
 import coil3.ImageLoader
 import coil3.SingletonImageLoader

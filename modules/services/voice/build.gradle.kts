@@ -17,7 +17,10 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags += listOf("-std=c++17")
-                arguments += listOf("-DANDROID_STL=c++_shared")
+                arguments += listOf(
+                    "-DANDROID_STL=c++_shared",
+                    "-DANDROID_LD_FLAGS=-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384",
+                )
             }
         }
         ndk {
@@ -43,7 +46,6 @@ dependencies {
     implementation(libs.android.vad.silero)
     implementation(libs.litert.api)
     implementation(libs.litert.runtime)
-    implementation(libs.oboe)
     implementation(libs.timber)
 
     implementation(projects.modules.services.analytics)

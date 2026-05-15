@@ -11,20 +11,27 @@ import timber.log.Timber
 class CascadedVoiceRecognizer @Inject constructor(
     private val whisperRecognizer: WhisperRecognizer,
     private val intentParser: SmolLmIntentParser,
+    private val modelManager: ModelManager,
 ) : VoiceRecognizer {
 
     override suspend fun ensureReady(): Result<Unit> {
-        val whisperReady = whisperRecognizer.isModelReady()
-        val lmReady = intentParser.isModelReady()
-        return if (whisperReady && lmReady) {
-            Result.success(Unit)
-        } else {
-            val missing = buildString {
-                if (!whisperReady) append("whisper ")
-                if (!lmReady) append("smol-lm")
-            }
-            Result.failure(Exception("Models not ready: $missing"))
-        }
+        modelManager.ensureModels().fold(
+            onSuccess = {
+                val whisperReady = whisperRecognizer.isModelReady()
+                val lmReady = intentParser.isModelReady()
+                if (whisperReady && lmReady) {
+                    return Result.success(Unit)
+                }
+                val missing = buildString {
+                    if (!whisperReady) append("whisper ")
+                    if (!lmReady) append("smol-lm")
+                }
+                return Result.failure(Exception("Models not ready: $missing"))
+            },
+            onFailure = { e ->
+                return Result.failure(e)
+            },
+        )
     }
 
     override suspend fun recognize(

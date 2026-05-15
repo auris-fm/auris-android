@@ -28,6 +28,7 @@ class VoiceControlServiceController @Inject constructor(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var isMonitoring = false
+    private var hasPromptedEnrollment = false
 
     fun start() {
         // Prevent loop: if not enrolled, go directly to enrollment instead of
@@ -44,6 +45,21 @@ class VoiceControlServiceController @Inject constructor(
         context.startForegroundService(Intent(context, VoiceControlService::class.java))
     }
 
+    /**
+     * Launches the enrollment activity if the user is not yet enrolled.
+     * Call this independently of the gate so users can enroll without
+     * needing active playback or a headset.
+     */
+    fun promptEnrollmentIfNeeded() {
+        if (enrollmentManager.state.value !is VoiceEnrollmentState.Enrolled) {
+            Timber.i("VoiceControlServiceController: not enrolled, prompting enrollment")
+            val intent = Intent(context, EnrollmentActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            context.startActivity(intent)
+        }
+    }
+
     fun stop() {
         Timber.i("VoiceControlServiceController: stopping service")
         context.stopService(Intent(context, VoiceControlService::class.java))
@@ -57,6 +73,17 @@ class VoiceControlServiceController @Inject constructor(
         combine(gate.state, appLifecycleProvider.isInForeground, enrollmentManager.state) { gateState, foreground, _ ->
             gateState to foreground
         }.onEach { (gateState, foreground) ->
+            // Prompt enrollment once when the app first becomes visible.
+            // This runs independently of the gate so the user can enroll
+            // without needing active playback or a headset.
+            if (foreground && !hasPromptedEnrollment) {
+                hasPromptedEnrollment = true
+                if (enrollmentManager.state.value !is VoiceEnrollmentState.Enrolled) {
+                    promptEnrollmentIfNeeded()
+                    return@onEach
+                }
+            }
+
             when (gateState) {
                 is VoiceControlGateState.Allowed -> {
                     if (foreground) {

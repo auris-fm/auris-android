@@ -1,11 +1,14 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.model
 
+import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import timber.log.Timber
 
 @Singleton
@@ -13,6 +16,8 @@ class VoiceEnrollmentManager @Inject constructor(
     private val store: SpeakerVerificationStore,
     private val embedder: SpeakerEmbedder,
     private val verifier: SpeakerVerifier,
+    private val modelManager: ModelManager,
+    @ApplicationScope private val scope: CoroutineScope,
 ) {
     private val _state = MutableStateFlow<VoiceEnrollmentState>(
         if (store.isEnrolled()) {
@@ -22,6 +27,18 @@ class VoiceEnrollmentManager @Inject constructor(
         },
     )
     val state: StateFlow<VoiceEnrollmentState> = _state.asStateFlow()
+
+    init {
+        // Kick off model download whenever the user becomes enrolled,
+        // whether from a fresh enrollment or a previous session.
+        scope.launch {
+            _state.collect { s ->
+                if (s is VoiceEnrollmentState.Enrolled) {
+                    modelManager.ensureModels()
+                }
+            }
+        }
+    }
 
     companion object {
         const val REQUIRED_UTTERANCES = 3

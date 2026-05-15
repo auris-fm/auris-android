@@ -9,7 +9,7 @@ static OboeAudioCapture* gCapture = nullptr;
 static std::mutex gCaptureMutex;
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_au_com_shiftyjelly_pocketcasts_voice_audio_OboeNative_nativeStartCapture(
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartCapture(
     JNIEnv* /*env*/,
     jclass /*clazz*/,
     jint sampleRate,
@@ -39,7 +39,7 @@ Java_au_com_shiftyjelly_pocketcasts_voice_audio_OboeNative_nativeStartCapture(
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_au_com_shiftyjelly_pocketcasts_voice_audio_OboeNative_nativeReadAudioData(
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeReadAudioData(
     JNIEnv* env,
     jclass /*clazz*/,
     jshortArray jBuffer)
@@ -66,7 +66,7 @@ Java_au_com_shiftyjelly_pocketcasts_voice_audio_OboeNative_nativeReadAudioData(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_au_com_shiftyjelly_pocketcasts_voice_audio_OboeNative_nativeStopCapture(
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStopCapture(
     JNIEnv* /*env*/,
     jclass /*clazz*/)
 {
@@ -77,7 +77,7 @@ Java_au_com_shiftyjelly_pocketcasts_voice_audio_OboeNative_nativeStopCapture(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_au_com_shiftyjelly_pocketcasts_voice_audio_OboeNative_nativeCloseCapture(
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeCloseCapture(
     JNIEnv* /*env*/,
     jclass /*clazz*/)
 {
@@ -87,7 +87,7 @@ Java_au_com_shiftyjelly_pocketcasts_voice_audio_OboeNative_nativeCloseCapture(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_au_com_shiftyjelly_pocketcasts_voice_audio_OboeNative_nativeIsCapturing(
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeIsCapturing(
     JNIEnv* /*env*/,
     jclass /*clazz*/)
 {

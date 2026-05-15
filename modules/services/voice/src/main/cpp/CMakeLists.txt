@@ -1,9 +1,22 @@
 cmake_minimum_required(VERSION 3.22)
 project("pocketcasts-voice-capture" CXX)
 
-find_package(oboe REQUIRED CONFIG)
+# Apply 16KB page size alignment for all shared libraries (Android 16 requirement)
+set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384")
 
 include(FetchContent)
+
+# Build Oboe from source (statically linked) to get proper 16KB segment alignment.
+# The Maven prebuilt liboboe.so has 4KB alignment and triggers the Android 16
+# compatibility warning. When used via FetchContent, Oboe detects it is a
+# subproject and builds as a static library.
+FetchContent_Declare(
+    oboe
+    GIT_REPOSITORY https://github.com/google/oboe.git
+    GIT_TAG 1.9.0
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(oboe)
 
 FetchContent_Declare(
     llamacpp
@@ -25,6 +38,13 @@ set(WHISPER_BUILD_STATIC_LIB ON CACHE BOOL "" FORCE)
 set(WHISPER_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(whispercpp)
 
+# Force 16KB page size alignment on all shared library targets for Android 16
+foreach(tgt llama whisper ggml ggml-base ggml-cpu omp)
+    if(TARGET ${tgt})
+        target_link_options(${tgt} PRIVATE -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384)
+    endif()
+endforeach()
+
 add_library(pocketcasts_voice_capture SHARED
     OboeAudioCapture.cpp
     jni_bridge.cpp
@@ -41,7 +61,7 @@ target_include_directories(pocketcasts_voice_capture PRIVATE
 )
 
 target_link_libraries(pocketcasts_voice_capture
-    oboe::oboe
+    oboe
     log
     android
     whisper

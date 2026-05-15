@@ -36,7 +36,7 @@ class ModelManagerTest {
     fun `reports ready when both model files exist`() {
         val whisperDir = File(tempDir.root, "whisper-model").apply { mkdirs() }
         val lmDir = File(tempDir.root, "smol-lm-model").apply { mkdirs() }
-        File(whisperDir, "ggml-base-multilingual.bin").writeText("fake model")
+        File(whisperDir, "ggml-base.bin").writeText("fake model")
         File(lmDir, "smolLM2-360M-instruct-Q4_K_M.gguf").writeText("fake model")
 
         val manager = ModelManager(context).apply {
@@ -50,7 +50,7 @@ class ModelManagerTest {
         val manager = ModelManager(context).apply {
             filesDir = tempDir.root
         }
-        assertEquals("ggml-base-multilingual.bin", manager.whisperModelFile.name)
+        assertEquals("ggml-base.bin", manager.whisperModelFile.name)
         assertEquals("smolLM2-360M-instruct-Q4_K_M.gguf", manager.smolLmModelFile.name)
     }
 }

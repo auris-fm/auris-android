@@ -1,5 +1,10 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -23,7 +28,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioSegmenter
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
@@ -58,6 +65,49 @@ fun EnrollmentScreen(
     var utterances by remember { mutableStateOf(listOf<VoiceUtteranceClip>()) }
     var isRecording by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+
+    val context = LocalContext.current
+
+    fun recordAndProcess() {
+        scope.launch {
+            isRecording = true
+            errorMessage = null
+            try {
+                val clip = captureUtterance(microphoneCapture, segmenter)
+                if (clip != null) {
+                    utterances = utterances + clip
+                    step++
+                    if (step >= PHRASES.size) {
+                        try {
+                            withContext(Dispatchers.IO) { manager.enroll(utterances) }
+                        } catch (e: Exception) {
+                            Timber.e(e, "Enrollment failed")
+                            errorMessage = "Enrollment failed: ${e.message}. Tap Record to try again."
+                            utterances = emptyList()
+                            step = 0
+                        }
+                    }
+                } else {
+                    errorMessage = "No speech detected. Please try again."
+                }
+            } catch (e: Exception) {
+                Timber.e(e, "Capture failed")
+                errorMessage = "Capture failed: ${e.message}. Please try again."
+            }
+            isRecording = false
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+        onResult = { granted ->
+            if (granted) {
+                recordAndProcess()
+            } else {
+                errorMessage = "Microphone permission is required for enrollment"
+            }
+        },
+    )
 
     Column(
         modifier = modifier.fillMaxSize().padding(32.dp),
@@ -101,27 +151,13 @@ fun EnrollmentScreen(
                     Spacer(Modifier.height(16.dp))
                     Button(
                         onClick = {
-                            scope.launch {
-                                isRecording = true
-                                errorMessage = null
-                                val clip = captureUtterance(microphoneCapture, segmenter)
-                                if (clip != null) {
-                                    utterances = utterances + clip
-                                    step++
-                                    if (step >= PHRASES.size) {
-                                        try {
-                                            withContext(Dispatchers.IO) { manager.enroll(utterances) }
-                                        } catch (e: Exception) {
-                                            Timber.e(e, "Enrollment failed")
-                                            errorMessage = "Enrollment failed: ${e.message}. Tap Record to try again."
-                                            utterances = emptyList()
-                                            step = 0
-                                        }
-                                    }
-                                } else {
-                                    errorMessage = "No speech detected. Please try again."
-                                }
-                                isRecording = false
+                            val permission = Manifest.permission.RECORD_AUDIO
+                            val hasPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+                                ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+                            if (hasPermission) {
+                                recordAndProcess()
+                            } else {
+                                permissionLauncher.launch(permission)
                             }
                         },
                         enabled = !isRecording,

@@ -49,6 +49,29 @@ class VoiceControlNotificationManager @Inject constructor(
     }
 
     /**
+     * Create a notification indicating that voice control models are being downloaded.
+     */
+    fun createDownloadingNotification(): Notification {
+        createNotificationChannel()
+
+        return NotificationCompat.Builder(context, CHANNEL_ID)
+            .setContentTitle("Voice Control")
+            .setContentText("Downloading voice control models…")
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setProgress(0, 0, true)
+            .build()
+    }
+
+    /**
+     * Update the foreground notification (used once models are ready).
+     */
+    fun notify(notification: Notification) {
+        notificationManager.notify(NOTIFICATION_ID, notification)
+    }
+
+    /**
      * Create a notification indicating that voice control is actively listening.
      */
     fun createListeningNotification(): Notification {

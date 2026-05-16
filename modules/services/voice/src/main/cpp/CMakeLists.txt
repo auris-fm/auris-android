@@ -113,15 +113,30 @@ if(NOT llamacpp_POPULATED)
     add_subdirectory(${llamacpp_SOURCE_DIR} ${llamacpp_BINARY_DIR})
 endif()
 
+# whisper.cpp is intentionally added AFTER llama.cpp so llama's ggml target
+# is created first. When whisper's CMakeLists.txt checks `if (NOT TARGET ggml)`,
+# it finds llama's ggml already exists, so it skips its own bundled ggml and
+# uses llama's ggml instead. This avoids target name collisions in the same
+# build tree. whisper.cpp v1.8.4's ggml-cpp.h header (required by whisper.cpp
+# for ggml_backend_ptr RAII wrapper) lives in its bundled ggml/include dir;
+# since we skip that subdirectory, we add the include path manually below.
 FetchContent_Declare(
     whispercpp
-    GIT_REPOSITORY https://github.com/ggerganov/whisper.cpp.git
-    GIT_TAG v1.7.4
+    GIT_REPOSITORY https://github.com/ggml-org/whisper.cpp.git
+    GIT_TAG v1.8.4
     GIT_SHALLOW TRUE
 )
 set(WHISPER_BUILD_STATIC_LIB ON CACHE BOOL "" FORCE)
 set(WHISPER_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(whispercpp)
+FetchContent_GetProperties(whispercpp)
+if(NOT whispercpp_POPULATED)
+    FetchContent_Populate(whispercpp)
+    add_subdirectory(${whispercpp_SOURCE_DIR} ${whispercpp_BINARY_DIR})
+    # whisper.cpp v1.8.4 uses ggml_backend_ptr (RAII wrapper from ggml-cpp.h)
+    # which lives in its bundled ggml include dir. Since llama's ggml target
+    # pre-empts the subdirectory, ggml-cpp.h isn't in the include path.
+    target_include_directories(whisper PRIVATE ${whispercpp_SOURCE_DIR}/ggml/include)
+endif()
 
 # Force 16KB page size alignment on all shared library targets for Android 16
 foreach(tgt llama whisper ggml ggml-base ggml-cpu ggml-vulkan omp)
@@ -130,7 +145,9 @@ foreach(tgt llama whisper ggml ggml-base ggml-cpu ggml-vulkan omp)
     endif()
 endforeach()
 
-# vulkan.hpp (C++ bindings) is not in the NDK. Find it on the host system.
+# vulkan.hpp (C++ bindings) and SPIRV headers are not in the NDK. Find them
+# on the host system. ggml-vulkan in b9174+ also needs spirv/unified1/spirv.hpp
+# for SPIRV reflection of compiled shaders.
 if(TARGET ggml-vulkan)
     find_path(VULKAN_HPP_PATH vulkan/vulkan.hpp
         NO_CMAKE_FIND_ROOT_PATH
@@ -138,6 +155,14 @@ if(TARGET ggml-vulkan)
     )
     if(VULKAN_HPP_PATH)
         target_include_directories(ggml-vulkan PRIVATE "${VULKAN_HPP_PATH}")
+    endif()
+
+    find_path(SPIRV_HEADERS_PATH spirv/unified1/spirv.hpp
+        NO_CMAKE_FIND_ROOT_PATH
+        HINTS "${ANDROID_NDK}/sources/third_party/shaderc/third_party/spirv-tools/external/spirv-headers/include"
+    )
+    if(SPIRV_HEADERS_PATH)
+        target_include_directories(ggml-vulkan PRIVATE "${SPIRV_HEADERS_PATH}")
     endif()
 endif()
 
@@ -148,12 +173,18 @@ add_library(pocketcasts_voice_capture SHARED
     LmJni.cpp
 )
 
+# NB: Do NOT add ${whispercpp_SOURCE_DIR}/ggml/include or
+# ${llamacpp_SOURCE_DIR}/ggml/include here. Both whisper and llama bundle their
+# own ggml headers with incompatible struct/enum definitions. Adding both to
+# the include path causes whichever comes first to shadow the other, leading
+# to redefinition errors in either whisper.cpp or LmJni.cpp depending on order.
+# The ggml headers are propagated transitively via each library's INTERFACE
+# include directories when we target_link_libraries(whisper) and
+# target_link_libraries(llama).
 target_include_directories(pocketcasts_voice_capture PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${whispercpp_SOURCE_DIR}/include
-    ${whispercpp_SOURCE_DIR}/ggml/include
     ${llamacpp_SOURCE_DIR}/include
-    ${llamacpp_SOURCE_DIR}/ggml/include
 )
 
 target_link_libraries(pocketcasts_voice_capture

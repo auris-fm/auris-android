@@ -105,7 +105,8 @@ static std::string run(const std::string& prompt) {
     // Clear the KV cache before each inference to prevent cache pollution from
     // previous runs. Without this, stale KV entries from the prior prompt cause
     // numerical instability (NaN) in the attention softmax computation.
-    llama_kv_self_clear(g_ctx);
+    // b9174 replaces llama_kv_self_clear with the memory API.
+    llama_memory_seq_rm(llama_get_memory(g_ctx), -1, -1, -1);
 
     const auto* vocab = llama_model_get_vocab(g_model);
     if (!vocab) return {};

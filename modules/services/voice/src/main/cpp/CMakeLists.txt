@@ -20,8 +20,8 @@ FetchContent_MakeAvailable(oboe)
 
 FetchContent_Declare(
     llamacpp
-    GIT_REPOSITORY https://github.com/ggerganov/llama.cpp.git
-    GIT_TAG b5079
+    GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
+    GIT_TAG b9174
     GIT_SHALLOW TRUE
 )
 set(LLAMA_STATIC ON CACHE BOOL "" FORCE)
@@ -42,13 +42,22 @@ if(NOT llamacpp_POPULATED)
     if(EXISTS "${_ninja_path}")
         set(_vk_cmake "${llamacpp_SOURCE_DIR}/ggml/src/ggml-vulkan/CMakeLists.txt")
         file(READ "${_vk_cmake}" _vk_content)
-        # Inject -DCMAKE_MAKE_PROGRAM into the ExternalProject's CMAKE_ARGS.
+        # Inject -DCMAKE_MAKE_PROGRAM into the ExternalProject's CMAKE_ARGS so the
+        # vulkan-shaders-gen sub-build uses the same build tool (ninja) as the parent.
         string(REPLACE
-            [=[                    -DGGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT=${GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT}
-            BUILD_COMMAND ${CMAKE_COMMAND} --build .]=]
-            [=[                    -DGGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT=${GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT}
-                    -DCMAKE_MAKE_PROGRAM=__NINJA_PATH__
-            BUILD_COMMAND ${CMAKE_COMMAND} --build .]=]
+            [=[        CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/$<CONFIG>
+                   -DCMAKE_INSTALL_BINDIR=.
+                   -DCMAKE_BUILD_TYPE=$<CONFIG>
+                   ${VULKAN_SHADER_GEN_CMAKE_ARGS}
+
+        BUILD_COMMAND]=]
+            [=[        CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/$<CONFIG>
+                   -DCMAKE_INSTALL_BINDIR=.
+                   -DCMAKE_BUILD_TYPE=$<CONFIG>
+                   -DCMAKE_MAKE_PROGRAM=__NINJA_PATH__
+                   ${VULKAN_SHADER_GEN_CMAKE_ARGS}
+
+        BUILD_COMMAND]=]
             _vk_content "${_vk_content}")
         string(REPLACE "__NINJA_PATH__" "${_ninja_path}" _vk_content "${_vk_content}")
         file(WRITE "${_vk_cmake}" "${_vk_content}")

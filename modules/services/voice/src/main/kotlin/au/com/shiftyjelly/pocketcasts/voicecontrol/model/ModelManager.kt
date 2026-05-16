@@ -14,6 +14,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
@@ -21,15 +23,18 @@ import timber.log.Timber
 class ModelManager @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
+    private val downloadMutex = Mutex()
     companion object {
         const val WHISPER_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
-        const val SMOL_LM_URL = "https://huggingface.co/mfuntowicz/SmolLM2-360M-Instruct-Q4_K_M-GGUF/resolve/main/smollm2-360m-instruct-q4_k_m.gguf"
+        // bartowski's GGUF conversion is the most reliable — mfuntowicz's
+        // version had corrupted fp16 quantization scales causing NaN crashes.
+        const val SMOL_LM_URL = "https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf"
 
         @VisibleForTesting
         internal const val WHISPER_SHA256 = "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"
 
         @VisibleForTesting
-        internal const val SMOL_LM_SHA256 = "8856952e27c65a87618f8347d1d06328c3953af04e8327b6dd1fab6670358fd0"
+        internal const val SMOL_LM_SHA256 = "2fa3f013dcdd7b99f9b237717fa0b12d75bbb89984cc1274be1471a465bac9c2"
     }
 
     @VisibleForTesting
@@ -53,18 +58,25 @@ class ModelManager @Inject constructor(
             _downloadState.value = ModelDownloadState.Ready
             return@withContext Result.success(Unit)
         }
-        try {
-            whisperDir.mkdirs()
-            smolLmDir.mkdirs()
-            downloadFile(WHISPER_URL, whisperModelFile, "whisper", WHISPER_SHA256)
-            downloadFile(SMOL_LM_URL, smolLmModelFile, "SmolLM", SMOL_LM_SHA256)
-            _downloadState.value = ModelDownloadState.Ready
-            Result.success(Unit)
-        } catch (e: Exception) {
-            Timber.e(e, "Model download failed")
-            _downloadState.value = ModelDownloadState.Failed(e.message ?: "Unknown error")
-            Result.failure(e)
-        }
+        downloadMutex.withLock {
+            // Double-check after acquiring lock — another coroutine may have finished
+            if (areModelsReady()) {
+                _downloadState.value = ModelDownloadState.Ready
+                return@withContext Result.success(Unit)
+            }
+            try {
+                whisperDir.mkdirs()
+                smolLmDir.mkdirs()
+                downloadFile(WHISPER_URL, whisperModelFile, "whisper", WHISPER_SHA256)
+                downloadFile(SMOL_LM_URL, smolLmModelFile, "SmolLM", SMOL_LM_SHA256)
+                _downloadState.value = ModelDownloadState.Ready
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Timber.e(e, "Model download failed")
+                _downloadState.value = ModelDownloadState.Failed(e.message ?: "Unknown error")
+                Result.failure(e)
+            }
+        } // downloadMutex.withLock
     }
 
     /**
@@ -74,8 +86,13 @@ class ModelManager @Inject constructor(
      */
     private fun downloadFile(urlStr: String, dest: File, label: String, expectedSha256: String) {
         if (dest.exists()) {
-            Timber.i("$label model already downloaded")
-            return
+            // Verify SHA256 even when file exists so model changes auto-redownload.
+            if (sha256Matches(dest, expectedSha256)) {
+                Timber.i("$label model already downloaded (SHA256 verified)")
+                return
+            }
+            Timber.w("$label model file exists but SHA256 mismatch, re-downloading")
+            dest.delete()
         }
         Timber.i("$label model download starting from $urlStr")
         val tmpFile = File(dest.parentFile, "${dest.name}.tmp")
@@ -133,7 +150,7 @@ class ModelManager @Inject constructor(
         }
     }
 
-    private fun verifySha256(file: File, expected: String, label: String) {
+    private fun computeSha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { input ->
             val buffer = ByteArray(65536)
@@ -142,7 +159,19 @@ class ModelManager @Inject constructor(
                 digest.update(buffer, 0, read)
             }
         }
-        val actual = digest.digest().joinToString("") { "%02x".format(it) }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun sha256Matches(file: File, expected: String): Boolean {
+        return try {
+            computeSha256(file) == expected
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun verifySha256(file: File, expected: String, label: String) {
+        val actual = computeSha256(file)
         if (actual != expected) {
             file.delete()
             Timber.e("$label model hash mismatch — got $actual, expected $expected")

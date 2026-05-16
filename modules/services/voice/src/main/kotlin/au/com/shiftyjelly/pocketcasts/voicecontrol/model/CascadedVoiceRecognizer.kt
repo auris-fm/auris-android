@@ -15,6 +15,7 @@ class CascadedVoiceRecognizer @Inject constructor(
 ) : VoiceRecognizer {
 
     override suspend fun ensureReady(): Result<Unit> {
+        Timber.i("Ensuring voice recognition models are ready")
         modelManager.ensureModels().fold(
             onSuccess = {
                 val whisperReady = whisperRecognizer.isModelReady()
@@ -26,9 +27,11 @@ class CascadedVoiceRecognizer @Inject constructor(
                     if (!whisperReady) append("whisper ")
                     if (!lmReady) append("smol-lm")
                 }
+                Timber.w("Models downloaded but still missing: %s", missing)
                 return Result.failure(Exception("Models not ready: $missing"))
             },
             onFailure = { e ->
+                Timber.e(e, "Model download failed")
                 return Result.failure(e)
             },
         )
@@ -38,11 +41,17 @@ class CascadedVoiceRecognizer @Inject constructor(
         clip: VoiceUtteranceClip,
         context: VoiceRecognitionContext,
     ): VoicePlaybackIntent? {
+        val t0 = System.currentTimeMillis()
         val transcript = whisperRecognizer.transcribe(clip)
+        val t1 = System.currentTimeMillis()
+        Timber.i("Whisper transcribe: %dms, text='%s'", t1 - t0, transcript)
         if (transcript.isBlank()) {
             Timber.w("Whisper: empty transcript, skipping intent parsing")
             return null
         }
-        return intentParser.parseIntent(transcript, context)
+        val intent = intentParser.parseIntent(transcript, context)
+        val t2 = System.currentTimeMillis()
+        Timber.i("SmolLM parseIntent: %dms, intent=%s", t2 - t1, intent)
+        return intent
     }
 }

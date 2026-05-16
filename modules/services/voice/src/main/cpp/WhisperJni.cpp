@@ -16,13 +16,11 @@ static std::mutex g_mutex;
 static whisper_context* g_ctx = nullptr;
 static std::string g_model_path;
 
-// Workaround ggml Vulkan driver crashes on some GPUs. These env vars disable
-// the problematic extensions (cooperative matrix, fp16 compute) that trigger
-// VK_ERROR_DEVICE_LOST on various Android GPU drivers.
+// Disable FP16 compute to avoid VK_ERROR_DEVICE_LOST on Mali-G715 (Pixel 8 / Tensor G3).
+// Cooperative matrix is kept enabled — tested stable with llama.cpp b9174 on this device.
 static void initVulkanEnv() {
     static bool done = false;
     if (done) return;
-    setenv("GGML_VK_DISABLE_COOPMAT", "1", 1);
     setenv("GGML_VK_DISABLE_F16", "1", 1);
     done = true;
 }

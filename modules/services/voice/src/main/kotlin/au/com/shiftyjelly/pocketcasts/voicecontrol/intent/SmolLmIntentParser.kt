@@ -57,9 +57,13 @@ open class SmolLmIntentParser @Inject constructor(
             is PlaybackContext.Active -> "Current playback state: ${if (pc.isPlaying) "playing" else "paused"}"
             PlaybackContext.Inactive -> "Current playback state: inactive"
         }
-        return """<|system|>
-You are a voice command processor for a podcast player. Given a transcript of the user's speech, respond with ONLY a JSON object representing the closest matching intent. Available intents:
+        return """<|im_start|>system
+You are a voice command processor for a podcast player. Output ONLY a single JSON object matching the user's intent. No greetings, no explanations, no natural language — just raw JSON.
 
+If the speech is not clearly a playback command, output {"intent": "none"}.
+
+Available intents:
+{"intent": "none"}
 {"intent": "pause"}
 {"intent": "resume"}
 {"intent": "seek_relative", "delta_seconds": <positive integer>}
@@ -100,35 +104,39 @@ Common aliases:
 
 $playbackInfo
 Audio route: ${ctx.audioRoute}
-If the speech is not a playback command, respond with {"intent": "none"}.
-<|user|>
+<|im_end|>
+<|im_start|>user
 $transcript
-<|assistant|>
-        """.trimIndent()
+<|im_end|>
+<|im_start|>assistant"""
     }
 
     internal fun parseIntentJson(output: String): VoicePlaybackIntent? {
         if (output.isBlank()) return null
-        return try {
-            val trimmed = output.trim()
-            val jsonStart = trimmed.indexOf('{')
-            val jsonEnd = trimmed.lastIndexOf('}')
-            if (jsonStart == -1 || jsonEnd == -1) return null
+        val trimmed = output.trim().lowercase()
+        // Try JSON format first: {"intent": "pause", ...}
+        val jsonStart = trimmed.indexOf('{')
+        val jsonEnd = trimmed.lastIndexOf('}')
+        if (jsonStart != -1 && jsonEnd != -1) {
             val json = trimmed.substring(jsonStart, jsonEnd + 1)
-            val intent = extractJsonString(json, "intent") ?: return null
-            if (intent == "none") return null
-            parseKnownIntent(intent, json)
-        } catch (e: Exception) {
-            Timber.w(e, "SmolLM: failed to parse intent JSON")
-            null
+            val intent = extractJsonString(json, "intent")
+            if (intent != null) {
+                if (intent == "none") return null
+                return parseKnownIntent(intent, json)
+            }
         }
+        // Fallback: single-word classification
+        val word = trimmed.replace(Regex("[^a-zA-Z_]"), "").trim()
+        if (word.isBlank()) return null
+        if (word == "none") return null
+        return parseKnownIntent(word, "{\"intent\": \"$word\"}")
     }
 
     private fun parseKnownIntent(intent: String, json: String): VoicePlaybackIntent? {
         return when (intent) {
-            "pause" -> VoicePlaybackIntent.Pause
+            "pause", "stop" -> VoicePlaybackIntent.Pause
 
-            "resume" -> VoicePlaybackIntent.Resume
+            "resume", "play" -> VoicePlaybackIntent.Resume
 
             "seek_relative" -> VoicePlaybackIntent.SeekRelative(
                 (extractJsonDouble(json, "delta_seconds") ?: 30.0).let { (it * 1000).toInt() },

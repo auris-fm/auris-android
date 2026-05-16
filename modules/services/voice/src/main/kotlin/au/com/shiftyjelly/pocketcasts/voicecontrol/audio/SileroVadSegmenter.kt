@@ -40,7 +40,11 @@ class SileroVadSegmenter @Inject constructor(
 
     /** Rolling buffer of recent frames to include as context before VAD triggers. */
     private val contextFrames = ArrayDeque<PcmAudioFrame>()
-    private val maxContextFrames = 5 // ~600ms of context at 120ms/frame
+    private val maxContextFrames = 20 // ~1.28s of pre-speech context (1024 samples/frame @16kHz = 64ms)
+
+    /** Post-speech drain: keep accumulating frames after silence so whisper sees trailing audio. */
+    private val postSpeechDrainFrames = 10 // ~640ms
+    private var drainRemaining = 0
 
     override fun process(frame: PcmAudioFrame): VoiceSegmenterResult {
         val now = System.currentTimeMillis()
@@ -75,6 +79,7 @@ class SileroVadSegmenter @Inject constructor(
 
         if (currentSpeech) {
             consecutiveSilentFrames = 0
+            drainRemaining = 0 // Cancel any drain if speech resumes
             if (!speechActive) {
                 contextFrames.forEach { accumulatedFrames.add(it) }
             }
@@ -83,17 +88,13 @@ class SileroVadSegmenter @Inject constructor(
             if (!speechActive) {
                 speechActive = true
                 speechStartTimeMs = now
-                contextFrames.addLast(frame)
-                if (contextFrames.size > maxContextFrames) contextFrames.removeFirst()
                 return VoiceSegmenterResult.SpeechStarted
             }
-            contextFrames.addLast(frame)
-            if (contextFrames.size > maxContextFrames) contextFrames.removeFirst()
             return VoiceSegmenterResult.SpeechContinuing
         }
 
-        // Keep rolling context, don't add if it would push out speech frames
-        if (!speechActive) {
+        // Keep rolling context when not in speech or drain
+        if (!speechActive && drainRemaining <= 0) {
             contextFrames.addLast(frame)
             if (contextFrames.size > maxContextFrames) contextFrames.removeFirst()
         }
@@ -101,9 +102,19 @@ class SileroVadSegmenter @Inject constructor(
         if (speechActive) {
             consecutiveSilentFrames++
             if (consecutiveSilentFrames >= silenceTimeoutFrames) {
-                val segment = accumulatedFrames.toList()
-                reset()
-                return VoiceSegmenterResult.SpeechEnded(segment)
+                // Enter or continue post-speech drain
+                if (drainRemaining <= 0) {
+                    drainRemaining = postSpeechDrainFrames
+                }
+                drainRemaining--
+                accumulatedFrames.add(frame)
+                if (drainRemaining > 0) {
+                    return VoiceSegmenterResult.SpeechContinuing
+                } else {
+                    val segment = accumulatedFrames.toList()
+                    reset()
+                    return VoiceSegmenterResult.SpeechEnded(segment)
+                }
             }
             accumulatedFrames.add(frame)
             return VoiceSegmenterResult.SpeechContinuing
@@ -120,6 +131,7 @@ class SileroVadSegmenter @Inject constructor(
         consecutiveSilentFrames = 0
         accumulatedFrames.clear()
         contextFrames.clear()
+        drainRemaining = 0
         cooldownUntilMs = System.currentTimeMillis() + 1500L
     }
 }

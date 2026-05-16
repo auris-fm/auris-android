@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
+import android.app.Notification
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
@@ -107,8 +108,9 @@ class VoiceControlService : Service() {
             return
         }
 
-        val notification = notificationManager.createListeningNotification()
-        startForeground(notificationManager.notificationId, notification)
+        // Show a "downloading" notification until models are ready
+        val downloadingNotification = notificationManager.createDownloadingNotification()
+        startForeground(notificationManager.notificationId, downloadingNotification)
 
         gate.state.onEach { state ->
             if (state is VoiceControlGateState.Blocked) {
@@ -118,9 +120,15 @@ class VoiceControlService : Service() {
         }.launchIn(serviceScope)
 
         serviceScope.launch(Dispatchers.IO) {
+            Timber.i("Voice recognizer ensureReady starting")
             voiceRecognizer.ensureReady().fold(
                 onSuccess = {
-                    launch(Dispatchers.Main) { startAudioCapture() }
+                    Timber.i("Voice recognizer ready, starting audio capture")
+                    launch(Dispatchers.Main) {
+                        val notification = notificationManager.createListeningNotification()
+                        notificationManager.notify(notification)
+                        startAudioCapture()
+                    }
                 },
                 onFailure = { e ->
                     Timber.e(e, "Recognizer not ready, stopping")
@@ -171,12 +179,17 @@ class VoiceControlService : Service() {
     }
 
     private suspend fun processUtterance(clip: VoiceUtteranceClip) {
+        val tStart = System.currentTimeMillis()
+
         // Speaker verification gate
-        if (!enrollmentManager.verify(clip)) {
-            Timber.i("Speaker verification failed, discarding utterance")
+        val tv0 = System.currentTimeMillis()
+        val verified = enrollmentManager.verify(clip)
+        val tv1 = System.currentTimeMillis()
+        if (!verified) {
+            Timber.i("Speaker verification failed (%dms)", tv1 - tv0)
             return
         }
-        Timber.i("Speaker verification passed")
+        Timber.i("Speaker verification passed (%dms)", tv1 - tv0)
 
         val recognitionContext = VoiceRecognitionContext(
             playbackContext = playbackContextMonitor.context.value,
@@ -184,6 +197,8 @@ class VoiceControlService : Service() {
         )
 
         val intent = voiceRecognizer.recognize(clip, recognitionContext)
+        val tEnd = System.currentTimeMillis()
+        Timber.i("Utterance total: %dms, intent=%s", tEnd - tStart, intent)
         if (intent != null) {
             handleIntent(clip, intent)
         }

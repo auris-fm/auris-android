@@ -105,6 +105,7 @@ val ktlintVersion = libs.versions.ktlint.asProvider().get()
 val ktlintComposeRules = libs.ktlint.compose.rules.get().toString()
 
 spotless {
+    ratchetFrom("origin/main")
     val ktLintConfigOverride = mapOf(
         "ktlint_standard_function-expression-body" to "disabled",
         "ktlint_standard_multiline-expression-wrapping" to "disabled",

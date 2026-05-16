@@ -26,7 +26,6 @@ class ModelManager @Inject constructor(
     private val downloadMutex = Mutex()
     companion object {
         const val WHISPER_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
-
         // bartowski's GGUF conversion is the most reliable — mfuntowicz's
         // version had corrupted fp16 quantization scales causing NaN crashes.
         const val SMOL_LM_URL = "https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf"

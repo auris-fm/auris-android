@@ -28,11 +28,11 @@ static void llamaLogCallback(enum ggml_log_level level, const char * text, void 
 
 static std::mutex g_mutex;
 
-// Workaround for ggml Vulkan driver crashes on some GPUs.
+// Disable FP16 compute to avoid VK_ERROR_DEVICE_LOST on Mali-G715 (Pixel 8 / Tensor G3).
+// Cooperative matrix is kept enabled — tested stable with llama.cpp b9174 on this device.
 static void initVulkanEnv() {
     static bool done = false;
     if (done) return;
-    setenv("GGML_VK_DISABLE_COOPMAT", "1", 1);
     setenv("GGML_VK_DISABLE_F16", "1", 1);
     done = true;
 }

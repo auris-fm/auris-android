@@ -17,25 +17,12 @@
 // Redirect llama.cpp's internal logging (weight errors, dimension mismatches,
 // backend selection messages) to Android logcat for diagnostics.
 static void llamaLogCallback(enum ggml_log_level level, const char * text, void * /*user_data*/) {
-    if (level <= GGML_LOG_LEVEL_ERROR) {
-        __android_log_write(ANDROID_LOG_ERROR, "llama.cpp", text);
-    } else if (level <= GGML_LOG_LEVEL_WARN) {
-        __android_log_write(ANDROID_LOG_WARN, "llama.cpp", text);
-    } else {
-        __android_log_write(ANDROID_LOG_INFO, "llama.cpp", text);
+    if (level <= GGML_LOG_LEVEL_WARN) {
+        __android_log_write(level == GGML_LOG_LEVEL_ERROR ? ANDROID_LOG_ERROR : ANDROID_LOG_WARN, "llama.cpp", text);
     }
 }
 
 static std::mutex g_mutex;
-
-// Disable FP16 compute to avoid VK_ERROR_DEVICE_LOST on Mali-G715 (Pixel 8 / Tensor G3).
-// Cooperative matrix is kept enabled — tested stable with llama.cpp b9174 on this device.
-static void initVulkanEnv() {
-    static bool done = false;
-    if (done) return;
-    setenv("GGML_VK_DISABLE_F16", "1", 1);
-    done = true;
-}
 
 static llama_model* g_model = nullptr;
 static llama_context* g_ctx = nullptr;
@@ -181,7 +168,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_intent_LmNative_parseIntent(
     JNIEnv* env, jclass, jstring j_model_path, jstring j_prompt
 ) {
     std::lock_guard<std::mutex> lock(g_mutex);
-    initVulkanEnv();
+    ggml_log_set(llamaLogCallback, nullptr);
     llama_log_set(llamaLogCallback, nullptr);
     auto modelPath = jstringToString(env, j_model_path);
     if (!ensureModel(modelPath)) return stringToJstring(env, "");

@@ -1,10 +1,10 @@
-# Voice Control Foundation Implementation Plan
+# Voice Control Core — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Spec:** [voice-control-core spec](../specs/voice-control-core.md) — architecture, interfaces, gate policies, lifecycle, error handling.
+
+> **For agentic workers:** Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the Android voice-control foundation: module wiring, core settings, gate policy, audio route detection, microphone segmenter, typed intents, playback executor, foreground service shell, and tests.
-
-**Architecture:** Add a new `:modules:services:voice` service module that depends on existing playback/repository services instead of modifying player UI first. The module exposes small interfaces for gate rules, route monitoring, segmentation, recognition, intent interpretation, and playback execution so Gemma 4 and speaker-mode echo suppression can be added after the foundation is stable. All playback mutations go through `VoicePlaybackIntentExecutor`, which validates intents and calls `PlaybackManager`.
 
 **Tech Stack:** Kotlin, Coroutines/Flow, Hilt, Android `AudioManager`, Android `AudioRecord`, foreground service with microphone type, JUnit, Mockito, Turbine.
 
@@ -12,7 +12,7 @@
 
 ## Scope
 
-This plan implements the foundation with `HeadsetOnly` as the default audio route policy and a dormant `SpeakerExperimental` policy state. It does not implement Gemma 4 inference, model download UI, transcript semantic search, or production speaker-mode echo suppression. Those should be planned after this foundation compiles, passes tests, and can run a local no-op recognizer service shell.
+This plan implements the foundation with `HeadsetOnly` as the default audio route policy and a dormant `SpeakerExperimental` policy state. It does not implement recognizer inference, model download UI, transcript semantic search, or production speaker-mode echo suppression. Those are covered in follow-up plans ([ASR Pipeline](asr-intent-pipeline.md), [Speaker Verification](speaker-verification.md)).
 
 ## File Structure
 
@@ -23,7 +23,7 @@ This plan implements the foundation with `HeadsetOnly` as the default audio rout
 - `modules/services/preferences/src/main/java/au/com/shiftyjelly/pocketcasts/preferences/model/VoiceControlAudioRoutePolicy.kt`: persisted policy enum.
 - `modules/services/preferences/src/main/java/au/com/shiftyjelly/pocketcasts/preferences/Settings.kt`: voice-control settings contract.
 - `modules/services/preferences/src/main/java/au/com/shiftyjelly/pocketcasts/preferences/SettingsImpl.kt`: voice-control settings storage.
-- `modules/services/analytics/src/main/java/au/com/shiftyjelly/pocketcasts/analytics/SourceView.kt`: add `VOICE_CONTROL` if EventHorizon exposes a matching enum; otherwise use `UNKNOWN` in the executor until analytics generation is updated.
+- `modules/services/analytics/src/main/java/au/com/shiftyjelly/pocketcasts/analytics/SourceView.kt`: add `VOICE_CONTROL` entry.
 - `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/gate/*.kt`: gate state, rules, and coordinator.
 - `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/route/*.kt`: audio route monitoring and route policy.
 - `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/audio/*.kt`: PCM frame types, audio source, and segmenter.
@@ -243,7 +243,6 @@ git commit -m "Add voice control settings"
 
 **Files:**
 - Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoicePlaybackIntent.kt`
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoiceRecognitionResult.kt`
 - Create: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoicePlaybackIntentTest.kt`
 
 - [ ] **Step 1: Write the intent test**
@@ -301,19 +300,19 @@ sealed interface VoicePlaybackIntent {
     data class ChapterByTitle(val query: String) : VoicePlaybackIntent {
         val normalizedQuery: String = query.trim()
     }
-    data class SetPlaybackSpeed(val speed: Double) : VoicePlaybackIntent
+    data object NextEpisode : VoicePlaybackIntent
+    data class SetSpeed(val speed: Double) : VoicePlaybackIntent
+    data class AdjustSpeed(val delta: Double) : VoicePlaybackIntent
+    data class SetVolume(val volume: Int) : VoicePlaybackIntent
+    data class AdjustVolume(val delta: Int) : VoicePlaybackIntent
+    data class SleepTimer(val minutes: Int) : VoicePlaybackIntent
+    data class SetTrimMode(val mode: String) : VoicePlaybackIntent
+    data class SetVolumeBoost(val enabled: Boolean) : VoicePlaybackIntent
+    data class AddBookmark(val title: String) : VoicePlaybackIntent
 }
 ```
 
-Create `VoiceRecognitionResult.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.intent
-
-data class VoiceRecognitionResult(
-    val transcript: String,
-    val confidence: Float,
-)
+This defines the full intent set. Some intents (SetTrimMode, SetVolumeBoost, AddBookmark, etc.) will be wired in a follow-up plan (see [Playback Controls](playback-controls.md)). The initial executor maps only the intents relevant to the foundation.
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -950,7 +949,9 @@ git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/vo
 git commit -m "Add energy voice segmenter"
 ```
 
-## Task 8: Add Deterministic Intent Interpreter
+## Task 8: Add Deterministic Intent Interpreter (placeholder)
+
+> **Note:** This deterministic interpreter is a **placeholder** for the foundation phase. It is superseded by `SmolLmIntentParser` in the [ASR Intent Pipeline plan](asr-intent-pipeline.md), which uses SmolLM2 via llama.cpp for intent parsing from English transcripts. Keep this task minimal — the deterministic interpreter is only needed so the foundation module compiles and passes smoke tests before the ASR pipeline is integrated.
 
 **Files:**
 - Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoiceIntentInterpreter.kt`
@@ -975,7 +976,7 @@ class DeterministicVoiceIntentInterpreterTest {
     fun `parses skip forward`() = runTest {
         assertEquals(
             VoicePlaybackIntent.SeekRelative(deltaMs = 30_000),
-            interpreter.interpret(VoiceRecognitionResult("skip forward thirty seconds", confidence = 0.95f)),
+            interpreter.interpret("skip forward thirty seconds"),
         )
     }
 
@@ -983,15 +984,15 @@ class DeterministicVoiceIntentInterpreterTest {
     fun `parses resume`() = runTest {
         assertEquals(
             VoicePlaybackIntent.Resume,
-            interpreter.interpret(VoiceRecognitionResult("resume", confidence = 0.95f)),
+            interpreter.interpret("resume"),
         )
     }
 
     @Test
-    fun `rejects low confidence`() = runTest {
+    fun `returns null for unrecognized text`() = runTest {
         assertEquals(
             null,
-            interpreter.interpret(VoiceRecognitionResult("skip forward", confidence = 0.2f)),
+            interpreter.interpret("what is the weather like"),
         )
     }
 }
@@ -1015,7 +1016,7 @@ Create `VoiceIntentInterpreter.kt`:
 package au.com.shiftyjelly.pocketcasts.voice.intent
 
 interface VoiceIntentInterpreter {
-    suspend fun interpret(result: VoiceRecognitionResult): VoicePlaybackIntent?
+    suspend fun interpret(transcript: String): VoicePlaybackIntent?
 }
 ```
 
@@ -1025,9 +1026,9 @@ Create `DeterministicVoiceIntentInterpreter.kt`:
 package au.com.shiftyjelly.pocketcasts.voice.intent
 
 class DeterministicVoiceIntentInterpreter @javax.inject.Inject constructor() : VoiceIntentInterpreter {
-    override suspend fun interpret(result: VoiceRecognitionResult): VoicePlaybackIntent? {
-        if (result.confidence < 0.7f) return null
-        val text = result.transcript.lowercase()
+    override suspend fun interpret(transcript: String): VoicePlaybackIntent? {
+        val text = transcript.lowercase().trim()
+        if (text.isBlank()) return null
         return when {
             text == "pause" || text == "stop" -> VoicePlaybackIntent.Pause
             text == "resume" || text == "play" -> VoicePlaybackIntent.Resume
@@ -1155,7 +1156,8 @@ class VoicePlaybackIntentExecutor @Inject constructor(
             VoicePlaybackIntent.PreviousChapter -> sink.previousChapter()
             is VoicePlaybackIntent.ChapterByIndex -> sink.chapterByIndex(intent.index)
             is VoicePlaybackIntent.ChapterByTitle -> Unit
-            is VoicePlaybackIntent.SetPlaybackSpeed -> Unit
+            is VoicePlaybackIntent.SetSpeed -> Unit  // wired by playback-controls plan
+            is VoicePlaybackIntent.AdjustSpeed -> Unit
         }
     }
 }
@@ -1227,16 +1229,36 @@ Create `VoiceRecognizer.kt`:
 package au.com.shiftyjelly.pocketcasts.voice.model
 
 import au.com.shiftyjelly.pocketcasts.voice.audio.PcmAudioFrame
-import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceRecognitionResult
+import au.com.shiftyjelly.pocketcasts.voice.intent.VoicePlaybackIntent
+
+data class VoiceRecognitionContext(
+    val playbackContext: PlaybackContext,
+    val audioRoute: AudioRoute,
+)
+
+data class VoiceUtteranceClip(
+    val frames: List<PcmAudioFrame>,
+    val sampleRateHz: Int = 16000,
+) {
+    companion object {
+        fun fromFrames(frames: List<PcmAudioFrame>): VoiceUtteranceClip {
+            return VoiceUtteranceClip(frames.toList(), frames.firstOrNull()?.sampleRateHz ?: 16000)
+        }
+    }
+}
 
 interface VoiceRecognizer {
-    suspend fun recognize(frames: List<PcmAudioFrame>): VoiceRecognitionResult?
+    suspend fun ensureReady(): Result<Unit>
+    suspend fun recognize(clip: VoiceUtteranceClip, context: VoiceRecognitionContext): VoicePlaybackIntent?
 }
 
 class NoOpVoiceRecognizer @javax.inject.Inject constructor() : VoiceRecognizer {
-    override suspend fun recognize(frames: List<PcmAudioFrame>): VoiceRecognitionResult? = null
+    override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+    override suspend fun recognize(clip: VoiceUtteranceClip, context: VoiceRecognitionContext): VoicePlaybackIntent? = null
 }
 ```
+
+This defines the interface that the cascaded pipeline ([ASR Intent Pipeline](asr-intent-pipeline.md)) implements. `NoOpVoiceRecognizer` is a placeholder until the real `CascadedVoiceRecognizer` is wired in.
 
 - [ ] **Step 2: Add the service shell**
 
@@ -1467,46 +1489,3 @@ git commit -m "Fix voice control foundation verification"
 ```
 
 If there are no edits after verification, do not create an empty commit.
-
-## Follow-Up Plans
-
-Create separate implementation plans for:
-
-- Gemma 4 / LiteRT-LM recognizer provider validation (provider skeleton exists, needs model binary and runtime testing).
-- First-run setup and settings UI.
-- Production speaker-mode echo suppression and false-positive evaluation.
-- Transcript-assisted section jumping.
-- Analytics source generation for voice control if `SourceViewType` does not already include a voice value.
-
-## Completed Beyond Foundation Scope
-
-The following were implemented after the foundation plan was completed:
-
-- **Pluggable VoiceRecognizer architecture**: `VoskVoiceRecognizer` (active, offline ASR processing AudioRecord PCM directly) and `Gemma4VoiceRecognizer` (placeholder for LiteRT-LM). Swappable via single `@Binds` line in `VoiceControlModule`.
-- **VoiceModelManager**: Downloads and extracts Vosk small English model (~40 MB) on first launch. Tracks download progress via `StateFlow<ModelDownloadState>`.
-- **AudioRecord pipeline**: `MicrophoneCapture` → `EnergyVoiceAudioSegmenter` → `VoiceRecognizer`. Zero audio focus impact — media playback is never interrupted.
-- **Android SpeechRecognizer rejection**: Testing confirmed `SpeechRecognizer` inherently takes audio focus and interrupts media playback. It is incompatible with continuous listening and was removed from the pipeline.
-- **Service orchestration**: `VoiceControlServiceController` observes `VoiceControlGate` state and auto-starts/stops the foreground service.
-- **Microphone lifecycle**: Mic capture starts only when gate is fully allowed (playback active + headset connected + model ready). Mic stops immediately on gate block, app kill, or background without playback. Background with active playback keeps mic on for hands-free commands.
-
-## Subsequent Phase: Gemma 4 E2B Simplification
-
-The following replaces Vosk ASR + DeterministicVoiceIntentInterpreter with Gemma 4 E2B single-pass audio-to-intent:
-
-See `task-group-gemma4-e2b-simplification.md` for the detailed implementation plan.
-
-### Key Changes
-
-- **VoiceRecognizer** interface now returns `VoicePlaybackIntent?` directly instead of `VoiceRecognitionResult?`.
-- **Gemma4VoiceRecognizer** becomes the only provider: feeds PCM audio to LiteRT-LM, parses structured JSON output.
-- **VoiceIntentInterpreter** interface and `DeterministicVoiceIntentInterpreter` are removed — ASR + intent parsing collapsed into one model.
-- **VoiceRecognitionResult** data class removed — no longer needed as an intermediate type.
-- **VoskVoiceRecognizer** removed along with Vosk library dependency.
-- **VoiceModelManager** promotes Gemma 4 E2B model management to primary (Vosk download/extraction removed).
-- **VoiceControlService** simplification: recognizer output goes directly to executor, no interpreter chaining.
-
-## Self-Review Notes
-
-- Spec coverage: this foundation covers module structure, settings, gate policy, route policy, segmenter, deterministic intent boundary, executor, service shell, and test strategy. It intentionally excludes Gemma 4 runtime, model download UI, production speaker echo suppression, and transcript semantic search, which are listed as follow-up plans because each has separate device or UX risk.
-- Red-flag scan: no unfinished markers or unspecified implementation steps remain.
-- Type consistency: plan consistently uses `VoicePlaybackIntent`, `VoiceIntentInterpreter`, `VoicePlaybackIntentExecutor`, `AudioRoutePolicyRule`, and `PlaybackContextRule`.

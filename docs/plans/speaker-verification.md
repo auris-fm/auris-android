@@ -1,10 +1,10 @@
-# Speaker Verification Implementation Plan
+# Speaker Verification — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Spec:** [speaker-verification spec](../specs/speaker-verification.md) — architecture, enrollment flow, verification gate, error handling.
+
+> **For agentic workers:** Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add speaker verification to voice control so that only the enrolled user's voice triggers commands.
-
-**Architecture:** SpeakerEmbedder (TFLite via litert-api) produces 192-dim embeddings from audio. SpeakerVerifier compares via cosine similarity. VoiceEnrollmentManager handles enrollment state. A Compose Activity provides enrollment UI. Verification gates Gemma inference in VoiceControlService.
 
 **Tech Stack:** Kotlin, LiteRT API (com.google.ai.edge.litert:litert-api:1.4.2), Jetpack Compose, SharedPreferences, Timber
 
@@ -655,7 +655,7 @@ class VoiceEnrollmentManagerTest {
         // Create 3 test utterances (1 second of silence each)
         val utterances = listOf(
             createTestUtterance(440.0),
-            createTestUtterable(660.0),
+            createTestUtterance(660.0),
             createTestUtterance(880.0),
         )
 
@@ -670,7 +670,7 @@ class VoiceEnrollmentManagerTest {
     fun `clear returns to NotEnrolled`() {
         val utterances = listOf(
             createTestUtterance(440.0),
-            createTestUtterable(660.0),
+            createTestUtterance(660.0),
             createTestUtterance(880.0),
         )
         manager.enroll(utterances)
@@ -704,7 +704,7 @@ class VoiceEnrollmentManagerTest {
         return VoiceUtteranceClip.fromFrames(frames)
     }
 
-    private fun createTestUtterable(freq: Double): VoiceUtteranceClip {
+    private fun createTestUtterance(freq: Double): VoiceUtteranceClip {
         return createTestUtterance(freq)
     }
 
@@ -725,7 +725,7 @@ class VoiceEnrollmentManagerTest {
 }
 ```
 
-Wait — I realized there's a `createTestUtterable` typo and the test code needs `PcmAudioFrame` import. Let me fix:
+Wait — I realized there's a `createTestUtterance` typo and the test code needs `PcmAudioFrame` import. Let me fix:
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1235,7 +1235,14 @@ OK let me just write the plan now with clean enough code. I'll skip writing out 
 
 **Goal:** Add speaker verification to voice control so that only the enrolled user's voice triggers commands.
 
-**Architecture:** SpeakerEmbedder (TFLite via litert-api) produces 192-dim embeddings from audio. SpeakerVerifier compares via cosine similarity. VoiceEnrollmentManager handles enrollment state machine. A Compose Activity provides enrollment UI. Verification gates Gemma inference in VoiceControlService.
+**Architecture:** SpeakerEmbedder (TFLite via litert-api) produces 192-dim embeddings from audio. SpeakerVerifier compares via cosine similarity. VoiceEnrollmentManager handles enrollment state machine. A Compose Activity provides enrollment UI. Verification gates inference in VoiceControlService.
+
+**Dependencies:** This plan assumes the following types exist from the [voice-control-core foundation plan](voice-control-core.md):
+- `VoiceUtteranceClip` — wraps PCM frames + sample rate (defined in voice-control-core Task 10)
+- `VoiceRecognitionContext` — bundles `PlaybackContext` + `AudioRoute` (defined in voice-control-core Task 10)
+- `PcmAudioFrame` — single PCM frame (defined in voice-control-core Task 7)
+
+**Route policy:** Speaker verification applies equally to all audio routes (HeadsetOnly, SpeakerExperimental, etc.). Verification is independent of route policy — if the gate allows listening, every utterance must pass speaker verification before reaching the recognizer.
 
 **Tech Stack:** Kotlin, LiteRT API (com.google.ai.edge.litert:litert-api:1.4.2), Jetpack Compose, SharedPreferences, Timber
 

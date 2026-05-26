@@ -4,6 +4,12 @@ project("pocketcasts-voice-capture" CXX)
 # Apply 16KB page size alignment for all shared libraries (Android 16 requirement)
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384")
 
+# Enable ARM v8.2-A dot product instructions for quantized matmul on CPU (whisper + ggml-cpu).
+# The NDK defaults to armv8-a which lacks these. Safe for Tensor G3 / Pixel 8 and newer.
+if(ANDROID_ABI STREQUAL "arm64-v8a")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8.2-a+dotprod")
+endif()
+
 include(FetchContent)
 
 # Build Oboe from source (statically linked) to get proper 16KB segment alignment.
@@ -27,6 +33,16 @@ FetchContent_Declare(
 set(LLAMA_STATIC ON CACHE BOOL "" FORCE)
 set(LLAMA_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+# KleidiAI integration in ggml b9174 has incomplete CMake globs for dotprod
+# kernel sources, causing linker errors on arm64. Disabled for now — the
+# -march=armv8.2-a+dotprod flag alone enables SDOT/UDOT instructions in
+# ggml's own CPU kernels, capturing most of the performance gain.
+# if(ANDROID_ABI STREQUAL "arm64-v8a")
+#     set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
+# endif()
+# LTO disabled — suspected conflict with Vulkan dispatch pipeline on Mali-G715,
+# causing GGML_ASSERT failures during inference. Re-test after ggml version bump.
+# set(GGML_LTO ON CACHE BOOL "" FORCE)
 
 # Find ninja path - ggml's vulkan-shaders-gen ExternalProject sub-build can't
 # inherit CMAKE_MAKE_PROGRAM from the parent cache.
@@ -109,6 +125,36 @@ if(NOT llamacpp_POPULATED)
         if (result != vk::Result::eNotReady) {]=]
         _vk_src_content "${_vk_src_content}")
     file(WRITE "${_vk_src}" "${_vk_src_content}")
+
+    # Re-read the (now-patched) source for the next patch.
+    file(READ "${_vk_src}" _vk_src_content)
+
+    # Patch ggml-vulkan.cpp to ensure the descriptor set pool has sufficient
+    # capacity for the full inference graph on Mali-G715. The default start-at-0
+    # with 1.5× growth can leave a shortfall when the graph has many dispatches
+    # (e.g. flash_attn disabled → explicit Q*K^T + attention*V per layer).
+    # Fix: floor the allocation at 3 full pools (768 sets) so growth is
+    # front-loaded and covers the entire graph.
+    string(REPLACE
+[=[    uint32_t needed = std::max(3 * ctx->descriptor_sets.size() / 2, size_t{ctx->pipeline_descriptor_set_requirements});]=]
+[=[    uint32_t needed = std::max(std::max(3 * ctx->descriptor_sets.size() / 2, size_t{ctx->pipeline_descriptor_set_requirements}), size_t(768));]=]
+    _vk_src_content "${_vk_src_content}")
+
+    file(WRITE "${_vk_src}" "${_vk_src_content}")
+
+    # Guard: fail the build if the descriptor set floor patch wasn't applied.
+    # Without this guard, a llama.cpp version bump that changes the target
+    # text in ggml-vulkan.cpp would silently skip the patch, causing the
+    # same descriptor-set-exhaustion crash on Mali GPUs.
+    string(FIND "${_vk_src_content}" "size_t(768)" _patch_ok)
+    if(_patch_ok EQUAL -1)
+        message(FATAL_ERROR "\n\n"
+            "ggml-vulkan.cpp descriptor-set floor patch FAILED.\n"
+            "The REPLACE pattern in ${CMAKE_CURRENT_LIST_FILE}:138\n"
+            "no longer matches ggml-vulkan.cpp in llama.cpp ${GIT_TAG}.\n"
+            "Update the old_string to match the new upstream version or\n"
+            "remove this patch if the upstream has its own fix.\n")
+    endif()
 
     add_subdirectory(${llamacpp_SOURCE_DIR} ${llamacpp_BINARY_DIR})
 endif()

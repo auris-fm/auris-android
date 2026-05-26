@@ -22,6 +22,24 @@ static void llamaLogCallback(enum ggml_log_level level, const char * text, void 
     }
 }
 
+// Vulkan backend performance tuning for Mali-G715 (Tensor G3 / Pixel 8).
+// These env vars are read by ggml-vulkan during device init and control
+// memory allocation strategy and queue selection.
+static void initVulkanEnv() {
+    static bool done = false;
+    if (done) return;
+    // Mali-G715 may not expose a dedicated compute queue. Force fallback to
+    // the graphics queue to avoid VK_ERROR_INITIALIZATION_FAILED.
+    setenv("GGML_VK_ALLOW_GRAPHICS_QUEUE", "1", 1);
+    // Cap GPU memory allocations at 512 MB and suballocation blocks at 64 MB
+    // to match Mali's heap limits and reduce fragmentation overhead.
+    // NB: 256 MB was too tight — SmolLM2 Q4_K_M's model buffer is 256.35 MiB,
+    // and inference adds ~250 MiB more (KV cache + compute buffers).
+    setenv("GGML_VK_FORCE_MAX_ALLOCATION_SIZE", "536870912", 1);
+    setenv("GGML_VK_SUBALLOCATION_BLOCK_SIZE", "67108864", 1);
+    done = true;
+}
+
 static std::mutex g_mutex;
 
 static llama_model* g_model = nullptr;
@@ -63,8 +81,15 @@ static bool ensureModel(const std::string& path) {
         // validation fails, and execution falls back to CPU entirely — causing
         // NaN crashes in SiLU from slow CPU inference.
         ctxParams.offload_kqv = true;
-        // NB: flash_attn is disabled — on Mali-G715 with Vulkan it creates 66
+        // NB: flash_attn was disabled — on Mali-G715 with Vulkan it created 66
         // graph splits vs. 2 without, causing GPU driver hangs on this device.
+        // Re-enabled for b9174 testing: the DP4A flash attention shader and
+        // shared-memory-capacity check may stabilize it. Monitor logcat for
+        // vk::DeviceLostError and revert if hangs reappear.
+        // Test result: flash_attn=ENABLED added ~4x overhead to decode and ~5-10x
+        // to generation. The Mali driver still fragments the GPU graph badly even
+        // if it doesn't crash. Disabled.
+        ctxParams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
         // Cap threads to avoid big.LITTLE contention. 4 threads is optimal on mobile ARM.
         int nThreads = static_cast<int>(std::thread::hardware_concurrency());
         if (nThreads < 2) nThreads = 2;
@@ -161,6 +186,12 @@ static std::string run(const std::string& prompt) {
     return result;
 }
 
+// Logger for ggml_abort assertion failures. The default handler writes to
+// stderr which is discarded on Android. This forwards the message to logcat.
+static void abortCallback(const char * message) {
+    __android_log_write(ANDROID_LOG_FATAL, "ggml_abort", message);
+}
+
 extern "C" {
 
 JNIEXPORT jstring JNICALL
@@ -170,6 +201,8 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_intent_LmNative_parseIntent(
     std::lock_guard<std::mutex> lock(g_mutex);
     ggml_log_set(llamaLogCallback, nullptr);
     llama_log_set(llamaLogCallback, nullptr);
+    ggml_set_abort_callback(abortCallback);
+    initVulkanEnv();
     auto modelPath = jstringToString(env, j_model_path);
     if (!ensureModel(modelPath)) return stringToJstring(env, "");
     auto prompt = jstringToString(env, j_prompt);

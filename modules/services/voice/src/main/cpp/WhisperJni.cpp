@@ -19,6 +19,20 @@ static void whisperGgmlLog(enum ggml_log_level level, const char * text, void * 
     }
 }
 
+// Vulkan backend performance tuning for Mali-G715 (Tensor G3 / Pixel 8).
+// Whisper currently runs on CPU (no Vulkan support in whisper.cpp), but the
+// ggml Vulkan backend is still initialized at library load time through the
+// shared ggml build with llama.cpp. These env vars keep it configured
+// consistently between the two JNI modules.
+static void initVulkanEnv() {
+    static bool done = false;
+    if (done) return;
+    setenv("GGML_VK_ALLOW_GRAPHICS_QUEUE", "1", 1);
+    setenv("GGML_VK_FORCE_MAX_ALLOCATION_SIZE", "536870912", 1);
+    setenv("GGML_VK_SUBALLOCATION_BLOCK_SIZE", "67108864", 1);
+    done = true;
+}
+
 static std::mutex g_mutex;
 static whisper_context* g_ctx = nullptr;
 static std::string g_model_path;
@@ -44,6 +58,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_WhisperNative_transcribe(
 ) {
     std::lock_guard<std::mutex> lock(g_mutex);
     ggml_log_set(whisperGgmlLog, nullptr);
+    initVulkanEnv();
 
     std::string modelPath = jstringToString(env, j_model_path);
     if (!ensureModel(modelPath)) return stringToJstring(env, "");

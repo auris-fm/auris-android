@@ -1,11 +1,8 @@
-# Voice Playback Controls — Design Spec
+# Playback Controls
 
 ## Summary
 
-Extend the voice command system to wire up all currently defined intents through to
-actual playback actions, and add new intents for remaining player "knobs": trim
-silence, volume boost, and bookmarks. Refactor ambiguous dual-nullable-parameter
-intents into separate types.
+Extend the voice command system to wire up all currently defined intents through to actual playback actions, and add new intents for remaining player controls: trim silence, volume boost, and bookmarks. Refactor ambiguous dual-nullable-parameter intents into separate types.
 
 ## Intents
 
@@ -52,7 +49,7 @@ sealed interface VoicePlaybackIntent {
 
 ## System Prompt
 
-Update `Gemma4VoiceRecognizer.systemPrompt`:
+Update the intent parser's system prompt:
 - Add `set_speed` with `speed` (absolute, 0.5–5.0)
 - Add `adjust_speed` with `delta` (relative adjustment)
 - Add `set_volume` with `volume` (absolute, 0–100)
@@ -61,11 +58,16 @@ Update `Gemma4VoiceRecognizer.systemPrompt`:
 - Add `set_volume_boost` with `enabled` (true/false)
 - Add `add_bookmark` with `title`
 - Keep existing intents (pause, resume, seek, chapter nav, sleep_timer, next_episode)
-- Update aliases to include trim/boost/bookmark variations
+- Update aliases to include trim/boost/bookmark variations:
+  - "louder" / "quieter" → adjust_volume
+  - "trim silence" / "silence trimming" → set_trim mode=medium
+  - "no trim" → set_trim mode=off
+  - "boost" / "turn on boost" → set_volume_boost enabled=true
+  - "bookmark this" / "save this" → add_bookmark
 
 ## Intent Parser
 
-Update `parseIntent()` in `Gemma4VoiceRecognizer`:
+Update the parse function to handle new intent types:
 - `"set_speed"` — reads `speed` (required, 0.5–5.0). Route to `SetSpeed`.
 - `"adjust_speed"` — reads `delta` (required). Route to `AdjustSpeed`.
 - `"set_volume"` — reads `volume` (required, 0–100). Route to `SetVolume`.
@@ -92,7 +94,7 @@ Map each intent to a `VoicePlaybackSink` method:
 
 ## Sink Interface — `VoicePlaybackSink`
 
-Add methods:
+Add methods to the existing interface:
 ```kotlin
 fun setSpeed(speed: Double)
 fun adjustSpeed(delta: Double)
@@ -106,14 +108,14 @@ fun addBookmark(title: String)
 
 ## `PlaybackManagerVoicePlaybackSink`
 
-Inject `SleepTimer` and `BookmarkManager` (both already `@Singleton`).
+Implementation details for the new sink methods:
 
 | Method | Implementation |
 |---|---|
 | `setSpeed(speed)` | Clamp [0.5, 5.0], update `PlaybackEffects.playbackSpeed` + `updatePlayerEffects` |
 | `adjustSpeed(delta)` | `playbackManager.getPlaybackSpeed() + delta`, clamp, same effects path |
 | `setVolume(volume)` | Scale 0–100 to `AudioManager.STREAM_MUSIC` range, call `setStreamVolume` |
-| `adjustVolume(delta)` | Read current stream volume, add delta, apply |
+| `adjustVolume(delta)` | Read current stream volume, add delta (scaled), apply |
 | `sleepAfter(minutes)` | If > 0: `sleepTimer.sleepAfter(minutes.minutes)`. Else: `sleepTimer.cancelTimer()` |
 | `setTrimMode(mode)` | Parse mode string → `TrimMode`, update `PlaybackEffects.trimMode` + `updatePlayerEffects` |
 | `setVolumeBoost(enabled)` | Update `PlaybackEffects.isVolumeBoosted` + `updatePlayerEffects` |
@@ -122,16 +124,6 @@ Inject `SleepTimer` and `BookmarkManager` (both already `@Singleton`).
 ## Analytics
 
 Add `SourceView.VOICE_COMMANDS` to the `SourceView` enum for tracking voice-initiated actions.
-
-## Files to change
-
-| File | Changes |
-|---|---|
-| `modules/services/analytics/.../SourceView.kt` | Add `VOICE_COMMANDS` entry |
-| `modules/services/voice/.../intent/VoicePlaybackIntent.kt` | Add new intent types; remove `SetPlaybackSpeed`/`SetVolume` dual-param variants |
-| `modules/services/voice/.../model/Gemma4VoiceRecognizer.kt` | Update system prompt, parseIntent branches |
-| `modules/services/voice/.../playback/VoicePlaybackIntentExecutor.kt` | Add sink methods, update executor when-branch |
-| `modules/services/voice/.../playback/VoicePlaybackSink` (in same file) | New interface methods |
 
 ## Out of scope
 

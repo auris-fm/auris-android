@@ -1,21 +1,21 @@
-# Dedicated ASR + Tiny LLM Implementation Plan
+# ASR Intent Pipeline — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Spec:** [asr-intent-pipeline spec](../specs/asr-intent-pipeline.md) — architecture, component design, language coverage, error handling.
 
-**Goal:** Replace the Gemma 4 E2B monolithic model (~2.58 GB, high WER) with a cascaded pipeline: Whisper base multilingual (ASR with translate) + SmolLM2 360M (intent parsing).
+> **For agentic workers:** Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Architecture:** Audio capture (Oboe), VAD (Silero), and speaker verification remain unchanged. The recognized audio clip is fed to whisper.cpp which transcribes/translates to English. The English text is passed to SmolLM2 360M (via llama.cpp) which outputs the same `VoicePlaybackIntent` JSON schema. Both models run on CPU via native JNI.
+**Goal:** Replace the monolithic model (~2.58 GB, high WER) with a cascaded pipeline: Moonshine base (ASR) + SmolLM2 360M (intent parsing).
 
-**Tech Stack:** whisper.cpp (ASR), llama.cpp (inference runtime for SmolLM2), Android NDK CMake, JNI, Hilt DI
+**Tech Stack:** Moonshine (ASR), llama.cpp (inference runtime for SmolLM2), Android NDK CMake, JNI, Hilt DI
 
 ---
 
-### Task 1: Set up native build for whisper.cpp + llama.cpp
+### Task 1: Set up native build for Moonshine + llama.cpp
 
 **Files:**
 - Modify: `modules/services/voice/src/main/cpp/CMakeLists.txt`
-- Create: `modules/services/voice/src/main/cpp/WhisperJni.h`
-- Create: `modules/services/voice/src/main/cpp/WhisperJni.cpp`
+- Create: `modules/services/voice/src/main/cpp/MoonshineJni.h`
+- Create: `modules/services/voice/src/main/cpp/MoonshineJni.cpp`
 - Create: `modules/services/voice/src/main/cpp/LmJni.h`
 - Create: `modules/services/voice/src/main/cpp/LmJni.cpp`
 - Create: `modules/services/voice/src/main/cpp/jni_bridge_common.h`
@@ -45,7 +45,7 @@ inline jstring stringToJstring(JNIEnv* env, const std::string& str) {
 }
 ```
 
-- [ ] **Step 2: Update `CMakeLists.txt`** to fetch and build whisper.cpp and llama.cpp, and add the JNI bridge targets
+- [ ] **Step 2: Update `CMakeLists.txt`** to fetch and build Moonshine and llama.cpp, and add the JNI bridge targets
 
 ```cmake
 cmake_minimum_required(VERSION 3.22)
@@ -54,17 +54,18 @@ project("pocketcasts-voice-capture" CXX)
 # Oboe is provided via Prefab from the Gradle dependency
 find_package(oboe REQUIRED CONFIG)
 
-# --- whisper.cpp ---
+# --- Moonshine ---
 include(FetchContent)
 FetchContent_Declare(
-    whispercpp
-    GIT_REPOSITORY https://github.com/ggerganov/whisper.cpp.git
-    GIT_TAG v1.7.4
+    moonshine
+    GIT_REPOSITORY https://github.com/moonshine-ai/moonshine.git
+    GIT_TAG main
     GIT_SHALLOW TRUE
 )
-set(WHISPER_BUILD_STATIC_LIB ON CACHE BOOL "" FORCE)
-set(WHISPER_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(whispercpp)
+# Enable C API build; disable Python bindings and tests
+set(MOONSHINE_BUILD_C_API ON CACHE BOOL "" FORCE)
+set(MOONSHINE_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(moonshine)
 
 # --- llama.cpp ---
 FetchContent_Declare(
@@ -81,13 +82,13 @@ FetchContent_MakeAvailable(llamacpp)
 add_library(pocketcasts_voice_capture SHARED
     OboeAudioCapture.cpp
     jni_bridge.cpp
-    WhisperJni.cpp
+    MoonshineJni.cpp
     LmJni.cpp
 )
 
 target_include_directories(pocketcasts_voice_capture PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${whispercpp_SOURCE_DIR}/include
+    ${moonshine_SOURCE_DIR}/c
     ${llamacpp_SOURCE_DIR}/include
     ${llamacpp_BINARY_DIR}/include  # generated common.h
 )
@@ -96,7 +97,7 @@ target_link_libraries(pocketcasts_voice_capture
     oboe::oboe
     log
     android
-    whisper_static
+    moonshine
     llama_static
 )
 
@@ -104,10 +105,12 @@ target_compile_features(pocketcasts_voice_capture PUBLIC cxx_std_17)
 target_compile_options(pocketcasts_voice_capture PRIVATE -Os -fvisibility=hidden)
 ```
 
-- [ ] **Step 3: Create `WhisperJni.h`** — header declaring the JNI function
+> **Note:** The exact CMake target name, cache variables, and include paths depend on Moonshine's CMake build. These are placeholders — consult [Moonshine's C API](https://github.com/moonshine-ai/moonshine/tree/main/c) for the actual build integration.
+
+- [ ] **Step 3: Create `MoonshineJni.h`** — header declaring the JNI function
 
 ```cpp
-// WhisperJni.h
+// MoonshineJni.h
 #pragma once
 
 #include <jni.h>
@@ -117,9 +120,9 @@ extern "C" {
 #endif
 
 JNIEXPORT jstring JNICALL
-Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_WhisperRecognizer_transcribeNative(
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_MoonshineNative_transcribe(
     JNIEnv* env,
-    jobject /* thiz */,
+    jclass /* clazz */,
     jstring model_path,
     jshortArray pcm_data,
     jint sample_rate
@@ -130,89 +133,58 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_WhisperRecognizer_transcrib
 #endif
 ```
 
-- [ ] **Step 4: Create `WhisperJni.cpp`** — implementation wrapping whisper.cpp
+- [ ] **Step 4: Create `MoonshineJni.cpp`** — implementation wrapping Moonshine's C API for ASR
 
 ```cpp
-// WhisperJni.cpp
-#include "WhisperJni.h"
+// MoonshineJni.cpp
+#include "MoonshineJni.h"
 #include "jni_bridge_common.h"
-#include "whisper.h"
+#include "moonshine.h"     // Moonshine C API header
 #include <mutex>
 #include <vector>
 
-static std::mutex g_whisper_mutex;
-static whisper_context* g_context = nullptr;
+static std::mutex g_mutex;
+static moonshine_state* g_state = nullptr;
 static std::string g_model_path;
 
-static bool ensure_model(const std::string& model_path) {
-    if (g_context && g_model_path == model_path) return true;
-    if (g_context) {
-        whisper_free(g_context);
-        g_context = nullptr;
-    }
-    struct whisper_context_params params = whisper_context_default_params();
-    g_context = whisper_init_from_file_with_params(model_path.c_str(), params);
-    g_model_path = model_path;
-    return g_context != nullptr;
+static bool ensure_model(const std::string& path) {
+    if (g_state && g_model_path == path) return true;
+    if (g_state) { moonshine_free(g_state); g_state = nullptr; }
+    g_state = moonshine_init(path.c_str());
+    g_model_path = path;
+    return g_state != nullptr;
 }
 
 extern "C" {
 
 JNIEXPORT jstring JNICALL
-Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_WhisperRecognizer_transcribeNative(
-    JNIEnv* env,
-    jobject /* thiz */,
-    jstring j_model_path,
-    jshortArray j_pcm_data,
-    jint j_sample_rate
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_MoonshineNative_transcribe(
+    JNIEnv* env, jclass, jstring j_model_path, jshortArray j_pcm_data, jint j_sample_rate
 ) {
-    std::lock_guard<std::mutex> lock(g_whisper_mutex);
+    std::lock_guard<std::mutex> lock(g_mutex);
 
-    std::string model_path = jstringToString(env, j_model_path);
-    if (!ensure_model(model_path)) {
-        return stringToJstring(env, "");
-    }
+    std::string modelPath = jstringToString(env, j_model_path);
+    if (!ensure_model(modelPath)) return stringToJstring(env, "");
 
     jsize len = env->GetArrayLength(j_pcm_data);
     jshort* elements = env->GetShortArrayElements(j_pcm_data, nullptr);
 
-    // Convert to float samples
-    std::vector<float> pcm_f32(len);
-    for (jsize i = 0; i < len; i++) {
-        pcm_f32[i] = elements[i] / 32768.0f;
-    }
+    std::vector<float> pcmF32(len);
+    for (jsize i = 0; i < len; i++) pcmF32[i] = elements[i] / 32768.0f;
     env->ReleaseShortArrayElements(j_pcm_data, elements, JNI_ABORT);
 
-    whisper_full_params wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    wparams.print_progress = false;
-    wparams.print_timestamps = false;
-    wparams.print_special = false;
-    wparams.translate = true;
-    wparams.language = "auto";
-    wparams.n_threads = 4;
-    wparams.audio_ctx = 0;
-    wparams.speed_up = false;
-    wparams.no_context = true;
-
-    if (whisper_full(g_context, wparams, pcm_f32.data(), (int)pcm_f32.size()) != 0) {
-        return stringToJstring(env, "");
-    }
-
-    std::string result;
-    int n_segments = whisper_full_n_segments(g_context);
-    for (int i = 0; i < n_segments; i++) {
-        const char* text = whisper_full_get_segment_text(g_context, i);
-        if (text) {
-            if (!result.empty()) result += " ";
-            result += text;
-        }
-    }
+    // Moonshine transcribe: audio samples → text
+    char* text = moonshine_transcribe(g_state, pcmF32.data(), (int)pcmF32.size());
+    std::string result(text ? text : "");
+    if (text) free(text);
 
     return stringToJstring(env, result);
 }
 
 } // extern "C"
 ```
+
+> **Note:** The exact Moonshine C API function signatures (`moonshine_state`, `moonshine_init`, `moonshine_transcribe`, `moonshine_free`) and header path are placeholders. Consult [Moonshine's C API](https://github.com/moonshine-ai/moonshine/tree/main/c) for the actual API.
 
 - [ ] **Step 5: Create `LmJni.h`** — header declaring the JNI function
 
@@ -350,16 +322,16 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_intent_SmolLmIntentParser_parse
 
 ```bash
 git add modules/services/voice/src/main/cpp/
-git commit -m "feat: add whisper.cpp + llama.cpp native libraries and JNI bridges"
+git commit -m "feat: add Moonshine + llama.cpp native libraries and JNI bridges"
 ```
 
 ---
 
-### Task 2: Create WhisperRecognizer Kotlin class
+### Task 2: Create MoonshineRecognizer Kotlin class
 
 **Files:**
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/WhisperRecognizer.kt`
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/WhisperRecognizer.kt` (test)
+- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/MoonshineRecognizer.kt`
+- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/MoonshineRecognizer.kt` (test)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -372,10 +344,10 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-class WhisperRecognizerTest {
+class MoonshineRecognizerTest {
     @Test
     fun `returns empty string when model not ready`() = runTest {
-        val recognizer = WhisperRecognizer(fakeNative = object : WhisperNativeBridge {
+        val recognizer = MoonshineRecognizer(fakeNative = object : MoonshineNativeBridge {
             override fun transcribe(modelPath: String, pcmData: ShortArray, sampleRate: Int): String {
                 return ""
             }
@@ -387,7 +359,7 @@ class WhisperRecognizerTest {
 
     @Test
     fun `returns transcript from native bridge`() = runTest {
-        val recognizer = WhisperRecognizer(fakeNative = object : WhisperNativeBridge {
+        val recognizer = MoonshineRecognizer(fakeNative = object : MoonshineNativeBridge {
             override fun transcribe(modelPath: String, pcmData: ShortArray, sampleRate: Int): String {
                 return "play the next episode"
             }
@@ -401,9 +373,9 @@ class WhisperRecognizerTest {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `./gradlew :modules:services:voice:testDebugUnitTest --tests "*WhisperRecognizerTest*"`
+Run: `./gradlew :modules:services:voice:testDebugUnitTest --tests "*MoonshineRecognizerTest*"`
 
-- [ ] **Step 3: Create `WhisperRecognizer.kt`**
+- [ ] **Step 3: Create `MoonshineRecognizer.kt`**
 
 ```kotlin
 package au.com.shiftyjelly.pocketcasts.voicecontrol.asr
@@ -418,11 +390,11 @@ import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.io.File
 
-interface WhisperNativeBridge {
+interface MoonshineNativeBridge {
     fun transcribe(modelPath: String, pcmData: ShortArray, sampleRate: Int): String
 }
 
-object WhisperNative : WhisperNativeBridge {
+object MoonshineNative : MoonshineNativeBridge {
     init {
         System.loadLibrary("pocketcasts_voice_capture")
     }
@@ -435,16 +407,16 @@ object WhisperNative : WhisperNativeBridge {
 }
 
 @Singleton
-class WhisperRecognizer @Inject constructor(
+class MoonshineRecognizer @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
-    private val modelDir = File(context.filesDir, "whisper-model")
-    private val modelFile = File(modelDir, "ggml-base-multilingual.bin")
+    private val modelDir = File(context.filesDir, "moonshine-model")
+    private val modelFile = File(modelDir, "moonshine-base.onnx")
 
-    private var nativeBridge: WhisperNativeBridge = WhisperNative
+    private var nativeBridge: MoonshineNativeBridge = MoonshineNative
 
     // Visible for testing
-    internal constructor(nativeBridge: WhisperNativeBridge) : this(
+    internal constructor(nativeBridge: MoonshineNativeBridge) : this(
         context = TODO("not used in test constructor"),
     ) {
         this.nativeBridge = nativeBridge
@@ -457,7 +429,7 @@ class WhisperRecognizer @Inject constructor(
     suspend fun transcribe(clip: VoiceUtteranceClip): String = withContext(Dispatchers.IO) {
         val path = modelFile.absolutePath
         if (!modelFile.exists()) {
-            Timber.w("Whisper model not ready")
+            Timber.w("Moonshine model not ready")
             return@withContext ""
         }
 
@@ -472,10 +444,10 @@ class WhisperRecognizer @Inject constructor(
 
         try {
             val text = nativeBridge.transcribe(path, allSamples, clip.sampleRateHz)
-            Timber.i("Whisper: '%s'", text)
+            Timber.i("Moonshine: '%s'", text)
             text.trim()
         } catch (e: Exception) {
-            Timber.e(e, "Whisper transcription failed")
+            Timber.e(e, "Moonshine transcription failed")
             ""
         }
     }
@@ -484,14 +456,14 @@ class WhisperRecognizer @Inject constructor(
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `./gradlew :modules:services:voice:testDebugUnitTest --tests "*WhisperRecognizerTest*"`
+Run: `./gradlew :modules:services:voice:testDebugUnitTest --tests "*MoonshineRecognizerTest*"`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/WhisperRecognizer.kt
-git add modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/WhisperRecognizerTest.kt
-git commit -m "feat: add WhisperRecognizer for ASR via whisper.cpp"
+git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/MoonshineRecognizer.kt
+git add modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/MoonshineRecognizerTest.kt
+git commit -m "feat: add MoonshineRecognizer for ASR via Moonshine"
 ```
 
 ---
@@ -842,14 +814,14 @@ git commit -m "feat: add SmolLmIntentParser for intent extraction via llama.cpp"
 - Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/model/CascadedVoiceRecognizer.kt`
 - Test: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/model/CascadedVoiceRecognizerTest.kt`
 
-This class implements the existing `VoiceRecognizer` interface and wires `WhisperRecognizer` + `SmolLmIntentParser` together.
+This class implements the existing `VoiceRecognizer` interface and wires `MoonshineRecognizer` + `SmolLmIntentParser` together.
 
 - [ ] **Step 1: Write the failing test**
 
 ```kotlin
 package au.com.shiftyjelly.pocketcasts.voicecontrol.model
 
-import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.WhisperRecognizer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.MoonshineRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.SmolLmIntentParser
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoicePlaybackIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContext
@@ -863,19 +835,19 @@ class CascadedVoiceRecognizerTest {
 
     @Test
     fun `recognize returns parsed intent on successful ASR and parsing`() = runTest {
-        val whisper = FakeWhisperRecognizer("pause the podcast")
+        val moonshine = FakeMoonshineRecognizer("pause the podcast")
         val parser = FakeIntentParser("pause")
-        val recognizer = CascadedVoiceRecognizer(whisper, parser)
+        val recognizer = CascadedVoiceRecognizer(moonshine, parser)
 
         val result = recognizer.recognize(mockClip(), mockContext())
         assertEquals(VoicePlaybackIntent.Pause, result)
     }
 
     @Test
-    fun `recognize returns null when whisper returns empty`() = runTest {
-        val whisper = FakeWhisperRecognizer("")
+    fun `recognize returns null when moonshine returns empty`() = runTest {
+        val moonshine = FakeMoonshineRecognizer("")
         val parser = FakeIntentParser("none")
-        val recognizer = CascadedVoiceRecognizer(whisper, parser)
+        val recognizer = CascadedVoiceRecognizer(moonshine, parser)
 
         val result = recognizer.recognize(mockClip(), mockContext())
         assertNull(result)
@@ -883,9 +855,9 @@ class CascadedVoiceRecognizerTest {
 
     @Test
     fun `recognize returns null when intent parser returns null`() = runTest {
-        val whisper = FakeWhisperRecognizer("what is the weather")
+        val moonshine = FakeMoonshineRecognizer("what is the weather")
         val parser = FakeIntentParser("none")
-        val recognizer = CascadedVoiceRecognizer(whisper, parser)
+        val recognizer = CascadedVoiceRecognizer(moonshine, parser)
 
         val result = recognizer.recognize(mockClip(), mockContext())
         assertNull(result)
@@ -893,9 +865,9 @@ class CascadedVoiceRecognizerTest {
 
     @Test
     fun `ensureReady succeeds when models are ready`() = runTest {
-        val whisper = FakeWhisperRecognizer("test")
+        val moonshine = FakeMoonshineRecognizer("test")
         val parser = FakeIntentParser("none")
-        val recognizer = CascadedVoiceRecognizer(whisper, parser)
+        val recognizer = CascadedVoiceRecognizer(moonshine, parser)
         // just check it doesn't throw
         recognizer.ensureReady()
     }
@@ -910,7 +882,7 @@ class CascadedVoiceRecognizerTest {
     )
 }
 
-class FakeWhisperRecognizer(private val transcript: String) : WhisperRecognizer {
+class FakeMoonshineRecognizer(private val transcript: String) : MoonshineRecognizer {
     constructor() : this("")
     override fun isModelReady(): Boolean = true
     override fun getModelPath(): String? = "/fake/path"
@@ -941,43 +913,43 @@ Run: `./gradlew :modules:services:voice:testDebugUnitTest --tests "*CascadedVoic
 
 - [ ] **Step 3: Create the implementation**
 
-Inherit the tests mean `WhisperRecognizer` and `SmolLmIntentParser` need to be open or have an interface. Since the current plan has `WhisperRecognizer` as a concrete class, we should extract interfaces or make the key methods `open`. Actually, looking at the test code above, the test fakes are designed to extend those classes. Let's make the relevant classes open, or extract an interface.
+Inherit the tests mean `MoonshineRecognizer` and `SmolLmIntentParser` need to be open or have an interface. Since the current plan has `MoonshineRecognizer` as a concrete class, we should extract interfaces or make the key methods `open`. Actually, looking at the test code above, the test fakes are designed to extend those classes. Let's make the relevant classes open, or extract an interface.
 
-Better approach: Extract a common interface for both recognizers. But the existing `VoiceRecognizer` interface is what the DI provides. `CascadedVoiceRecognizer` implements `VoiceRecognizer` and takes `WhisperRecognizer` and `SmolLmIntentParser` as constructor params.
+Better approach: Extract a common interface for both recognizers. But the existing `VoiceRecognizer` interface is what the DI provides. `CascadedVoiceRecognizer` implements `VoiceRecognizer` and takes `MoonshineRecognizer` and `SmolLmIntentParser` as constructor params.
 
-Let me simplify: Make `WhisperRecognizer` and `SmolLmIntentParser` have open methods. Actually, let me look at how the test fakes are designed...
+Let me simplify: Make `MoonshineRecognizer` and `SmolLmIntentParser` have open methods. Actually, let me look at how the test fakes are designed...
 
-The tests above have `FakeWhisperRecognizer` extending `WhisperRecognizer` and `FakeIntentParser` extending `SmolLmIntentParser`. They call superclass constructors. This won't compile as-is because the constructors have `@ApplicationContext context: Context` param. 
+The tests above have `FakeMoonshineRecognizer` extending `MoonshineRecognizer` and `FakeIntentParser` extending `SmolLmIntentParser`. They call superclass constructors. This won't compile as-is because the constructors have `@ApplicationContext context: Context` param. 
 
-Let me use a different approach: use an interface for `WhisperRecognizer` and `SmolLmIntentParser`, or make test fakes inline.
+Let me use a different approach: use an interface for `MoonshineRecognizer` and `SmolLmIntentParser`, or make test fakes inline.
 
 Actually, the cleanest approach for testing is to make `CascadedVoiceRecognizer` accept interfaces. Let me define:
 
 ```kotlin
 class CascadedVoiceRecognizer @Inject constructor(
-    private val whisperRecognizer: WhisperRecognizer,
+    private val moonshineRecognizer: MoonshineRecognizer,
     private val intentParser: SmolLmIntentParser,
 ) : VoiceRecognizer {
     ...
 }
 ```
 
-And in tests, use real instances with mocked native bridges that return known values. The `WhisperRecognizer` and `SmolLmIntentParser` already inject their native bridges via constructors for testing.
+And in tests, use real instances with mocked native bridges that return known values. The `MoonshineRecognizer` and `SmolLmIntentParser` already inject their native bridges via constructors for testing.
 
-Actually, the simplest approach: `CascadedVoiceRecognizer` takes the two concrete types as constructor parameters. The tests create real `WhisperRecognizer` and `SmolLmIntentParser` instances with fake native bridges, then pass them to `CascadedVoiceRecognizer`.
+Actually, the simplest approach: `CascadedVoiceRecognizer` takes the two concrete types as constructor parameters. The tests create real `MoonshineRecognizer` and `SmolLmIntentParser` instances with fake native bridges, then pass them to `CascadedVoiceRecognizer`.
 
 Let me rewrite the test to use that approach.
 
 ```kotlin
 @Test
 fun `recognize returns parsed intent on successful ASR and parsing`() = runTest {
-    val whisper = WhisperRecognizer(object : WhisperNativeBridge {
+    val moonshine = MoonshineRecognizer(object : MoonshineNativeBridge {
         override fun transcribe(modelPath: String, pcmData: ShortArray, sampleRate: Int) = "pause the podcast"
     })
     val parser = SmolLmIntentParser(object : LmNativeBridge {
         override fun parseIntent(modelPath: String, prompt: String) = """{"intent": "pause"}"""
     })
-    val recognizer = CascadedVoiceRecognizer(whisper, parser)
+    val recognizer = CascadedVoiceRecognizer(moonshine, parser)
     val result = recognizer.recognize(mockClip(), mockContext())
     assertEquals(VoicePlaybackIntent.Pause, result)
 }
@@ -988,7 +960,7 @@ This is cleaner. Now the `CascadedVoiceRecognizer`:
 ```kotlin
 package au.com.shiftyjelly.pocketcasts.voicecontrol.model
 
-import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.WhisperRecognizer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.MoonshineRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.SmolLmIntentParser
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoicePlaybackIntent
 import javax.inject.Inject
@@ -997,12 +969,12 @@ import timber.log.Timber
 
 @Singleton
 class CascadedVoiceRecognizer @Inject constructor(
-    private val whisperRecognizer: WhisperRecognizer,
+    private val moonshineRecognizer: MoonshineRecognizer,
     private val intentParser: SmolLmIntentParser,
 ) : VoiceRecognizer {
 
     override suspend fun ensureReady(): Result<Unit> {
-        return if (whisperRecognizer.isModelReady() && intentParser.isModelReady()) {
+        return if (moonshineRecognizer.isModelReady() && intentParser.isModelReady()) {
             Result.success(Unit)
         } else {
             Result.failure(Exception("Models not ready"))
@@ -1013,9 +985,9 @@ class CascadedVoiceRecognizer @Inject constructor(
         clip: VoiceUtteranceClip,
         context: VoiceRecognitionContext,
     ): VoicePlaybackIntent? {
-        val transcript = whisperRecognizer.transcribe(clip)
+        val transcript = moonshineRecognizer.transcribe(clip)
         if (transcript.isBlank()) {
-            Timber.w("Whisper: empty transcript")
+            Timber.w("Moonshine: empty transcript")
             return null
         }
         return intentParser.parseIntent(transcript, context)
@@ -1023,17 +995,17 @@ class CascadedVoiceRecognizer @Inject constructor(
 }
 ```
 
-OK let me also think about the `WhisperRecognizer` test constructor issue. The class has `@Inject constructor(@ApplicationContext private val context: Context)`. For testing, we add an `internal constructor(nativeBridge: WhisperNativeBridge)` that doesn't need context. The `TODO()` for context is fine since the test constructor won't use it.
+OK let me also think about the `MoonshineRecognizer` test constructor issue. The class has `@Inject constructor(@ApplicationContext private val context: Context)`. For testing, we add an `internal constructor(nativeBridge: MoonshineNativeBridge)` that doesn't need context. The `TODO()` for context is fine since the test constructor won't use it.
 
-Actually wait, looking more carefully, the `WhisperRecognizer` won't use `context` until `transcribe()` is called and it needs to check `modelFile.exists()`. In tests with fake native bridges, we never call the real `transcribe`... wait no, we do. The `transcribe()` method checks `modelFile.exists()` first. But in the test, we bypass that by using the test constructor.
+Actually wait, looking more carefully, the `MoonshineRecognizer` won't use `context` until `transcribe()` is called and it needs to check `modelFile.exists()`. In tests with fake native bridges, we never call the real `transcribe`... wait no, we do. The `transcribe()` method checks `modelFile.exists()` first. But in the test, we bypass that by using the test constructor.
 
-Wait, actually, in the test I wrote for `CascadedVoiceRecognizer`, I create `WhisperRecognizer(fakeNative)` which uses the test constructor. But then `transcribe()` is called, which accesses `modelFile`. The test constructor sets `context` to... nothing (TODO). This is a problem.
+Wait, actually, in the test I wrote for `CascadedVoiceRecognizer`, I create `MoonshineRecognizer(fakeNative)` which uses the test constructor. But then `transcribe()` is called, which accesses `modelFile`. The test constructor sets `context` to... nothing (TODO). This is a problem.
 
-Let me rethink. Since the `WhisperRecognizer` is concrete and we need it to be testable, the best approach is to have the test pass in a fake native bridge AND have the model ready check be overridable. 
+Let me rethink. Since the `MoonshineRecognizer` is concrete and we need it to be testable, the best approach is to have the test pass in a fake native bridge AND have the model ready check be overridable. 
 
-Actually, the simplest: just have the test check `modelFile.exists()` return true. Since we can't override the check easily, let me restructure `WhisperRecognizer` to accept model path as a parameter or make `isModelReady()` virtual.
+Actually, the simplest: just have the test check `modelFile.exists()` return true. Since we can't override the check easily, let me restructure `MoonshineRecognizer` to accept model path as a parameter or make `isModelReady()` virtual.
 
-Alternatively, I can make `CascadedVoiceRecognizer` direct enough that I don't need to test it separately. The `VoiceRecognizer` interface is just wiring, and component testing for `WhisperRecognizer` + `SmolLmIntentParser` individually covers the logic. Let me keep `CascadedVoiceRecognizer` simple and just test the two subcomponents individually.
+Alternatively, I can make `CascadedVoiceRecognizer` direct enough that I don't need to test it separately. The `VoiceRecognizer` interface is just wiring, and component testing for `MoonshineRecognizer` + `SmolLmIntentParser` individually covers the logic. Let me keep `CascadedVoiceRecognizer` simple and just test the two subcomponents individually.
 
 Let me simplify this task: `CascadedVoiceRecognizer` is thin wiring. The `ensureReady()` check and `recognize()` orchestration are already covered by the individual component tests. I'll skip the `CascadedVoiceRecognizerTest` file and just create the orchestrator.
 
@@ -1041,7 +1013,7 @@ Actually, let me keep the test but make it work:
 
 ```kotlin
 // Test constructor doesn't need context - for testing only
-internal constructor(nativeBridge: WhisperNativeBridge) : this(
+internal constructor(nativeBridge: MoonshineNativeBridge) : this(
     context = TODO("not used in test constructor"),
 )
 ```
@@ -1053,20 +1025,20 @@ Hmm, I need to either:
 2. Make the model path configurable in tests
 3. Have the transcribe function check model readiness differently
 
-Actually, let me rethink this. For the `CascadedVoiceRecognizer`, I can have it check `isModelReady()` separately before calling `transcribe()`. But `WhisperRecognizer.transcribe()` also checks internally.
+Actually, let me rethink this. For the `CascadedVoiceRecognizer`, I can have it check `isModelReady()` separately before calling `transcribe()`. But `MoonshineRecognizer.transcribe()` also checks internally.
 
-The simplest fix: Make `WhisperRecognizer` and `SmolLmIntentParser` accept the model directory path via constructor, defaulting to the real `context.filesDir`, and allow injection of the native bridge. Then in tests, we use the test constructor which sets the native bridge, and the model file check happens against a non-existent file.
+The simplest fix: Make `MoonshineRecognizer` and `SmolLmIntentParser` accept the model directory path via constructor, defaulting to the real `context.filesDir`, and allow injection of the native bridge. Then in tests, we use the test constructor which sets the native bridge, and the model file check happens against a non-existent file.
 
 Wait, but then the model readiness check and the transcoding check are the same. Let me just not check model file existence inside `transcribe` and `parseIntent` since the outer `CascadedVoiceRecognizer.ensureReady()` and the service layer are responsible for that. The internal methods can trust that if they're called, the model is ready.
 
-But the current design has `WhisperRecognizer.transcribe()` check `modelFile.exists()`. For a clean design:
+But the current design has `MoonshineRecognizer.transcribe()` check `modelFile.exists()`. For a clean design:
 
 Actually, let me just make it so the test constructor doesn't do the model file check. The simplest way:
 
 ```kotlin
 suspend fun transcribe(clip: VoiceUtteranceClip): String = withContext(Dispatchers.IO) {
     if (!isModelReady()) {
-        Timber.w("Whisper model not ready")
+        Timber.w("Moonshine model not ready")
         return@withContext ""
     }
     ...
@@ -1078,20 +1050,20 @@ For tests, the `isModelReady()` returns false since the file doesn't exist. So t
 OK, let me just design it better. I'll make the model path injectable:
 
 ```kotlin
-class WhisperRecognizer @Inject constructor(
+class MoonshineRecognizer @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
     @VisibleForTesting
-    internal var modelFile: File = File(context.filesDir, "whisper-model/ggml-base-multilingual.bin")
-    internal var nativeBridge: WhisperNativeBridge = WhisperNative
+    internal var modelFile: File = File(context.filesDir, "moonshine-model/moonshine-base.onnx")
+    internal var nativeBridge: MoonshineNativeBridge = MoonshineNative
     ...
 }
 ```
 
 Then in tests:
 ```kotlin
-val recognizer = WhisperRecognizer(fakeContext).apply {
-    modelFile = File("/fake/path/whisper")
+val recognizer = MoonshineRecognizer(fakeContext).apply {
+    modelFile = File("/fake/path/moonshine")
     nativeBridge = fakeBridge
 }
 ```
@@ -1109,24 +1081,24 @@ OK let me just write this cleanly now.<｜end▁of▁thinking｜>
 
 <｜｜DSML｜｜tool_calls>
 <｜｜DSML｜｜invoke name="Write">
-<｜｜DSML｜｜parameter name="content" string="true"># Dedicated ASR + Tiny LLM Implementation Plan
+<｜｜DSML｜｜parameter name="content" string="true"># ASR Intent Pipeline — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Spec:** [asr-intent-pipeline spec](../specs/asr-intent-pipeline.md) — architecture, component design, language coverage, error handling.
 
-**Goal:** Replace the Gemma 4 E2B monolithic model (~2.58 GB, high WER) with a cascaded pipeline: Whisper base multilingual (ASR with translate) + SmolLM2 360M (intent parsing).
+> **For agentic workers:** Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Architecture:** Audio capture (Oboe), VAD (Silero), and speaker verification remain unchanged. The recognized audio clip is fed to whisper.cpp which transcribes/translates to English. The English text is passed to SmolLM2 360M (via llama.cpp) which outputs the same `VoicePlaybackIntent` JSON schema. Both models run on CPU via native JNI.
+**Goal:** Replace the monolithic model (~2.58 GB, high WER) with a cascaded pipeline: Moonshine base (ASR) + SmolLM2 360M (intent parsing).
 
-**Tech Stack:** whisper.cpp (ASR), llama.cpp (inference runtime for SmolLM2), Android NDK CMake, JNI, Hilt DI
+**Tech Stack:** Moonshine (ASR), llama.cpp (inference runtime for SmolLM2), Android NDK CMake, JNI, Hilt DI
 
 ---
 
-### Task 1: Set up native build for whisper.cpp + llama.cpp
+### Task 1: Set up native build for Moonshine + llama.cpp
 
 **Files:**
 - Modify: `modules/services/voice/src/main/cpp/CMakeLists.txt`
-- Create: `modules/services/voice/src/main/cpp/WhisperJni.h`
-- Create: `modules/services/voice/src/main/cpp/WhisperJni.cpp`
+- Create: `modules/services/voice/src/main/cpp/MoonshineJni.h`
+- Create: `modules/services/voice/src/main/cpp/MoonshineJni.cpp`
 - Create: `modules/services/voice/src/main/cpp/LmJni.h`
 - Create: `modules/services/voice/src/main/cpp/LmJni.cpp`
 - Create: `modules/services/voice/src/main/cpp/jni_bridge_common.h`
@@ -1153,10 +1125,10 @@ inline jstring stringToJstring(JNIEnv* env, const std::string& str) {
 }
 ```
 
-- [ ] **Step 2: Create `WhisperJni.h`** — JNI function declaration (static native, matching `WhisperNative` object)
+- [ ] **Step 2: Create `MoonshineJni.h`** — JNI function declaration (static native, matching `MoonshineNative` object)
 
 ```cpp
-// WhisperJni.h
+// MoonshineJni.h
 #pragma once
 
 #include <jni.h>
@@ -1164,7 +1136,7 @@ inline jstring stringToJstring(JNIEnv* env, const std::string& str) {
 extern "C" {
 
 JNIEXPORT jstring JNICALL
-Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_WhisperNative_transcribe(
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_MoonshineNative_transcribe(
     JNIEnv* env,
     jclass /* clazz */,
     jstring model_path,
@@ -1175,33 +1147,32 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_WhisperNative_transcribe(
 } // extern "C"
 ```
 
-- [ ] **Step 3: Create `WhisperJni.cpp`** — whisper.cpp transcription, singleton context cached for process lifetime, thread-safe via mutex
+- [ ] **Step 3: Create `MoonshineJni.cpp`** — Moonshine transcription, singleton state cached for process lifetime, thread-safe via mutex
 
 ```cpp
-// WhisperJni.cpp
-#include "WhisperJni.h"
+// MoonshineJni.cpp
+#include "MoonshineJni.h"
 #include "jni_bridge_common.h"
-#include "whisper.h"
+#include "moonshine.h"     // Moonshine C API header
 #include <mutex>
 #include <vector>
 
 static std::mutex g_mutex;
-static whisper_context* g_ctx = nullptr;
+static moonshine_state* g_state = nullptr;
 static std::string g_model_path;
 
 static bool ensureModel(const std::string& path) {
-    if (g_ctx && g_model_path == path) return true;
-    if (g_ctx) { whisper_free(g_ctx); g_ctx = nullptr; }
-    auto params = whisper_context_default_params();
-    g_ctx = whisper_init_from_file_with_params(path.c_str(), params);
+    if (g_state && g_model_path == path) return true;
+    if (g_state) { moonshine_free(g_state); g_state = nullptr; }
+    g_state = moonshine_init(path.c_str());
     g_model_path = path;
-    return g_ctx != nullptr;
+    return g_state != nullptr;
 }
 
 extern "C" {
 
 JNIEXPORT jstring JNICALL
-Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_WhisperNative_transcribe(
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_MoonshineNative_transcribe(
     JNIEnv* env, jclass, jstring j_model_path, jshortArray j_pcm_data, jint j_sample_rate
 ) {
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -1216,33 +1187,18 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_WhisperNative_transcribe(
     for (jsize i = 0; i < len; i++) pcmF32[i] = elements[i] / 32768.0f;
     env->ReleaseShortArrayElements(j_pcm_data, elements, JNI_ABORT);
 
-    auto wparams = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
-    wparams.print_progress = false;
-    wparams.print_timestamps = false;
-    wparams.print_special = false;
-    wparams.translate = true;
-    wparams.language = "auto";
-    wparams.n_threads = 4;
-    wparams.audio_ctx = 0;
-    wparams.no_context = true;
+    // Moonshine transcribe: audio samples → text
+    char* text = moonshine_transcribe(g_state, pcmF32.data(), (int)pcmF32.size());
+    std::string result(text ? text : "");
+    if (text) free(text);
 
-    if (whisper_full(g_ctx, wparams, pcmF32.data(), (int)pcmF32.size()) != 0)
-        return stringToJstring(env, "");
-
-    std::string result;
-    int n = whisper_full_n_segments(g_ctx);
-    for (int i = 0; i < n; i++) {
-        const char* text = whisper_full_get_segment_text(g_ctx, i);
-        if (text) {
-            if (!result.empty()) result += " ";
-            result += text;
-        }
-    }
     return stringToJstring(env, result);
 }
 
 } // extern "C"
 ```
+
+> **Note:** The exact Moonshine C API function signatures and header path are placeholders. Consult [Moonshine's C API](https://github.com/moonshine-ai/moonshine/tree/main/c) for the actual API.
 
 - [ ] **Step 4: Create `LmJni.h`** — JNI function declaration (static native, matching `LmNative` object)
 
@@ -1338,7 +1294,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_intent_LmNative_parseIntent(
 } // extern "C"
 ```
 
-- [ ] **Step 6: Update `CMakeLists.txt`** — add whisper.cpp and llama.cpp as fetched dependencies, link them, add the new JNI sources
+- [ ] **Step 6: Update `CMakeLists.txt`** — add moonshine.cpp and llama.cpp as fetched dependencies, link them, add the new JNI sources
 
 ```cmake
 cmake_minimum_required(VERSION 3.22)
@@ -1349,14 +1305,14 @@ find_package(oboe REQUIRED CONFIG)
 include(FetchContent)
 
 FetchContent_Declare(
-    whispercpp
-    GIT_REPOSITORY https://github.com/ggerganov/whisper.cpp.git
-    GIT_TAG v1.7.4
+    moonshine
+    GIT_REPOSITORY https://github.com/moonshine-ai/moonshine.git
+    GIT_TAG main
     GIT_SHALLOW TRUE
 )
-set(WHISPER_BUILD_STATIC_LIB ON CACHE BOOL "" FORCE)
-set(WHISPER_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(whispercpp)
+set(MOONSHINE_BUILD_C_API ON CACHE BOOL "" FORCE)
+set(MOONSHINE_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(moonshine)
 
 FetchContent_Declare(
     llamacpp
@@ -1371,13 +1327,13 @@ FetchContent_MakeAvailable(llamacpp)
 add_library(pocketcasts_voice_capture SHARED
     OboeAudioCapture.cpp
     jni_bridge.cpp
-    WhisperJni.cpp
+    MoonshineJni.cpp
     LmJni.cpp
 )
 
 target_include_directories(pocketcasts_voice_capture PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${whispercpp_SOURCE_DIR}/include
+    ${moonshine_SOURCE_DIR}/include
     ${llamacpp_SOURCE_DIR}/include
     ${llamacpp_BINARY_DIR}/ggml/include
 )
@@ -1386,7 +1342,7 @@ target_link_libraries(pocketcasts_voice_capture
     oboe::oboe
     log
     android
-    whisper_static
+    moonshine_static
     llama_static
 )
 
@@ -1398,18 +1354,18 @@ target_compile_options(pocketcasts_voice_capture PRIVATE -Os -fvisibility=hidden
 
 ```bash
 git add modules/services/voice/src/main/cpp/
-git commit -m "feat: add whisper.cpp + llama.cpp native libraries and JNI bridges"
+git commit -m "feat: add Moonshine + llama.cpp native libraries and JNI bridges"
 ```
 
 ---
 
-### Task 2: Create WhisperRecognizer Kotlin class
+### Task 2: Create MoonshineRecognizer Kotlin class
 
 **Files:**
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/WhisperRecognizer.kt`
-- Test: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/WhisperRecognizerTest.kt`
+- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/MoonshineRecognizer.kt`
+- Test: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/MoonshineRecognizerTest.kt`
 
-`WhisperRecognizer` wraps the native whisper.cpp JNI and accepts a `VoiceUtteranceClip` returning a transcribed English string.
+`MoonshineRecognizer` wraps the Moonshine native JNI and accepts a `VoiceUtteranceClip` returning a transcribed English string.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1422,11 +1378,11 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-class WhisperRecognizerTest {
+class MoonshineRecognizerTest {
 
     @Test
     fun `returns transcript when native transcribes`() = runTest {
-        val recognizer = WhisperRecognizer(
+        val recognizer = MoonshineRecognizer(
             modelFile = java.io.File("/nonexistent"),
         ).apply {
             nativeImpl = { _, _, _ -> "play the next episode" }
@@ -1439,7 +1395,7 @@ class WhisperRecognizerTest {
 
     @Test
     fun `returns empty string on native returning empty`() = runTest {
-        val recognizer = WhisperRecognizer(
+        val recognizer = MoonshineRecognizer(
             modelFile = java.io.File("/nonexistent"),
         ).apply {
             nativeImpl = { _, _, _ -> "" }
@@ -1454,9 +1410,9 @@ class WhisperRecognizerTest {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `./gradlew :modules:services:voice:testDebugUnitTest --tests "*WhisperRecognizerTest*"`
+Run: `./gradlew :modules:services:voice:testDebugUnitTest --tests "*MoonshineRecognizerTest*"`
 
-- [ ] **Step 3: Create `WhisperRecognizer.kt`**
+- [ ] **Step 3: Create `MoonshineRecognizer.kt`**
 
 ```kotlin
 package au.com.shiftyjelly.pocketcasts.voicecontrol.asr
@@ -1469,7 +1425,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
-object WhisperNative {
+object MoonshineNative {
     init {
         System.loadLibrary("pocketcasts_voice_capture")
     }
@@ -1481,7 +1437,7 @@ object WhisperNative {
 }
 
 @Singleton
-open class WhisperRecognizer @Inject constructor(
+open class MoonshineRecognizer @Inject constructor(
     private val modelFile: File,
 ) {
     // Override in tests to avoid calling real native code
@@ -1500,11 +1456,11 @@ open class WhisperRecognizer @Inject constructor(
         }
         try {
             val text = nativeImpl?.invoke(modelFile.absolutePath, allSamples, clip.sampleRateHz)
-                ?: WhisperNative.transcribe(modelFile.absolutePath, allSamples, clip.sampleRateHz)
-            Timber.i("Whisper: '%s'", text)
+                ?: MoonshineNative.transcribe(modelFile.absolutePath, allSamples, clip.sampleRateHz)
+            Timber.i("Moonshine: '%s'", text)
             text.trim()
         } catch (e: Exception) {
-            Timber.e(e, "Whisper transcription failed")
+            Timber.e(e, "Moonshine transcription failed")
             ""
         }
     }
@@ -1515,14 +1471,14 @@ open class WhisperRecognizer @Inject constructor(
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `./gradlew :modules:services:voice:testDebugUnitTest --tests "*WhisperRecognizerTest*"`
+Run: `./gradlew :modules:services:voice:testDebugUnitTest --tests "*MoonshineRecognizerTest*"`
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/WhisperRecognizer.kt
-git add modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/WhisperRecognizerTest.kt
-git commit -m "feat: add WhisperRecognizer for ASR via whisper.cpp"
+git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/MoonshineRecognizer.kt
+git add modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/asr/MoonshineRecognizerTest.kt
+git commit -m "feat: add MoonshineRecognizer for ASR via Moonshine"
 ```
 
 ---
@@ -1799,14 +1755,14 @@ git commit -m "feat: add SmolLmIntentParser for intent extraction via llama.cpp"
 - Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/model/CascadedVoiceRecognizer.kt`
 - Test: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/model/CascadedVoiceRecognizerTest.kt`
 
-`CascadedVoiceRecognizer` implements the existing `VoiceRecognizer` interface and wires `WhisperRecognizer.transcribe()` into `SmolLmIntentParser.parseIntent()`.
+`CascadedVoiceRecognizer` implements the existing `VoiceRecognizer` interface and wires `MoonshineRecognizer.transcribe()` into `SmolLmIntentParser.parseIntent()`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```kotlin
 package au.com.shiftyjelly.pocketcasts.voicecontrol.model
 
-import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.WhisperRecognizer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.MoonshineRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.SmolLmIntentParser
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoicePlaybackIntent
@@ -1822,13 +1778,13 @@ class CascadedVoiceRecognizerTest {
 
     @Test
     fun `orchestrates ASR then intent parsing`() = runTest {
-        val whisper = WhisperRecognizer(modelFile = File("/tmp/whisper")).apply {
+        val moonshine = MoonshineRecognizer(modelFile = File("/tmp/moonshine")).apply {
             nativeImpl = { _, _, _ -> "pause" }
         }
         val parser = SmolLmIntentParser(modelFile = File("/tmp/lm")).apply {
             nativeImpl = { _, _ -> """{"intent": "pause"}""" }
         }
-        val recognizer = CascadedVoiceRecognizer(whisper, parser)
+        val recognizer = CascadedVoiceRecognizer(moonshine, parser)
         val clip = VoiceUtteranceClip.fromFrames(listOf(PcmAudioFrame(ShortArray(1600), 16000)))
         val ctx = VoiceRecognitionContext(PlaybackContext.Inactive, AudioRoute.Headset)
 
@@ -1836,14 +1792,14 @@ class CascadedVoiceRecognizerTest {
     }
 
     @Test
-    fun `returns null when whisper returns empty`() = runTest {
-        val whisper = WhisperRecognizer(modelFile = File("/tmp/whisper")).apply {
+    fun `returns null when moonshine returns empty`() = runTest {
+        val moonshine = MoonshineRecognizer(modelFile = File("/tmp/moonshine")).apply {
             nativeImpl = { _, _, _ -> "" }
         }
         val parser = SmolLmIntentParser(modelFile = File("/tmp/lm")).apply {
             nativeImpl = { _, _ -> """{"intent": "none"}""" }
         }
-        val recognizer = CascadedVoiceRecognizer(whisper, parser)
+        val recognizer = CascadedVoiceRecognizer(moonshine, parser)
         val clip = VoiceUtteranceClip.fromFrames(listOf(PcmAudioFrame(ShortArray(1600), 16000)))
         val ctx = VoiceRecognitionContext(PlaybackContext.Inactive, AudioRoute.Headset)
 
@@ -1861,7 +1817,7 @@ Run: `./gradlew :modules:services:voice:testDebugUnitTest --tests "*CascadedVoic
 ```kotlin
 package au.com.shiftyjelly.pocketcasts.voicecontrol.model
 
-import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.WhisperRecognizer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.MoonshineRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.SmolLmIntentParser
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoicePlaybackIntent
 import javax.inject.Inject
@@ -1870,18 +1826,18 @@ import timber.log.Timber
 
 @Singleton
 class CascadedVoiceRecognizer @Inject constructor(
-    private val whisperRecognizer: WhisperRecognizer,
+    private val moonshineRecognizer: MoonshineRecognizer,
     private val intentParser: SmolLmIntentParser,
 ) : VoiceRecognizer {
 
     override suspend fun ensureReady(): Result<Unit> {
-        val whisperReady = whisperRecognizer.isModelReady()
+        val moonshineReady = moonshineRecognizer.isModelReady()
         val lmReady = intentParser.isModelReady()
-        return if (whisperReady && lmReady) {
+        return if (moonshineReady && lmReady) {
             Result.success(Unit)
         } else {
             val missing = buildString {
-                if (!whisperReady) append("whisper ")
+                if (!moonshineReady) append("moonshine ")
                 if (!lmReady) append("smol-lm")
             }
             Result.failure(Exception("Models not ready: $missing"))
@@ -1892,9 +1848,9 @@ class CascadedVoiceRecognizer @Inject constructor(
         clip: VoiceUtteranceClip,
         context: VoiceRecognitionContext,
     ): VoicePlaybackIntent? {
-        val transcript = whisperRecognizer.transcribe(clip)
+        val transcript = moonshineRecognizer.transcribe(clip)
         if (transcript.isBlank()) {
-            Timber.w("Whisper: empty transcript, skipping intent parsing")
+            Timber.w("Moonshine: empty transcript, skipping intent parsing")
             return null
         }
         return intentParser.parseIntent(transcript, context)
@@ -1911,7 +1867,7 @@ Run: `./gradlew :modules:services:voice:testDebugUnitTest --tests "*CascadedVoic
 ```bash
 git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/model/CascadedVoiceRecognizer.kt
 git add modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/model/CascadedVoiceRecognizerTest.kt
-git commit -m "feat: add CascadedVoiceRecognizer orchestrating whisper + SmolLM"
+git commit -m "feat: add CascadedVoiceRecognizer orchestrating Moonshine + SmolLM"
 ```
 
 ---
@@ -1922,7 +1878,7 @@ git commit -m "feat: add CascadedVoiceRecognizer orchestrating whisper + SmolLM"
 - Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/model/ModelManager.kt`
 - Test: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/model/ModelManagerTest.kt`
 
-Replicates the resumable download pattern from `VoiceModelManager` but for the two new models (whisper base and SmolLM2 360M). Also provides `File` references for the model files so `WhisperRecognizer` and `SmolLmIntentParser` can inject them.
+Replicates the resumable download pattern from `VoiceModelManager` but for the two new models (moonshine base and SmolLM2 360M). Also provides `File` references for the model files so `MoonshineRecognizer` and `SmolLmIntentParser` can inject them.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1950,9 +1906,9 @@ class ModelManagerTest {
 
     @Test
     fun `reports ready when both markers exist`() {
-        val whisperDir = tempDir.newFolder("whisper-model")
+        val moonshineDir = tempDir.newFolder("moonshine-model")
         val lmDir = tempDir.newFolder("smol-lm-model")
-        File(whisperDir, "ggml-base-multilingual.bin").writeText("fake model")
+        File(moonshineDir, "moonshine-base.onnx").writeText("fake model")
         File(lmDir, "smolLM2-360M-instruct-Q4_K_M.gguf").writeText("fake model")
 
         val manager = ModelManager(tempDir.root)
@@ -1962,7 +1918,7 @@ class ModelManagerTest {
     @Test
     fun `provides correct model file paths`() {
         val manager = ModelManager(tempDir.root)
-        assertEquals("ggml-base-multilingual.bin", manager.whisperModelFile.name)
+        assertEquals("moonshine-base.onnx", manager.moonshineModelFile.name)
         assertEquals("smolLM2-360M-instruct-Q4_K_M.gguf", manager.smolLmModelFile.name)
     }
 }
@@ -2002,23 +1958,23 @@ class ModelManager @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
     companion object {
-        const val WHISPER_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-multilingual.bin"
-        const val WHISPER_EXPECTED_SIZE = 150_000_000L
+        const val MOONSHINE_URL = "https://huggingface.co/moonshine-ai/moonshine-base-onnx/resolve/main/moonshine-base.onnx"
+        const val MOONSHINE_EXPECTED_SIZE = 0L // TBD: measure actual model size
         const val SMOL_LM_URL = "https://huggingface.co/hugging-quants/SmolLM2-360M-Instruct-Q4_K_M-GGUF/resolve/main/smollm2-360m-instruct-q4_k_m.gguf"
         const val SMOL_LM_EXPECTED_SIZE = 200_000_000L
     }
 
-    private val whisperDir = File(context.filesDir, "whisper-model")
+    private val moonshineDir = File(context.filesDir, "moonshine-model")
     private val smolLmDir = File(context.filesDir, "smol-lm-model")
 
-    val whisperModelFile = File(whisperDir, "ggml-base-multilingual.bin")
+    val moonshineModelFile = File(moonshineDir, "moonshine-base.onnx")
     val smolLmModelFile = File(smolLmDir, "smolLM2-360M-instruct-Q4_K_M.gguf")
 
     private val _downloadState = MutableStateFlow<ModelDownloadState>(ModelDownloadState.NotStarted)
     val downloadState: StateFlow<ModelDownloadState> = _downloadState.asStateFlow()
 
     fun areModelsReady(): Boolean {
-        return whisperModelFile.exists() && whisperModelFile.length() > 0 &&
+        return moonshineModelFile.exists() && moonshineModelFile.length() > 0 &&
             smolLmModelFile.exists() && smolLmModelFile.length() > 0
     }
 
@@ -2028,9 +1984,9 @@ class ModelManager @Inject constructor(
             return@withContext Result.success(Unit)
         }
         try {
-            whisperDir.mkdirs()
+            moonshineDir.mkdirs()
             smolLmDir.mkdirs()
-            downloadFile(WHISPER_URL, whisperModelFile, WHISPER_EXPECTED_SIZE, "whisper")
+            downloadFile(MOONSHINE_URL, moonshineModelFile, MOONSHINE_EXPECTED_SIZE, "Moonshine")
             downloadFile(SMOL_LM_URL, smolLmModelFile, SMOL_LM_EXPECTED_SIZE, "SmolLM")
             _downloadState.value = ModelDownloadState.Ready
             Result.success(Unit)
@@ -2098,7 +2054,7 @@ Run: `./gradlew :modules:services:voice:testDebugUnitTest --tests "*ModelManager
 ```bash
 git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/model/ModelManager.kt
 git add modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/model/ModelManagerTest.kt
-git commit -m "feat: add ModelManager for whisper + SmolLM model downloads"
+git commit -m "feat: add ModelManager for Moonshine + SmolLM model downloads"
 ```
 
 ---
@@ -2111,7 +2067,7 @@ git commit -m "feat: add ModelManager for whisper + SmolLM model downloads"
 - Delete: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/model/Gemma4VoiceRecognizer.kt`
 - Delete: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/model/VoiceModelManager.kt`
 
-- [ ] **Step 1: Update `VoiceControlModule.kt`** — rebind `VoiceRecognizer` to `CascadedVoiceRecognizer`, add `WhisperRecognizer` and `SmolLmIntentParser` providers, provide model `File` objects from `ModelManager`
+- [ ] **Step 1: Update `VoiceControlModule.kt`** — rebind `VoiceRecognizer` to `CascadedVoiceRecognizer`, add `MoonshineRecognizer` and `SmolLmIntentParser` providers, provide model `File` objects from `ModelManager`
 
 ```kotlin
 package au.com.shiftyjelly.pocketcasts.voicecontrol.di
@@ -2122,7 +2078,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.SileroVadSegmenter
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioSegmenter
-import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.WhisperRecognizer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.MoonshineRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.UserNotDisabledRule
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRule
@@ -2152,7 +2108,7 @@ abstract class VoiceControlModule {
 
     @Binds abstract fun bindVoiceAudioSegmenter(impl: SileroVadSegmenter): VoiceAudioSegmenter
 
-    // Cascaded pipeline: Whisper ASR -> SmolLM2 360M intent parser
+    // Cascaded pipeline: Moonshine ASR -> SmolLM2 360M intent parser
     @Binds abstract fun bindVoiceRecognizer(impl: CascadedVoiceRecognizer): VoiceRecognizer
 
     @Binds abstract fun bindVoicePlaybackSink(impl: PlaybackManagerVoicePlaybackSink): VoicePlaybackSink
@@ -2161,7 +2117,7 @@ abstract class VoiceControlModule {
 
     companion object {
         @Provides @Singleton
-        fun provideWhisperModelFile(manager: ModelManager): File = manager.whisperModelFile
+        fun provideMoonshineModelFile(manager: ModelManager): File = manager.moonshineModelFile
 
         @Provides @Singleton
         fun provideSmolLmModelFile(manager: ModelManager): File = manager.smolLmModelFile
@@ -2224,7 +2180,7 @@ git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/vo
 git add modules/services/voice/build.gradle.kts
 git rm modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/model/Gemma4VoiceRecognizer.kt
 git rm modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/model/VoiceModelManager.kt
-git commit -m "refactor: swap Gemma 4 E2B for cascaded Whisper + SmolLM pipeline"
+git commit -m "refactor: swap Gemma 4 E2B for cascaded Moonshine + SmolLM pipeline"
 ```
 
 ---
@@ -2237,7 +2193,7 @@ git commit -m "refactor: swap Gemma 4 E2B for cascaded Whisper + SmolLM pipeline
 ./gradlew :modules:services:voice:assembleDebug
 ```
 
-Expected: Build succeeds. First build may take a while due to `FetchContent` downloading whisper.cpp and llama.cpp source.
+Expected: Build succeeds. First build may take a while due to `FetchContent` downloading moonshine.cpp and llama.cpp source.
 
 - [ ] **Step 2: Run all voice module unit tests**
 

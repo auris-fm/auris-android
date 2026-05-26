@@ -44,10 +44,13 @@ VoiceControlGate
 VoiceControlService
         |
         v
-VoiceAudioSegmenter
+Moonshine MicTranscriber  (capture + VAD + ASR, one library)
         |
         v
-VoiceRecognizer (ASR + Intent in one pass)
+UtteranceFilter          (speaker diarization + playback bleed rejection)
+        |
+        v
+SmolLmIntentParser       (structured JSON intent via llama.cpp)
         |
         v
 VoicePlaybackIntentExecutor
@@ -56,20 +59,21 @@ VoicePlaybackIntentExecutor
 PlaybackManager
 ```
 
-The `VoiceRecognizer` interface accepts an utterance clip and playback context, internally cascading through
-ASR (Moonshine) and intent parsing (SmolLM2 via llama.cpp) stages, and returns a typed `VoicePlaybackIntent` or null.
-The specific ASR model and intent parsing approach are detailed in the [ASR Intent Pipeline spec](asr-intent-pipeline.md).
+Audio capture, VAD, and ASR are handled by [Moonshine Voice](https://github.com/moonshine-ai/moonshine)
+(`ai.moonshine:moonshine-voice` from Maven Central) as an integrated library — no separate Oboe JNI, Silero VAD, or
+whisper.cpp integration. Structured intent parsing is kept as a separate SmolLM2 stage via llama.cpp for parameter
+extraction. Full details are in the [ASR Intent Pipeline spec](asr-intent-pipeline.md).
 
 ### VoiceControlGate
 
 `VoiceControlGate` is a standalone policy engine. It combines small, independently testable rules.
 
-**Implemented (foundation):**
+**Active rules:**
 - `UserNotDisabledRule` — user can disable voice control in settings
 - `PlaybackContextActiveRule` — a current episode must exist (playing or paused)
 - `AudioRoutePolicyRule` — headset with microphone required (HeadsetOnly default)
 
-**Planned (follow-up):**
+**Planned rules:**
 - `MicrophonePermissionRule` — runtime permission check
 - `NotCastingRule` — block while casting to another device
 - `NotInCallRule` — block during phone calls
@@ -104,8 +108,8 @@ intent confidence thresholds, and automatic fallback to `HeadsetOnly` after repe
 `VoiceControlService` owns the foreground microphone lifecycle. It starts capture only when the gate is allowed, stops immediately when
 any required gate blocks, and exposes a persistent visible state while listening.
 
-The service should not parse commands itself. It coordinates capture, segmenter, model providers, command interpretation, metrics, and
-error recovery.
+The service should not parse commands itself. It coordinates the Moonshine pipeline, model readiness, command interpretation,
+metrics, and error recovery.
 
 Android microphone foreground-service requirements must be handled explicitly. The service should use a microphone foreground service
 type and a notification that clearly indicates voice control is active.
@@ -118,51 +122,43 @@ immediately when any required gate blocks. This means:
 - **App background, episode playing/paused**: Gate remains allowed → service continues → microphone active for hands-free commands.
 - **App foreground, no episode**: Gate blocks → service stops → microphone off.
 
-### VoiceAudioSegmenter
+### Audio Capture, VAD, and ASR
 
-A replaceable segmenter interface:
+Moonshine Voice (`ai.moonshine:moonshine-voice`) provides an integrated `MicTranscriber` that handles microphone capture
+via Oboe, built-in voice activity detection, and streaming ASR (Moonshine Small Streaming, 123M params, 7.84% WER on
+English) as a single library.
 
-```kotlin
-interface VoiceAudioSegmenter {
-    fun process(frame: PcmAudioFrame): VoiceSegmenterResult
-}
-```
+### UtteranceFilter
 
-Candidate results:
+Before an utterance reaches the intent parser, `UtteranceFilter` runs two lightweight checks:
 
-- `Silence`
-- `SpeechStarted`
-- `SpeechContinuing`
-- `SpeechEnded(segment: VoiceUtteranceClip)`
-- `Rejected(reason)`
+- **Speaker consistency**: Moonshine's built-in `identify_speakers` diarization sets `hasSpeakerId` and
+  `speakerIndex` on each `TranscriptLine`. The first accepted command in a listening session establishes the
+  target speaker; subsequent utterances from other speaker indices are dropped.
+- **Playback bleed rejection**: Normalized cross-correlation of `TranscriptLine.audioData` against the playback
+  buffer. If the mic signal strongly correlates with what the device is playing, the utterance is dropped.
+  Disabled when using a headset (no acoustic path from speaker to mic).
 
-The segmenter should be cheap enough to run continuously while gated. The heavy recognition model must not be used as the always-running segmenter.
-
-Initial implementations:
-
-- `EnergyVoiceAudioSegmenter`: MVP/prototype based on RMS energy, adaptive noise floor, minimum speech duration, and trailing silence.
-- `NoOpVoiceAudioSegmenter`: tests.
-- Production candidate: WebRTC VAD or a small LiteRT VAD model if prototype data shows the energy segmenter is not robust enough.
+See [ASR Intent Pipeline spec](asr-intent-pipeline.md) for full details.
 
 ### VoiceRecognizer
 
-`VoiceRecognizer` accepts an utterance clip and playback context, cascading through ASR and intent parsing
-internally, and returns a typed playback intent or null:
+`VoiceRecognizer` accepts an utterance clip and playback context, and returns a typed playback intent or null:
 
 ```kotlin
 interface VoiceRecognizer {
     suspend fun ensureReady(): Result<Unit>
-    suspend fun recognize(clip: VoiceUtteranceClip, context: VoiceRecognitionContext): VoicePlaybackIntent?
+    suspend fun recognize(transcript: String, context: VoiceRecognitionContext): VoicePlaybackIntent?
 }
 ```
 
-The default implementation (`CascadedVoiceRecognizer`) orchestrates two stages:
-1. `MoonshineRecognizer.transcribe(clip)` → English transcript
-2. `SmolLmIntentParser.parseIntent(transcript, context)` → `VoicePlaybackIntent?`
+Moonshine `MicTranscriber` handles capture + VAD + ASR internally, emitting transcript events. `VoiceControlService`
+receives completed transcript lines, runs them through `UtteranceFilter`, and passes filtered text to
+`SmolLmIntentParser` (which implements `VoiceRecognizer`).
 
-**Critical design constraint**: The recognizer must process `AudioRecord`-captured PCM buffers **without taking system audio focus**.
-Android's built-in `SpeechRecognizer` is unsuitable because it internally acquires audio focus and interrupts media playback. All
-providers operate entirely in-process on already-captured audio via Oboe `AudioRecordCaptureEngine`.
+**Critical design constraint**: Audio capture must operate **without taking system audio focus**.
+Android's built-in `SpeechRecognizer` is unsuitable because it internally acquires audio focus and interrupts media
+playback. Moonshine `MicTranscriber` uses Oboe internally and does not acquire audio focus.
 
 See [ASR Intent Pipeline spec](asr-intent-pipeline.md) for model choices, the system prompt, intent schema, and integration details.
 
@@ -185,15 +181,13 @@ The executor should clamp seek positions to valid episode duration and reject co
 
 ## Model Management
 
-`VoiceModelManager` owns downloadable model lifecycle:
+Moonshine Voice manages its own ASR models — either bundled in app assets or downloaded via its built-in downloader.
+The only model managed separately is the SmolLM2 GGUF for intent parsing, handled by `ModelManager`:
 
-- Discover supported local model packs.
-- Download over Wi-Fi by default unless user opts into cellular.
-- Verify checksum/signature.
-- Track model version, size, language support, runtime backend, and compatibility.
-- Expose download progress and readiness to settings UI and `VoiceControlGate`.
-- Allow model deletion.
-- Provide fallback model selection.
+- Download SmolLM2 360M Q4_K_M GGUF (~200 MB) from HuggingFace.
+- SHA-256 verification, resume support, retry on failure.
+- Progress tracking via `StateFlow<ModelDownloadState>`.
+- Model stored under `filesDir/smol-lm-model/`.
 
 Specific model sizes, formats, and sources are detailed in the [ASR Intent Pipeline spec](asr-intent-pipeline.md).
 
@@ -205,8 +199,8 @@ Specific model sizes, formats, and sources are detailed in the [ASR Intent Pipel
 4. User enters a playback context with a current episode. Playback may be playing or paused.
 5. Gate checks playback context, audio route policy, microphone permission, casting, call state, model readiness, and permission.
 6. Service enters foreground microphone mode.
-7. Segmenter listens for candidate utterances.
-8. Candidate utterance is passed to recognizer, which returns a validated `VoicePlaybackIntent` or null.
+7. Moonshine MicTranscriber listens for speech, transcribes utterances, and emits transcript events.
+8. UtteranceFilter checks speaker consistency and playback bleed, then passes to SmolLmIntentParser which returns a validated `VoicePlaybackIntent` or null.
 9. Valid playback intent is executed through `VoicePlaybackIntentExecutor`.
 10. Service keeps listening while gate remains allowed.
 11. Listening stops immediately when the playback context ends, the current episode is cleared, the audio route becomes disallowed,
@@ -220,7 +214,7 @@ Specific model sizes, formats, and sources are detailed in the [ASR Intent Pipel
 
 Target response for common commands should be under one second after the user finishes speaking on supported devices. The plan:
 
-- Keep the segmenter always warm while gated.
+- Moonshine MicTranscriber stays warm while gated.
 - Keep the selected model/runtime warm while playback is active, if memory permits.
 - Use short utterance clips and trailing-silence detection to avoid waiting too long.
 - Prefer deterministic parsing for simple time and chapter commands after recognition.
@@ -232,8 +226,8 @@ Target response for common commands should be under one second after the user fi
 - **Microphone is off by default**: Capture starts only when the gate is fully allowed. App killed or background without playback → mic off.
 - Never listen unless all required gates are allowed.
 - Start with `HeadsetOnly` route policy to reduce false positives and avoid acoustic feedback.
-- Run only a tiny segmenter continuously.
-- Invoke the heavy recognition model only on completed candidate utterances, not on every audio frame.
+- Moonshine VAD runs continuously at low cost; ASR inference only fires on completed speech segments.
+- SmolLM2 intent parsing only runs on filtered utterances that pass UtteranceFilter.
 - Stop listening when the playback context ends, not merely because audio is paused.
 - Add diagnostics for segmenter duty cycle, model invocations, average inference time, and gate state.
 
@@ -254,7 +248,7 @@ Target response for common commands should be under one second after the user fi
 - Headset disconnects: stop capture immediately and update state to `Blocked(HeadsetDisconnected)`.
 - Route changes to a disallowed route: stop capture immediately.
 - Model not ready: do not start service; show model download state.
-- Segmenter stuck in speech: timeout and reset.
+- VAD stuck in speech: Moonshine's `vad_max_segment_duration` forces a segment break to recover.
 - Recognition timeout: discard clip and keep listening.
 - Low confidence: discard command silently by default, optionally play a subtle feedback tone in later iterations.
 - Invalid command JSON: discard and log sanitized error.
@@ -267,8 +261,8 @@ Unit tests:
 
 - Gate rule combinations and blocked reasons.
 - Route changes and playback-state transitions.
-- Segmenter state machine using synthetic PCM fixtures.
-- Interpreter JSON validation and confidence thresholds.
+- UtteranceFilter speaker gating and cross-correlation logic.
+- SmolLM2 JSON validation and confidence thresholds.
 - Executor command mapping and seek clamping.
 - Duplicate command debounce.
 
@@ -296,7 +290,7 @@ Manual/device tests:
 
 - Android background microphone restrictions and OEM behavior may require foreground-service tuning.
 - **Android SpeechRecognizer is incompatible with continuous listening**: It acquires audio focus and interrupts/pauses media playback.
-  This was confirmed during testing and led to the Oboe AudioRecord pipeline.
+  Moonshine uses Oboe internally and does not acquire audio focus, avoiding this issue.
 - ASR model inference latency on mobile hardware is device-dependent and needs ongoing measurement.
 - Continuous model warmup may be too memory intensive on lower-end devices, requiring on-demand loading.
 - Bluetooth headset microphones vary widely in quality and latency.

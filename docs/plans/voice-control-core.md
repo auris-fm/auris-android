@@ -4,15 +4,15 @@
 
 > **For agentic workers:** Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the Android voice-control foundation: module wiring, core settings, gate policy, audio route detection, microphone segmenter, typed intents, playback executor, foreground service shell, and tests.
+**Goal:** Build the Android voice-control core: module wiring, settings, gate policy, audio route detection, typed intents, playback executor, foreground service shell, and tests.
 
-**Tech Stack:** Kotlin, Coroutines/Flow, Hilt, Android `AudioManager`, Android `AudioRecord`, foreground service with microphone type, JUnit, Mockito, Turbine.
+**Tech Stack:** Kotlin, Coroutines/Flow, Hilt, Android `AudioManager`, foreground service with microphone type, JUnit, Mockito, Turbine.
 
 ---
 
 ## Scope
 
-This plan implements the foundation with `HeadsetOnly` as the default audio route policy and a dormant `SpeakerExperimental` policy state. It does not implement recognizer inference, model download UI, transcript semantic search, or production speaker-mode echo suppression. Those are covered in follow-up plans ([ASR Pipeline](asr-intent-pipeline.md), [Speaker Verification](speaker-verification.md)).
+This plan builds the voice-control core with `HeadsetOnly` as the default audio route policy. Audio capture, VAD, ASR, and intent parsing are covered in the [ASR Pipeline](asr-intent-pipeline.md) plan.
 
 ## File Structure
 
@@ -26,8 +26,8 @@ This plan implements the foundation with `HeadsetOnly` as the default audio rout
 - `modules/services/analytics/src/main/java/au/com/shiftyjelly/pocketcasts/analytics/SourceView.kt`: add `VOICE_CONTROL` entry.
 - `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/gate/*.kt`: gate state, rules, and coordinator.
 - `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/route/*.kt`: audio route monitoring and route policy.
-- `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/audio/*.kt`: PCM frame types, audio source, and segmenter.
-- `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/*.kt`: recognition result, intent model, interpreter interface, and deterministic parser.
+- `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/audio/*.kt`: PCM frame types and audio types.
+- `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/*.kt`: intent model types.
 - `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/*.kt`: playback context monitor and intent executor.
 - `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/service/VoiceControlService.kt`: foreground service shell.
 - `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/di/VoiceControlModule.kt`: Hilt bindings.
@@ -312,7 +312,7 @@ sealed interface VoicePlaybackIntent {
 }
 ```
 
-This defines the full intent set. Some intents (SetTrimMode, SetVolumeBoost, AddBookmark, etc.) will be wired in a follow-up plan (see [Playback Controls](playback-controls.md)). The initial executor maps only the intents relevant to the foundation.
+This defines the full intent set. Intents beyond the core playback set are wired in [Playback Controls](playback-controls.md).
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -807,268 +807,7 @@ git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/vo
 git commit -m "Add voice playback context rule"
 ```
 
-## Task 7: Add Energy Audio Segmenter
-
-**Files:**
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/audio/PcmAudioFrame.kt`
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/audio/VoiceAudioSegmenter.kt`
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/audio/EnergyVoiceAudioSegmenter.kt`
-- Create: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/audio/EnergyVoiceAudioSegmenterTest.kt`
-
-- [ ] **Step 1: Write segmenter tests**
-
-Create `EnergyVoiceAudioSegmenterTest.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.audio
-
-import org.junit.Assert.assertTrue
-import org.junit.Test
-
-class EnergyVoiceAudioSegmenterTest {
-    @Test
-    fun `returns speech ended after speech followed by trailing silence`() {
-        val segmenter = EnergyVoiceAudioSegmenter(
-            speechThreshold = 500,
-            minimumSpeechFrames = 2,
-            trailingSilenceFrames = 2,
-        )
-
-        segmenter.process(frame(shortArrayOf(800, 900)))
-        segmenter.process(frame(shortArrayOf(900, 900)))
-        segmenter.process(frame(shortArrayOf(0, 0)))
-        val result = segmenter.process(frame(shortArrayOf(0, 0)))
-
-        assertTrue(result is VoiceSegmenterResult.SpeechEnded)
-    }
-
-    private fun frame(samples: ShortArray) = PcmAudioFrame(samples = samples, sampleRateHz = 16_000)
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.audio.EnergyVoiceAudioSegmenterTest
-```
-
-Expected: fail because segmenter types do not exist.
-
-- [ ] **Step 3: Add segmenter implementation**
-
-Create `PcmAudioFrame.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.audio
-
-data class PcmAudioFrame(
-    val samples: ShortArray,
-    val sampleRateHz: Int,
-)
-```
-
-Create `VoiceAudioSegmenter.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.audio
-
-interface VoiceAudioSegmenter {
-    fun process(frame: PcmAudioFrame): VoiceSegmenterResult
-}
-
-sealed interface VoiceSegmenterResult {
-    data object Silence : VoiceSegmenterResult
-    data object SpeechStarted : VoiceSegmenterResult
-    data object SpeechContinuing : VoiceSegmenterResult
-    data class SpeechEnded(val frames: List<PcmAudioFrame>) : VoiceSegmenterResult
-}
-```
-
-Create `EnergyVoiceAudioSegmenter.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.audio
-
-import kotlin.math.abs
-
-class EnergyVoiceAudioSegmenter @javax.inject.Inject constructor(
-    private val speechThreshold: Int = 700,
-    private val minimumSpeechFrames: Int = 3,
-    private val trailingSilenceFrames: Int = 4,
-) : VoiceAudioSegmenter {
-    private val frames = mutableListOf<PcmAudioFrame>()
-    private var speechFrames = 0
-    private var silenceFrames = 0
-
-    override fun process(frame: PcmAudioFrame): VoiceSegmenterResult {
-        val isSpeech = frame.samples.any { abs(it.toInt()) >= speechThreshold }
-        if (isSpeech) {
-            frames += frame
-            speechFrames += 1
-            silenceFrames = 0
-            return if (speechFrames == 1) VoiceSegmenterResult.SpeechStarted else VoiceSegmenterResult.SpeechContinuing
-        }
-
-        if (speechFrames > 0) {
-            frames += frame
-            silenceFrames += 1
-            if (speechFrames >= minimumSpeechFrames && silenceFrames >= trailingSilenceFrames) {
-                val segment = frames.toList()
-                reset()
-                return VoiceSegmenterResult.SpeechEnded(segment)
-            }
-        }
-
-        return VoiceSegmenterResult.Silence
-    }
-
-    private fun reset() {
-        frames.clear()
-        speechFrames = 0
-        silenceFrames = 0
-    }
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.audio.EnergyVoiceAudioSegmenterTest
-```
-
-Expected: pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/audio modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/audio
-git commit -m "Add energy voice segmenter"
-```
-
-## Task 8: Add Deterministic Intent Interpreter (placeholder)
-
-> **Note:** This deterministic interpreter is a **placeholder** for the foundation phase. It is superseded by `SmolLmIntentParser` in the [ASR Intent Pipeline plan](asr-intent-pipeline.md), which uses SmolLM2 via llama.cpp for intent parsing from English transcripts. Keep this task minimal — the deterministic interpreter is only needed so the foundation module compiles and passes smoke tests before the ASR pipeline is integrated.
-
-**Files:**
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoiceIntentInterpreter.kt`
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/DeterministicVoiceIntentInterpreter.kt`
-- Create: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/DeterministicVoiceIntentInterpreterTest.kt`
-
-- [ ] **Step 1: Write interpreter tests**
-
-Create `DeterministicVoiceIntentInterpreterTest.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.intent
-
-import kotlinx.coroutines.test.runTest
-import org.junit.Assert.assertEquals
-import org.junit.Test
-
-class DeterministicVoiceIntentInterpreterTest {
-    private val interpreter = DeterministicVoiceIntentInterpreter()
-
-    @Test
-    fun `parses skip forward`() = runTest {
-        assertEquals(
-            VoicePlaybackIntent.SeekRelative(deltaMs = 30_000),
-            interpreter.interpret("skip forward thirty seconds"),
-        )
-    }
-
-    @Test
-    fun `parses resume`() = runTest {
-        assertEquals(
-            VoicePlaybackIntent.Resume,
-            interpreter.interpret("resume"),
-        )
-    }
-
-    @Test
-    fun `returns null for unrecognized text`() = runTest {
-        assertEquals(
-            null,
-            interpreter.interpret("what is the weather like"),
-        )
-    }
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.intent.DeterministicVoiceIntentInterpreterTest
-```
-
-Expected: fail because interpreter types do not exist.
-
-- [ ] **Step 3: Add interpreter implementation**
-
-Create `VoiceIntentInterpreter.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.intent
-
-interface VoiceIntentInterpreter {
-    suspend fun interpret(transcript: String): VoicePlaybackIntent?
-}
-```
-
-Create `DeterministicVoiceIntentInterpreter.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.intent
-
-class DeterministicVoiceIntentInterpreter @javax.inject.Inject constructor() : VoiceIntentInterpreter {
-    override suspend fun interpret(transcript: String): VoicePlaybackIntent? {
-        val text = transcript.lowercase().trim()
-        if (text.isBlank()) return null
-        return when {
-            text == "pause" || text == "stop" -> VoicePlaybackIntent.Pause
-            text == "resume" || text == "play" -> VoicePlaybackIntent.Resume
-            text.contains("next chapter") -> VoicePlaybackIntent.NextChapter
-            text.contains("previous chapter") || text.contains("last chapter") -> VoicePlaybackIntent.PreviousChapter
-            text.contains("skip") || text.contains("forward") -> VoicePlaybackIntent.SeekRelative(parseSeconds(text, 30) * 1000)
-            text.contains("back") || text.contains("rewind") -> VoicePlaybackIntent.SeekRelative(-parseSeconds(text, 10) * 1000)
-            else -> null
-        }
-    }
-
-    private fun parseSeconds(text: String, defaultSeconds: Int): Int {
-        return when {
-            text.contains("one minute") -> 60
-            text.contains("thirty") -> 30
-            text.contains("ten") -> 10
-            else -> defaultSeconds
-        }
-    }
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.intent.DeterministicVoiceIntentInterpreterTest
-```
-
-Expected: pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent
-git commit -m "Add deterministic voice intent interpreter"
-```
-
-## Task 9: Add Playback Intent Executor
+## Task 7: Add Playback Intent Executor
 
 **Files:**
 - Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoicePlaybackIntentExecutor.kt`
@@ -1156,8 +895,8 @@ class VoicePlaybackIntentExecutor @Inject constructor(
             VoicePlaybackIntent.PreviousChapter -> sink.previousChapter()
             is VoicePlaybackIntent.ChapterByIndex -> sink.chapterByIndex(intent.index)
             is VoicePlaybackIntent.ChapterByTitle -> Unit
-            is VoicePlaybackIntent.SetSpeed -> Unit  // wired by playback-controls plan
-            is VoicePlaybackIntent.AdjustSpeed -> Unit
+            is VoicePlaybackIntent.SetSpeed -> Unit  // wired in playback-controls plan
+            is VoicePlaybackIntent.AdjustSpeed -> Unit  // wired in playback-controls plan
         }
     }
 }
@@ -1214,7 +953,7 @@ git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/vo
 git commit -m "Add voice playback intent executor"
 ```
 
-## Task 10: Add Foreground Service Shell and Hilt Bindings
+## Task 8: Add Foreground Service Shell and Hilt Bindings
 
 **Files:**
 - Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/service/VoiceControlService.kt`
@@ -1249,16 +988,16 @@ data class VoiceUtteranceClip(
 
 interface VoiceRecognizer {
     suspend fun ensureReady(): Result<Unit>
-    suspend fun recognize(clip: VoiceUtteranceClip, context: VoiceRecognitionContext): VoicePlaybackIntent?
+    suspend fun recognize(transcript: String, context: VoiceRecognitionContext): VoicePlaybackIntent?
 }
 
 class NoOpVoiceRecognizer @javax.inject.Inject constructor() : VoiceRecognizer {
     override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
-    override suspend fun recognize(clip: VoiceUtteranceClip, context: VoiceRecognitionContext): VoicePlaybackIntent? = null
+    override suspend fun recognize(transcript: String, context: VoiceRecognitionContext): VoicePlaybackIntent? = null
 }
 ```
 
-This defines the interface that the cascaded pipeline ([ASR Intent Pipeline](asr-intent-pipeline.md)) implements. `NoOpVoiceRecognizer` is a placeholder until the real `CascadedVoiceRecognizer` is wired in.
+`SmolLmIntentParser` (from the [ASR Intent Pipeline](asr-intent-pipeline.md) plan) implements `VoiceRecognizer`.
 
 - [ ] **Step 2: Add the service shell**
 
@@ -1300,12 +1039,8 @@ Create `VoiceControlModule.kt`:
 ```kotlin
 package au.com.shiftyjelly.pocketcasts.voice.di
 
-import au.com.shiftyjelly.pocketcasts.voice.audio.EnergyVoiceAudioSegmenter
-import au.com.shiftyjelly.pocketcasts.voice.audio.VoiceAudioSegmenter
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
-import au.com.shiftyjelly.pocketcasts.voice.intent.DeterministicVoiceIntentInterpreter
-import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntentInterpreter
-import au.com.shiftyjelly.pocketcasts.voice.model.NoOpVoiceRecognizer
+import au.com.shiftyjelly.pocketcasts.voice.intent.SmolLmIntentParser
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackManagerVoicePlaybackSink
 import au.com.shiftyjelly.pocketcasts.voice.playback.VoicePlaybackSink
@@ -1327,9 +1062,7 @@ import kotlinx.coroutines.CoroutineScope
 @Module
 @InstallIn(SingletonComponent::class)
 abstract class VoiceControlModule {
-    @Binds abstract fun bindVoiceAudioSegmenter(impl: EnergyVoiceAudioSegmenter): VoiceAudioSegmenter
-    @Binds abstract fun bindVoiceRecognizer(impl: NoOpVoiceRecognizer): VoiceRecognizer
-    @Binds abstract fun bindVoiceIntentInterpreter(impl: DeterministicVoiceIntentInterpreter): VoiceIntentInterpreter
+    @Binds abstract fun bindVoiceRecognizer(impl: SmolLmIntentParser): VoiceRecognizer
     @Binds abstract fun bindVoicePlaybackSink(impl: PlaybackManagerVoicePlaybackSink): VoicePlaybackSink
     @Binds abstract fun bindAudioRouteMonitor(impl: AndroidAudioRouteMonitor): AudioRouteMonitor
 
@@ -1377,7 +1110,7 @@ git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/vo
 git commit -m "Add voice control service shell"
 ```
 
-## Task 11: Add App-Level Service Starter
+## Task 9: Add App-Level Service Starter
 
 **Files:**
 - Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/service/VoiceControlServiceController.kt`
@@ -1444,7 +1177,7 @@ git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/vo
 git commit -m "Wire voice service controller"
 ```
 
-## Task 12: Run Foundation Verification
+## Task 10: Build and Verify
 
 **Files:**
 - No source edits unless verification exposes a compile or test failure.

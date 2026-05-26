@@ -4,53 +4,74 @@
 
 The original monolithic model (~2.58 GB) used for both ASR and intent parsing had high Word Error Rate (WER) across the 20 supported languages. A single model also forces a single upgrade path — you cannot improve ASR independently of intent parsing.
 
+The initial replacement built a custom native pipeline (Oboe JNI, whisper.cpp, llama.cpp, CMake FetchContent, Vulkan patches) that was fragile, hard to maintain, and required managing multiple native dependencies. [Moonshine Voice](https://github.com/moonshine-ai/moonshine) provides most of these stages as a unified, maintained library.
+
 ## Architecture
 
-Replace the monolithic model with a cascaded pipeline:
+Replace the monolithic model — and the custom native stack — with Moonshine Voice for audio capture + VAD + ASR + speaker diarization, keeping SmolLM2 solely for structured intent parsing:
 
 ```
-Oboe → Silero VAD → Speaker Verify → Moonshine base → SmolLM2 360M → Intent Executor
-                                      (CPU, ONNX)     (CPU, ~200 MB Q4)
+Moonshine MicTranscriber  →  Signal Filter  →  SmolLM2 360M  →  Intent Executor
+ (capture + VAD + ASR       (speaker diariz.    (CPU, ~200 MB    (unchanged)
+  + speaker diarization)     + cross-corr.)      Q4_K_M)
 ```
 
-- **Moonshine base** ([github.com/moonshine-ai/moonshine](https://github.com/moonshine-ai/moonshine)) — ASR optimized for mobile/edge, based on Whisper architecture. Runs on CPU via ONNX runtime or native C API.
-- **SmolLM2 360M** (~200 MB Q4_K_M) — Intent parsing from English transcript, outputting a `VoicePlaybackIntent` JSON schema. Runs on CPU via llama.cpp.
-- Both CPU-bound; total size approximately the SmolLM2 size plus the Moonshine ONNX model size.
+- **Moonshine Voice** (`ai.moonshine:moonshine-voice`, MIT license) — Integrated library providing Oboe-based audio capture, built-in VAD, Moonshine streaming ASR models (ONNX), and optional speaker diarization. Ships from Maven Central; no CMake FetchContent needed for capture, VAD, or ASR.
+- **Signal Filter** — Two lightweight checks run against each utterance before it reaches SmolLM2:
+  1. **Speaker diarization** (Moonshine `identify_speakers`): first accepted command in a listening session establishes the target speaker; utterances from other speaker indices during the same session are dropped.
+  2. **Playback cross-correlation**: cross-correlate the mic utterance against the playback buffer (the audio the device itself is playing). If they correlate strongly (accounting for acoustic delay), the utterance is podcast bleed and is dropped.
+- **SmolLM2 360M** (~200 MB Q4_K_M) — Structured intent parsing from the transcribed English text, outputting `VoicePlaybackIntent` JSON. Runs on CPU via llama.cpp. Kept because embedding-based intent matching (Moonshine IntentRecognizer) cannot extract typed parameters from natural language utterances.
+- **llama.cpp** — The only remaining native dependency. Fetched via CMake `FetchContent`. Vulkan backend enabled for GPU acceleration.
 
 ## Pipeline Detail
 
-1. **Audio Capture** (unchanged): Oboe 16kHz/16-bit PCM mono → ring buffer
-2. **VAD** (unchanged): Silero VAD segments speech utterances
-3. **Speaker Verification** (unchanged): TFLite model runs on the speech segment
-4. **ASR**: Speech segment fed to Moonshine base → English transcript
-5. **Intent Parsing**: English transcript + playback context fed to SmolLM2 360M → structured JSON
-6. **Intent Execution** (unchanged): `VoicePlaybackIntentExecutor` maps JSON to `PlaybackManager` actions
+1. **Audio Capture + VAD + ASR**: Moonshine `MicTranscriber` handles all three stages. Microphone capture via Oboe, voice activity detection (built-in, configurable thresholds), and Moonshine streaming ASR producing English transcripts.
+2. **Speaker Diarization**: Moonshine's built-in `identify_speakers` sets `hasSpeakerId` and `speakerIndex` on each `TranscriptLine`. First accepted utterance in a session establishes the target speaker. Subsequent utterances from other speaker indices are discarded.
+3. **Playback Bleed Rejection**: The mic audio (`TranscriptLine.audioData`) is cross-correlated against the playback buffer. High correlation → podcast bleed → dropped.
+4. **Intent Parsing**: Filtered English transcript + playback context fed to SmolLM2 360M → structured JSON (`VoicePlaybackIntent`).
+5. **Intent Execution** (unchanged): `VoicePlaybackIntentExecutor` maps intent to `PlaybackManager` actions.
 
 ## Component Design
 
 ### Moonshine Integration
 
-Moonshine provides fast, on-device ASR optimized for mobile CPUs. It is based on the Whisper architecture with optimizations for edge inference.
+- **Dependency**: `ai.moonshine:moonshine-voice` from Maven Central (no CMake FetchContent for ASR/VAD/capture).
+- **Model**: Moonshine Small Streaming (123M params, 7.84% WER, ONNX). English-optimized. 73ms latency on MacBook Pro-class hardware.
+- **API**: `MicTranscriber` (Java class) for microphone capture + VAD + transcription. `TranscriptLine` carries `speakerId` (long), `speakerIndex` (int), `hasSpeakerId` (boolean), and `audioData` (float[]) when `identify_speakers` is enabled. Model architecture is an `int` constant (e.g. `MOONSHINE_MODEL_ARCH_SMALL_STREAMING`).
+- **Model location**: Bundled in app assets or downloaded at first launch. Moonshine provides a built-in model downloader.
+- **Speaker diarization**: Enabled via `identify_speakers = true`. Uses pyannote embeddings under the hood. Marked experimental by Moonshine authors — adequate for session-based speaker differentiation in quiet environments.
 
-- Compiled as a native library target via CMake
-- JNI bridge exposes `transcribe(ShortArray, sampleRate): String`
-- Model file: `moonshine-base.onnx` downloaded via `ModelManager`
-- Input: same 16kHz PCM clips Silero VAD produces
-- Output: transcribed English text
+### Signal Filter
 
-The exact C API (`moonshine_init`, `moonshine_transcribe`, `moonshine_free`) and build integration depend on Moonshine's CMake configuration. See [Moonshine's C API](https://github.com/moonshine-ai/moonshine/tree/main/c) for details.
+A `UtteranceFilter` class runs two checks in sequence before an utterance is passed to SmolLM2:
+
+**Speaker consistency:**
+- On first accepted command after playback starts, record `speakerIndex` as the session target.
+- Subsequent utterances from a different `speakerIndex` are dropped silently.
+- Session target resets when playback stops (new listening session).
+- No enrollment, no stored embeddings, no persistent identity.
+- **Fallback (WeSpeaker):** If Moonshine's experimental diarization proves too unreliable in testing, replace the session-based speaker gating with [WeSpeaker](https://github.com/wenet-e2e/wespeaker) (ECAPA-TDNN, ONNX, ~15 MB). The user enrolls with a single passphrase at setup; at runtime each utterance is checked for embedding similarity against the enrolled voice. Shares the ONNX runtime Moonshine already bundles. However, it adds enrollment UX (one-time passphrase recording) that the diarization approach avoids entirely.
+
+**Playback cross-correlation:**
+- Only active when the audio route is **speaker** or **Bluetooth A2DP** (no microphone on the output device). Disabled entirely when using a headset — there is no acoustic path from headset speakers to the mic, so cross-correlation is wasted work and risks false positives.
+- Maintain a rolling buffer of the last 2 seconds of audio played by the device (resampled to 16kHz if needed).
+- For each mic utterance, compute normalized cross-correlation against the playback buffer at offsets corresponding to plausible acoustic delays (50–500 ms).
+- If peak correlation exceeds a threshold, the utterance is classified as playback bleed and dropped.
+- This directly exploits the fact that the app *knows* exactly what audio it is playing.
 
 ### SmolLM2 360M Integration (llama.cpp)
 
-- Compiled as a native library target via CMake alongside Moonshine
-- JNI bridge exposes `parseIntent(String transcript, String context): String`
+Unchanged from the prior design, but simplified — it is now the only native component:
+
+- Compiled as a native library via CMake
+- JNI bridge exposes `parseIntent(modelPath, prompt): String`
 - Model file: `smolLM2-360M-instruct-Q4_K_M.gguf` (~200 MB)
 - Strict system prompt listing all intents with JSON schema
 - Single attempt per request — invalid JSON returns `none`
 
 ### Intent Schema
 
-The intent parser outputs the same `VoicePlaybackIntent` JSON schema the monolithic model previously produced. Available intents:
+The intent parser outputs the same `VoicePlaybackIntent` JSON schema. Available intents:
 
 | Intent | JSON |
 |---|---|
@@ -74,51 +95,87 @@ The intent parser outputs the same `VoicePlaybackIntent` JSON schema the monolit
 
 Common aliases are defined in the system prompt (e.g., "play" → resume, "stop" → pause, "faster" → adjust_speed +0.5, "volume up" → adjust_volume +10).
 
-> **Note on `VoiceRecognitionResult`:** The foundation plan originally defined a `VoiceRecognitionResult(transcript, confidence)` type for the monolithic model. The cascaded pipeline returns `VoicePlaybackIntent?` directly, so `VoiceRecognitionResult` is unused. It should be removed or left as dead code until the foundation plan is updated.
-
 ### Orchestrator
 
-A `CascadedVoiceRecognizer` implements the existing `VoiceRecognizer` interface and wires the two stages together:
+`VoiceControlService` connects the stages directly — no separate `CascadedVoiceRecognizer` needed since Moonshine handles the capture-to-transcript cascade internally:
 
 ```
-CascadedVoiceRecognizer:
-  recognize(clip, context):
-    transcript = moonshineRecognizer.transcribe(clip)
-    if transcript.isBlank() → return null
-    return smolLmIntentParser.parseIntent(transcript, context)
+VoiceControlService:
+  on TranscriptEvent.LineCompleted:
+    line = event.line
+    text = line.text
+    audio = line.audioData
+    hasSpeakerId = line.hasSpeakerId
+    speakerIndex = line.speakerIndex
+
+    if not utteranceFilter.shouldProcess(audio, hasSpeakerId, speakerIndex, playbackBuffer):
+      return
+
+    intent = smolLmIntentParser.parseIntent(text, context)
+    if intent != null:
+      intentExecutor.execute(intent)
 ```
 
 ### Model Management
 
-A `ModelManager` replaces the old monolithic `VoiceModelManager`. It downloads two model files:
+Moonshine manages its own models (bundled in assets or downloaded via built-in downloader). Only SmolLM2 needs a download manager:
 
-- Moonshine base ONNX model (exact size TBD)
-- SmolLM2 360M Q4_K_M GGUF (~200 MB)
-
-Both downloaded from HuggingFace. Resumable download with retry, progress tracking via `StateFlow<ModelDownloadState>`.
+- `ModelManager` handles SmolLM2 GGUF download from HuggingFace
+- SHA-256 verification, resume support, retry (5 attempts), atomic rename
+- Progress tracking via `StateFlow<ModelDownloadState>`
+- Model stored under `filesDir/smol-lm-model/`
 
 ### Error Handling
 
 | Condition | Behavior |
 |-----------|----------|
-| Moonshine returns empty | `none` intent |
+| Moonshine returns empty transcript | `none` intent |
+| Utterance fails speaker diarization check | Dropped silently |
+| Utterance fails cross-correlation check | Dropped silently |
 | SmolLM2 returns invalid JSON | `none` intent (single attempt) |
 | VAD false positive (no speech) | Moonshine returns empty → `none` |
 | Model not yet downloaded | Queue utterance, process once model ready |
 
 ## Language Coverage
 
-Moonshine base is built on the Whisper architecture and is primarily optimized for English ASR on mobile/edge devices. It may support additional languages through Whisper-derived tokenizers, but its primary focus is fast, accurate English transcription. Unlike the previous Whisper-based plan, `translate=true` is not available — non-English utterances will be transcribed in their source language. This means SmolLM2 360M (English-pretrained) may not handle non-English transcripts well. Multilingual voice commands should be evaluated during testing to determine if a language-specific SmolLM2 variant or a different intent parsing approach is needed for non-English users.
+Moonshine Small Streaming is English-optimized (7.84% WER). Moonshine also provides mono-lingual models for Arabic, Japanese, Korean, Mandarin, Spanish, Ukrainian, and Vietnamese. Non-English utterances are transcribed in their source language. SmolLM2 360M is English-pretrained, so non-English transcripts may not parse correctly. Multilingual voice commands should be evaluated during testing.
+
+## Component Map
+
+| Component | Responsibility |
+|---|---|
+| Moonshine `MicTranscriber` | Audio capture (Oboe), VAD, streaming ASR |
+| `UtteranceFilter` | Speaker consistency (Moonshine diarization) + playback cross-correlation |
+| `SmolLmIntentParser` | Structured JSON intent parsing via llama.cpp |
+| `ModelManager` | Downloads SmolLM2 GGUF from HuggingFace |
+| `VoicePlaybackIntentExecutor` | Maps intents to `PlaybackManager` actions (unchanged) |
+
+### Dependencies
+
+```kotlin
+// Gradle
+implementation("ai.moonshine:moonshine-voice:0.0.61")
+
+// CMake (only llama.cpp)
+FetchContent: llama.cpp
+// Links: LmJni.cpp for SmolLM2 inference
+```
+
+### JNI Surface
+
+```
+LmNative → parseIntent(modelPath, prompt): String
+```
 
 ## Testing
 
-- **Unit**: `MoonshineRecognizerTest` with mock JNI returns. `SmolLmIntentParserTest` with sample transcripts covering all intents, boundary cases (malformed input, empty string). `CascadedVoiceRecognizerTest` for orchestration logic.
-- **Native integration**: Pre-recorded WAV clips per language, run through full pipeline on device, verify correct `VoicePlaybackIntent` output.
-- **Regression**: All existing voice control unit tests continue to pass (intent executor, gate rules, speaker verification).
+- **Unit**: `UtteranceFilterTest` for diarization gating and cross-correlation threshold logic. `SmolLmIntentParserTest` with sample transcripts covering all intents, boundary cases (malformed input, empty string).
+- **Integration**: Moonshine `MicTranscriber` + `UtteranceFilter` + SmolLM2 end-to-end with pre-recorded WAV clips. Test playback bleed rejection with real podcast audio.
+- **Regression**: All existing `VoicePlaybackIntentExecutor` and gate rule tests continue to pass.
 
 ## Dependencies
 
-- Moonshine C API library (fetched via CMake `FetchContent`)
-- llama.cpp (fetched via CMake `FetchContent`)
+- `ai.moonshine:moonshine-voice` — Maven Central (audio capture, VAD, ASR, speaker diarization)
+- llama.cpp — CMake `FetchContent` (SmolLM2 intent parsing only)
 - Android NDK CMake, JNI, Hilt DI
-- Both models run on CPU — no GPU delegate required
+- Moonshine ASR runs on CPU via ONNX runtime (bundled by Moonshine). SmolLM2 runs on GPU via Vulkan.

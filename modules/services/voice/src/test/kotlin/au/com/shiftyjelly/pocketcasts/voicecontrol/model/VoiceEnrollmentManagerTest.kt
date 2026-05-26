@@ -3,6 +3,10 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.model
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -15,6 +19,8 @@ class VoiceEnrollmentManagerTest {
     private lateinit var store: SpeakerVerificationStore
     private lateinit var embedder: SpeakerEmbedder
     private lateinit var verifier: SpeakerVerifier
+    private lateinit var modelManager: ModelManager
+    private lateinit var scope: CoroutineScope
     private lateinit var manager: VoiceEnrollmentManager
 
     @Before
@@ -25,7 +31,14 @@ class VoiceEnrollmentManagerTest {
         embedder = SpeakerEmbedder(ctx)
         embedder.load()
         verifier = SpeakerVerifier()
-        manager = VoiceEnrollmentManager(store, embedder, verifier)
+        modelManager = ModelManager(ctx)
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        manager = VoiceEnrollmentManager(store, embedder, verifier, modelManager, scope)
+    }
+
+    @After
+    fun tearDown() {
+        // Cancel the scope to avoid lingering coroutines between tests
     }
 
     @Test fun `initial state is NotEnrolled`() {

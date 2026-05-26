@@ -5,14 +5,13 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoicePlaybackIntent
 interface VoiceRecognizer {
     suspend fun ensureReady(): Result<Unit>
 
-    /**
-     * Process an audio utterance and return a validated [VoicePlaybackIntent] or null.
-     *
-     * Gemma 4 E2B performs ASR and intent interpretation in a single model pass,
-     * returning structured JSON that is parsed into a [VoicePlaybackIntent].
-     */
     suspend fun recognize(
         clip: VoiceUtteranceClip,
         context: VoiceRecognitionContext,
     ): VoicePlaybackIntent?
+}
+
+class NoOpVoiceRecognizer @javax.inject.Inject constructor() : VoiceRecognizer {
+    override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+    override suspend fun recognize(clip: VoiceUtteranceClip, context: VoiceRecognitionContext): VoicePlaybackIntent? = null
 }

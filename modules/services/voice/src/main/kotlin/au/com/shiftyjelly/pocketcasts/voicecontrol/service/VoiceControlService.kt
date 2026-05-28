@@ -1,38 +1,26 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
-import android.app.Notification
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.BuildConfig
-import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture
-import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame
-import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioSegmenter
-import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceClipSaver
-import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
+import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.MoonshineVoiceEngine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGateState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.model.SpeakerEmbedder
-import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceEnrollmentManager
-import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceEnrollmentState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
-import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceUtteranceClip
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
-import au.com.shiftyjelly.pocketcasts.voicecontrol.ui.EnrollmentActivity
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
@@ -42,10 +30,6 @@ class VoiceControlService : Service() {
 
     @Inject lateinit var notificationManager: VoiceControlNotificationManager
 
-    @Inject lateinit var microphoneCapture: MicrophoneCapture
-
-    @Inject lateinit var segmenter: VoiceAudioSegmenter
-
     @Inject lateinit var voiceRecognizer: VoiceRecognizer
 
     @Inject lateinit var voicePlaybackIntentExecutor: VoicePlaybackIntentExecutor
@@ -54,18 +38,22 @@ class VoiceControlService : Service() {
 
     @Inject lateinit var audioRouteMonitor: AndroidAudioRouteMonitor
 
-    @Inject lateinit var enrollmentManager: VoiceEnrollmentManager
+    @Inject lateinit var moonshineEngine: dagger.Lazy<MoonshineVoiceEngine>
 
-    @Inject lateinit var embedder: SpeakerEmbedder
+    @Inject lateinit var playbackBufferRecorder: PlaybackBufferRecorder
+
+    @Inject lateinit var modelManager: au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-    private var captureJob: Job? = null
-    private var speechFrames = mutableListOf<PcmAudioFrame>()
     private var lastIntentType: String? = null
     private var lastCommandTime: Long = 0L
+    private var engineStarted = false
+    private var startInProgress = false
+    private var stopping = false
 
     companion object {
         private const val COMMAND_DEBOUNCE_MS = 2000L
+        private const val MOONSHINE_MODEL_ARCH = 2 // Small Streaming
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -80,6 +68,11 @@ class VoiceControlService : Service() {
     }
 
     private fun startVoiceControl() {
+        if (startInProgress || engineStarted) {
+            Timber.i("Voice control already started, skipping duplicate start")
+            return
+        }
+        startInProgress = true
         Timber.i("Voice control service starting")
 
         if (!hasRequiredPermissions()) {
@@ -88,29 +81,16 @@ class VoiceControlService : Service() {
             return
         }
 
-        // Mandatory enrollment check
-        if (enrollmentManager.state.value !is VoiceEnrollmentState.Enrolled) {
-            Timber.w("Speaker not enrolled, launching enrollment activity")
-            val notification = notificationManager.createEnrollmentRequiredNotification()
+        // On API 35+ FOREGROUND_SERVICE_MICROPHONE requires RECORD_AUDIO granted.
+        // If the user hasn't granted it yet, startForeground will throw.
+        try {
+            val notification = notificationManager.createDownloadingNotification()
             startForeground(notificationManager.notificationId, notification)
-            val enrollIntent = Intent(this, EnrollmentActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            }
-            startActivity(enrollIntent)
+        } catch (e: SecurityException) {
+            Timber.e(e, "Cannot start foreground — mic permission not granted")
             stopSelf()
             return
         }
-
-        // Load speaker embedding model
-        if (!embedder.load()) {
-            Timber.e("Failed to load speaker embedding model, stopping")
-            stopSelf()
-            return
-        }
-
-        // Show a "downloading" notification until models are ready
-        val downloadingNotification = notificationManager.createDownloadingNotification()
-        startForeground(notificationManager.notificationId, downloadingNotification)
 
         gate.state.onEach { state ->
             if (state is VoiceControlGateState.Blocked) {
@@ -120,15 +100,50 @@ class VoiceControlService : Service() {
         }.launchIn(serviceScope)
 
         serviceScope.launch(Dispatchers.IO) {
-            Timber.i("Voice recognizer ensureReady starting")
             voiceRecognizer.ensureReady().fold(
                 onSuccess = {
-                    Timber.i("Voice recognizer ready, starting audio capture")
-                    launch(Dispatchers.Main) {
-                        val notification = notificationManager.createListeningNotification()
-                        notificationManager.notify(notification)
-                        startAudioCapture()
-                    }
+                    Timber.i("Recognizer ready, ensuring Moonshine model")
+                    modelManager.ensureMoonshineModel().fold(
+                        onSuccess = {
+                            Timber.i("Moonshine model ready, ensuring SmolLM model")
+                            modelManager.ensureModel().fold(
+                                onSuccess = {
+                                    Timber.i("SmolLM model ready, starting engine")
+                                    try {
+                                        val notification = notificationManager.createListeningNotification()
+                                        notificationManager.notify(notification)
+
+                                        val modelPath = filesDir.resolve("moonshine-model").absolutePath
+                                        moonshineEngine.get().start(
+                                            modelPath = modelPath,
+                                            modelArch = MOONSHINE_MODEL_ARCH,
+                                            audioRoute = audioRouteMonitor.route.value,
+                                            playbackBufferProvider = playbackBufferRecorder::snapshot,
+                                            contextProvider = {
+                                                VoiceRecognitionContext(
+                                                    playbackContext = playbackContextMonitor.context.value,
+                                                    audioRoute = audioRouteMonitor.route.value,
+                                                )
+                                            },
+                                            onIntent = { intent -> handleIntent(intent) },
+                                        )
+                                        engineStarted = true
+                                    } catch (e: Exception) {
+                                        Timber.e(e, "Engine start failed")
+                                        launch(Dispatchers.Main) { stopSelf() }
+                                    }
+                                },
+                                onFailure = { e ->
+                                    Timber.e(e, "SmolLM model not ready, stopping")
+                                    launch(Dispatchers.Main) { stopSelf() }
+                                },
+                            )
+                        },
+                        onFailure = { e ->
+                            Timber.e(e, "Moonshine model not ready, stopping")
+                            launch(Dispatchers.Main) { stopSelf() }
+                        },
+                    )
                 },
                 onFailure = { e ->
                     Timber.e(e, "Recognizer not ready, stopping")
@@ -138,74 +153,7 @@ class VoiceControlService : Service() {
         }
     }
 
-    private fun startAudioCapture() {
-        captureJob?.cancel()
-        captureJob = serviceScope.launch(Dispatchers.IO) {
-            while (isActive) {
-                microphoneCapture.startCapture()
-                    .catch { e -> Timber.e(e, "Capture stream ended, restarting") }
-                    .collect { frame -> processAudioFrame(frame) }
-                Timber.i("Capture stream completed, restarting")
-                kotlinx.coroutines.delay(100)
-            }
-        }
-    }
-
-    private suspend fun processAudioFrame(frame: PcmAudioFrame) {
-        when (val result = segmenter.process(frame)) {
-            is VoiceSegmenterResult.SpeechStarted -> {
-                Timber.i("Speech started")
-                speechFrames.clear()
-                speechFrames.add(frame)
-            }
-
-            is VoiceSegmenterResult.SpeechContinuing -> {
-                speechFrames.add(frame)
-            }
-
-            is VoiceSegmenterResult.SpeechEnded -> {
-                speechFrames.clear()
-                Timber.i("Speech ended: ${result.frames.size} frames")
-                processUtterance(VoiceUtteranceClip.fromFrames(result.frames))
-            }
-
-            is VoiceSegmenterResult.Rejected -> {
-                Timber.w("Segment rejected: ${result.reason}")
-                speechFrames.clear()
-            }
-
-            VoiceSegmenterResult.Silence -> { /* continue */ }
-        }
-    }
-
-    private suspend fun processUtterance(clip: VoiceUtteranceClip) {
-        val tStart = System.currentTimeMillis()
-
-        // Speaker verification gate
-        val tv0 = System.currentTimeMillis()
-        val verified = enrollmentManager.verify(clip)
-        val tv1 = System.currentTimeMillis()
-        if (!verified) {
-            Timber.i("Speaker verification failed (%dms)", tv1 - tv0)
-            return
-        }
-        Timber.i("Speaker verification passed (%dms)", tv1 - tv0)
-
-        val recognitionContext = VoiceRecognitionContext(
-            playbackContext = playbackContextMonitor.context.value,
-            audioRoute = audioRouteMonitor.route.value,
-        )
-
-        val intent = voiceRecognizer.recognize(clip, recognitionContext)
-        val tEnd = System.currentTimeMillis()
-        Timber.i("Utterance total: %dms, intent=%s", tEnd - tStart, intent)
-        if (intent != null) {
-            handleIntent(clip, intent)
-        }
-    }
-
-    private suspend fun handleIntent(
-        clip: VoiceUtteranceClip,
+    private fun handleIntent(
         intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoicePlaybackIntent,
     ) {
         val now = System.currentTimeMillis()
@@ -218,18 +166,16 @@ class VoiceControlService : Service() {
         lastCommandTime = now
 
         Timber.i("Executing: $intent")
-
-        if (BuildConfig.DEBUG) {
-            VoiceClipSaver.save(clip, intent.toString())
-        }
-
-        voicePlaybackIntentExecutor.execute(intent)
+        serviceScope.launch(Dispatchers.IO) { voicePlaybackIntentExecutor.execute(intent) }
     }
 
     private fun stopVoiceControl() {
+        if (stopping) return
+        stopping = true
         Timber.i("Stopping voice control service")
-        captureJob?.cancel()
-        microphoneCapture.stopCapture()
+        if (engineStarted) moonshineEngine.get().stop()
+        engineStarted = false
+        startInProgress = false
         notificationManager.cancelNotification()
         stopForeground(STOP_FOREGROUND_REMOVE)
         serviceScope.cancel()

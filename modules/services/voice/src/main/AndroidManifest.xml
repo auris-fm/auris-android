@@ -10,6 +10,10 @@
             android:name=".ui.EnrollmentActivity"
             android:exported="false"
             android:theme="@style/Theme.AppCompat.DayNight" />
+        <activity
+            android:name=".ui.PermissionRequestActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <service
             android:name=".service.VoiceControlService"
             android:exported="false"

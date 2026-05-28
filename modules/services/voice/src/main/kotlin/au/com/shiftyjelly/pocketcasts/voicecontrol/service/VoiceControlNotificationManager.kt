@@ -9,7 +9,6 @@ import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import au.com.shiftyjelly.pocketcasts.voicecontrol.R
-import au.com.shiftyjelly.pocketcasts.voicecontrol.ui.EnrollmentActivity
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -96,33 +95,6 @@ class VoiceControlNotificationManager @Inject constructor(
                 "Stop",
                 stopPendingIntent,
             )
-            .build()
-    }
-
-    /**
-     * Create a notification directing the user to enroll their voice.
-     * Tapping opens the enrollment Activity.
-     */
-    fun createEnrollmentRequiredNotification(): Notification {
-        createNotificationChannel()
-
-        val enrollIntent = Intent(context, EnrollmentActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val enrollPendingIntent = PendingIntent.getActivity(
-            context,
-            0,
-            enrollIntent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
-
-        return NotificationCompat.Builder(context, CHANNEL_ID)
-            .setContentTitle("Voice Control")
-            .setContentText("Enroll your voice to enable voice control")
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setContentIntent(enrollPendingIntent)
             .build()
     }
 

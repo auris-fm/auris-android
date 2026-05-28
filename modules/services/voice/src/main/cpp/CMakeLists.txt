@@ -1,11 +1,10 @@
 cmake_minimum_required(VERSION 3.22)
 project("pocketcasts-voice-capture" CXX)
 
-# Apply 16KB page size alignment for all shared libraries (Android 16 requirement)
+# Apply 16KB page size alignment for Android 16
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384")
 
-# Enable ARM v8.2-A dot product instructions for quantized matmul on CPU (whisper + ggml-cpu).
-# The NDK defaults to armv8-a which lacks these. Safe for Tensor G3 / Pixel 8 and newer.
+# Enable ARM v8.2-A dot product instructions for quantized matmul on CPU
 if(ANDROID_ABI STREQUAL "arm64-v8a")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8.2-a+dotprod")
 endif()
@@ -13,9 +12,6 @@ endif()
 include(FetchContent)
 
 # Build Oboe from source (statically linked) to get proper 16KB segment alignment.
-# The Maven prebuilt liboboe.so has 4KB alignment and triggers the Android 16
-# compatibility warning. When used via FetchContent, Oboe detects it is a
-# subproject and builds as a static library.
 FetchContent_Declare(
     oboe
     GIT_REPOSITORY https://github.com/google/oboe.git
@@ -24,6 +20,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(oboe)
 
+# --- llama.cpp (SmolLM2 intent parsing) ---
 FetchContent_Declare(
     llamacpp
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
@@ -33,16 +30,6 @@ FetchContent_Declare(
 set(LLAMA_STATIC ON CACHE BOOL "" FORCE)
 set(LLAMA_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN ON CACHE BOOL "" FORCE)
-# KleidiAI integration in ggml b9174 has incomplete CMake globs for dotprod
-# kernel sources, causing linker errors on arm64. Disabled for now — the
-# -march=armv8.2-a+dotprod flag alone enables SDOT/UDOT instructions in
-# ggml's own CPU kernels, capturing most of the performance gain.
-# if(ANDROID_ABI STREQUAL "arm64-v8a")
-#     set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
-# endif()
-# LTO disabled — suspected conflict with Vulkan dispatch pipeline on Mali-G715,
-# causing GGML_ASSERT failures during inference. Re-test after ggml version bump.
-# set(GGML_LTO ON CACHE BOOL "" FORCE)
 
 # Find ninja path - ggml's vulkan-shaders-gen ExternalProject sub-build can't
 # inherit CMAKE_MAKE_PROGRAM from the parent cache.
@@ -58,8 +45,6 @@ if(NOT llamacpp_POPULATED)
     if(EXISTS "${_ninja_path}")
         set(_vk_cmake "${llamacpp_SOURCE_DIR}/ggml/src/ggml-vulkan/CMakeLists.txt")
         file(READ "${_vk_cmake}" _vk_content)
-        # Inject -DCMAKE_MAKE_PROGRAM into the ExternalProject's CMAKE_ARGS so the
-        # vulkan-shaders-gen sub-build uses the same build tool (ninja) as the parent.
         string(REPLACE
             [=[        CMAKE_ARGS -DCMAKE_INSTALL_PREFIX=${CMAKE_BINARY_DIR}/$<CONFIG>
                    -DCMAKE_INSTALL_BINDIR=.
@@ -78,9 +63,8 @@ if(NOT llamacpp_POPULATED)
         string(REPLACE "__NINJA_PATH__" "${_ninja_path}" _vk_content "${_vk_content}")
         file(WRITE "${_vk_cmake}" "${_vk_content}")
     endif()
-    # Vulkan 1.1+ functions (vkEnumerateInstanceVersion, etc.) are declared in
-    # NDK headers but only exported in libvulkan.so at API 28+. Point
-    # find_package(Vulkan) to API 28's library so ggml links correctly.
+    # Vulkan 1.1+ functions are declared in NDK headers but only exported
+    # in libvulkan.so at API 28+. Point find_package(Vulkan) to API 28's library.
     if(ANDROID_ABI STREQUAL "arm64-v8a")
         set(_vk_arch "aarch64-linux-android")
     elseif(ANDROID_ABI STREQUAL "x86_64")
@@ -97,9 +81,7 @@ if(NOT llamacpp_POPULATED)
         endif()
     endif()
     # Patch ggml-vulkan.cpp to catch exceptions from vulkan.hpp in the fence
-    # polling loop. The code uses exception-throwing vulkan.hpp calls without
-    # a try/catch, so a vk::DeviceLostError bypasses the error check and
-    # terminates as an uncaught exception.
+    # polling loop.
     set(_vk_src "${llamacpp_SOURCE_DIR}/ggml/src/ggml-vulkan/ggml-vulkan.cpp")
     file(READ "${_vk_src}" _vk_src_content)
     string(REPLACE
@@ -126,74 +108,34 @@ if(NOT llamacpp_POPULATED)
         _vk_src_content "${_vk_src_content}")
     file(WRITE "${_vk_src}" "${_vk_src_content}")
 
-    # Re-read the (now-patched) source for the next patch.
+    # Patch ggml-vulkan.cpp descriptor set pool capacity floor for Mali-G715
     file(READ "${_vk_src}" _vk_src_content)
-
-    # Patch ggml-vulkan.cpp to ensure the descriptor set pool has sufficient
-    # capacity for the full inference graph on Mali-G715. The default start-at-0
-    # with 1.5× growth can leave a shortfall when the graph has many dispatches
-    # (e.g. flash_attn disabled → explicit Q*K^T + attention*V per layer).
-    # Fix: floor the allocation at 3 full pools (768 sets) so growth is
-    # front-loaded and covers the entire graph.
     string(REPLACE
 [=[    uint32_t needed = std::max(3 * ctx->descriptor_sets.size() / 2, size_t{ctx->pipeline_descriptor_set_requirements});]=]
 [=[    uint32_t needed = std::max(std::max(3 * ctx->descriptor_sets.size() / 2, size_t{ctx->pipeline_descriptor_set_requirements}), size_t(768));]=]
     _vk_src_content "${_vk_src_content}")
-
     file(WRITE "${_vk_src}" "${_vk_src_content}")
 
-    # Guard: fail the build if the descriptor set floor patch wasn't applied.
-    # Without this guard, a llama.cpp version bump that changes the target
-    # text in ggml-vulkan.cpp would silently skip the patch, causing the
-    # same descriptor-set-exhaustion crash on Mali GPUs.
+    # Guard: fail if the descriptor set floor patch wasn't applied
     string(FIND "${_vk_src_content}" "size_t(768)" _patch_ok)
     if(_patch_ok EQUAL -1)
         message(FATAL_ERROR "\n\n"
             "ggml-vulkan.cpp descriptor-set floor patch FAILED.\n"
-            "The REPLACE pattern in ${CMAKE_CURRENT_LIST_FILE}:138\n"
-            "no longer matches ggml-vulkan.cpp in llama.cpp ${GIT_TAG}.\n"
-            "Update the old_string to match the new upstream version or\n"
-            "remove this patch if the upstream has its own fix.\n")
+            "The REPLACE pattern no longer matches ggml-vulkan.cpp.\n"
+            "Update the old_string or remove this patch if upstream has a fix.\n")
     endif()
 
     add_subdirectory(${llamacpp_SOURCE_DIR} ${llamacpp_BINARY_DIR})
 endif()
 
-# whisper.cpp is intentionally added AFTER llama.cpp so llama's ggml target
-# is created first. When whisper's CMakeLists.txt checks `if (NOT TARGET ggml)`,
-# it finds llama's ggml already exists, so it skips its own bundled ggml and
-# uses llama's ggml instead. This avoids target name collisions in the same
-# build tree. whisper.cpp v1.8.4's ggml-cpp.h header (required by whisper.cpp
-# for ggml_backend_ptr RAII wrapper) lives in its bundled ggml/include dir;
-# since we skip that subdirectory, we add the include path manually below.
-FetchContent_Declare(
-    whispercpp
-    GIT_REPOSITORY https://github.com/ggml-org/whisper.cpp.git
-    GIT_TAG v1.8.4
-    GIT_SHALLOW TRUE
-)
-set(WHISPER_BUILD_STATIC_LIB ON CACHE BOOL "" FORCE)
-set(WHISPER_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
-FetchContent_GetProperties(whispercpp)
-if(NOT whispercpp_POPULATED)
-    FetchContent_Populate(whispercpp)
-    add_subdirectory(${whispercpp_SOURCE_DIR} ${whispercpp_BINARY_DIR})
-    # whisper.cpp v1.8.4 uses ggml_backend_ptr (RAII wrapper from ggml-cpp.h)
-    # which lives in its bundled ggml include dir. Since llama's ggml target
-    # pre-empts the subdirectory, ggml-cpp.h isn't in the include path.
-    target_include_directories(whisper PRIVATE ${whispercpp_SOURCE_DIR}/ggml/include)
-endif()
-
-# Force 16KB page size alignment on all shared library targets for Android 16
-foreach(tgt llama whisper ggml ggml-base ggml-cpu ggml-vulkan omp)
+# Force 16KB page size alignment on all shared library targets
+foreach(tgt llama ggml ggml-base ggml-cpu ggml-vulkan omp)
     if(TARGET ${tgt})
         target_link_options(${tgt} PRIVATE -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384)
     endif()
 endforeach()
 
-# vulkan.hpp (C++ bindings) and SPIRV headers are not in the NDK. Find them
-# on the host system. ggml-vulkan in b9174+ also needs spirv/unified1/spirv.hpp
-# for SPIRV reflection of compiled shaders.
+# vulkan.hpp (C++ bindings) and SPIRV headers
 if(TARGET ggml-vulkan)
     find_path(VULKAN_HPP_PATH vulkan/vulkan.hpp
         NO_CMAKE_FIND_ROOT_PATH
@@ -212,25 +154,18 @@ if(TARGET ggml-vulkan)
     endif()
 endif()
 
+# --- pocketcasts_voice_capture (SmolLM2 JNI only) ---
 add_library(pocketcasts_voice_capture SHARED
     OboeAudioCapture.cpp
     jni_bridge.cpp
-    WhisperJni.cpp
+    VadJni.cpp
     LmJni.cpp
 )
 
-# NB: Do NOT add ${whispercpp_SOURCE_DIR}/ggml/include or
-# ${llamacpp_SOURCE_DIR}/ggml/include here. Both whisper and llama bundle their
-# own ggml headers with incompatible struct/enum definitions. Adding both to
-# the include path causes whichever comes first to shadow the other, leading
-# to redefinition errors in either whisper.cpp or LmJni.cpp depending on order.
-# The ggml headers are propagated transitively via each library's INTERFACE
-# include directories when we target_link_libraries(whisper) and
-# target_link_libraries(llama).
 target_include_directories(pocketcasts_voice_capture PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${whispercpp_SOURCE_DIR}/include
     ${llamacpp_SOURCE_DIR}/include
+    ${oboe_SOURCE_DIR}/include
 )
 
 target_link_libraries(pocketcasts_voice_capture
@@ -238,9 +173,16 @@ target_link_libraries(pocketcasts_voice_capture
     log
     android
     vulkan
-    whisper
     llama
 )
 
 target_compile_features(pocketcasts_voice_capture PUBLIC cxx_std_17)
 target_compile_options(pocketcasts_voice_capture PRIVATE -Wall -Werror -Os -fvisibility=hidden)
+
+# FetchContent targets (llama.cpp) override or ignore CMAKE_SHARED_LINKER_FLAGS
+# from the parent scope, so apply 16KB alignment explicitly per target.
+foreach(tgt llama ggml ggml-base ggml-cpu ggml-vulkan omp)
+    if(TARGET ${tgt})
+        target_link_options(${tgt} PRIVATE -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384)
+    endif()
+endforeach()

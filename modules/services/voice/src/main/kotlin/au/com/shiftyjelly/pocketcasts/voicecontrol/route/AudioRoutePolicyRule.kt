@@ -33,10 +33,11 @@ class AudioRoutePolicyRule(
     ): VoiceControlRuleState {
         return when (policy) {
             VoiceControlAudioRoutePolicy.HeadsetOnly -> when (route) {
-                AudioRoute.Headset(hasMicrophone = true) -> VoiceControlRuleState.Allowed
+                AudioRoute.Headset(hasMicrophone = true),
+                AudioRoute.BluetoothA2dpOnly, // SCO opened at engine start
+                -> VoiceControlRuleState.Allowed
 
                 is AudioRoute.Headset,
-                AudioRoute.BluetoothA2dpOnly,
                 AudioRoute.Speaker,
                 AudioRoute.Unknown,
                 -> disallowed
@@ -44,11 +45,11 @@ class AudioRoutePolicyRule(
 
             VoiceControlAudioRoutePolicy.SpeakerExperimental -> when (route) {
                 AudioRoute.Headset(hasMicrophone = true),
+                AudioRoute.BluetoothA2dpOnly, // SCO opened at engine start
                 AudioRoute.Speaker,
                 -> VoiceControlRuleState.Allowed
 
                 is AudioRoute.Headset,
-                AudioRoute.BluetoothA2dpOnly,
                 AudioRoute.Unknown,
                 -> disallowed
             }

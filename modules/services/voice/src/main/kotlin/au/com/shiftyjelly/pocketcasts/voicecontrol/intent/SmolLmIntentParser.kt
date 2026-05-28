@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.intent
 
 import androidx.annotation.VisibleForTesting
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContext
 import java.io.File
 import javax.inject.Inject
@@ -22,11 +23,18 @@ object LmNative {
 @Singleton
 open class SmolLmIntentParser @Inject constructor(
     @Named("smolLmModel") private val modelFile: File,
-) {
+) : VoiceRecognizer {
     @VisibleForTesting
     internal var nativeImpl: ((modelPath: String, prompt: String) -> String)? = null
 
     fun isModelReady(): Boolean = modelFile.exists() && modelFile.length() > 0
+
+    override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+
+    override suspend fun recognize(
+        transcript: String,
+        context: VoiceRecognitionContext,
+    ): VoicePlaybackIntent? = parseIntent(transcript, context)
 
     suspend fun parseIntent(
         transcript: String,

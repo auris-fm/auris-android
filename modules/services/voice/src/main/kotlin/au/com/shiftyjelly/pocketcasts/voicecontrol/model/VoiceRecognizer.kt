@@ -6,12 +6,12 @@ interface VoiceRecognizer {
     suspend fun ensureReady(): Result<Unit>
 
     suspend fun recognize(
-        clip: VoiceUtteranceClip,
+        transcript: String,
         context: VoiceRecognitionContext,
     ): VoicePlaybackIntent?
 }
 
 class NoOpVoiceRecognizer @javax.inject.Inject constructor() : VoiceRecognizer {
     override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
-    override suspend fun recognize(clip: VoiceUtteranceClip, context: VoiceRecognitionContext): VoicePlaybackIntent? = null
+    override suspend fun recognize(transcript: String, context: VoiceRecognitionContext): VoicePlaybackIntent? = null
 }

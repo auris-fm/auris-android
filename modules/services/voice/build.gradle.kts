@@ -43,9 +43,7 @@ dependencies {
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.coroutines.core)
-    implementation(libs.android.vad.silero)
-    implementation(libs.litert.api)
-    implementation(libs.litert.runtime)
+    implementation(libs.moonshine.voice)
     implementation(libs.timber)
 
     implementation(projects.modules.services.analytics)

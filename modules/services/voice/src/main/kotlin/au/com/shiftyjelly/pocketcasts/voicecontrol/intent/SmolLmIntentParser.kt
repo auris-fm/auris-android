@@ -17,7 +17,19 @@ object LmNative {
         System.loadLibrary("pocketcasts_voice_capture")
     }
 
-    external fun parseIntent(modelPath: String, prompt: String): String
+    /**
+     * Pre-decodes the system prompt prefix into the GPU KV cache so subsequent
+     * [parseIntent] calls only need to encode the short per-utterance suffix.
+     * Returns true if the prefix was successfully decoded.
+     */
+    external fun prewarmModel(modelPath: String, fixedPrefix: String): Boolean
+
+    /**
+     * Decodes the per-utterance suffix (transcript + runtime context) at
+     * positions after the prewarmed prefix and generates the intent JSON.
+     * Must call [prewarmModel] first.
+     */
+    external fun parseIntent(modelPath: String, suffix: String): String
 }
 
 @Singleton
@@ -25,7 +37,11 @@ open class SmolLmIntentParser @Inject constructor(
     @Named("smolLmModel") private val modelFile: File,
 ) : VoiceRecognizer {
     @VisibleForTesting
-    internal var nativeImpl: ((modelPath: String, prompt: String) -> String)? = null
+    internal var nativeImpl: ((modelPath: String, suffix: String) -> String)? = null
+
+    /** Whether the system prompt prefix has been prewarmed into the KV cache. */
+    @VisibleForTesting
+    internal var prewarmed = false
 
     fun isModelReady(): Boolean = modelFile.exists() && modelFile.length() > 0
 
@@ -35,6 +51,17 @@ open class SmolLmIntentParser @Inject constructor(
         transcript: String,
         context: VoiceRecognitionContext,
     ): VoicePlaybackIntent? = parseIntent(transcript, context)
+
+    /**
+     * Pre-decodes the static system prompt prefix into the GPU KV cache.
+     * Must be called once before [parseIntent]. Safe to call multiple times.
+     */
+    fun prewarm(): Boolean {
+        val prefix = buildPromptPrefix()
+        return LmNative.prewarmModel(modelFile.absolutePath, prefix).also { ok ->
+            prewarmed = ok
+        }
+    }
 
     suspend fun parseIntent(
         transcript: String,
@@ -48,10 +75,10 @@ open class SmolLmIntentParser @Inject constructor(
         context: VoiceRecognitionContext,
     ): VoicePlaybackIntent? {
         if (transcript.isBlank()) return null
-        val prompt = buildPrompt(transcript, context)
+        val suffix = buildPromptSuffix(transcript, context)
         try {
-            val output = nativeImpl?.invoke(modelFile.absolutePath, prompt)
-                ?: LmNative.parseIntent(modelFile.absolutePath, prompt)
+            val output = nativeImpl?.invoke(modelFile.absolutePath, suffix)
+                ?: LmNative.parseIntent(modelFile.absolutePath, suffix)
             Timber.i("SmolLM: '%s'", output)
             return parseIntentJson(output)
         } catch (e: Exception) {
@@ -60,11 +87,12 @@ open class SmolLmIntentParser @Inject constructor(
         }
     }
 
-    private fun buildPrompt(transcript: String, ctx: VoiceRecognitionContext): String {
-        val playbackInfo = when (val pc = ctx.playbackContext) {
-            is PlaybackContext.Active -> "Current playback state: ${if (pc.isPlaying) "playing" else "paused"}"
-            PlaybackContext.Inactive -> "Current playback state: inactive"
-        }
+    /**
+     * Static system prompt prefix ending at `<|im_start|>user\n`.
+     * Pre-decoded into the KV cache once at engine start.
+     */
+    @VisibleForTesting
+    internal fun buildPromptPrefix(): String {
         return """<|im_start|>system
 You are a voice command processor for a podcast player. Output ONLY a single JSON object matching the user's intent. No greetings, no explanations, no natural language — just raw JSON.
 
@@ -109,11 +137,23 @@ Common aliases:
 "no boost" -> {"intent": "set_volume_boost", "enabled": false}
 "bookmark this" / "save this" -> {"intent": "add_bookmark", "title": "Voice bookmark"}
 "set speed X" -> {"intent": "set_speed", "speed": X}
-
-$playbackInfo
-Audio route: ${ctx.audioRoute}
 <|im_end|>
 <|im_start|>user
+"""
+    }
+
+    /**
+     * Per-utterance suffix: runtime playback context + transcript + end tokens.
+     * Decoded at positions after the prewarmed prefix.
+     */
+    @VisibleForTesting
+    internal fun buildPromptSuffix(transcript: String, ctx: VoiceRecognitionContext): String {
+        val playbackInfo = when (val pc = ctx.playbackContext) {
+            is PlaybackContext.Active -> "Current playback state: ${if (pc.isPlaying) "playing" else "paused"}"
+            PlaybackContext.Inactive -> "Current playback state: inactive"
+        }
+        return """$playbackInfo
+Audio route: ${ctx.audioRoute}
 $transcript
 <|im_end|>
 <|im_start|>assistant"""

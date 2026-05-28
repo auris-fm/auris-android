@@ -48,11 +48,17 @@ static llama_context* g_ctx = nullptr;
 static llama_sampler* g_smpl = nullptr;
 static std::string g_model_path;
 
+// Number of prefix tokens pre-decoded into the KV cache. Zero means no
+// prewarmed prefix — parseIntent will fail in that case.
+static int g_prefix_token_count = 0;
+
 static bool ensureModel(const std::string& path) {
     if (g_model && g_model_path == path) return true;
     if (g_smpl) { llama_sampler_free(g_smpl); g_smpl = nullptr; }
     if (g_ctx) { llama_free(g_ctx); g_ctx = nullptr; }
     if (g_model) { llama_model_free(g_model); g_model = nullptr; }
+
+    g_prefix_token_count = 0;
 
     {
         auto t0 = std::chrono::steady_clock::now();
@@ -76,23 +82,13 @@ static bool ensureModel(const std::string& path) {
         auto t0 = std::chrono::steady_clock::now();
         auto ctxParams = llama_context_default_params();
         // 2048 matches SmolLM2's max_position_embeddings. The system prompt with
-        // all intent aliases is ~800-1250 tokens; 512 is too small and causes
+        // all intent aliases is ~500-600 tokens; 512 is too small and causes
         // severe truncation which can produce garbled activations → NaN.
         ctxParams.n_ctx = 2048;
-        // Offload KV cache to GPU along with model layers. When the KV cache is
-        // CPU-backed but model layers are on Vulkan, the ggml graph scheduler
-        // creates GPU views for CPU buffers (e.g. Vulkan0#cache_k_l0), the view
-        // validation fails, and execution falls back to CPU entirely — causing
-        // NaN crashes in SiLU from slow CPU inference.
+        // Offload KV cache to GPU along with model layers.
         ctxParams.offload_kqv = true;
-        // NB: flash_attn was disabled — on Mali-G715 with Vulkan it created 66
-        // graph splits vs. 2 without, causing GPU driver hangs on this device.
-        // Re-enabled for b9174 testing: the DP4A flash attention shader and
-        // shared-memory-capacity check may stabilize it. Monitor logcat for
-        // vk::DeviceLostError and revert if hangs reappear.
-        // Test result: flash_attn=ENABLED added ~4x overhead to decode and ~5-10x
-        // to generation. The Mali driver still fragments the GPU graph badly even
-        // if it doesn't crash. Disabled.
+        // Flash attention disabled on Mali-G715: it fragments the GPU graph into
+        // 66+ splits vs. 2 without, causing driver hangs and 4-10x decode overhead.
         ctxParams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
         // Cap threads to avoid big.LITTLE contention. 4 threads is optimal on mobile ARM.
         int nThreads = static_cast<int>(std::thread::hardware_concurrency());
@@ -115,68 +111,89 @@ static bool ensureModel(const std::string& path) {
     return true;
 }
 
-static std::string run(const std::string& prompt) {
-    if (!g_ctx || !g_model || !g_smpl) return {};
+static bool prewarmImpl(const std::string& prefix) {
+    if (!g_ctx || !g_model) return false;
 
-    // Clear the KV cache before each inference to prevent cache pollution from
-    // previous runs. Without this, stale KV entries from the prior prompt cause
-    // numerical instability (NaN) in the attention softmax computation.
-    // b9174 replaces llama_kv_self_clear with the memory API.
-    llama_memory_seq_rm(llama_get_memory(g_ctx), -1, -1, -1);
+    // Clear any stale KV cache entries before decoding the prefix.
+    llama_memory_seq_rm(llama_get_memory(g_ctx), 0, -1, -1);
+
+    const auto* vocab = llama_model_get_vocab(g_model);
+    if (!vocab) return false;
+
+    int nCtx = llama_n_ctx(g_ctx);
+    std::vector<llama_token> tokens(nCtx);
+    int nTokens = llama_tokenize(vocab, prefix.c_str(), (int32_t)prefix.size(),
+                                  tokens.data(), (int32_t)tokens.size(), true, true);
+    if (nTokens < 0) {
+        tokens.resize(-nTokens);
+        nTokens = llama_tokenize(vocab, prefix.c_str(), (int32_t)prefix.size(),
+                                  tokens.data(), (int32_t)tokens.size(), true, true);
+    }
+    if (nTokens <= 0) return false;
+    tokens.resize(nTokens);
+
+    auto decodeT0 = std::chrono::steady_clock::now();
+    auto batch = llama_batch_get_one(tokens.data(), nTokens);
+    if (llama_decode(g_ctx, batch) != 0) return false;
+    auto decodeT1 = std::chrono::steady_clock::now();
+    auto decodeMs = std::chrono::duration_cast<std::chrono::milliseconds>(decodeT1 - decodeT0).count();
+
+    g_prefix_token_count = nTokens;
+    LOGI("prewarm: decoded %d prefix tokens in %lldms", nTokens, (long long)decodeMs);
+    return true;
+}
+
+// Decodes suffix tokens after the prewarmed prefix using auto-positioning
+// (llama_batch_get_one), generates output, then removes only the suffix and
+// generated tokens from the KV cache — keeping the prefix cached for reuse.
+static std::string run(const std::string& suffix, int prefixLen) {
+    if (!g_ctx || !g_model || !g_smpl) return {};
 
     const auto* vocab = llama_model_get_vocab(g_model);
     if (!vocab) return {};
 
-    // Tokenize
+    // Tokenize suffix
     auto tTokenize = std::chrono::steady_clock::now();
     int nCtx = llama_n_ctx(g_ctx);
+    int maxSuffixTokens = nCtx - prefixLen - 16;
     std::vector<llama_token> tokens(nCtx);
-    // parse_special=true: SmolLM2's chat template uses <|system|>, <|user|>,
-    // <|assistant|> as single special tokens. Without parsing them, the tokenizer
-    // splits them into individual characters, producing ~10x more tokens and
-    // losing the role boundary structure the model was trained on.
-    int nTokens = llama_tokenize(vocab, prompt.c_str(), (int32_t)prompt.size(),
+    int nTokens = llama_tokenize(vocab, suffix.c_str(), (int32_t)suffix.size(),
                                   tokens.data(), (int32_t)tokens.size(), true, true);
     if (nTokens < 0) {
         tokens.resize(-nTokens);
-        nTokens = llama_tokenize(vocab, prompt.c_str(), (int32_t)prompt.size(),
+        nTokens = llama_tokenize(vocab, suffix.c_str(), (int32_t)suffix.size(),
                                   tokens.data(), (int32_t)tokens.size(), true, true);
     }
     if (nTokens <= 0) return {};
-    tokens.resize(nTokens);
-
-    if (nTokens > nCtx - 16) nTokens = nCtx - 16;
+    if (nTokens > maxSuffixTokens) nTokens = maxSuffixTokens;
     tokens.resize(nTokens);
     auto tTokenizeEnd = std::chrono::steady_clock::now();
-    auto tokenizeMs = std::chrono::duration_cast<std::chrono::microseconds>(tTokenizeEnd - tTokenize).count();
+    auto tokenizeUs = std::chrono::duration_cast<std::chrono::microseconds>(tTokenizeEnd - tTokenize).count();
 
-    // Initial decode (prompt processing)
+    // llama_batch_get_one uses auto-positioning: after the prefix at positions
+    // [0, prefixLen), it continues sequentially from position prefixLen.
     auto tDecode = std::chrono::steady_clock::now();
     auto batch = llama_batch_get_one(tokens.data(), nTokens);
     if (llama_decode(g_ctx, batch) != 0) return {};
     auto tDecodeEnd = std::chrono::steady_clock::now();
     auto decodeMs = std::chrono::duration_cast<std::chrono::milliseconds>(tDecodeEnd - tDecode).count();
 
-    LOGI("prompt: %d tokens, tokenize=%lldus, decode=%lldms",
-         nTokens, (long long)tokenizeMs, (long long)decodeMs);
+    LOGI("suffix: %d tokens, tokenize=%lldus, decode=%lldms",
+         nTokens, (long long)tokenizeUs, (long long)decodeMs);
 
-    // Generation loop
+    // Generation loop — same as before, using auto-positioned single-token batches.
     auto tGen = std::chrono::steady_clock::now();
     std::string result;
     int genTokens = 0;
     for (int i = 0; i < 256; i++) {
-        auto tSample = std::chrono::steady_clock::now();
         auto id = llama_sampler_sample(g_smpl, g_ctx, -1);
-        auto tSampleEnd = std::chrono::steady_clock::now();
-        auto sampleUs = std::chrono::duration_cast<std::chrono::microseconds>(tSampleEnd - tSample).count();
         if (id == llama_vocab_eos(vocab)) {
-            LOGI("generated %d tokens (EOS at step %d), last sample=%lldus", genTokens, i, (long long)sampleUs);
+            LOGI("generated %d tokens (EOS at step %d)", genTokens, i);
             break;
         }
 
-        tokens.push_back(id);
-        auto nextBatch = llama_batch_get_one(&id, 1);
-        if (llama_decode(g_ctx, nextBatch) != 0) break;
+        auto genBatch = llama_batch_get_one(&id, 1);
+        if (llama_decode(g_ctx, genBatch) != 0) break;
 
         char buf[8];
         int n = llama_token_to_piece(vocab, id, buf, sizeof(buf), 0, true);
@@ -187,6 +204,11 @@ static std::string run(const std::string& prompt) {
     auto genMs = std::chrono::duration_cast<std::chrono::milliseconds>(tGenEnd - tGen).count();
     LOGI("generation: %d tokens in %lldms (%.1fms/tok)", genTokens, (long long)genMs,
          genTokens > 0 ? (double)genMs / genTokens : 0.0);
+
+    // Remove suffix + generated tokens from KV cache, leaving the prefix intact
+    // for the next utterance.
+    llama_memory_seq_rm(llama_get_memory(g_ctx), 0, prefixLen, -1);
+
     return result;
 }
 
@@ -210,19 +232,51 @@ static void abortCallback(const char * message) {
 
 extern "C" {
 
-JNIEXPORT jstring JNICALL
-Java_au_com_shiftyjelly_pocketcasts_voicecontrol_intent_LmNative_parseIntent(
-    JNIEnv* env, jclass, jstring j_model_path, jstring j_prompt
+JNIEXPORT jboolean JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_intent_LmNative_prewarmModel(
+    JNIEnv* env, jclass, jstring j_model_path, jstring j_fixed_prefix
 ) {
     std::lock_guard<std::mutex> lock(g_mutex);
     ggml_log_set(llamaLogCallback, nullptr);
     llama_log_set(llamaLogCallback, nullptr);
     ggml_set_abort_callback(abortCallback);
     initVulkanEnv();
+
+    auto modelPath = jstringToString(env, j_model_path);
+    if (!ensureModel(modelPath)) {
+        LOGE("prewarm: model load failed");
+        return JNI_FALSE;
+    }
+
+    auto prefix = jstringToString(env, j_fixed_prefix);
+    if (prefix.empty()) {
+        LOGE("prewarm: empty prefix");
+        return JNI_FALSE;
+    }
+
+    return prewarmImpl(prefix) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_intent_LmNative_parseIntent(
+    JNIEnv* env, jclass, jstring j_model_path, jstring j_suffix
+) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ggml_log_set(llamaLogCallback, nullptr);
+    llama_log_set(llamaLogCallback, nullptr);
+    ggml_set_abort_callback(abortCallback);
+    initVulkanEnv();
+
     auto modelPath = jstringToString(env, j_model_path);
     if (!ensureModel(modelPath)) return stringToJstring(env, "");
-    auto prompt = jstringToString(env, j_prompt);
-    auto result = run(prompt);
+
+    if (g_prefix_token_count <= 0) {
+        LOGE("parseIntent called without prewarmed prefix — ignoring");
+        return stringToJstring(env, "");
+    }
+
+    auto suffix = jstringToString(env, j_suffix);
+    auto result = run(suffix, g_prefix_token_count);
     return stringToJstring(env, result);
 }
 

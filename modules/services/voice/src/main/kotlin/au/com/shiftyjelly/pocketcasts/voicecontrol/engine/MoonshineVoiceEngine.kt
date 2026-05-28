@@ -41,6 +41,7 @@ class MoonshineVoiceEngine @Inject constructor(
     private var savedAudioMode: Int? = null
     private var playbackBufferProvider: (() -> FloatArray)? = null
     private var engineStartTimeMs: Long = 0
+    private var transcribeStartTimeMs: Long = 0
 
     fun start(
         modelPath: String,
@@ -62,7 +63,7 @@ class MoonshineVoiceEngine @Inject constructor(
                     Timber.i("Moonshine event: %s", event::class.simpleName)
                     if (event is TranscriptEvent.LineCompleted) {
                         val text = event.line.text ?: ""
-                        val elapsed = System.currentTimeMillis() - engineStartTimeMs
+                        val elapsed = System.currentTimeMillis() - transcribeStartTimeMs
                         val audio = event.line.audioData ?: FloatArray(0)
                         Timber.i("Moonshine ASR: '%s' (elapsed=%dms)", text, elapsed)
                         if (text.isNotBlank()) {
@@ -75,6 +76,11 @@ class MoonshineVoiceEngine @Inject constructor(
             Timber.e(e, "Failed to load Moonshine transcriber")
             return
         }
+
+        // Pre-decode the SmolLM system prompt prefix (~600 tokens) into the GPU KV cache.
+        // Subsequent parseIntent calls only encode the short per-utterance suffix (~20 tokens).
+        val prewarmed = intentParser.prewarm()
+        Timber.i("SmolLM prewarm: %s", if (prewarmed) "OK" else "FAILED")
 
         processingJob = scope.launch {
             try {
@@ -116,6 +122,7 @@ class MoonshineVoiceEngine @Inject constructor(
         }
         val frameCount = segment.frames.size
         try {
+            transcribeStartTimeMs = System.currentTimeMillis()
             val streamId = t.createStream()
             Timber.i("transcribeSegment: stream=$streamId frames=$frameCount")
             t.startStream(streamId)

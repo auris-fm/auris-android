@@ -46,9 +46,6 @@ class NativeVadSegmenter @Inject constructor(
 
     private val speechThreshold = 0.1f
 
-    private var debugSampleCount = 0
-    private var isFirstSilent = true
-
     private fun ensureInit() {
         if (initialized) return
         // Init on first call — defers ONNX loading until engine is running.
@@ -125,23 +122,9 @@ class NativeVadSegmenter @Inject constructor(
             }
         }
 
-        // Log RMS and VAD probability for first 200 frames to debug audio levels
-        if (debugSampleCount < 200) {
-            val rms = kotlin.math.sqrt(frame.samples.map { (it * it).toDouble() }.average())
-            if (maxProb > 0f || debugSampleCount < 40) {
-                Timber.i("VAD: rms=%.0f prob=%.3f samples=%d", rms, maxProb, frame.samples.size)
-            }
-            debugSampleCount++
-        }
-
         if (currentSpeech && !speechActive) {
             Timber.i("VAD: speech started")
         }
-        if (!currentSpeech && speechActive && !isFirstSilent) {
-            Timber.i("VAD: speech ended")
-            isFirstSilent = true
-        }
-        if (currentSpeech) isFirstSilent = false
 
         if (currentSpeech) {
             consecutiveSilentFrames = 0

@@ -134,23 +134,8 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_NativeVad_nativeIsSpeech(
 
     // Build float input tensor [1, 1024].
     std::vector<float> inputData(kInputSize);
-    float sumSq = 0.0f;
     for (size_t i = 0; i < kInputSize; i++) {
-        float val = (float)samples[i] / 32768.0f;
-        inputData[i] = val;
-        sumSq += val * val;
-    }
-    float rms = sqrtf(sumSq / kInputSize);
-    short peak = 0;
-    for (size_t i = 0; i < kInputSize; i++) {
-        short absVal = samples[i] > 0 ? samples[i] : (short)-samples[i];
-        if (absVal > peak) peak = absVal;
-    }
-    static int diagCount = 0;
-    if (diagCount < 20) {
-        LOGI("VAD native: rms=%.6f peak=%d sample[0]=%d sample[512]=%d",
-             rms, (int)peak, (int)samples[0], (int)samples[512]);
-        diagCount++;
+        inputData[i] = (float)samples[i] / 32768.0f;
     }
     env->ReleaseShortArrayElements(jSamples, samples, JNI_ABORT);
 
@@ -224,10 +209,6 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_NativeVad_nativeIsSpeech(
         return 0.0f;
     }
     float result = outputData[0];
-
-    if (diagCount < 20) {
-        LOGI("VAD native: prob=%.6f", result);
-    }
 
     // Copy new hidden state back for next frame.
     float* hnData = nullptr;

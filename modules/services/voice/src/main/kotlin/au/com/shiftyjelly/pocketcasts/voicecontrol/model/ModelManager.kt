@@ -25,50 +25,72 @@ class ModelManager @Inject constructor(
 ) {
     private val downloadMutex = Mutex()
     companion object {
-        const val WHISPER_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
-
-        // bartowski's GGUF conversion is the most reliable — mfuntowicz's
-        // version had corrupted fp16 quantization scales causing NaN crashes.
         const val SMOL_LM_URL = "https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf"
 
         @VisibleForTesting
-        internal const val WHISPER_SHA256 = "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe"
-
-        @VisibleForTesting
         internal const val SMOL_LM_SHA256 = "2fa3f013dcdd7b99f9b237717fa0b12d75bbb89984cc1274be1471a465bac9c2"
+
+        private const val MOONSHINE_BASE_URL =
+            "https://download.moonshine.ai/model/small-streaming-en/quantized"
+
+        private val MOONSHINE_FILES = listOf(
+            "adapter.ort",
+            "cross_kv.ort",
+            "decoder_kv.ort",
+            "decoder_kv_with_attention.ort",
+            "encoder.ort",
+            "frontend.ort",
+            "streaming_config.json",
+            "tokenizer.bin",
+        )
     }
 
     @VisibleForTesting
     internal var filesDir: File = context.filesDir
 
-    private val whisperDir get() = File(filesDir, "whisper-model")
     private val smolLmDir get() = File(filesDir, "smol-lm-model")
-
-    val whisperModelFile get() = File(whisperDir, "ggml-base.bin")
     val smolLmModelFile get() = File(smolLmDir, "smolLM2-360M-instruct-Q4_K_M.gguf")
+
+    val moonshineDir get() = File(filesDir, "moonshine-model")
 
     private val _downloadState = MutableStateFlow<ModelDownloadState>(ModelDownloadState.NotStarted)
     val downloadState: StateFlow<ModelDownloadState> = _downloadState.asStateFlow()
 
-    fun areModelsReady(): Boolean {
-        return whisperModelFile.exists() && smolLmModelFile.exists()
+    fun isModelReady(): Boolean = smolLmModelFile.exists()
+
+    fun isMoonshineModelReady(): Boolean = MOONSHINE_FILES.all { File(moonshineDir, it).exists() }
+
+    suspend fun ensureMoonshineModel(): Result<Unit> = withContext(Dispatchers.IO) {
+        if (isMoonshineModelReady()) return@withContext Result.success(Unit)
+        downloadMutex.withLock {
+            if (isMoonshineModelReady()) return@withContext Result.success(Unit)
+            try {
+                moonshineDir.mkdirs()
+                for (file in MOONSHINE_FILES) {
+                    val url = "$MOONSHINE_BASE_URL/$file"
+                    val dest = File(moonshineDir, file)
+                    downloadFile(url, dest, "Moonshine/$file", expectedSha256 = "")
+                }
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Timber.e(e, "Moonshine model download failed")
+                Result.failure(e)
+            }
+        }
     }
 
-    suspend fun ensureModels(): Result<Unit> = withContext(Dispatchers.IO) {
-        if (areModelsReady()) {
+    suspend fun ensureModel(): Result<Unit> = withContext(Dispatchers.IO) {
+        if (isModelReady()) {
             _downloadState.value = ModelDownloadState.Ready
             return@withContext Result.success(Unit)
         }
         downloadMutex.withLock {
-            // Double-check after acquiring lock — another coroutine may have finished
-            if (areModelsReady()) {
+            if (isModelReady()) {
                 _downloadState.value = ModelDownloadState.Ready
                 return@withContext Result.success(Unit)
             }
             try {
-                whisperDir.mkdirs()
                 smolLmDir.mkdirs()
-                downloadFile(WHISPER_URL, whisperModelFile, "whisper", WHISPER_SHA256)
                 downloadFile(SMOL_LM_URL, smolLmModelFile, "SmolLM", SMOL_LM_SHA256)
                 _downloadState.value = ModelDownloadState.Ready
                 Result.success(Unit)
@@ -77,18 +99,12 @@ class ModelManager @Inject constructor(
                 _downloadState.value = ModelDownloadState.Failed(e.message ?: "Unknown error")
                 Result.failure(e)
             }
-        } // downloadMutex.withLock
+        }
     }
 
-    /**
-     * Downloads [urlStr] to a temporary file, then atomically renames it to [dest]
-     * on success. If the process is killed mid-download, only the `.tmp` file exists
-     * and the download will be retried from scratch on the next launch.
-     */
     private fun downloadFile(urlStr: String, dest: File, label: String, expectedSha256: String) {
         if (dest.exists()) {
-            // Verify SHA256 even when file exists so model changes auto-redownload.
-            if (sha256Matches(dest, expectedSha256)) {
+            if (expectedSha256.isEmpty() || sha256Matches(dest, expectedSha256)) {
                 Timber.i("$label model already downloaded (SHA256 verified)")
                 return
             }
@@ -135,7 +151,7 @@ class ModelManager @Inject constructor(
                     }
                 }
                 connection.disconnect()
-                verifySha256(tmpFile, expectedSha256, label)
+                if (expectedSha256.isNotEmpty()) verifySha256(tmpFile, expectedSha256, label)
                 tmpFile.renameTo(dest)
                 Timber.i("$label model download complete")
                 maxRetries = 0

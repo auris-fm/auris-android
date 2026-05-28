@@ -1,6 +1,7 @@
 // LmJni.cpp
 #include "LmJni.h"
-#include "jni_bridge_common.h"
+#include <jni.h>
+#include <string>
 #include <llama.h>
 #include <android/log.h>
 #include <chrono>
@@ -63,9 +64,12 @@ static bool ensureModel(const std::string& path) {
         g_model = llama_model_load_from_file(path.c_str(), modelParams);
         auto t1 = std::chrono::steady_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        if (!g_model) {
+            LOGE("model load failed");
+            return false;
+        }
         int nLayers = llama_model_n_layer(g_model);
         LOGI("model loaded in %lldms, %d layers, n_gpu_layers=%d", (long long)ms, nLayers, modelParams.n_gpu_layers);
-        if (!g_model) return false;
     }
 
     {
@@ -184,6 +188,18 @@ static std::string run(const std::string& prompt) {
     LOGI("generation: %d tokens in %lldms (%.1fms/tok)", genTokens, (long long)genMs,
          genTokens > 0 ? (double)genMs / genTokens : 0.0);
     return result;
+}
+
+static std::string jstringToString(JNIEnv* env, jstring str) {
+    if (!str) return {};
+    const char* chars = env->GetStringUTFChars(str, nullptr);
+    std::string result(chars);
+    env->ReleaseStringUTFChars(str, chars);
+    return result;
+}
+
+static jstring stringToJstring(JNIEnv* env, const std::string& str) {
+    return env->NewStringUTF(str.c_str());
 }
 
 // Logger for ggml_abort assertion failures. The default handler writes to

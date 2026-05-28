@@ -1,13 +1,13 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat
 import au.com.shiftyjelly.pocketcasts.repositories.playback.AppLifecycleProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGateState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceEnrollmentManager
-import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceEnrollmentState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.ui.EnrollmentActivity
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -24,43 +24,30 @@ import timber.log.Timber
 class VoiceControlServiceController @Inject constructor(
     @ApplicationContext private val context: Context,
     private val appLifecycleProvider: AppLifecycleProvider,
-    private val enrollmentManager: VoiceEnrollmentManager,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var isMonitoring = false
-    private var hasPromptedEnrollment = false
+    private var serviceStarted = false
 
     fun start() {
-        // Prevent loop: if not enrolled, go directly to enrollment instead of
-        // starting the service (which would stop itself and re-trigger us).
-        if (enrollmentManager.state.value !is VoiceEnrollmentState.Enrolled) {
-            Timber.i("VoiceControlServiceController: not enrolled, launching enrollment activity")
-            val intent = Intent(context, EnrollmentActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            }
-            context.startActivity(intent)
+        if (serviceStarted) return
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            Timber.w("VoiceControlServiceController: RECORD_AUDIO not granted, requesting")
+            context.startActivity(
+                Intent(context, au.com.shiftyjelly.pocketcasts.voicecontrol.ui.PermissionRequestActivity::class.java)
+                    .apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) },
+            )
             return
         }
         Timber.i("VoiceControlServiceController: starting service")
+        serviceStarted = true
         context.startForegroundService(Intent(context, VoiceControlService::class.java))
     }
 
-    /**
-     * Launches the enrollment activity if the user is not yet enrolled.
-     * Call this independently of the gate so users can enroll without
-     * needing active playback or a headset.
-     */
-    fun promptEnrollmentIfNeeded() {
-        if (enrollmentManager.state.value !is VoiceEnrollmentState.Enrolled) {
-            Timber.i("VoiceControlServiceController: not enrolled, prompting enrollment")
-            val intent = Intent(context, EnrollmentActivity::class.java).apply {
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-            }
-            context.startActivity(intent)
-        }
-    }
-
     fun stop() {
+        serviceStarted = false
         Timber.i("VoiceControlServiceController: stopping service")
         context.stopService(Intent(context, VoiceControlService::class.java))
     }
@@ -70,20 +57,9 @@ class VoiceControlServiceController @Inject constructor(
         isMonitoring = true
         Timber.i("VoiceControlServiceController: starting gate monitoring")
 
-        combine(gate.state, appLifecycleProvider.isInForeground, enrollmentManager.state) { gateState, foreground, _ ->
+        combine(gate.state, appLifecycleProvider.isInForeground) { gateState, foreground ->
             gateState to foreground
         }.onEach { (gateState, foreground) ->
-            // Prompt enrollment once when the app first becomes visible.
-            // This runs independently of the gate so the user can enroll
-            // without needing active playback or a headset.
-            if (foreground && !hasPromptedEnrollment) {
-                hasPromptedEnrollment = true
-                if (enrollmentManager.state.value !is VoiceEnrollmentState.Enrolled) {
-                    promptEnrollmentIfNeeded()
-                    return@onEach
-                }
-            }
-
             when (gateState) {
                 is VoiceControlGateState.Allowed -> {
                     if (foreground) {
@@ -93,7 +69,10 @@ class VoiceControlServiceController @Inject constructor(
                     }
                 }
 
-                is VoiceControlGateState.Blocked -> stop()
+                is VoiceControlGateState.Blocked -> {
+                    Timber.w("VoiceControlServiceController: gate blocked: %s", gateState.rules)
+                    stop()
+                }
             }
         }.launchIn(scope)
     }

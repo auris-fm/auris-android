@@ -7,7 +7,13 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioSegmenter
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.UserNotDisabledRule
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRule
-import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.SmolLmIntentParser
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.EmbeddingIntentMatcher
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.EntityExtractor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.BpeTokenizer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.EmbeddingEngine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.JniEmbeddingEngine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.TextTokenizer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.entity.GrammarEntityExtractor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
@@ -33,16 +39,26 @@ abstract class VoiceControlModule {
 
     @Binds abstract fun bindVoiceAudioSegmenter(impl: NativeVadSegmenter): VoiceAudioSegmenter
 
-    @Binds abstract fun bindVoiceRecognizer(impl: SmolLmIntentParser): VoiceRecognizer
+    @Binds abstract fun bindVoiceRecognizer(impl: EmbeddingIntentMatcher): VoiceRecognizer
 
     @Binds abstract fun bindVoicePlaybackSink(impl: PlaybackManagerVoicePlaybackSink): VoicePlaybackSink
 
     @Binds abstract fun bindAudioRouteMonitor(impl: AndroidAudioRouteMonitor): AudioRouteMonitor
 
+    @Binds abstract fun bindTextTokenizer(impl: BpeTokenizer): TextTokenizer
+
+    @Binds abstract fun bindEmbeddingEngine(impl: JniEmbeddingEngine): EmbeddingEngine
+
+    @Binds abstract fun bindEntityExtractor(impl: GrammarEntityExtractor): EntityExtractor
+
     companion object {
         @Provides @Singleton
-        @Named("smolLmModel")
-        fun provideSmolLmModelFile(manager: ModelManager): File = manager.smolLmModelFile
+        @Named("embeddingModel")
+        fun provideEmbeddingModelFile(manager: ModelManager): File = manager.embeddingModelFile
+
+        @Provides @Singleton
+        @Named("embeddingTokenizer")
+        fun provideEmbeddingTokenizerFile(manager: ModelManager): File = manager.tokenizerModelFile
 
         @Provides
         @Singleton

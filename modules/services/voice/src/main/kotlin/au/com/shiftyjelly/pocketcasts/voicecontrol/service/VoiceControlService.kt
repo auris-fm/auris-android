@@ -8,6 +8,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.MoonshineVoiceEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGateState
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.EmbeddingIntentMatcher
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
@@ -32,6 +33,8 @@ class VoiceControlService : Service() {
 
     @Inject lateinit var voiceRecognizer: VoiceRecognizer
 
+    @Inject lateinit var embeddingIntentMatcher: EmbeddingIntentMatcher
+
     @Inject lateinit var voicePlaybackIntentExecutor: VoicePlaybackIntentExecutor
 
     @Inject lateinit var playbackContextMonitor: PlaybackContextMonitor
@@ -53,7 +56,7 @@ class VoiceControlService : Service() {
 
     companion object {
         private const val COMMAND_DEBOUNCE_MS = 2000L
-        private const val MOONSHINE_MODEL_ARCH = 2 // Small Streaming
+        private const val MOONSHINE_MODEL_ARCH = 4 // Small Streaming (123M params, 7.84% WER)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -100,56 +103,67 @@ class VoiceControlService : Service() {
         }.launchIn(serviceScope)
 
         serviceScope.launch(Dispatchers.IO) {
-            voiceRecognizer.ensureReady().fold(
-                onSuccess = {
-                    Timber.i("Recognizer ready, ensuring Moonshine model")
-                    modelManager.ensureMoonshineModel().fold(
-                        onSuccess = {
-                            Timber.i("Moonshine model ready, ensuring SmolLM model")
-                            modelManager.ensureModel().fold(
-                                onSuccess = {
-                                    Timber.i("SmolLM model ready, starting engine")
-                                    try {
-                                        val notification = notificationManager.createListeningNotification()
-                                        notificationManager.notify(notification)
+            // 1. Download models in parallel
+            Timber.i("Ensuring models")
+            val embeddingResult = modelManager.ensureEmbeddingModel()
+            val moonshineResult = modelManager.ensureMoonshineModel()
 
-                                        val modelPath = filesDir.resolve("moonshine-model").absolutePath
-                                        moonshineEngine.get().start(
-                                            modelPath = modelPath,
-                                            modelArch = MOONSHINE_MODEL_ARCH,
-                                            audioRoute = audioRouteMonitor.route.value,
-                                            playbackBufferProvider = playbackBufferRecorder::snapshot,
-                                            contextProvider = {
-                                                VoiceRecognitionContext(
-                                                    playbackContext = playbackContextMonitor.context.value,
-                                                    audioRoute = audioRouteMonitor.route.value,
-                                                )
-                                            },
-                                            onIntent = { intent -> handleIntent(intent) },
-                                        )
-                                        engineStarted = true
-                                    } catch (e: Exception) {
-                                        Timber.e(e, "Engine start failed")
-                                        launch(Dispatchers.Main) { stopSelf() }
-                                    }
-                                },
-                                onFailure = { e ->
-                                    Timber.e(e, "SmolLM model not ready, stopping")
-                                    launch(Dispatchers.Main) { stopSelf() }
-                                },
-                            )
-                        },
-                        onFailure = { e ->
-                            Timber.e(e, "Moonshine model not ready, stopping")
-                            launch(Dispatchers.Main) { stopSelf() }
-                        },
-                    )
+            // 2. Start Moonshine engine first (loads libonnxruntime.so)
+            moonshineResult.fold(
+                onSuccess = {
+                    Timber.i("Moonshine model ready, starting engine")
+                    try {
+                        val modelPath = filesDir.resolve("moonshine-model").absolutePath
+                        moonshineEngine.get().start(
+                            modelPath = modelPath,
+                            modelArch = MOONSHINE_MODEL_ARCH,
+                            audioRoute = audioRouteMonitor.route.value,
+                            playbackBufferProvider = playbackBufferRecorder::snapshot,
+                            contextProvider = {
+                                VoiceRecognitionContext(
+                                    playbackContext = playbackContextMonitor.context.value,
+                                    audioRoute = audioRouteMonitor.route.value,
+                                )
+                            },
+                            onIntent = { intent -> handleIntent(intent) },
+                        )
+                        engineStarted = true
+                    } catch (e: Exception) {
+                        Timber.e(e, "Engine start failed")
+                        launch(Dispatchers.Main) { stopSelf() }
+                        return@launch
+                    }
                 },
                 onFailure = { e ->
-                    Timber.e(e, "Recognizer not ready, stopping")
+                    Timber.e(e, "Moonshine model not ready, stopping")
                     launch(Dispatchers.Main) { stopSelf() }
+                    return@launch
                 },
             )
+
+            // 3. Initialize embedding intent matcher (ORT loaded by Moonshine above)
+            embeddingResult.fold(
+                onSuccess = {
+                    Timber.i("Embedding model ready, initializing intent matcher")
+                    val initOk = embeddingIntentMatcher.initialize(
+                        tokenizerPath = modelManager.tokenizerModelFile.absolutePath,
+                        modelPath = modelManager.embeddingModelFile.absolutePath,
+                    )
+                    if (!initOk) {
+                        Timber.e("Intent matcher initialization failed, continuing without embeddings")
+                    } else {
+                        Timber.i("Intent matcher initialized")
+                    }
+                },
+                onFailure = { e ->
+                    Timber.e(e, "Embedding model download failed, continuing without embeddings")
+                },
+            )
+
+            // Show listening notification
+            val notification = notificationManager.createListeningNotification()
+            notificationManager.notify(notification)
+            Timber.i("Voice control ready")
         }
     }
 

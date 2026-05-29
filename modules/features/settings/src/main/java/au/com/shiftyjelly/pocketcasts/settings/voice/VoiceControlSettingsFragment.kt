@@ -55,7 +55,7 @@ class VoiceControlSettingsFragment : BaseFragment() {
                 .collectAsState(VoiceControlAudioRoutePolicy.HeadsetOnly)
             val modelState by modelManager.downloadState
                 .collectAsState(ModelDownloadState.NotStarted)
-            val modelReady = modelManager.isModelReady()
+            val modelReady = modelManager.isMoonshineModelReady()
             val bottomInset = settings.bottomInset
                 .collectAsStateWithLifecycle(0)
 

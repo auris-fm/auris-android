@@ -6,9 +6,9 @@ import android.content.Context
 import android.media.AudioManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
-import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.SmolLmIntentParser
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoicePlaybackIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -21,7 +21,7 @@ import kotlinx.coroutines.launch
 import timber.log.Timber
 
 /**
- * Full voice pipeline: Oboe capture → Silero VAD → Moonshine ASR → SmolLM intent.
+ * Full voice pipeline: Oboe capture → Silero VAD → Moonshine ASR → Intent parser.
  *
  * Silero VAD gates Moonshine inference so the 123M-param encoder only runs when
  * speech is detected, eliminating continuous ONNX GC churn during silence.
@@ -30,7 +30,7 @@ import timber.log.Timber
 class MoonshineVoiceEngine @Inject constructor(
     private val voiceAudioProcessor: VoiceAudioProcessor,
     private val utteranceFilter: UtteranceFilter,
-    private val intentParser: SmolLmIntentParser,
+    private val intentRecognizer: VoiceRecognizer,
     @ApplicationContext private val context: Context,
 ) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -76,11 +76,6 @@ class MoonshineVoiceEngine @Inject constructor(
             Timber.e(e, "Failed to load Moonshine transcriber")
             return
         }
-
-        // Pre-decode the SmolLM system prompt prefix (~600 tokens) into the GPU KV cache.
-        // Subsequent parseIntent calls only encode the short per-utterance suffix (~20 tokens).
-        val prewarmed = intentParser.prewarm()
-        Timber.i("SmolLM prewarm: %s", if (prewarmed) "OK" else "FAILED")
 
         processingJob = scope.launch {
             try {
@@ -153,13 +148,13 @@ class MoonshineVoiceEngine @Inject constructor(
 
         scope.launch {
             val t0 = System.currentTimeMillis()
-            val intent = intentParser.parseIntent(text, context)
-            val smolLmMs = System.currentTimeMillis() - t0
+            val intent = intentRecognizer.recognize(text, context)
+            val elapsedMs = System.currentTimeMillis() - t0
             if (intent != null) {
-                Timber.i("SmolLm intent: %s (%dms)", intent::class.simpleName, smolLmMs)
+                Timber.i("Intent: %s (%dms)", intent::class.simpleName, elapsedMs)
                 onIntent(intent)
             } else {
-                Timber.i("SmolLm no intent (%dms)", smolLmMs)
+                Timber.i("No intent (%dms)", elapsedMs)
             }
         }
     }

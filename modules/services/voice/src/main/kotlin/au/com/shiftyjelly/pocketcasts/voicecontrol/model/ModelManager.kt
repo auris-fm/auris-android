@@ -25,11 +25,6 @@ class ModelManager @Inject constructor(
 ) {
     private val downloadMutex = Mutex()
     companion object {
-        const val SMOL_LM_URL = "https://huggingface.co/bartowski/SmolLM2-360M-Instruct-GGUF/resolve/main/SmolLM2-360M-Instruct-Q4_K_M.gguf"
-
-        @VisibleForTesting
-        internal const val SMOL_LM_SHA256 = "2fa3f013dcdd7b99f9b237717fa0b12d75bbb89984cc1274be1471a465bac9c2"
-
         private const val MOONSHINE_BASE_URL =
             "https://download.moonshine.ai/model/small-streaming-en/quantized"
 
@@ -43,20 +38,56 @@ class ModelManager @Inject constructor(
             "streaming_config.json",
             "tokenizer.bin",
         )
+
+        // Use hf-mirror.com for faster/reliable downloads from HuggingFace
+        private const val HF_MIRROR = "https://hf-mirror.com"
+
+        // multilingual-e5-small ONNX (INT8 quantized, ~118 MB)
+        private const val EMBEDDING_MODEL_PATH =
+            "/nixiesearch/multilingual-e5-small-onnx/resolve/main/model_opt2_QInt8.onnx"
+        const val EMBEDDING_MODEL_FILENAME = "model_opt2_QInt8.onnx"
+
+        // HuggingFace tokenizer.json (~16 MB, JSON — parseable in pure Kotlin)
+        // Preferred over sentencepiece.bpe.model (~5 MB, protobuf) to avoid
+        // needing a protobuf parser in the BpeTokenizer.
+        private const val TOKENIZER_PATH =
+            "/intfloat/multilingual-e5-small/resolve/main/tokenizer.json"
+        const val TOKENIZER_FILENAME = "tokenizer.json"
     }
 
     @VisibleForTesting
     internal var filesDir: File = context.filesDir
-
-    private val smolLmDir get() = File(filesDir, "smol-lm-model")
-    val smolLmModelFile get() = File(smolLmDir, "smolLM2-360M-instruct-Q4_K_M.gguf")
 
     val moonshineDir get() = File(filesDir, "moonshine-model")
 
     private val _downloadState = MutableStateFlow<ModelDownloadState>(ModelDownloadState.NotStarted)
     val downloadState: StateFlow<ModelDownloadState> = _downloadState.asStateFlow()
 
-    fun isModelReady(): Boolean = smolLmModelFile.exists()
+    // -- Embedding model (multilingual-e5-small) ---------------------------
+
+    val embeddingDir get() = File(filesDir, "embedding-model")
+    val embeddingModelFile get() = File(embeddingDir, EMBEDDING_MODEL_FILENAME)
+    val tokenizerModelFile get() = File(embeddingDir, TOKENIZER_FILENAME)
+
+    fun isEmbeddingModelReady(): Boolean = embeddingModelFile.exists() && tokenizerModelFile.exists()
+
+    suspend fun ensureEmbeddingModel(): Result<Unit> = withContext(Dispatchers.IO) {
+        if (isEmbeddingModelReady()) return@withContext Result.success(Unit)
+        downloadMutex.withLock {
+            if (isEmbeddingModelReady()) return@withContext Result.success(Unit)
+            try {
+                embeddingDir.mkdirs()
+                downloadFile("$HF_MIRROR$EMBEDDING_MODEL_PATH", embeddingModelFile, "Embedding ONNX", "")
+                downloadFile("$HF_MIRROR$TOKENIZER_PATH", tokenizerModelFile, "Tokenizer", "")
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Timber.e(e, "Embedding model download failed")
+                Result.failure(e)
+            }
+        }
+    }
+
+    // -- Moonshine model ---------------------------------------------------
 
     fun isMoonshineModelReady(): Boolean = MOONSHINE_FILES.all { File(moonshineDir, it).exists() }
 
@@ -74,29 +105,6 @@ class ModelManager @Inject constructor(
                 Result.success(Unit)
             } catch (e: Exception) {
                 Timber.e(e, "Moonshine model download failed")
-                Result.failure(e)
-            }
-        }
-    }
-
-    suspend fun ensureModel(): Result<Unit> = withContext(Dispatchers.IO) {
-        if (isModelReady()) {
-            _downloadState.value = ModelDownloadState.Ready
-            return@withContext Result.success(Unit)
-        }
-        downloadMutex.withLock {
-            if (isModelReady()) {
-                _downloadState.value = ModelDownloadState.Ready
-                return@withContext Result.success(Unit)
-            }
-            try {
-                smolLmDir.mkdirs()
-                downloadFile(SMOL_LM_URL, smolLmModelFile, "SmolLM", SMOL_LM_SHA256)
-                _downloadState.value = ModelDownloadState.Ready
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Timber.e(e, "Model download failed")
-                _downloadState.value = ModelDownloadState.Failed(e.message ?: "Unknown error")
                 Result.failure(e)
             }
         }

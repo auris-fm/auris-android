@@ -3,7 +3,6 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.model
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import java.io.File
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -25,29 +24,34 @@ class ModelManagerTest {
     }
 
     @Test
-    fun `reports not ready when model not downloaded`() {
+    fun `reports not ready when moonshine model not downloaded`() {
         val manager = ModelManager(context).apply {
             filesDir = tempDir.root
         }
-        assertFalse(manager.isModelReady())
+        assertFalse(manager.isMoonshineModelReady())
     }
 
     @Test
-    fun `reports ready when model file exists`() {
-        val lmDir = File(tempDir.root, "smol-lm-model").apply { mkdirs() }
-        File(lmDir, "smolLM2-360M-instruct-Q4_K_M.gguf").writeText("fake model")
+    fun `reports ready when all moonshine model files exist`() {
+        val moonshineDir = File(tempDir.root, "moonshine-model").apply { mkdirs() }
+        // Create all expected Moonshine model files
+        val files = listOf(
+            "adapter.ort",
+            "cross_kv.ort",
+            "decoder_kv.ort",
+            "decoder_kv_with_attention.ort",
+            "encoder.ort",
+            "frontend.ort",
+            "streaming_config.json",
+            "tokenizer.bin",
+        )
+        for (file in files) {
+            File(moonshineDir, file).writeText("fake model")
+        }
 
         val manager = ModelManager(context).apply {
             filesDir = tempDir.root
         }
-        assertTrue(manager.isModelReady())
-    }
-
-    @Test
-    fun `provides correct model file name`() {
-        val manager = ModelManager(context).apply {
-            filesDir = tempDir.root
-        }
-        assertEquals("smolLM2-360M-instruct-Q4_K_M.gguf", manager.smolLmModelFile.name)
+        assertTrue(manager.isMoonshineModelReady())
     }
 }

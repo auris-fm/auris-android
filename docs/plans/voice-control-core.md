@@ -1,73 +1,49 @@
 # Voice Control Core — Implementation Plan
 
-> **Spec:** [voice-control-core spec](../specs/voice-control-core.md) — architecture, interfaces, gate policies, lifecycle, error handling.
+> **Spec:** [voice-control-core spec](../specs/voice-control-core.md) — architecture, gate conditions, microphone-exposure classification, listening modes, foreground-service lifecycle, privacy/battery/UX.
 
 > **For agentic workers:** Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the Android voice-control core: module wiring, settings, gate policy, audio route detection, typed intents, playback executor, foreground service shell, and tests.
+**Goal:** Build the Android voice-control core: module wiring, settings, the gate (three condition groups), microphone-exposure classification, listening-mode resolution (`Off` / `Continuous` / `WakeWord`), typed intents, playback executor, foreground microphone service, and tests.
 
-**Tech Stack:** Kotlin, Coroutines/Flow, Hilt, Android `AudioManager`, foreground service with microphone type, JUnit, Mockito, Turbine.
+**Tech Stack:** Kotlin, Coroutines/Flow, Hilt, Android `AudioManager` / `TelephonyManager` / `PowerManager`, `ProcessLifecycleOwner`, foreground service with microphone type, JUnit, Mockito, Turbine.
 
 ---
 
 ## Scope
 
-This plan builds the voice-control core with `HeadsetOnly` as the default audio route policy. Audio capture, VAD, ASR, and intent parsing are covered in the [ASR Pipeline](asr-intent-pipeline.md) plan.
+This plan owns everything between **device & playback signals** and the **`VoiceIntentExecutor` → `PlaybackManager`** call: the gate, microphone-exposure classification, listening-mode policy, foreground-service lifecycle, and the executor. Everything between "microphone audio in" and "validated `VoiceIntent` out" — capture, VAD, signal filtering, wake-word detection, ASR backends, intent matching, entity extraction, and model sources — is owned by the [ASR Intent Pipeline](asr-intent-pipeline.md) plan. This plan consumes only the pipeline's boundary contract (`VoiceRecognizer`) and its readiness signal.
+
+The audio route is classified into a `MicExposure` value, and the gate plus exposure resolve a `ListeningMode` (`Off` / `Continuous` / `WakeWord`). The mode decides whether a wake word is required.
 
 ## File Structure
 
-- `settings.gradle.kts`: include the new voice service module.
+- `settings.gradle.kts`: include the voice service module.
 - `app/build.gradle.kts`: add the voice module dependency so the app receives the merged service manifest.
-- `modules/services/voice/build.gradle.kts`: new Android library module.
-- `modules/services/voice/src/main/AndroidManifest.xml`: microphone permissions and `VoiceControlService` declaration.
-- `modules/services/preferences/src/main/java/au/com/shiftyjelly/pocketcasts/preferences/model/VoiceControlAudioRoutePolicy.kt`: persisted policy enum.
-- `modules/services/preferences/src/main/java/au/com/shiftyjelly/pocketcasts/preferences/Settings.kt`: voice-control settings contract.
-- `modules/services/preferences/src/main/java/au/com/shiftyjelly/pocketcasts/preferences/SettingsImpl.kt`: voice-control settings storage.
-- `modules/services/analytics/src/main/java/au/com/shiftyjelly/pocketcasts/analytics/SourceView.kt`: add `VOICE_CONTROL` entry.
-- `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/gate/*.kt`: gate state, rules, and coordinator.
-- `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/route/*.kt`: audio route monitoring and route policy.
-- `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/audio/*.kt`: PCM frame types and audio types.
-- `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/*.kt`: intent model types.
-- `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/*.kt`: playback context monitor and intent executor.
-- `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/service/VoiceControlService.kt`: foreground service shell.
-- `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/di/VoiceControlModule.kt`: Hilt bindings.
-- `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/**/*.kt`: unit tests.
+- `modules/services/voice/build.gradle.kts`: Android library module.
+- `modules/services/voice/src/main/AndroidManifest.xml`: microphone permission + `FOREGROUND_SERVICE_MICROPHONE` + `VoiceControlService` declaration.
+- `modules/services/preferences/.../Settings.kt` + `SettingsImpl.kt`: `voiceControlUserDisabled`, `voiceControlSetupCompleted`.
+- `.../voice/gate/*.kt`: rule contract, rule state, condition groups, and the gate combinator.
+- `.../voice/gate/conditions/*.kt`: the eight conditions (Setup / Conflicts / Context).
+- `.../voice/route/*.kt`: audio route monitoring and `MicExposure` classification.
+- `.../voice/mode/*.kt`: `ListeningMode` and `ListeningModePolicy`.
+- `.../voice/intent/*.kt`: intent model types.
+- `.../voice/playback/*.kt`: playback context monitor and `VoiceIntentExecutor`.
+- `.../voice/service/VoiceControlService.kt`: foreground microphone service.
+- `.../voice/di/VoiceControlModule.kt`: Hilt bindings.
+- `.../voice/src/test/**/*.kt`: unit tests.
+
+---
 
 ## Task 1: Add Voice Service Module
 
 **Files:**
-- Modify: `settings.gradle.kts`
-- Modify: `app/build.gradle.kts`
-- Create: `modules/services/voice/build.gradle.kts`
-- Create: `modules/services/voice/src/main/AndroidManifest.xml`
+- Modify: `settings.gradle.kts`, `app/build.gradle.kts`
+- Create: `modules/services/voice/build.gradle.kts`, `modules/services/voice/src/main/AndroidManifest.xml`
 
-- [ ] **Step 1: Add the failing module reference**
+- [ ] **Step 1: Include the module** — add `include(":modules:services:voice")` to `settings.gradle.kts` and `implementation(projects.modules.services.voice)` to `app/build.gradle.kts`.
 
-Add this include near the other services in `settings.gradle.kts`:
-
-```kotlin
-include(":modules:services:voice")
-```
-
-Add this dependency to `app/build.gradle.kts` with the other service dependencies:
-
-```kotlin
-implementation(projects.modules.services.voice)
-```
-
-- [ ] **Step 2: Run Gradle to verify the module is missing**
-
-Run:
-
-```bash
-./gradlew :app:dependencies --configuration debugRuntimeClasspath
-```
-
-Expected: fail because `:modules:services:voice` has no build file.
-
-- [ ] **Step 3: Create the voice module build file**
-
-Create `modules/services/voice/build.gradle.kts`:
+- [ ] **Step 2: Module build file** — `modules/services/voice/build.gradle.kts`:
 
 ```kotlin
 plugins {
@@ -77,19 +53,17 @@ plugins {
 }
 
 android {
-    namespace = "au.com.shiftyjelly.pocketcasts.voice"
-    buildFeatures {
-        buildConfig = true
-    }
+    namespace = "au.com.shiftyjelly.pocketcasts.voicecontrol"
+    buildFeatures { buildConfig = true }
 }
 
 dependencies {
     ksp(libs.dagger.hilt.compiler)
     ksp(libs.hilt.compiler)
-
     api(libs.dagger.hilt.android)
 
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.lifecycle.process)
     implementation(libs.coroutines.core)
     implementation(libs.timber)
 
@@ -110,185 +84,42 @@ dependencies {
 }
 ```
 
-- [ ] **Step 4: Create the voice service manifest**
+- [ ] **Step 3: Manifest** — `RECORD_AUDIO` + `FOREGROUND_SERVICE_MICROPHONE` permissions and a `VoiceControlService` declared with `android:foregroundServiceType="microphone"` and `android:exported="false"`.
 
-Create `modules/services/voice/src/main/AndroidManifest.xml`:
+- [ ] **Step 4: Verify** `./gradlew :modules:services:voice:dependencies --configuration debugRuntimeClasspath` resolves.
 
-```xml
-<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-
-    <application>
-        <service
-            android:name=".service.VoiceControlService"
-            android:exported="false"
-            android:foregroundServiceType="microphone" />
-    </application>
-</manifest>
-```
-
-- [ ] **Step 5: Run dependency resolution**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:dependencies --configuration debugRuntimeClasspath
-```
-
-Expected: pass dependency resolution.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add settings.gradle.kts app/build.gradle.kts modules/services/voice
-git commit -m "Add voice control service module"
-```
+- [ ] **Step 5: Commit.**
 
 ## Task 2: Add Core Voice Settings
 
 **Files:**
-- Create: `modules/services/preferences/src/main/java/au/com/shiftyjelly/pocketcasts/preferences/model/VoiceControlAudioRoutePolicy.kt`
-- Modify: `modules/services/preferences/src/main/java/au/com/shiftyjelly/pocketcasts/preferences/Settings.kt`
-- Modify: `modules/services/preferences/src/main/java/au/com/shiftyjelly/pocketcasts/preferences/SettingsImpl.kt`
+- Modify: `Settings.kt`, `SettingsImpl.kt`
 
-- [ ] **Step 1: Add the policy enum**
+The core needs two persisted settings.
 
-Create `VoiceControlAudioRoutePolicy.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.preferences.model
-
-enum class VoiceControlAudioRoutePolicy(val value: String) {
-    HeadsetOnly("headset_only"),
-    SpeakerExperimental("speaker_experimental"),
-    ;
-
-    companion object {
-        fun fromValue(value: String): VoiceControlAudioRoutePolicy {
-            return entries.firstOrNull { it.value == value } ?: HeadsetOnly
-        }
-    }
-}
-```
-
-- [ ] **Step 2: Add settings to the interface**
-
-Add the import to `Settings.kt`:
-
-```kotlin
-import au.com.shiftyjelly.pocketcasts.preferences.model.VoiceControlAudioRoutePolicy
-```
-
-Add these properties near playback/headphone settings:
+- [ ] **Step 1: Interface** — add to `Settings.kt`:
 
 ```kotlin
 val voiceControlUserDisabled: UserSetting<Boolean>
 val voiceControlSetupCompleted: UserSetting<Boolean>
-val voiceControlAudioRoutePolicy: UserSetting<VoiceControlAudioRoutePolicy>
 ```
 
-- [ ] **Step 3: Add settings storage**
+- [ ] **Step 2: Storage** — add `BoolPref` implementations in `SettingsImpl.kt` (`voiceControlUserDisabled` default `false`, `voiceControlSetupCompleted` default `false`).
 
-Add the import to `SettingsImpl.kt`:
+- [ ] **Step 3: Compile** `./gradlew :modules:services:preferences:compileDebugKotlin`.
 
-```kotlin
-import au.com.shiftyjelly.pocketcasts.preferences.model.VoiceControlAudioRoutePolicy
-```
-
-Add these settings near `headphoneControlsPlayBookmarkConfirmationSound`:
-
-```kotlin
-override val voiceControlUserDisabled = UserSetting.BoolPref(
-    sharedPrefKey = "voiceControlUserDisabled",
-    defaultValue = false,
-    sharedPrefs = sharedPreferences,
-)
-
-override val voiceControlSetupCompleted = UserSetting.BoolPref(
-    sharedPrefKey = "voiceControlSetupCompleted",
-    defaultValue = false,
-    sharedPrefs = sharedPreferences,
-)
-
-override val voiceControlAudioRoutePolicy = UserSetting.PrefFromString(
-    sharedPrefKey = "voiceControlAudioRoutePolicy",
-    defaultValue = VoiceControlAudioRoutePolicy.HeadsetOnly,
-    sharedPrefs = sharedPreferences,
-    fromString = VoiceControlAudioRoutePolicy::fromValue,
-    toString = VoiceControlAudioRoutePolicy::value,
-)
-```
-
-- [ ] **Step 4: Compile preferences**
-
-Run:
-
-```bash
-./gradlew :modules:services:preferences:compileDebugKotlin
-```
-
-Expected: pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add modules/services/preferences
-git commit -m "Add voice control settings"
-```
+- [ ] **Step 4: Commit.**
 
 ## Task 3: Add Voice Intent and Recognition Types
 
 **Files:**
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoiceIntent.kt`
-- Create: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoiceIntentTest.kt`
+- Create: `.../voice/intent/VoiceIntent.kt` + `VoiceIntentTest.kt`
 
-- [ ] **Step 1: Write the intent test**
+- [ ] **Step 1: Write the intent test** — assert `SeekRelative(30_000).deltaMs == 30_000` and `ChapterByTitle("  interview  ").normalizedQuery == "interview"`. Run it; it fails.
 
-Create `VoiceIntentTest.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.intent
-
-import org.junit.Assert.assertEquals
-import org.junit.Test
-
-class VoiceIntentTest {
-    @Test
-    fun `seek relative stores milliseconds`() {
-        val intent = VoiceIntent.SeekRelative(deltaMs = 30_000)
-
-        assertEquals(30_000, intent.deltaMs)
-    }
-
-    @Test
-    fun `chapter title trims query`() {
-        val intent = VoiceIntent.ChapterByTitle(query = "  interview  ")
-
-        assertEquals("interview", intent.normalizedQuery)
-    }
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntentTest
-```
-
-Expected: fail because the intent model has not been added yet.
-
-- [ ] **Step 3: Add the intent model**
-
-Create `VoiceIntent.kt`:
+- [ ] **Step 2: Add the full intent model** — the closed `VoiceIntent` set owned by [Playback Controls](playback-controls.md); the core defines all types so the executor's `when` is exhaustive:
 
 ```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.intent
-
 sealed interface VoiceIntent {
     data object Pause : VoiceIntent
     data object Resume : VoiceIntent
@@ -312,573 +143,142 @@ sealed interface VoiceIntent {
 }
 ```
 
-This defines the full intent set. Intents beyond the core playback set are wired in [Playback Controls](playback-controls.md).
-```
+- [ ] **Step 3: Run the test** — it passes. Commit.
 
-- [ ] **Step 4: Run test to verify it passes**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntentTest
-```
-
-Expected: pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent
-git commit -m "Add voice playback intent model"
-```
-
-## Task 4: Add Gate State and Rule Coordinator
+## Task 4: Gate Framework (rules, groups, fail-closed combinator)
 
 **Files:**
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/gate/VoiceControlRule.kt`
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/gate/VoiceControlGate.kt`
-- Create: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/gate/VoiceControlGateTest.kt`
+- Create: `.../voice/gate/VoiceControlRule.kt`, `.../voice/gate/VoiceControlGate.kt`, `.../voice/gate/VoiceControlGateTest.kt`
 
-- [ ] **Step 1: Write gate tests**
+The gate asks three questions on top of the microphone-permission foundation (permission is handled in first-run setup, not as a gate condition). Each condition reports `Allowed` / `Blocked(reason)` / `Unknown(reason)`, and the combination is **fail-closed**: `Unknown` counts the same as `Blocked` for Setup and Conflicts.
 
-Create `VoiceControlGateTest.kt`:
+- [ ] **Step 1: Rule contract + state + groups**
 
 ```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.gate
-
-import app.cash.turbine.test
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.test.runTest
-import org.junit.Assert.assertEquals
-import org.junit.Test
-
-class VoiceControlGateTest {
-    @Test
-    fun `gate is allowed when all required rules are allowed`() = runTest {
-        val rule = FakeRule("playback", VoiceControlRuleState.Allowed)
-        val gate = VoiceControlGate(listOf(rule))
-
-        gate.state.test {
-            assertEquals(VoiceControlGateState.Allowed, awaitItem())
-            cancelAndIgnoreRemainingEvents()
-        }
-    }
-
-    @Test
-    fun `gate is blocked when required rule is blocked`() = runTest {
-        val gate = VoiceControlGate(
-            listOf(FakeRule("route", VoiceControlRuleState.Blocked("disallowed_route"))),
-        )
-
-        gate.state.test {
-            assertEquals(
-                VoiceControlGateState.Blocked(mapOf("route" to VoiceControlRuleState.Blocked("disallowed_route"))),
-                awaitItem(),
-            )
-            cancelAndIgnoreRemainingEvents()
-        }
-    }
-
-    private class FakeRule(
-        override val id: String,
-        initialState: VoiceControlRuleState,
-    ) : VoiceControlRule {
-        override val state = MutableStateFlow(initialState)
-    }
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGateTest
-```
-
-Expected: fail because gate types do not exist.
-
-- [ ] **Step 3: Add rule state and gate implementation**
-
-Create `VoiceControlRule.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.gate
-
-import kotlinx.coroutines.flow.StateFlow
-
-interface VoiceControlRule {
-    val id: String
-    val state: StateFlow<VoiceControlRuleState>
-}
+enum class VoiceControlRuleGroup { Setup, Conflicts, Context }
 
 sealed interface VoiceControlRuleState {
     data object Allowed : VoiceControlRuleState
     data class Blocked(val reason: String) : VoiceControlRuleState
     data class Unknown(val reason: String) : VoiceControlRuleState
 }
+
+interface VoiceControlRule {
+    val id: String
+    val group: VoiceControlRuleGroup
+    val state: StateFlow<VoiceControlRuleState>
+}
 ```
 
-Create `VoiceControlGate.kt`:
+- [ ] **Step 2: Gate state + combinator**
 
 ```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.gate
-
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.SharingStarted
-
-class VoiceControlGate(
-    rules: List<VoiceControlRule>,
-    scope: CoroutineScope = CoroutineScope(Dispatchers.Default),
-) {
-    val state: StateFlow<VoiceControlGateState> = combine(rules.map { rule ->
-        rule.state.mapRule(rule.id)
-    }) { states ->
-        val byRule = states.toMap()
-        val blocked = byRule.filterValues { it is VoiceControlRuleState.Blocked }
-        if (blocked.isEmpty()) VoiceControlGateState.Allowed else VoiceControlGateState.Blocked(blocked)
-    }.stateIn(scope, SharingStarted.Eagerly, VoiceControlGateState.Blocked(emptyMap()))
-
-    private fun Flow<VoiceControlRuleState>.mapRule(id: String): Flow<Pair<String, VoiceControlRuleState>> {
-        return kotlinx.coroutines.flow.map { state -> id to state }
-    }
-}
-
-sealed interface VoiceControlGateState {
-    data object Allowed : VoiceControlGateState
-    data class Blocked(val rules: Map<String, VoiceControlRuleState>) : VoiceControlGateState
-}
+data class VoiceControlGateState(
+    val allowed: Boolean,
+    val rules: Map<String, VoiceControlRuleState>,
+)
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+Combination rules (per spec):
+- **Setup** group: every condition must be `Allowed` (`Blocked`/`Unknown` → fail).
+- **Conflicts** group: no condition may be `Blocked` or `Unknown` (fail-closed).
+- **Context** group: at least one condition must be `Allowed`.
+- The gate is `allowed` only when all three groups pass. `rules` carries the full per-condition breakdown for diagnostics and the settings UI.
 
-Run:
+- [ ] **Step 3: Tests** — `VoiceControlGateTest` with fake rules per group: all-allowed → `allowed = true`; a blocked Setup rule → `false`; an `Unknown` Conflicts rule → `false` (fail-closed); Context with one `Allowed` + one `Blocked` → passes Context; Context all-blocked → `false`. Use Turbine on `state`.
 
-```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGateTest
-```
+- [ ] **Step 4: Commit.**
 
-Expected: pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/gate modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/gate
-git commit -m "Add voice control gate"
-```
-
-## Task 5: Add Audio Route Policy
+## Task 5: Audio Route Monitor + MicExposure
 
 **Files:**
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/route/AudioRoute.kt`
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/route/AudioRouteMonitor.kt`
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/route/AndroidAudioRouteMonitor.kt`
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/route/AudioRoutePolicyRule.kt`
-- Create: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/route/AudioRoutePolicyRuleTest.kt`
+- Create: `.../voice/route/AudioRoute.kt`, `AudioRouteMonitor.kt`, `AndroidAudioRouteMonitor.kt`, `MicExposure.kt`, `MicExposureTest.kt`
 
-- [ ] **Step 1: Write route policy tests**
+`MicExposure` describes how easily the mic picks up non-command sound. It does **not** pass or block — it is read only when resolving the mode.
 
-Create `AudioRoutePolicyRuleTest.kt`:
+- [ ] **Step 1: Route + exposure types**
 
 ```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.route
-
-import au.com.shiftyjelly.pocketcasts.preferences.model.VoiceControlAudioRoutePolicy
-import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlRuleState
-import org.junit.Assert.assertEquals
-import kotlinx.coroutines.flow.MutableStateFlow
-import org.junit.Test
-
-class AudioRoutePolicyRuleTest {
-    @Test
-    fun `headset policy allows headset with microphone`() {
-        val rule = AudioRoutePolicyRule(
-            route = MutableStateFlow(AudioRoute.Headset(hasMicrophone = true)),
-            policy = MutableStateFlow(VoiceControlAudioRoutePolicy.HeadsetOnly),
-        )
-
-        assertEquals(VoiceControlRuleState.Allowed, rule.evaluate())
-    }
-
-    @Test
-    fun `headset policy blocks speaker`() {
-        val rule = AudioRoutePolicyRule(
-            route = MutableStateFlow(AudioRoute.Speaker),
-            policy = MutableStateFlow(VoiceControlAudioRoutePolicy.HeadsetOnly),
-        )
-
-        assertEquals(VoiceControlRuleState.Blocked("audio_route_disallowed"), rule.evaluate())
-    }
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.route.AudioRoutePolicyRuleTest
-```
-
-Expected: fail because route types do not exist.
-
-- [ ] **Step 3: Add route types and rule**
-
-Create `AudioRoute.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.route
-
 sealed interface AudioRoute {
-    data class Headset(val hasMicrophone: Boolean) : AudioRoute
-    data object Speaker : AudioRoute
-    data object BluetoothA2dpOnly : AudioRoute
+    data class Headset(val hasMicrophone: Boolean) : AudioRoute   // wired / BT-SCO / BLE
+    data object Speaker : AudioRoute                              // built-in loudspeaker
+    data object BluetoothA2dpOnly : AudioRoute                    // external speaker, output-only
     data object Unknown : AudioRoute
 }
+
+enum class MicExposure { Isolated, Exposed, NoMic }
 ```
 
-Create `AudioRouteMonitor.kt`:
+- [ ] **Step 2: Classification** — `AudioRoute → MicExposure`:
+  - `Headset(hasMicrophone = true)` → `Isolated` (mic cannot hear the playback; safe without a wake word).
+  - `Speaker`, `BluetoothA2dpOnly` → `Exposed` (mic shares air with playback/room; wake word required).
+  - `Headset(hasMicrophone = false)` → `NoMic` (nothing to listen with).
+  - `Unknown` → `Exposed` (conservative: require the wake word rather than risk a false activation).
 
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.route
+- [ ] **Step 3: `AndroidAudioRouteMonitor`** — `@Singleton`, reads `AudioManager.getDevices(...)` outputs/inputs and registers an `AudioDeviceCallback` to push a `StateFlow<AudioRoute>` on add/remove. Headset types: `TYPE_WIRED_HEADSET`, `TYPE_BLUETOOTH_SCO`, `TYPE_BLE_HEADSET`; a headset output with a matching input device is `hasMicrophone = true`.
 
-import kotlinx.coroutines.flow.StateFlow
+- [ ] **Step 4: `MicExposureTest`** — every `AudioRoute` maps to the expected `MicExposure`. Commit.
 
-interface AudioRouteMonitor {
-    val route: StateFlow<AudioRoute>
-}
-```
-
-Create `AudioRoutePolicyRule.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.route
-
-import au.com.shiftyjelly.pocketcasts.preferences.model.VoiceControlAudioRoutePolicy
-import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlRule
-import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlRuleState
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.stateIn
-
-class AudioRoutePolicyRule(
-    private val route: StateFlow<AudioRoute>,
-    private val policy: StateFlow<VoiceControlAudioRoutePolicy>,
-    scope: kotlinx.coroutines.CoroutineScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default),
-) : VoiceControlRule {
-    override val id = "audio_route_policy"
-    override val state: StateFlow<VoiceControlRuleState> = kotlinx.coroutines.flow.combine(route, policy) { _, _ ->
-        evaluate()
-    }.stateIn(
-        scope,
-        kotlinx.coroutines.flow.SharingStarted.Eagerly,
-        evaluate(),
-    )
-
-    fun evaluate(): VoiceControlRuleState {
-        return when (policy.value) {
-            VoiceControlAudioRoutePolicy.HeadsetOnly -> when (route.value) {
-                AudioRoute.Headset(hasMicrophone = true) -> VoiceControlRuleState.Allowed
-                else -> VoiceControlRuleState.Blocked("audio_route_disallowed")
-            }
-            VoiceControlAudioRoutePolicy.SpeakerExperimental -> when (route.value) {
-                AudioRoute.Headset(hasMicrophone = true), AudioRoute.Speaker -> VoiceControlRuleState.Allowed
-                else -> VoiceControlRuleState.Blocked("audio_route_disallowed")
-            }
-        }
-    }
-}
-```
-
-Create `AndroidAudioRouteMonitor.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.route
-
-import android.content.Context
-import android.media.AudioDeviceCallback
-import android.media.AudioDeviceInfo
-import android.media.AudioManager
-import android.os.Build
-import dagger.hilt.android.qualifiers.ApplicationContext
-import javax.inject.Inject
-import javax.inject.Singleton
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-
-@Singleton
-class AndroidAudioRouteMonitor @Inject constructor(
-    @ApplicationContext context: Context,
-) : AudioRouteMonitor {
-    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    private val mutableRoute = MutableStateFlow(readRoute())
-    override val route: StateFlow<AudioRoute> = mutableRoute.asStateFlow()
-
-    init {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            audioManager.registerAudioDeviceCallback(
-                object : AudioDeviceCallback() {
-                    override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
-                        mutableRoute.value = readRoute()
-                    }
-
-                    override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
-                        mutableRoute.value = readRoute()
-                    }
-                },
-                null,
-            )
-        }
-    }
-
-    private fun readRoute(): AudioRoute {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return AudioRoute.Unknown
-        val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-        val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
-        val hasHeadsetOutput = outputs.any { it.type in headsetTypes }
-        val hasHeadsetInput = inputs.any { it.type in headsetTypes }
-        return when {
-            hasHeadsetOutput -> AudioRoute.Headset(hasMicrophone = hasHeadsetInput)
-            outputs.any { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER } -> AudioRoute.Speaker
-            outputs.any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP } -> AudioRoute.BluetoothA2dpOnly
-            else -> AudioRoute.Unknown
-        }
-    }
-
-    private val headsetTypes = setOf(
-        AudioDeviceInfo.TYPE_WIRED_HEADSET,
-        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
-        AudioDeviceInfo.TYPE_BLE_HEADSET,
-    )
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.route.AudioRoutePolicyRuleTest
-```
-
-Expected: pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/route modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/route
-git commit -m "Add voice audio route policy"
-```
-
-## Task 6: Add Playback Context Rule
+## Task 6: Gate Conditions (Setup / Conflicts / Context)
 
 **Files:**
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/PlaybackContextMonitor.kt`
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/PlaybackContextRule.kt`
-- Create: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/PlaybackContextRuleTest.kt`
+- Create: `.../voice/gate/conditions/*.kt` (+ monitors) + tests
+- Create: `.../voice/playback/PlaybackContextMonitor.kt`, `.../voice/foreground/ForegroundStateMonitor.kt`
 
-- [ ] **Step 1: Write playback context tests**
+Each condition implements `VoiceControlRule` with its `group`, derives `state` from a source `StateFlow`, and exposes a pure `evaluate()` for unit testing.
 
-Create `PlaybackContextRuleTest.kt`:
+- [ ] **Step 1: Setup conditions** (`group = Setup`, all must be `Allowed`)
+  - `EnabledByUserCondition` — `Allowed` when `settings.voiceControlUserDisabled` is `false`, else `Blocked("disabled_by_user")`.
+  - `DeviceSupportedCondition` — `Allowed` when the device meets the minimum capability bar (API level / RAM probe), else `Blocked("device_unsupported")`.
+  - `ModelsReadyCondition` — consumes the pipeline's readiness signal (Task 9 wires `VoiceRecognizer.ensureReady()` into a `StateFlow<Boolean>`); `Allowed` when ready, `Unknown("models_loading")` while loading, `Blocked("model_download_failed")` on failure.
 
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.playback
+- [ ] **Step 2: Conflicts conditions** (`group = Conflicts`, none may block; transient)
+  - `NotOnCallCondition` — `TelephonyManager`/`AudioManager` call state; in a call → `Blocked("on_call")`.
+  - `NotCastingCondition` — repositories' cast state; casting → `Blocked("casting")`.
+  - `BatteryOkCondition` — `PowerManager.isPowerSaveMode` or critically low battery → `Blocked("battery_saver")`.
 
-import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlRuleState
-import kotlinx.coroutines.flow.MutableStateFlow
-import org.junit.Assert.assertEquals
-import org.junit.Test
+- [ ] **Step 3: Context conditions** (`group = Context`, at least one `Allowed`)
+  - `PlaybackContextMonitor` — maps `playbackManager.playbackStateFlow` to `Active(episodeUuid)` when a current episode exists and the player is not stopped/empty (paused still counts), else `Inactive`.
+  - `PlaybackContextActiveCondition` — `Active` → `Allowed`, else `Blocked("no_playback_context")`.
+  - `ForegroundStateMonitor` — `ProcessLifecycleOwner` foreground + screen-on state.
+  - `AppInForegroundCondition` — foreground & screen on → `Allowed`, else `Blocked("not_foreground")`.
 
-class PlaybackContextRuleTest {
-    @Test
-    fun `current episode allows listening even when paused`() {
-        val rule = PlaybackContextRule(MutableStateFlow(PlaybackContext.Active(currentEpisodeUuid = "episode-id")))
+- [ ] **Step 4: Tests** — per-condition `evaluate()` cases (paused-but-active context → `Allowed`; inactive → blocked; power-save → blocked; call → blocked). Commit.
 
-        assertEquals(VoiceControlRuleState.Allowed, rule.evaluate())
-    }
-
-    @Test
-    fun `missing episode blocks listening`() {
-        val rule = PlaybackContextRule(MutableStateFlow(PlaybackContext.Inactive))
-
-        assertEquals(VoiceControlRuleState.Blocked("playback_context_inactive"), rule.evaluate())
-    }
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackContextRuleTest
-```
-
-Expected: fail because playback context types do not exist.
-
-- [ ] **Step 3: Add playback context types and rule**
-
-Create `PlaybackContextMonitor.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.playback
-
-import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.SharingStarted
-
-sealed interface PlaybackContext {
-    data class Active(val currentEpisodeUuid: String) : PlaybackContext
-    data object Inactive : PlaybackContext
-}
-
-class PlaybackContextMonitor(
-    playbackManager: PlaybackManager,
-    scope: CoroutineScope,
-) {
-    val context: StateFlow<PlaybackContext> = playbackManager.playbackStateFlow
-        .map { state ->
-            if (state.episodeUuid.isNotBlank() && !state.isStopped && !state.isEmpty) {
-                PlaybackContext.Active(state.episodeUuid)
-            } else {
-                PlaybackContext.Inactive
-            }
-        }
-        .stateIn(scope, SharingStarted.Eagerly, PlaybackContext.Inactive)
-}
-```
-
-Create `PlaybackContextRule.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.playback
-
-import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlRule
-import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlRuleState
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.stateIn
-
-class PlaybackContextRule(
-    private val playbackContext: StateFlow<PlaybackContext>,
-    scope: kotlinx.coroutines.CoroutineScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default),
-) : VoiceControlRule {
-    override val id = "playback_context"
-    override val state: StateFlow<VoiceControlRuleState> = playbackContext
-        .map { evaluate() }
-        .stateIn(
-            scope,
-            kotlinx.coroutines.flow.SharingStarted.Eagerly,
-            evaluate(),
-        )
-
-    fun evaluate(): VoiceControlRuleState {
-        return when (playbackContext.value) {
-            is PlaybackContext.Active -> VoiceControlRuleState.Allowed
-            PlaybackContext.Inactive -> VoiceControlRuleState.Blocked("playback_context_inactive")
-        }
-    }
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackContextRuleTest
-```
-
-Expected: pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback
-git commit -m "Add voice playback context rule"
-```
-
-## Task 7: Add Playback Intent Executor
+## Task 7: Listening Mode Policy
 
 **Files:**
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoiceIntentExecutor.kt`
-- Create: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoiceIntentExecutorTest.kt`
+- Create: `.../voice/mode/ListeningMode.kt`, `.../voice/mode/ListeningModePolicy.kt`, `ListeningModePolicyTest.kt`
 
-- [ ] **Step 1: Write executor tests with a fake sink**
+This is the `ListeningModePolicy` the [ASR Intent Pipeline spec](../specs/asr-intent-pipeline.md) refers to: it turns the gate result + microphone exposure into the mode the pipeline runs in.
 
-Create `VoiceIntentExecutorTest.kt`:
+- [ ] **Step 1: Mode type** — `enum class ListeningMode { Off, Continuous, WakeWord }`.
 
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.playback
+- [ ] **Step 2: Resolution** — combine `gate.state`, `micExposure`, and the `AppInForeground` / `PlaybackContextActive` condition states into a `StateFlow<ListeningMode>`, resolved in order:
+  1. Gate not `allowed` → `Off`.
+  2. `MicExposure.NoMic` → `Off`.
+  3. `AppInForeground` allowed → `Continuous` (user can fix a wrong action; route-independent, even with no episode loaded).
+  4. Background + active context + `Isolated` → `Continuous`.
+  5. Background + active context + `Exposed` → `WakeWord`.
 
-import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntent
-import kotlinx.coroutines.test.runTest
-import org.junit.Assert.assertEquals
-import org.junit.Test
+  The mode depends on **whether the playback context is active**, not on whether audio is playing — a paused episode keeps listening. The flow recomputes when playback starts/stops, the route changes, or foreground/screen state changes, so `Continuous ↔ WakeWord` switches happen without stopping the service.
 
-class VoiceIntentExecutorTest {
-    @Test
-    fun `relative positive seek skips forward`() = runTest {
-        val sink = FakeVoicePlaybackSink()
-        VoiceIntentExecutor(sink).execute(VoiceIntent.SeekRelative(30_000))
+- [ ] **Step 3: Tests** — foreground → `Continuous` regardless of exposure; background + Isolated → `Continuous`; background + Exposed → `WakeWord`; NoMic → `Off`; gate blocked → `Off`; paused-but-active context still yields a listening mode.
 
-        assertEquals(listOf("skipForward:30"), sink.calls)
-    }
+- [ ] **Step 4: Commit.**
 
-    @Test
-    fun `relative negative seek skips backward`() = runTest {
-        val sink = FakeVoicePlaybackSink()
-        VoiceIntentExecutor(sink).execute(VoiceIntent.SeekRelative(-10_000))
+## Task 8: Voice Intent Executor
 
-        assertEquals(listOf("skipBackward:10"), sink.calls)
-    }
+**Files:**
+- Create: `.../voice/playback/VoiceIntentExecutor.kt` + `VoiceIntentExecutorTest.kt`
 
-    private class FakeVoicePlaybackSink : VoicePlaybackSink {
-        val calls = mutableListOf<String>()
-        override suspend fun pause() { calls += "pause" }
-        override suspend fun resume() { calls += "resume" }
-        override suspend fun skipForward(seconds: Int) { calls += "skipForward:$seconds" }
-        override suspend fun skipBackward(seconds: Int) { calls += "skipBackward:$seconds" }
-        override suspend fun seekTo(positionMs: Int) { calls += "seekTo:$positionMs" }
-        override fun nextChapter() { calls += "nextChapter" }
-        override fun previousChapter() { calls += "previousChapter" }
-        override fun chapterByIndex(index: Int) { calls += "chapterByIndex:$index" }
-    }
-}
-```
+The executor is the only class allowed to change playback from voice recognition. It maps each validated intent to a `VoicePlaybackSink` method, keeps seek positions within the episode, and rejects any command when no current episode exists. The added playback intents (speed/volume/sleep/trim/boost/bookmark) and their sink implementations are wired in [Playback Controls](playback-controls.md); this task establishes the executor, the sink interface, and the core playback mappings.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 1: Executor test with a fake sink** — `SeekRelative(30_000)` → `skipForward:30`; `SeekRelative(-10_000)` → `skipBackward:10`. Run; it fails.
 
-Run:
-
-```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.playback.VoiceIntentExecutorTest
-```
-
-Expected: fail because executor types do not exist.
-
-- [ ] **Step 3: Add executor and sink**
-
-Create `VoiceIntentExecutor.kt`:
+- [ ] **Step 2: Executor + sink**
 
 ```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.playback
-
-import au.com.shiftyjelly.pocketcasts.analytics.SourceView
-import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
-import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntent
-import javax.inject.Inject
-import kotlin.math.abs
-
 class VoiceIntentExecutor @Inject constructor(
     private val sink: VoicePlaybackSink,
 ) {
@@ -893,332 +293,75 @@ class VoiceIntentExecutor @Inject constructor(
             is VoiceIntent.SeekAbsolute -> sink.seekTo(intent.positionMs.coerceAtLeast(0))
             VoiceIntent.NextChapter -> sink.nextChapter()
             VoiceIntent.PreviousChapter -> sink.previousChapter()
+            VoiceIntent.NextEpisode -> sink.nextEpisode()
             is VoiceIntent.ChapterByIndex -> sink.chapterByIndex(intent.index)
-            is VoiceIntent.ChapterByTitle -> Unit
-            is VoiceIntent.SetSpeed -> Unit  // wired in playback-controls plan
-            is VoiceIntent.AdjustSpeed -> Unit  // wired in playback-controls plan
+            is VoiceIntent.ChapterByTitle -> Unit // chapter search wired in playback-controls
+            is VoiceIntent.SetSpeed -> sink.setSpeed(intent.speed)
+            is VoiceIntent.AdjustSpeed -> sink.adjustSpeed(intent.delta)
+            is VoiceIntent.SetVolume -> sink.setVolume(intent.volume)
+            is VoiceIntent.AdjustVolume -> sink.adjustVolume(intent.delta)
+            is VoiceIntent.SleepTimer -> sink.sleepAfter(intent.minutes)
+            is VoiceIntent.SetTrimMode -> sink.setTrimMode(intent.mode)
+            is VoiceIntent.SetVolumeBoost -> sink.setVolumeBoost(intent.enabled)
+            is VoiceIntent.AddBookmark -> sink.addBookmark(intent.title)
         }
     }
 }
-
-interface VoicePlaybackSink {
-    suspend fun pause()
-    suspend fun resume()
-    suspend fun skipForward(seconds: Int)
-    suspend fun skipBackward(seconds: Int)
-    suspend fun seekTo(positionMs: Int)
-    fun nextChapter()
-    fun previousChapter()
-    fun chapterByIndex(index: Int)
-}
-
-class PlaybackManagerVoicePlaybackSink @Inject constructor(
-    private val playbackManager: PlaybackManager,
-) : VoicePlaybackSink {
-    override suspend fun pause() = playbackManager.pauseSuspend(sourceView = SourceView.UNKNOWN)
-    override suspend fun resume() = playbackManager.playQueueSuspend(sourceView = SourceView.UNKNOWN)
-    override suspend fun skipForward(seconds: Int) = playbackManager.skipForwardSuspend(SourceView.UNKNOWN, seconds)
-    override suspend fun skipBackward(seconds: Int) = playbackManager.skipBackwardSuspend(SourceView.UNKNOWN, seconds)
-    override suspend fun seekTo(positionMs: Int) = playbackManager.seekToTimeMsSuspend(positionMs)
-    override fun nextChapter() = playbackManager.skipToNextSelectedOrLastChapter()
-    override fun previousChapter() = playbackManager.skipToPreviousSelectedOrLastChapter()
-    override fun chapterByIndex(index: Int) = playbackManager.skipToChapter(index)
-}
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+The `VoicePlaybackSink` interface and `PlaybackManagerVoicePlaybackSink` are defined here (core playback methods) and extended in [Playback Controls](playback-controls.md). Tag analytics with `SourceView.VOICE_COMMANDS` (added by the Playback Controls plan).
 
-Run:
+- [ ] **Step 3: Run the test** — it passes. Commit.
 
-```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.playback.VoiceIntentExecutorTest
-```
-
-Expected: pass.
-
-- [ ] **Step 5: Compile voice module**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:compileDebugKotlin
-```
-
-Expected: pass with `SourceView.UNKNOWN` used as the temporary analytics source for voice-triggered playback actions.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback
-git commit -m "Add voice playback intent executor"
-```
-
-## Task 8: Add Foreground Service Shell and Hilt Bindings
+## Task 9: Foreground Service, Recognizer Boundary, and DI
 
 **Files:**
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/service/VoiceControlService.kt`
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/di/VoiceControlModule.kt`
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/model/VoiceRecognizer.kt`
+- Create: `.../voice/model/VoiceRecognizer.kt`, `.../voice/service/VoiceControlService.kt`, `.../voice/service/VoiceControlNotificationManager.kt`, `.../voice/di/VoiceControlModule.kt`
 
-- [ ] **Step 1: Add recognizer interface**
-
-Create `VoiceRecognizer.kt`:
+- [ ] **Step 1: Recognizer boundary contract** — the pipeline boundary the core depends on (text in, validated intent out):
 
 ```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.model
-
-import au.com.shiftyjelly.pocketcasts.voice.audio.PcmAudioFrame
-import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntent
-
 data class VoiceRecognitionContext(
-    val playbackContext: PlaybackContext,
-    val audioRoute: AudioRoute,
+    val listeningMode: ListeningMode,
+    val micExposure: MicExposure,
 )
-
-data class VoiceUtteranceClip(
-    val frames: List<PcmAudioFrame>,
-    val sampleRateHz: Int = 16000,
-) {
-    companion object {
-        fun fromFrames(frames: List<PcmAudioFrame>): VoiceUtteranceClip {
-            return VoiceUtteranceClip(frames.toList(), frames.firstOrNull()?.sampleRateHz ?: 16000)
-        }
-    }
-}
 
 interface VoiceRecognizer {
     suspend fun ensureReady(): Result<Unit>
     suspend fun recognize(transcript: String, context: VoiceRecognitionContext): VoiceIntent?
 }
 
-class NoOpVoiceRecognizer @javax.inject.Inject constructor() : VoiceRecognizer {
+class NoOpVoiceRecognizer @Inject constructor() : VoiceRecognizer {
     override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
     override suspend fun recognize(transcript: String, context: VoiceRecognitionContext): VoiceIntent? = null
 }
 ```
 
-`EmbeddingIntentMatcher` (from the [ASR Intent Pipeline](asr-intent-pipeline.md) plan) implements `VoiceRecognizer`.
+`EmbeddingIntentMatcher` (from the [ASR Intent Pipeline](asr-intent-pipeline.md) plan) implements `VoiceRecognizer`; `ModelsReadyCondition` consumes `ensureReady()` state.
 
-- [ ] **Step 2: Add the service shell**
+- [ ] **Step 2: Foreground service** — `@AndroidEntryPoint VoiceControlService` owns the foreground microphone lifecycle. It observes `ListeningModePolicy.mode`: starts capture and goes foreground when the mode is `Continuous` or `WakeWord`, stops capture and leaves foreground when it is `Off`. Capture runs **without taking audio focus** (so playback is never interrupted). The service coordinates the pipeline, readiness, and the executor; it does not parse commands itself.
 
-Create `VoiceControlService.kt`:
+- [ ] **Step 3: Notification** — `VoiceControlNotificationManager` shows a persistent notification that clearly states voice control is active and reflects whether the current mode is `Continuous` or `WakeWord`. No raw audio is logged.
 
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.service
+- [ ] **Step 4: Hilt module** — bind `VoiceRecognizer`, `VoicePlaybackSink`, `AudioRouteMonitor`; provide the rule list (the eight conditions grouped), `VoiceControlGate`, `MicExposure` flow, and `ListeningModePolicy`.
 
-import android.app.Service
-import android.content.Intent
-import android.os.IBinder
-import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
-import dagger.hilt.android.AndroidEntryPoint
-import javax.inject.Inject
-import timber.log.Timber
+- [ ] **Step 5: Compile** `./gradlew :modules:services:voice:compileDebugKotlin`. Commit.
 
-@AndroidEntryPoint
-class VoiceControlService : Service() {
-    @Inject lateinit var gate: VoiceControlGate
-
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Timber.i("Voice control service started")
-        return START_STICKY
-    }
-
-    override fun onDestroy() {
-        Timber.i("Voice control service stopped")
-        super.onDestroy()
-    }
-}
-```
-
-- [ ] **Step 3: Add Hilt bindings**
-
-Create `VoiceControlModule.kt`:
-
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.di
-
-import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
-import au.com.shiftyjelly.pocketcasts.voice.intent.EmbeddingIntentMatcher
-import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognizer
-import au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackManagerVoicePlaybackSink
-import au.com.shiftyjelly.pocketcasts.voice.playback.VoicePlaybackSink
-import au.com.shiftyjelly.pocketcasts.preferences.Settings
-import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlGate
-import au.com.shiftyjelly.pocketcasts.voice.gate.VoiceControlRule
-import au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackContextMonitor
-import au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackContextRule
-import au.com.shiftyjelly.pocketcasts.voice.route.AndroidAudioRouteMonitor
-import au.com.shiftyjelly.pocketcasts.voice.route.AudioRouteMonitor
-import au.com.shiftyjelly.pocketcasts.voice.route.AudioRoutePolicyRule
-import dagger.Binds
-import dagger.Module
-import dagger.Provides
-import dagger.hilt.InstallIn
-import dagger.hilt.components.SingletonComponent
-import kotlinx.coroutines.CoroutineScope
-
-@Module
-@InstallIn(SingletonComponent::class)
-abstract class VoiceControlModule {
-    @Binds abstract fun bindVoiceRecognizer(impl: EmbeddingIntentMatcher): VoiceRecognizer
-    @Binds abstract fun bindVoicePlaybackSink(impl: PlaybackManagerVoicePlaybackSink): VoicePlaybackSink
-    @Binds abstract fun bindAudioRouteMonitor(impl: AndroidAudioRouteMonitor): AudioRouteMonitor
-
-    companion object {
-        @Provides
-        fun provideVoiceControlGate(
-            playbackContextMonitor: PlaybackContextMonitor,
-            audioRouteMonitor: AudioRouteMonitor,
-            settings: Settings,
-            @ApplicationScope scope: CoroutineScope,
-        ): VoiceControlGate {
-            val rules: List<VoiceControlRule> = listOf(
-                PlaybackContextRule(playbackContextMonitor.context, scope),
-                AudioRoutePolicyRule(audioRouteMonitor.route, settings.voiceControlAudioRoutePolicy.flow, scope),
-            )
-            return VoiceControlGate(rules = rules, scope = scope)
-        }
-    }
-}
-```
-
-Add `@Inject constructor` to `PlaybackContextMonitor` before compiling:
-
-```kotlin
-class PlaybackContextMonitor @javax.inject.Inject constructor(
-    playbackManager: PlaybackManager,
-    @ApplicationScope scope: CoroutineScope,
-) {
-```
-
-- [ ] **Step 4: Compile voice module**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:compileDebugKotlin
-```
-
-Expected: pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice
-git commit -m "Add voice control service shell"
-```
-
-## Task 9: Add App-Level Service Starter
+## Task 10: App-Level Service Controller
 
 **Files:**
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/service/VoiceControlServiceController.kt`
+- Create: `.../voice/service/VoiceControlServiceController.kt`
 - Modify: `app/src/main/java/au/com/shiftyjelly/pocketcasts/PocketCastsApplication.kt`
 
-- [ ] **Step 1: Add service controller**
+- [ ] **Step 1: Controller** — `@Singleton VoiceControlServiceController` with `start()` (`ContextCompat.startForegroundService`) and `stop()`. The service itself self-stops when the mode resolves to `Off`; the controller exists so first-run setup/gate orchestration can start it once setup completes.
 
-Create `VoiceControlServiceController.kt`:
+- [ ] **Step 2: Inject** the controller into `PocketCastsApplication` without calling `start()` (starting policy belongs to the setup/permission UX, not this task).
 
-```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.service
+- [ ] **Step 3: Compile** `./gradlew :app:compileDebugKotlin`. Commit.
 
-import android.content.Context
-import android.content.Intent
-import androidx.core.content.ContextCompat
-import dagger.hilt.android.qualifiers.ApplicationContext
-import javax.inject.Inject
-import javax.inject.Singleton
+## Task 11: Build and Verify
 
-@Singleton
-class VoiceControlServiceController @Inject constructor(
-    @ApplicationContext private val context: Context,
-) {
-    fun start() {
-        ContextCompat.startForegroundService(context, Intent(context, VoiceControlService::class.java))
-    }
-
-    fun stop() {
-        context.stopService(Intent(context, VoiceControlService::class.java))
-    }
-}
-```
-
-- [ ] **Step 2: Wire controller into application without starting it**
-
-In `PocketCastsApplication.kt`, add:
-
-```kotlin
-import au.com.shiftyjelly.pocketcasts.voice.service.VoiceControlServiceController
-```
-
-Add an injected field near other injected managers:
-
-```kotlin
-@Inject lateinit var voiceControlServiceController: VoiceControlServiceController
-```
-
-Do not call `start()` in this task. Starting policy belongs in the setup/gate orchestration task after notification and permission UX exists.
-
-- [ ] **Step 3: Compile app**
-
-Run:
-
-```bash
-./gradlew :app:compileDebugKotlin
-```
-
-Expected: pass.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/service app/src/main/java/au/com/shiftyjelly/pocketcasts/PocketCastsApplication.kt
-git commit -m "Wire voice service controller"
-```
-
-## Task 10: Build and Verify
-
-**Files:**
-- No source edits unless verification exposes a compile or test failure.
-
-- [ ] **Step 1: Run voice tests**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:testDebugUnitTest
-```
-
-Expected: pass.
-
-- [ ] **Step 2: Run compile checks**
-
-Run:
-
-```bash
-./gradlew :modules:services:voice:compileDebugKotlin :app:compileDebugKotlin
-```
-
-Expected: pass.
-
-- [ ] **Step 3: Run formatting check for touched Kotlin files**
-
-Run:
-
-```bash
-./gradlew spotlessCheck
-```
-
-Expected: pass. If formatting fails, run `./gradlew spotlessApply`, inspect the diff, and rerun `./gradlew spotlessCheck`.
-
-- [ ] **Step 4: Commit verification fixes if any**
-
-If verification caused formatting or compile-fix edits:
-
-```bash
-git add .
-git commit -m "Fix voice control foundation verification"
-```
-
-If there are no edits after verification, do not create an empty commit.
+- [ ] **Step 1: Unit tests** `./gradlew :modules:services:voice:testDebugUnitTest` — gate combination across groups (incl. fail-closed `Unknown`), `MicExposure` classification, mode resolution across foreground × exposure × context, executor mapping + seek clamping.
+- [ ] **Step 2: Compile** `./gradlew :modules:services:voice:compileDebugKotlin :app:compileDebugKotlin`.
+- [ ] **Step 3: Spotless** `./gradlew spotlessCheck` (run `spotlessApply` if it fails, then re-check).
+- [ ] **Step 4: Commit any verification fixups** (no empty commit if there are none).

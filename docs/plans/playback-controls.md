@@ -39,7 +39,7 @@ git commit -m "Add SourceView.VOICE_COMMANDS for voice-triggered action analytic
 ### Task 2: Refactor VoiceIntent sealed interface
 
 **Files:**
-- Modify: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoiceIntent.kt`
+- Modify: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/intent/VoiceIntent.kt`
 
 - [ ] **Step 1: Read current file**
 
@@ -48,7 +48,7 @@ git commit -m "Add SourceView.VOICE_COMMANDS for voice-triggered action analytic
 Replace the file contents with:
 
 ```kotlin
-package au.com.shiftyjelly.pocketcasts.voice.intent
+package au.com.shiftyjelly.pocketcasts.voicecontrol.intent
 
 sealed interface VoiceIntent {
     data object Pause : VoiceIntent
@@ -78,7 +78,7 @@ This replaces the old `SetPlaybackSpeed` with the split `SetSpeed` / `AdjustSpee
 - [ ] **Step 3: Commit**
 
 ```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoiceIntent.kt
+git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/intent/VoiceIntent.kt
 git commit -m "Refactor voice intents: split speed/volume, add trim/boost/bookmark"
 ```
 
@@ -87,7 +87,7 @@ git commit -m "Refactor voice intents: split speed/volume, add trim/boost/bookma
 ### Task 3: Update executor and sink interface
 
 **Files:**
-- Modify: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoiceIntentExecutor.kt`
+- Modify: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/playback/VoiceIntentExecutor.kt`
 
 - [ ] **Step 1: Read the current file**
 
@@ -154,7 +154,7 @@ Remove any obsolete branches (`SetPlaybackSpeed`). Keep `SeekAbsolute`. The `Cha
 - [ ] **Step 4: Commit**
 
 ```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoiceIntentExecutor.kt
+git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/playback/VoiceIntentExecutor.kt
 git commit -m "Update executor and sink interface with new voice intents"
 ```
 
@@ -163,7 +163,7 @@ git commit -m "Update executor and sink interface with new voice intents"
 ### Task 4: Implement PlaybackManagerVoicePlaybackSink new methods
 
 **Files:**
-- Modify: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoiceIntentExecutor.kt`
+- Modify: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/playback/VoiceIntentExecutor.kt`
 
 - [ ] **Step 1: Read the PlaybackManagerVoicePlaybackSink class**
 
@@ -270,7 +270,7 @@ import kotlinx.coroutines.runBlocking
 - [ ] **Step 5: Commit**
 
 ```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoiceIntentExecutor.kt
+git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/playback/VoiceIntentExecutor.kt
 git commit -m "Implement sink methods for volume, sleep timer, trim, boost, and bookmark"
 ```
 

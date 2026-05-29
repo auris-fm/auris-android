@@ -6,7 +6,7 @@ import android.content.Context
 import android.media.AudioManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
-import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoicePlaybackIntent
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
@@ -49,7 +49,7 @@ class MoonshineVoiceEngine @Inject constructor(
         audioRoute: AudioRoute,
         playbackBufferProvider: () -> FloatArray,
         contextProvider: () -> VoiceRecognitionContext,
-        onIntent: (VoicePlaybackIntent) -> Unit,
+        onIntent: (VoiceIntent) -> Unit,
     ) {
         this.playbackBufferProvider = playbackBufferProvider
         engineStartTimeMs = System.currentTimeMillis()
@@ -141,7 +141,7 @@ class MoonshineVoiceEngine @Inject constructor(
         text: String,
         audio: FloatArray,
         context: VoiceRecognitionContext,
-        onIntent: (VoicePlaybackIntent) -> Unit,
+        onIntent: (VoiceIntent) -> Unit,
     ) {
         val playbackBuffer = playbackBufferProvider?.invoke() ?: FloatArray(0)
         if (!utteranceFilter.shouldProcess(audio, false, -1, playbackBuffer)) return

@@ -4,17 +4,20 @@
 
 Extend the voice command system to wire up all currently defined intents through to actual playback actions, and add new intents for remaining player controls: trim silence, volume boost, and bookmarks. Refactor ambiguous dual-nullable-parameter intents into separate types.
 
+This spec owns the intent schema and the playback-side wiring (executor, sink, sink implementation). How an utterance
+becomes a matched intent + extracted slots is owned by the [ASR Intent Pipeline spec](asr-intent-pipeline.md).
+
 ## Intents
 
-| Intent | System prompt JSON |
-|---|---|
-| `SetSpeed(speed: Double)` | `{"intent": "set_speed", "speed": 2.0}` |
-| `AdjustSpeed(delta: Double)` | `{"intent": "adjust_speed", "delta": 0.5}` |
-| `SetVolume(volume: Int)` | `{"intent": "set_volume", "volume": 50}` |
-| `AdjustVolume(delta: Int)` | `{"intent": "adjust_volume", "delta": 10}` |
-| `SetTrimMode(mode: String)` | `{"intent": "set_trim", "mode": "low"}` |
-| `SetVolumeBoost(enabled: Boolean)` | `{"intent": "set_volume_boost", "enabled": true}` |
-| `AddBookmark(title: String)` | `{"intent": "add_bookmark", "title": "good part"}` |
+| Intent | Intent keyword(s) | Slot |
+|---|---|---|
+| `SetSpeed(speed: Double)` | "set speed", "change speed" | `speed` (0.5–5.0) |
+| `AdjustSpeed(delta: Double)` | "faster", "slower", "speed up" | `delta` |
+| `SetVolume(volume: Int)` | "set volume" | `volume` (0–100) |
+| `AdjustVolume(delta: Int)` | "louder", "quieter", "volume up/down" | `delta` |
+| `SetTrimMode(mode: String)` | "trim silence", "silence trimming" | `mode` (off/low/medium/high) |
+| `SetVolumeBoost(enabled: Boolean)` | "boost", "volume boost" | `enabled` (true/false) |
+| `AddBookmark(title: String)` | "bookmark", "save this" | `title` |
 
 Existing intents that need sink wiring:
 
@@ -24,60 +27,53 @@ Existing intents that need sink wiring:
 ### Sealed interface
 
 ```kotlin
-sealed interface VoicePlaybackIntent {
-    data object Pause : VoicePlaybackIntent
-    data object Resume : VoicePlaybackIntent
-    data class SeekRelative(val deltaMs: Int) : VoicePlaybackIntent
-    data class SeekAbsolute(val positionMs: Int) : VoicePlaybackIntent
-    data object NextChapter : VoicePlaybackIntent
-    data object PreviousChapter : VoicePlaybackIntent
-    data class ChapterByIndex(val index: Int) : VoicePlaybackIntent
-    data class ChapterByTitle(val query: String) : VoicePlaybackIntent {
+sealed interface VoiceIntent {
+    data object Pause : VoiceIntent
+    data object Resume : VoiceIntent
+    data class SeekRelative(val deltaMs: Int) : VoiceIntent
+    data class SeekAbsolute(val positionMs: Int) : VoiceIntent
+    data object NextChapter : VoiceIntent
+    data object PreviousChapter : VoiceIntent
+    data class ChapterByIndex(val index: Int) : VoiceIntent
+    data class ChapterByTitle(val query: String) : VoiceIntent {
         val normalizedQuery: String = query.trim()
     }
-    data object NextEpisode : VoicePlaybackIntent
-    data class SetSpeed(val speed: Double) : VoicePlaybackIntent
-    data class AdjustSpeed(val delta: Double) : VoicePlaybackIntent
-    data class SetVolume(val volume: Int) : VoicePlaybackIntent
-    data class AdjustVolume(val delta: Int) : VoicePlaybackIntent
-    data class SleepTimer(val minutes: Int) : VoicePlaybackIntent
-    data class SetTrimMode(val mode: String) : VoicePlaybackIntent
-    data class SetVolumeBoost(val enabled: Boolean) : VoicePlaybackIntent
-    data class AddBookmark(val title: String) : VoicePlaybackIntent
+    data object NextEpisode : VoiceIntent
+    data class SetSpeed(val speed: Double) : VoiceIntent
+    data class AdjustSpeed(val delta: Double) : VoiceIntent
+    data class SetVolume(val volume: Int) : VoiceIntent
+    data class AdjustVolume(val delta: Int) : VoiceIntent
+    data class SleepTimer(val minutes: Int) : VoiceIntent
+    data class SetTrimMode(val mode: String) : VoiceIntent
+    data class SetVolumeBoost(val enabled: Boolean) : VoiceIntent
+    data class AddBookmark(val title: String) : VoiceIntent
 }
 ```
 
-## System Prompt
+## Recognition wiring
 
-Update the intent parser's system prompt:
-- Add `set_speed` with `speed` (absolute, 0.5–5.0)
-- Add `adjust_speed` with `delta` (relative adjustment)
-- Add `set_volume` with `volume` (absolute, 0–100)
-- Add `adjust_volume` with `delta` (relative adjustment)
-- Add `set_trim` with `mode` (off/low/medium/high)
-- Add `set_volume_boost` with `enabled` (true/false)
-- Add `add_bookmark` with `title`
-- Keep existing intents (pause, resume, seek, chapter nav, sleep_timer, next_episode)
-- Update aliases to include trim/boost/bookmark variations:
-  - "louder" / "quieter" → adjust_volume
-  - "trim silence" / "silence trimming" → set_trim mode=medium
-  - "no trim" → set_trim mode=off
-  - "boost" / "turn on boost" → set_volume_boost enabled=true
-  - "bookmark this" / "save this" → add_bookmark
+Registering these intents in the recognition pipeline (per the [ASR Intent Pipeline spec](asr-intent-pipeline.md)):
 
-## Intent Parser
+- **Intent matcher** — add a keyword entry per intent so the embedding matcher can classify it:
+  - `set_speed` → "set speed", "change speed"
+  - `adjust_speed_up` / `adjust_speed_down` → "faster"/"speed up", "slower"/"speed down"
+  - `set_volume` → "set volume"
+  - `adjust_volume_up` / `adjust_volume_down` → "louder"/"volume up", "quieter"/"volume down"
+  - `set_trim` → "trim silence", "silence trimming"
+  - `set_volume_boost` → "boost", "volume boost"
+  - `add_bookmark` → "bookmark", "save this"
+- **Entity extractor** — each parameterized intent reads its slot from the language grammars:
+  - `set_speed` → `speed` (number, 0.5–5.0); `adjust_speed_*` → `speed` delta (default ±0.5)
+  - `set_volume` → `volume` (0–100); `adjust_volume_*` → `volume` delta (default ±10)
+  - `set_trim` → `trim_mode` (off/low/medium/high; bare "trim silence" defaults to medium, "no trim" → off)
+  - `set_volume_boost` → boolean (affirmative/negative)
+  - `add_bookmark` → `title` (free text after stripping the matched keyword)
+  - `sleep_timer` → `duration` → minutes
 
-Update the parse function to handle new intent types:
-- `"set_speed"` — reads `speed` (required, 0.5–5.0). Route to `SetSpeed`.
-- `"adjust_speed"` — reads `delta` (required). Route to `AdjustSpeed`.
-- `"set_volume"` — reads `volume` (required, 0–100). Route to `SetVolume`.
-- `"adjust_volume"` — reads `delta` (required). Route to `AdjustVolume`.
-- `"sleep_timer"` — reads `minutes`. Route to `SleepTimer`.
-- `"set_trim"` — reads `mode` (off/low/medium/high). Route to `SetTrimMode`.
-- `"set_volume_boost"` — reads `enabled` (boolean). Route to `SetVolumeBoost`.
-- `"add_bookmark"` — reads `title`. Route to `AddBookmark`.
+The matched intent type plus its normalized slot value is assembled into the `VoiceIntent` below and dispatched to
+the executor.
 
-## Executor — `VoicePlaybackIntentExecutor`
+## Executor — `VoiceIntentExecutor`
 
 Map each intent to a `VoicePlaybackSink` method:
 

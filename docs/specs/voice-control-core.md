@@ -2,23 +2,30 @@
 
 ## Summary
 
-Add local, hands-free voice control as a core Android playback capability. After first-run setup, the app listens while the playback UI
-or playback context is active and the current audio route satisfies the configured audio-route policy, so users can control playback
-while jogging, biking, doing house work, or otherwise avoiding touch interaction.
+Add local, hands-free voice control as a core Android playback capability. After first-run setup, the app listens while a listening
+context is active, so users can control playback while jogging, biking, doing house work, or otherwise avoiding touch interaction.
 
-Voice control is the main product interaction, not an auxiliary integration. It should not require a wake phrase. It should support
-natural phrasing, accents, slang, and multiple languages by using a downloaded local model stack. Playback execution must remain
-deterministic: the model can interpret intent, but only validated intents owned by Pocket Casts can affect playback.
+Voice control is the main product interaction, not an auxiliary integration.
+
+Whether a command needs a **wake word** depends on how exposed the microphone is to false activations:
+
+- **No wake word** in low-false-positive contexts — when audio is playing through a headset/earbuds with a microphone, or when the
+  app is in the foreground with the screen visible. Every recognized command executes directly.
+- **Wake word required** in every other listening context, where the microphone is exposed to podcast audio or ambient speech.
+  The wake word ("Auris" by default, or a user-defined keyword enrolled from a voice sample) must precede a command.
+
+Recognition runs on a downloaded local model stack and supports natural phrasing, accents, slang, and multiple languages.
+Playback execution stays deterministic: the model interprets intent, but only validated intents can affect playback.
 
 ## Goals
 
-- Fast response for common playback controls.
-- Treat voice control as the primary playback control surface.
-- Fully local recognition and intent interpretation after any required model download.
-- Android-first implementation.
-- No wake phrase requirement for ordinary use.
-- Listening only while the playback UI or playback context is active and the active route is allowed by `AudioRoutePolicyRule`.
-- Continue listening while playback is paused, so hands-free "resume" and seek commands still work.
+- Low-latency response for common playback commands (sub-second target on supported devices).
+- A first-class voice control surface that complements existing media controls rather than replacing them.
+- Fully on-device recognition and intent interpretation after the initial model download.
+- Wake-word-free operation in low-false-positive contexts, with a wake word (built-in "Auris" or a
+  user-enrolled custom keyword) required when the mic is exposed to podcast or ambient audio.
+- Microphone off unless a listening context is active — including paused playback, so hands-free
+  "resume" and seek still work — and stopped as soon as the context ends, for privacy and battery.
 - Adjustable gate logic that can be tuned without changing recognition or playback command execution.
 - Natural multilingual command support instead of a narrow phrase grammar.
 - Reuse existing playback, chapter, transcript, and analytics infrastructure.
@@ -35,201 +42,224 @@ deterministic: the model can interpret intent, but only validated intents owned 
 ## Architecture
 
 ```text
-PlaybackManager.playbackStateFlow
-        |
-        v
-VoiceControlGate
-        |
-        v
-VoiceControlService
-        |
-        v
-Moonshine MicTranscriber  (capture + VAD + ASR, one library)
-        |
-        v
-UtteranceFilter          (speaker diarization + playback bleed rejection)
-        |
-        v
-SmolLmIntentParser       (structured JSON intent via llama.cpp)
-        |
-        v
-VoicePlaybackIntentExecutor
-        |
-        v
-PlaybackManager
+        device & playback signals
+                   │
+                   ▼
+   ┌── decide if and how to listen ─────┐
+   │  VoiceControlGate · MicExposure       │
+   └───────────────┬─────────────────────┘
+                   │  Off │ Continuous │ WakeWord
+                   ▼
+   VoiceControlService ─► Recognition pipeline ─► VoiceIntentExecutor ─► PlaybackManager
 ```
 
-Audio capture, VAD, and ASR are handled by [Moonshine Voice](https://github.com/moonshine-ai/moonshine)
-(`ai.moonshine:moonshine-voice` from Maven Central) as an integrated library — no separate Oboe JNI, Silero VAD, or
-whisper.cpp integration. Structured intent parsing is kept as a separate SmolLM2 stage via llama.cpp for parameter
-extraction. Full details are in the [ASR Intent Pipeline spec](asr-intent-pipeline.md).
+The diagram has two layers:
+
+- **Decision layer** — decides whether to listen, and how. It reads device and playback signals (playback context, audio route,
+  foreground/screen state, mic permission, casting, call, battery, model readiness, user setting) and outputs one of three
+  values: `Off`, `Continuous`, or `WakeWord`. See [VoiceControlGate](#voicecontrolgate) and [Listening Modes](#listening-modes).
+- **Runtime path** — runs only when the value is not `Off`. It sends microphone audio into the pipeline, the pipeline turns it
+  into a validated intent, and the intent updates playback.
+
+Two arrows point back. The pipeline tells the gate when its models are ready. Running a command changes the playback state, and
+the decision layer reads that change.
+
+This spec owns the gate, the listening-mode policy, the foreground-service lifecycle, the microphone-exposure classification, and the
+privacy/battery/UX rules. Everything between "microphone audio in" and "validated `VoiceIntent` out" is the
+**recognition pipeline**: capture, voice activity detection, playback-bleed filtering, wake-word detection, ASR backends and
+their selection, intent matching, entity extraction, and model sources. The pipeline is owned by the
+[ASR Intent Pipeline spec](asr-intent-pipeline.md). This spec uses only the pipeline's boundary contract (see
+[Recognition pipeline](#recognition-pipeline)), so the pipeline can change inside without affecting this spec.
 
 ### VoiceControlGate
 
-`VoiceControlGate` is a standalone policy engine. It combines small, independently testable rules.
+`VoiceControlGate` decides whether the microphone may listen, and in which mode. It is built from small conditions that can each
+be tested on their own, grouped by the question they answer. It emits a `StateFlow<VoiceControlGateState>` carrying the full
+breakdown, for diagnostics and the settings UI.
 
-**Active rules:**
-- `UserNotDisabledRule` — user can disable voice control in settings
-- `PlaybackContextActiveRule` — a current episode must exist (playing or paused)
-- `AudioRoutePolicyRule` — headset with microphone required (HeadsetOnly default)
+**Foundation — microphone permission.** The app always requests microphone permission during first-run setup. This is not a gate
+condition: without permission, `VoiceControlService` never starts capture, so the pipeline receives no audio and does nothing.
+Everything below assumes permission has been granted.
 
-**Planned rules:**
-- `MicrophonePermissionRule` — runtime permission check
-- `NotCastingRule` — block while casting to another device
-- `NotInCallRule` — block during phone calls
-- `ModelReadyRule` — ensure ASR + intent models are downloaded
-- `OperationalKillSwitchRule` — server-driven remote disable
-- `SupportedDeviceRule` — minimum device capability check
-- `BatterySaverRule` — pause listening when battery is critically low
+The gate then asks three questions. Each condition reports `Allowed`, `Blocked(reason)`, or `Unknown(reason)`, and the
+combination is **fail-closed** — `Unknown` counts the same as `Blocked`, so the microphone never turns on from missing
+information.
 
-Each rule returns:
+**1. Setup — is voice control ready?** (all must be `Allowed`; persistent — the user fixes these)
+- `EnabledByUser` — the user has voice control turned on in settings
+- `DeviceSupported` — the device meets the minimum capability bar
+- `ModelsReady` — the recognition pipeline reports its models are downloaded and ready
 
-- `Allowed`
-- `Blocked(reason)`
-- `Unknown(reason)`
+**2. Conflicts — is anything blocking right now?** (none may block; transient — clears on its own)
+- `NotOnCall` — no phone call is in progress
+- `NotCasting` — not casting to another device
+- `BatteryOk` — not in battery-saver or critically low battery
 
-The combined gate emits a `StateFlow<VoiceControlGateState>` with the full rule breakdown for diagnostics and settings UI.
+**3. Context — is there a reason to listen?** (at least one must be `Allowed`)
+- `PlaybackContextActive` — a current episode exists (playing or paused)
+- `AppInForeground` — the app is in the foreground with the screen on
 
-`PlaybackContextActiveRule` should mean the user is in a valid playback context, not that audio is currently playing. A current episode
-must exist, and the player UI/session must be active enough that playback commands are meaningful. Paused playback remains allowed, so
-users can say "resume", "skip thirty", "go back", or "jump to chapter three" without touching the device. Listening stops when the user
-leaves the playback context, clears the current episode, or another required gate blocks.
+When all three questions pass, the microphone turns on and the microphone exposure selects the mode (see
+[Listening Modes](#listening-modes)).
 
-`AudioRoutePolicyRule` should keep route logic adjustable instead of baking in a permanent headset-only restriction. The first reliable
-production policy is `HeadsetOnly`, which allows wired headsets and Bluetooth earbuds/headsets with a usable microphone. The product
-direction should also include `SpeakerExperimental`, but that policy should stay blocked behind runtime capability checks and staged
-release data until speaker-mode false positives are understood. Speaker mode requires treating podcast playback as an echo source:
-Android acoustic echo cancellation and noise suppression should be used when available, but they are device-dependent and not sufficient
-on their own. A future speaker policy should combine playback-reference echo suppression, stricter segmenter thresholds, conservative
-intent confidence thresholds, and automatic fallback to `HeadsetOnly` after repeated suspected false positives.
+`PlaybackContextActive` means the user is in a real playback context — not that audio is playing right now. A current episode
+must exist, and the player screen or media session must be active enough for playback commands to make sense. Paused playback
+still counts, so the user can say "resume", "skip thirty", "go back", or "jump to chapter three" without touching the device.
+Listening stops when the user leaves the playback context, clears the current episode, or any condition above starts blocking.
+
+`MicExposure` classifies the current audio route and microphone availability into one of the values below. It does not pass or
+block — it is read only when picking the mode. The values describe how easily the microphone picks up sound that is not a
+command — a "false activation". They are kept separate from the mode names so the two are never confused.
+
+- **`Isolated`** — the microphone cannot hear the playback: a headset or earbuds with a working mic, where no sound travels from
+  the speaker back into the mic. Safe to listen without a wake word.
+- **`Exposed`** — the microphone shares the same air as the playback and the room (loudspeaker), so podcast audio or nearby
+  speech can reach it. Usable only behind a wake word, which keeps false activations low.
+- **`NoMic`** — the current route has no usable microphone (for example, a headset without a mic), so there is nothing to listen
+  with.
+
+`Exposed` listening still needs the usual echo care: Android acoustic echo cancellation and noise suppression when available,
+plus the pipeline's playback-bleed filtering.
+
+### Listening Modes
+
+The gate turns the three questions and the microphone exposure into one **listening mode** — `Off`, `Continuous`, or `WakeWord`:
+
+- **`Off`** — the gate did not pass: Setup is not ready, a conflict is blocking (call, casting, battery saver), or there is no
+  reason to listen (neither `AppInForeground` nor `PlaybackContextActive`). Missing microphone permission lands here too —
+  without it nothing runs at all.
+- Otherwise the microphone turns on, and the mode is chosen in order:
+  1. **`AppInForeground`** → `Continuous`. The user is looking at the app and can fix a wrong action right away, so commands run
+     directly whatever the exposure — even with no episode loaded.
+  2. **Background, active context, `Isolated`** → `Continuous`. The headset mic cannot hear the playback, so commands run directly.
+  3. **Background, active context, `Exposed`** → `WakeWord`. The loudspeaker mic may pick up podcast or room audio, so a wake
+     word must come before each command.
+  4. **`NoMic`** → `Off`. There is no microphone to listen with.
+
+The mode depends on **whether the playback context is active**, not on whether audio is playing right now. A paused episode keeps
+listening — so "resume", "skip thirty", or "jump to chapter three" work hands-free — just as `PlaybackContextActive` intends.
+
+In `WakeWord` mode, the app ignores speech until it hears the wake word. Hearing the wake word opens a **command window**. During
+this window, follow-up commands do not need the wake word. The window stays open while the user keeps talking, and closes after a
+silence longer than the conversation timeout (10 seconds by default). After that, the wake word is needed again.
+
+The wake word is **"Auris"** by default. Users may instead enroll a **custom keyword from a short voice sample**. Wake-word detection,
+the built-in and custom keyword models, and the command-window mechanics are owned by the
+[ASR Intent Pipeline spec](asr-intent-pipeline.md); this spec owns only *when* each mode applies.
+
+The mode reacts to change: it is recomputed when playback starts or stops, the route changes, or the app moves into or out of the
+visible foreground. For example, unplugging a headset during playback switches `Continuous` → `WakeWord` without stopping the
+service; bringing the app to the foreground switches `WakeWord` → `Continuous`.
 
 ### VoiceControlService
 
-`VoiceControlService` owns the foreground microphone lifecycle. It starts capture only when the gate is allowed, stops immediately when
-any required gate blocks, and exposes a persistent visible state while listening.
+`VoiceControlService` owns the foreground microphone lifecycle. It starts capture only when the gate allows it, stops at once
+when any required rule blocks, and shows a visible, ongoing status while it listens.
 
-The service should not parse commands itself. It coordinates the Moonshine pipeline, model readiness, command interpretation,
+The service does not parse commands itself. It coordinates the recognition pipeline, model readiness, command interpretation,
 metrics, and error recovery.
 
-Android microphone foreground-service requirements must be handled explicitly. The service should use a microphone foreground service
-type and a notification that clearly indicates voice control is active.
+Android's rules for a microphone foreground service must be handled directly. The service must declare the microphone
+foreground-service type and show a notification that clearly says voice control is active.
 
-The service lifecycle is strictly bound to gate state: microphone capture starts only when all required gates are allowed, and stops
-immediately when any required gate blocks. This means:
+The service lifecycle follows the listening context, which decides whether the mic is on at all. The listening mode
+(`Continuous` vs. `WakeWord`) only changes how the open mic is used, not whether the service runs. So:
 
-- **App killed**: Process termination destroys the service and stops microphone capture.
-- **App background, no playback**: `PlaybackContextActiveRule` blocks → service stops → microphone off.
-- **App background, episode playing/paused**: Gate remains allowed → service continues → microphone active for hands-free commands.
-- **App foreground, no episode**: Gate blocks → service stops → microphone off.
+- **App killed**: process termination destroys the service and stops microphone capture.
+- **Background, no active playback context**: no context signal holds → service stops → microphone off.
+- **Background, active context, `Isolated` exposure** (headset/earbuds with mic): microphone active, `Continuous` mode.
+- **Background, active context, `Exposed` exposure** (loudspeaker): microphone active, `WakeWord` mode.
+- **Background, active context, `NoMic` exposure**: no microphone on the route → microphone off.
+- **Foreground, screen visible, no episode**: `AppInForeground` holds → microphone active, `Continuous` mode.
+- **Foreground, screen visible, with playback**: microphone active, `Continuous` mode (foreground satisfies `Continuous` regardless of route).
 
-### Audio Capture, VAD, and ASR
+### Recognition pipeline
 
-Moonshine Voice (`ai.moonshine:moonshine-voice`) provides an integrated `MicTranscriber` that handles microphone capture
-via Oboe, built-in voice activity detection, and streaming ASR (Moonshine Small Streaming, 123M params, 7.84% WER on
-English) as a single library.
+The recognition pipeline is the single unit between the service and the executor. The core spec depends only on its boundary
+contract; the pipeline's internal stages, components, ordering, models, and mechanisms are owned by the
+[ASR Intent Pipeline spec](asr-intent-pipeline.md) and may change without touching this spec.
 
-### UtteranceFilter
+**Boundary contract:**
 
-Before an utterance reaches the intent parser, `UtteranceFilter` runs two lightweight checks:
+- **Input** — microphone audio, supplied only while the service holds the mic. The pipeline performs its own capture, voice
+  activity detection, and playback-bleed filtering.
+- **Output** — a validated `VoiceIntent` per recognized command, or null. The service forwards each recognized
+  utterance to a backend-agnostic recognizer call:
 
-- **Speaker consistency**: Moonshine's built-in `identify_speakers` diarization sets `hasSpeakerId` and
-  `speakerIndex` on each `TranscriptLine`. The first accepted command in a listening session establishes the
-  target speaker; subsequent utterances from other speaker indices are dropped.
-- **Playback bleed rejection**: Normalized cross-correlation of `TranscriptLine.audioData` against the playback
-  buffer. If the mic signal strongly correlates with what the device is playing, the utterance is dropped.
-  Disabled when using a headset (no acoustic path from speaker to mic).
+  ```kotlin
+  interface VoiceRecognizer {
+      suspend fun ensureReady(): Result<Unit>
+      suspend fun recognize(transcript: String, context: VoiceRecognitionContext): VoiceIntent?
+  }
+  ```
 
-See [ASR Intent Pipeline spec](asr-intent-pipeline.md) for full details.
+- **No audio focus** — capture must run **without taking system audio focus**, so media playback is never interrupted while the
+  app listens. Android's built-in `SpeechRecognizer` does not fit here, because it takes audio focus and pauses playback.
+- **Listening mode** — the pipeline follows the mode chosen by the gate: in wake-word mode it acts on a command only after the
+  wake word opens a command window; in continuous mode every recognized command acts at once. This spec owns *when* each mode
+  applies; the pipeline owns *how* the wake word is detected.
+- **Readiness** — the pipeline reports model/readiness state, which the gate's `ModelsReady` condition consumes.
 
-### VoiceRecognizer
+### VoiceIntentExecutor
 
-`VoiceRecognizer` accepts an utterance clip and playback context, and returns a typed playback intent or null:
-
-```kotlin
-interface VoiceRecognizer {
-    suspend fun ensureReady(): Result<Unit>
-    suspend fun recognize(transcript: String, context: VoiceRecognitionContext): VoicePlaybackIntent?
-}
-```
-
-Moonshine `MicTranscriber` handles capture + VAD + ASR internally, emitting transcript events. `VoiceControlService`
-receives completed transcript lines, runs them through `UtteranceFilter`, and passes filtered text to
-`SmolLmIntentParser` (which implements `VoiceRecognizer`).
-
-**Critical design constraint**: Audio capture must operate **without taking system audio focus**.
-Android's built-in `SpeechRecognizer` is unsuitable because it internally acquires audio focus and interrupts media
-playback. Moonshine `MicTranscriber` uses Oboe internally and does not acquire audio focus.
-
-See [ASR Intent Pipeline spec](asr-intent-pipeline.md) for model choices, the system prompt, intent schema, and integration details.
-
-### VoicePlaybackIntentExecutor
-
-The executor is the only class allowed to mutate playback based on voice recognition. It maps validated intents to existing
-`PlaybackManager` APIs and records source-specific analytics.
+The executor is the only class allowed to change playback from voice recognition. It maps each validated intent to an existing
+`PlaybackManager` API and records analytics tagged with the voice source.
 
 Execution examples:
 
-- `SeekRelative(+30s)` -> `playbackManager.skipForwardSuspend(sourceView = VOICE_CONTROL, jumpAmountSeconds = 30)`
-- `SeekRelative(-10s)` -> `playbackManager.skipBackwardSuspend(sourceView = VOICE_CONTROL, jumpAmountSeconds = 10)`
+- `SeekRelative(+30s)` -> `playbackManager.skipForwardSuspend(sourceView = VOICE_COMMANDS, jumpAmountSeconds = 30)`
+- `SeekRelative(-10s)` -> `playbackManager.skipBackwardSuspend(sourceView = VOICE_COMMANDS, jumpAmountSeconds = 10)`
 - `SeekAbsolute(12m)` -> `playbackManager.seekToTimeMsSuspend(720_000)`
 - `NextChapter` -> `playbackManager.skipToNextSelectedOrLastChapter()`
 - `PreviousChapter` -> `playbackManager.skipToPreviousSelectedOrLastChapter()`
 - `ChapterByIndex(3)` -> `playbackManager.skipToChapter(3)`
 - `ChapterByTitle("interview")` -> best chapter-title match, then `skipToChapter(chapter)`
 
-The executor should clamp seek positions to valid episode duration and reject commands when no current episode exists.
+The executor must keep seek positions within the episode's length, and must reject any command when no current episode exists.
 
 ## Model Management
 
-Moonshine Voice manages its own ASR models — either bundled in app assets or downloaded via its built-in downloader.
-The only model managed separately is the SmolLM2 GGUF for intent parsing, handled by `ModelManager`:
-
-- Download SmolLM2 360M Q4_K_M GGUF (~200 MB) from HuggingFace.
-- SHA-256 verification, resume support, retry on failure.
-- Progress tracking via `StateFlow<ModelDownloadState>`.
-- Model stored under `filesDir/smol-lm-model/`.
-
-Specific model sizes, formats, and sources are detailed in the [ASR Intent Pipeline spec](asr-intent-pipeline.md).
+Model download, verification, storage, and the custom wake-word template are owned by the recognition pipeline
+([ASR Intent Pipeline spec](asr-intent-pipeline.md)). The core spec consumes only the pipeline's readiness signal: the gate's
+`ModelsReady` blocks listening until the pipeline reports its models are ready, and first-run setup surfaces download progress
+to the user (see Lifecycle and Privacy and UX).
 
 ## Lifecycle
 
 1. First-run setup requests microphone permission, presents the local-listening privacy model, and prepares the local model.
 2. Model manager downloads or verifies the selected local model.
 3. Voice control becomes available as a default playback capability.
-4. User enters a playback context with a current episode. Playback may be playing or paused.
-5. Gate checks playback context, audio route policy, microphone permission, casting, call state, model readiness, and permission.
+4. A listening context begins — the user enters a playback context (playing or paused) or brings the app to the visible foreground.
+5. Gate checks its three questions — Setup, Conflicts, Context — on top of the microphone-permission foundation.
 6. Service enters foreground microphone mode.
-7. Moonshine MicTranscriber listens for speech, transcribes utterances, and emits transcript events.
-8. UtteranceFilter checks speaker consistency and playback bleed, then passes to SmolLmIntentParser which returns a validated `VoicePlaybackIntent` or null.
-9. Valid playback intent is executed through `VoicePlaybackIntentExecutor`.
-10. Service keeps listening while gate remains allowed.
-11. Listening stops immediately when the playback context ends, the current episode is cleared, the audio route becomes disallowed,
-    casting starts, call state blocks, permission is revoked, or the user explicitly disables voice control.
-12. **App killed or background without playback**: When the process is killed, the foreground service and microphone capture terminate
-    with it. When the app enters the background without an active playback episode, the gate's `PlaybackContextActiveRule` blocks,
-    the service stops, and microphone input ceases. Background playback (playing or paused episode) keeps the gate allowed and the
-    microphone active so hands-free commands remain available.
+7. The gate resolves `Continuous` vs. `WakeWord` from `AppInForeground` and the microphone exposure, and supplies it to the
+   recognition pipeline.
+8. The recognition pipeline processes microphone audio in the active mode and emits a validated `VoiceIntent`, or
+   nothing, per recognized command.
+9. Valid playback intent is executed through `VoiceIntentExecutor`.
+10. Service keeps listening while the listening context holds, recomputing the mode on playback/route/foreground changes.
+11. Listening stops immediately when no listening-context signal holds (playback context ends and the app is not foreground-visible),
+    the route loses its microphone, casting starts, a call begins, permission is revoked, or the user disables voice control.
+12. **App killed or fully idle**: process termination tears down the service and microphone. With no active playback context and
+    the app not foreground-visible, no listening-context signal holds, so the service stops and the microphone is off.
 
 ## Latency Strategy
 
-Target response for common commands should be under one second after the user finishes speaking on supported devices. The plan:
-
-- Moonshine MicTranscriber stays warm while gated.
-- Keep the selected model/runtime warm while playback is active, if memory permits.
-- Use short utterance clips and trailing-silence detection to avoid waiting too long.
-- Prefer deterministic parsing for simple time and chapter commands after recognition.
-- Cache current chapter titles and transcript search structures per episode.
-- Defer transcript-based semantic jumps until after core commands are fast.
+Target response for common commands should be under one second after the user finishes speaking on supported devices. The
+core spec contributes by keeping the pipeline warm while listening is gated-allowed and tearing it down promptly otherwise.
+Pipeline-internal latency tactics (model warmup, segmentation tuning, deterministic slot parsing) are owned by the
+[ASR Intent Pipeline spec](asr-intent-pipeline.md).
 
 ## Battery Strategy
 
-- **Microphone is off by default**: Capture starts only when the gate is fully allowed. App killed or background without playback → mic off.
-- Never listen unless all required gates are allowed.
-- Start with `HeadsetOnly` route policy to reduce false positives and avoid acoustic feedback.
-- Moonshine VAD runs continuously at low cost; ASR inference only fires on completed speech segments.
-- SmolLM2 intent parsing only runs on filtered utterances that pass UtteranceFilter.
-- Stop listening when the playback context ends, not merely because audio is paused.
-- Add diagnostics for segmenter duty cycle, model invocations, average inference time, and gate state.
+- **Microphone is off by default**: Capture starts only when a listening context holds. App killed, or backgrounded with no active playback context → mic off.
+- Never listen unless all required gates are allowed and at least one listening-context signal holds.
+- The active listening mode bounds pipeline work: wake-word mode keeps the heavier recognition stages idle until the wake word
+  fires, which keeps speaker/background listening cheap. The per-stage cost behavior is owned by the
+  [ASR Intent Pipeline spec](asr-intent-pipeline.md).
+- Stop listening when no listening-context signal holds, not merely because audio is paused.
+- Core diagnostics cover listening mode, gate state, and microphone on-time; pipeline-internal counters (inference time,
+  segmenter duty cycle, wake-word activations) are reported by the pipeline.
 
 ## Privacy and UX
 
@@ -237,32 +267,33 @@ Target response for common commands should be under one second after the user fi
   are user-visible commitments.
 - The app explains that voice audio is processed locally.
 - Downloaded models are managed on-device.
-- A persistent notification indicates active listening.
-- Settings show current status: active, blocked by route, blocked by model download, blocked by permission, disabled by user, or disabled
-  by operational kill switch.
-- No raw audio should be logged.
-- Debug logging should include only command type, confidence buckets, gate state, and latency.
+- A persistent notification indicates active listening, and should reflect whether the current mode is continuous or wake-word.
+- Settings let the user pick the wake word ("Auris" or a custom keyword) and enroll a custom keyword from a short voice sample. The
+  enrolled sample/template is stored locally and never uploaded; it can be deleted from settings.
+- Settings show current status: active (continuous), active (wake-word), no microphone on this route, blocked by model download,
+  blocked by permission, blocked by a conflict (call, casting, or battery saver), or disabled by user.
+- No raw audio should be logged, including wake-word enrollment audio.
+- Debug logging should include only command type, confidence buckets, listening mode, wake-word activations, gate state, and latency.
 
 ## Error Handling
 
-- Headset disconnects: stop capture immediately and update state to `Blocked(HeadsetDisconnected)`.
-- Route changes to a disallowed route: stop capture immediately.
-- Model not ready: do not start service; show model download state.
-- VAD stuck in speech: Moonshine's `vad_max_segment_duration` forces a segment break to recover.
-- Recognition timeout: discard clip and keep listening.
-- Low confidence: discard command silently by default, optionally play a subtle feedback tone in later iterations.
-- Invalid command JSON: discard and log sanitized error.
+- Headset disconnects mid-playback: do not stop — recompute the mode (`Continuous` → `WakeWord` if the route is now `Exposed`/loudspeaker), or stop if no listening-context signal remains.
+- Route loses its microphone (`NoMic`): stop capture immediately.
+- Models not ready: `ModelsReady` blocks; do not start the service; surface download state.
 - Playback unavailable: reject command with no mutation.
 - Repeated command duplicates: debounce identical commands within a short interval.
+- Recognition-internal failures (no intent, low confidence, recognition timeout, stuck segmentation, wake-word model/template
+  fallback) resolve to "no validated intent" and are handled inside the recognition pipeline
+  ([ASR Intent Pipeline spec](asr-intent-pipeline.md)); the core simply executes nothing.
 
 ## Testing Strategy
 
 Unit tests:
 
-- Gate rule combinations and blocked reasons.
-- Route changes and playback-state transitions.
-- UtteranceFilter speaker gating and cross-correlation logic.
-- SmolLM2 JSON validation and confidence thresholds.
+- Gate condition combinations and blocked reasons across the Setup, Conflicts, and Context groups.
+- Mode resolution: continuous vs. wake-word across foreground × route × playback-context combinations.
+- Route changes and playback-state transitions, including continuous ↔ wake-word switches without stopping the service.
+- Recognition-pipeline internals — playback-bleed filtering, backend selection, intent-match thresholds, entity extraction, and wake-word detection — are tested in the [ASR Intent Pipeline spec](asr-intent-pipeline.md).
 - Executor command mapping and seek clamping.
 - Duplicate command debounce.
 
@@ -277,26 +308,26 @@ Integration tests:
 
 Manual/device tests:
 
-- Wired headset, Bluetooth earbuds, headset without microphone, and speaker route with `SpeakerExperimental` disabled.
-- Speaker route with experimental echo suppression enabled on selected test devices.
+- Wired headset, Bluetooth earbuds, headset without microphone, and speaker route.
+- Continuous mode: headset playback and app-foreground-visible both trigger wake-word-free commands.
+- Wake-word mode: speaker/background playback requires "Auris" before the first command; follow-up commands within the conversation need no wake word; the window times out after ~10s of silence and the wake word is required again.
+- Custom wake-word enrollment from a voice sample, then detection; deletion of the enrolled template.
+- Speaker route false-positive rate against podcast audio and ambient speech.
 - Airplane mode after model download.
 - Battery saver.
-- Screen off.
+- Screen off (mode falls back to wake-word when foreground-visible no longer holds).
 - Long playback session.
 - Accented English, slang-heavy English, and non-English commands.
-- Podcast paused, resumed, and route changed while listening.
+- Podcast paused, resumed, and route changed while listening (continuous ↔ wake-word transitions).
 
 ## Open Risks
 
 - Android background microphone restrictions and OEM behavior may require foreground-service tuning.
 - **Android SpeechRecognizer is incompatible with continuous listening**: It acquires audio focus and interrupts/pauses media playback.
-  Moonshine uses Oboe internally and does not acquire audio focus, avoiding this issue.
-- ASR model inference latency on mobile hardware is device-dependent and needs ongoing measurement.
-- Continuous model warmup may be too memory intensive on lower-end devices, requiring on-demand loading.
+  The pipeline's no-audio-focus capture requirement (see [Recognition pipeline](#recognition-pipeline)) avoids this.
 - Bluetooth headset microphones vary widely in quality and latency.
 - Speaker mode may be difficult to make reliable because podcast speech is semantically similar to user commands and room echo varies
   by device, volume, environment, and distance from the phone.
-- Structured JSON parsing from model output carries risk: the model may produce malformed JSON, hallucinate intent types, or
-  emit commands outside the `VoicePlaybackIntent` sealed interface.
-- Multilingual natural commands may need language-specific evaluation data.
+- Recognition only ever selects from the closed `VoiceIntent` set, so it cannot emit out-of-scope commands; the residual
+  risk is misclassification or low-confidence misses, whose tuning is owned by the [ASR Intent Pipeline spec](asr-intent-pipeline.md).
 - False positives can still happen from nearby human speech, even without podcast feedback.

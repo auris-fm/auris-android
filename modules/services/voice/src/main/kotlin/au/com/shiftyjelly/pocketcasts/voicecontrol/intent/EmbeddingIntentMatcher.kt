@@ -111,7 +111,7 @@ class EmbeddingIntentMatcher @Inject constructor(
     override suspend fun recognize(
         transcript: String,
         context: VoiceRecognitionContext,
-    ): VoicePlaybackIntent? = withContext(Dispatchers.IO) {
+    ): VoiceIntent? = withContext(Dispatchers.IO) {
         if (transcript.isBlank()) return@withContext null
         if (!initialized) {
             Timber.w("EmbeddingIntentMatcher not initialized")
@@ -171,92 +171,92 @@ class EmbeddingIntentMatcher @Inject constructor(
     // -- Intent assembly ---------------------------------------------------
 
     /**
-     * Build a [VoicePlaybackIntent] from the matched intent type and extracted entities.
+     * Build a [VoiceIntent] from the matched intent type and extracted entities.
      * Parameterless intents are returned directly; parameterized intents delegate
      * to [entityExtractor] with defaults for unfound entities.
      */
-    private fun assembleIntent(intentType: String, text: String): VoicePlaybackIntent? {
+    private fun assembleIntent(intentType: String, text: String): VoiceIntent? {
         return when (intentType) {
-            "pause" -> VoicePlaybackIntent.Pause
+            "pause" -> VoiceIntent.Pause
 
-            "resume" -> VoicePlaybackIntent.Resume
+            "resume" -> VoiceIntent.Resume
 
-            "next_chapter" -> VoicePlaybackIntent.NextChapter
+            "next_chapter" -> VoiceIntent.NextChapter
 
-            "previous_chapter" -> VoicePlaybackIntent.PreviousChapter
+            "previous_chapter" -> VoiceIntent.PreviousChapter
 
-            "next_episode" -> VoicePlaybackIntent.NextEpisode
+            "next_episode" -> VoiceIntent.NextEpisode
 
             "seek_relative_forward" -> {
                 val entities = entityExtractor.extract(text, intentType)
                 val deltaMs = (entities.deltaSeconds ?: 30) * 1000
-                VoicePlaybackIntent.SeekRelative(deltaMs)
+                VoiceIntent.SeekRelative(deltaMs)
             }
 
             "seek_relative_backward" -> {
                 val entities = entityExtractor.extract(text, intentType)
                 val deltaMs = -(entities.deltaSeconds ?: 30) * 1000
-                VoicePlaybackIntent.SeekRelative(deltaMs)
+                VoiceIntent.SeekRelative(deltaMs)
             }
 
             "set_speed" -> {
                 val speed = entityExtractor.extract(text, intentType).speed ?: return null
-                if (speed in 0.5..5.0) VoicePlaybackIntent.SetSpeed(speed) else null
+                if (speed in 0.5..5.0) VoiceIntent.SetSpeed(speed) else null
             }
 
             "adjust_speed_up" -> {
                 val delta = entityExtractor.extract(text, intentType).speedDelta ?: 0.5
-                VoicePlaybackIntent.AdjustSpeed(delta)
+                VoiceIntent.AdjustSpeed(delta)
             }
 
             "adjust_speed_down" -> {
                 val delta = entityExtractor.extract(text, intentType).speedDelta ?: -0.5
-                VoicePlaybackIntent.AdjustSpeed(delta)
+                VoiceIntent.AdjustSpeed(delta)
             }
 
             "set_volume" -> {
                 val volume = entityExtractor.extract(text, intentType).volume ?: return null
-                if (volume in 0..100) VoicePlaybackIntent.SetVolume(volume) else null
+                if (volume in 0..100) VoiceIntent.SetVolume(volume) else null
             }
 
             "adjust_volume_up" -> {
                 val delta = entityExtractor.extract(text, intentType).volumeDelta ?: 10
-                VoicePlaybackIntent.AdjustVolume(delta)
+                VoiceIntent.AdjustVolume(delta)
             }
 
             "adjust_volume_down" -> {
                 val delta = entityExtractor.extract(text, intentType).volumeDelta ?: -10
-                VoicePlaybackIntent.AdjustVolume(delta)
+                VoiceIntent.AdjustVolume(delta)
             }
 
             "sleep_timer" -> {
                 val minutes = entityExtractor.extract(text, intentType).sleepMinutes ?: 30
-                VoicePlaybackIntent.SleepTimer(minutes)
+                VoiceIntent.SleepTimer(minutes)
             }
 
             "chapter_by_index" -> {
                 val index = entityExtractor.extract(text, intentType).chapterIndex ?: return null
-                VoicePlaybackIntent.ChapterByIndex(index)
+                VoiceIntent.ChapterByIndex(index)
             }
 
             "chapter_by_title" -> {
                 val query = entityExtractor.extract(text, intentType).chapterTitle ?: return null
-                VoicePlaybackIntent.ChapterByTitle(query)
+                VoiceIntent.ChapterByTitle(query)
             }
 
             "set_trim" -> {
                 val mode = entityExtractor.extract(text, intentType).trimMode ?: return null
-                VoicePlaybackIntent.SetTrimMode(mode)
+                VoiceIntent.SetTrimMode(mode)
             }
 
             "set_volume_boost" -> {
                 val enabled = entityExtractor.extract(text, intentType).boostEnabled ?: true
-                VoicePlaybackIntent.SetVolumeBoost(enabled)
+                VoiceIntent.SetVolumeBoost(enabled)
             }
 
             "add_bookmark" -> {
                 val title = entityExtractor.extract(text, intentType).bookmarkTitle ?: return null
-                VoicePlaybackIntent.AddBookmark(title)
+                VoiceIntent.AddBookmark(title)
             }
 
             else -> {

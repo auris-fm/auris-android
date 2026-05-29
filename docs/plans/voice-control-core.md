@@ -242,12 +242,12 @@ git commit -m "Add voice control settings"
 ## Task 3: Add Voice Intent and Recognition Types
 
 **Files:**
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoicePlaybackIntent.kt`
-- Create: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoicePlaybackIntentTest.kt`
+- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoiceIntent.kt`
+- Create: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoiceIntentTest.kt`
 
 - [ ] **Step 1: Write the intent test**
 
-Create `VoicePlaybackIntentTest.kt`:
+Create `VoiceIntentTest.kt`:
 
 ```kotlin
 package au.com.shiftyjelly.pocketcasts.voice.intent
@@ -255,17 +255,17 @@ package au.com.shiftyjelly.pocketcasts.voice.intent
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-class VoicePlaybackIntentTest {
+class VoiceIntentTest {
     @Test
     fun `seek relative stores milliseconds`() {
-        val intent = VoicePlaybackIntent.SeekRelative(deltaMs = 30_000)
+        val intent = VoiceIntent.SeekRelative(deltaMs = 30_000)
 
         assertEquals(30_000, intent.deltaMs)
     }
 
     @Test
     fun `chapter title trims query`() {
-        val intent = VoicePlaybackIntent.ChapterByTitle(query = "  interview  ")
+        val intent = VoiceIntent.ChapterByTitle(query = "  interview  ")
 
         assertEquals("interview", intent.normalizedQuery)
     }
@@ -277,38 +277,38 @@ class VoicePlaybackIntentTest {
 Run:
 
 ```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.intent.VoicePlaybackIntentTest
+./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntentTest
 ```
 
 Expected: fail because the intent model has not been added yet.
 
 - [ ] **Step 3: Add the intent model**
 
-Create `VoicePlaybackIntent.kt`:
+Create `VoiceIntent.kt`:
 
 ```kotlin
 package au.com.shiftyjelly.pocketcasts.voice.intent
 
-sealed interface VoicePlaybackIntent {
-    data object Pause : VoicePlaybackIntent
-    data object Resume : VoicePlaybackIntent
-    data class SeekRelative(val deltaMs: Int) : VoicePlaybackIntent
-    data class SeekAbsolute(val positionMs: Int) : VoicePlaybackIntent
-    data object NextChapter : VoicePlaybackIntent
-    data object PreviousChapter : VoicePlaybackIntent
-    data class ChapterByIndex(val index: Int) : VoicePlaybackIntent
-    data class ChapterByTitle(val query: String) : VoicePlaybackIntent {
+sealed interface VoiceIntent {
+    data object Pause : VoiceIntent
+    data object Resume : VoiceIntent
+    data class SeekRelative(val deltaMs: Int) : VoiceIntent
+    data class SeekAbsolute(val positionMs: Int) : VoiceIntent
+    data object NextChapter : VoiceIntent
+    data object PreviousChapter : VoiceIntent
+    data class ChapterByIndex(val index: Int) : VoiceIntent
+    data class ChapterByTitle(val query: String) : VoiceIntent {
         val normalizedQuery: String = query.trim()
     }
-    data object NextEpisode : VoicePlaybackIntent
-    data class SetSpeed(val speed: Double) : VoicePlaybackIntent
-    data class AdjustSpeed(val delta: Double) : VoicePlaybackIntent
-    data class SetVolume(val volume: Int) : VoicePlaybackIntent
-    data class AdjustVolume(val delta: Int) : VoicePlaybackIntent
-    data class SleepTimer(val minutes: Int) : VoicePlaybackIntent
-    data class SetTrimMode(val mode: String) : VoicePlaybackIntent
-    data class SetVolumeBoost(val enabled: Boolean) : VoicePlaybackIntent
-    data class AddBookmark(val title: String) : VoicePlaybackIntent
+    data object NextEpisode : VoiceIntent
+    data class SetSpeed(val speed: Double) : VoiceIntent
+    data class AdjustSpeed(val delta: Double) : VoiceIntent
+    data class SetVolume(val volume: Int) : VoiceIntent
+    data class AdjustVolume(val delta: Int) : VoiceIntent
+    data class SleepTimer(val minutes: Int) : VoiceIntent
+    data class SetTrimMode(val mode: String) : VoiceIntent
+    data class SetVolumeBoost(val enabled: Boolean) : VoiceIntent
+    data class AddBookmark(val title: String) : VoiceIntent
 }
 ```
 
@@ -320,7 +320,7 @@ This defines the full intent set. Intents beyond the core playback set are wired
 Run:
 
 ```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.intent.VoicePlaybackIntentTest
+./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntentTest
 ```
 
 Expected: pass.
@@ -810,26 +810,26 @@ git commit -m "Add voice playback context rule"
 ## Task 7: Add Playback Intent Executor
 
 **Files:**
-- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoicePlaybackIntentExecutor.kt`
-- Create: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoicePlaybackIntentExecutorTest.kt`
+- Create: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoiceIntentExecutor.kt`
+- Create: `modules/services/voice/src/test/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoiceIntentExecutorTest.kt`
 
 - [ ] **Step 1: Write executor tests with a fake sink**
 
-Create `VoicePlaybackIntentExecutorTest.kt`:
+Create `VoiceIntentExecutorTest.kt`:
 
 ```kotlin
 package au.com.shiftyjelly.pocketcasts.voice.playback
 
-import au.com.shiftyjelly.pocketcasts.voice.intent.VoicePlaybackIntent
+import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-class VoicePlaybackIntentExecutorTest {
+class VoiceIntentExecutorTest {
     @Test
     fun `relative positive seek skips forward`() = runTest {
         val sink = FakeVoicePlaybackSink()
-        VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.SeekRelative(30_000))
+        VoiceIntentExecutor(sink).execute(VoiceIntent.SeekRelative(30_000))
 
         assertEquals(listOf("skipForward:30"), sink.calls)
     }
@@ -837,7 +837,7 @@ class VoicePlaybackIntentExecutorTest {
     @Test
     fun `relative negative seek skips backward`() = runTest {
         val sink = FakeVoicePlaybackSink()
-        VoicePlaybackIntentExecutor(sink).execute(VoicePlaybackIntent.SeekRelative(-10_000))
+        VoiceIntentExecutor(sink).execute(VoiceIntent.SeekRelative(-10_000))
 
         assertEquals(listOf("skipBackward:10"), sink.calls)
     }
@@ -861,42 +861,42 @@ class VoicePlaybackIntentExecutorTest {
 Run:
 
 ```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.playback.VoicePlaybackIntentExecutorTest
+./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.playback.VoiceIntentExecutorTest
 ```
 
 Expected: fail because executor types do not exist.
 
 - [ ] **Step 3: Add executor and sink**
 
-Create `VoicePlaybackIntentExecutor.kt`:
+Create `VoiceIntentExecutor.kt`:
 
 ```kotlin
 package au.com.shiftyjelly.pocketcasts.voice.playback
 
 import au.com.shiftyjelly.pocketcasts.analytics.SourceView
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
-import au.com.shiftyjelly.pocketcasts.voice.intent.VoicePlaybackIntent
+import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntent
 import javax.inject.Inject
 import kotlin.math.abs
 
-class VoicePlaybackIntentExecutor @Inject constructor(
+class VoiceIntentExecutor @Inject constructor(
     private val sink: VoicePlaybackSink,
 ) {
-    suspend fun execute(intent: VoicePlaybackIntent) {
+    suspend fun execute(intent: VoiceIntent) {
         when (intent) {
-            VoicePlaybackIntent.Pause -> sink.pause()
-            VoicePlaybackIntent.Resume -> sink.resume()
-            is VoicePlaybackIntent.SeekRelative -> {
+            VoiceIntent.Pause -> sink.pause()
+            VoiceIntent.Resume -> sink.resume()
+            is VoiceIntent.SeekRelative -> {
                 val seconds = abs(intent.deltaMs / 1000)
                 if (intent.deltaMs >= 0) sink.skipForward(seconds) else sink.skipBackward(seconds)
             }
-            is VoicePlaybackIntent.SeekAbsolute -> sink.seekTo(intent.positionMs.coerceAtLeast(0))
-            VoicePlaybackIntent.NextChapter -> sink.nextChapter()
-            VoicePlaybackIntent.PreviousChapter -> sink.previousChapter()
-            is VoicePlaybackIntent.ChapterByIndex -> sink.chapterByIndex(intent.index)
-            is VoicePlaybackIntent.ChapterByTitle -> Unit
-            is VoicePlaybackIntent.SetSpeed -> Unit  // wired in playback-controls plan
-            is VoicePlaybackIntent.AdjustSpeed -> Unit  // wired in playback-controls plan
+            is VoiceIntent.SeekAbsolute -> sink.seekTo(intent.positionMs.coerceAtLeast(0))
+            VoiceIntent.NextChapter -> sink.nextChapter()
+            VoiceIntent.PreviousChapter -> sink.previousChapter()
+            is VoiceIntent.ChapterByIndex -> sink.chapterByIndex(intent.index)
+            is VoiceIntent.ChapterByTitle -> Unit
+            is VoiceIntent.SetSpeed -> Unit  // wired in playback-controls plan
+            is VoiceIntent.AdjustSpeed -> Unit  // wired in playback-controls plan
         }
     }
 }
@@ -931,7 +931,7 @@ class PlaybackManagerVoicePlaybackSink @Inject constructor(
 Run:
 
 ```bash
-./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.playback.VoicePlaybackIntentExecutorTest
+./gradlew :modules:services:voice:testDebugUnitTest --tests au.com.shiftyjelly.pocketcasts.voice.playback.VoiceIntentExecutorTest
 ```
 
 Expected: pass.
@@ -968,7 +968,7 @@ Create `VoiceRecognizer.kt`:
 package au.com.shiftyjelly.pocketcasts.voice.model
 
 import au.com.shiftyjelly.pocketcasts.voice.audio.PcmAudioFrame
-import au.com.shiftyjelly.pocketcasts.voice.intent.VoicePlaybackIntent
+import au.com.shiftyjelly.pocketcasts.voice.intent.VoiceIntent
 
 data class VoiceRecognitionContext(
     val playbackContext: PlaybackContext,
@@ -988,16 +988,16 @@ data class VoiceUtteranceClip(
 
 interface VoiceRecognizer {
     suspend fun ensureReady(): Result<Unit>
-    suspend fun recognize(transcript: String, context: VoiceRecognitionContext): VoicePlaybackIntent?
+    suspend fun recognize(transcript: String, context: VoiceRecognitionContext): VoiceIntent?
 }
 
 class NoOpVoiceRecognizer @javax.inject.Inject constructor() : VoiceRecognizer {
     override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
-    override suspend fun recognize(transcript: String, context: VoiceRecognitionContext): VoicePlaybackIntent? = null
+    override suspend fun recognize(transcript: String, context: VoiceRecognitionContext): VoiceIntent? = null
 }
 ```
 
-`SmolLmIntentParser` (from the [ASR Intent Pipeline](asr-intent-pipeline.md) plan) implements `VoiceRecognizer`.
+`EmbeddingIntentMatcher` (from the [ASR Intent Pipeline](asr-intent-pipeline.md) plan) implements `VoiceRecognizer`.
 
 - [ ] **Step 2: Add the service shell**
 
@@ -1040,7 +1040,7 @@ Create `VoiceControlModule.kt`:
 package au.com.shiftyjelly.pocketcasts.voice.di
 
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
-import au.com.shiftyjelly.pocketcasts.voice.intent.SmolLmIntentParser
+import au.com.shiftyjelly.pocketcasts.voice.intent.EmbeddingIntentMatcher
 import au.com.shiftyjelly.pocketcasts.voice.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voice.playback.PlaybackManagerVoicePlaybackSink
 import au.com.shiftyjelly.pocketcasts.voice.playback.VoicePlaybackSink
@@ -1062,7 +1062,7 @@ import kotlinx.coroutines.CoroutineScope
 @Module
 @InstallIn(SingletonComponent::class)
 abstract class VoiceControlModule {
-    @Binds abstract fun bindVoiceRecognizer(impl: SmolLmIntentParser): VoiceRecognizer
+    @Binds abstract fun bindVoiceRecognizer(impl: EmbeddingIntentMatcher): VoiceRecognizer
     @Binds abstract fun bindVoicePlaybackSink(impl: PlaybackManagerVoicePlaybackSink): VoicePlaybackSink
     @Binds abstract fun bindAudioRouteMonitor(impl: AndroidAudioRouteMonitor): AudioRouteMonitor
 

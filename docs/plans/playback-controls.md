@@ -6,7 +6,7 @@
 
 **Goal:** Wire up all voice intents through to actual playback actions — sleep timer, volume, trim mode, volume boost, and bookmarks — and refactor dual-param speed/volume intents into separate absolute/adjust types.
 
-**Scope:** This plan covers only the **execution layer**: the sealed intent interface, the executor, the sink interface, and sink implementations. The intent parsing layer (system prompt, SmolLM2 JSON parsing) is handled by the [ASR Intent Pipeline plan](asr-intent-pipeline.md) — `SmolLmIntentParser` already contains the full system prompt and parseIntent branches for all intents listed here.
+**Scope:** This plan covers only the **execution layer**: the sealed intent interface, the executor, the sink interface, and sink implementations. The recognition layer — intent matching and entity extraction — is handled by the [ASR Intent Pipeline plan](asr-intent-pipeline.md), which registers the intent keywords and slot grammars for every intent listed here.
 
 **Tech Stack:** Kotlin, Hilt DI, PlaybackManager, SleepTimer, BookmarkManager, AudioManager, Android analytics (SourceView)
 
@@ -36,10 +36,10 @@ git commit -m "Add SourceView.VOICE_COMMANDS for voice-triggered action analytic
 
 ---
 
-### Task 2: Refactor VoicePlaybackIntent sealed interface
+### Task 2: Refactor VoiceIntent sealed interface
 
 **Files:**
-- Modify: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoicePlaybackIntent.kt`
+- Modify: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoiceIntent.kt`
 
 - [ ] **Step 1: Read current file**
 
@@ -50,26 +50,26 @@ Replace the file contents with:
 ```kotlin
 package au.com.shiftyjelly.pocketcasts.voice.intent
 
-sealed interface VoicePlaybackIntent {
-    data object Pause : VoicePlaybackIntent
-    data object Resume : VoicePlaybackIntent
-    data class SeekRelative(val deltaMs: Int) : VoicePlaybackIntent
-    data class SeekAbsolute(val positionMs: Int) : VoicePlaybackIntent
-    data object NextChapter : VoicePlaybackIntent
-    data object PreviousChapter : VoicePlaybackIntent
-    data class ChapterByIndex(val index: Int) : VoicePlaybackIntent
-    data class ChapterByTitle(val query: String) : VoicePlaybackIntent {
+sealed interface VoiceIntent {
+    data object Pause : VoiceIntent
+    data object Resume : VoiceIntent
+    data class SeekRelative(val deltaMs: Int) : VoiceIntent
+    data class SeekAbsolute(val positionMs: Int) : VoiceIntent
+    data object NextChapter : VoiceIntent
+    data object PreviousChapter : VoiceIntent
+    data class ChapterByIndex(val index: Int) : VoiceIntent
+    data class ChapterByTitle(val query: String) : VoiceIntent {
         val normalizedQuery: String = query.trim()
     }
-    data object NextEpisode : VoicePlaybackIntent
-    data class SetSpeed(val speed: Double) : VoicePlaybackIntent
-    data class AdjustSpeed(val delta: Double) : VoicePlaybackIntent
-    data class SetVolume(val volume: Int) : VoicePlaybackIntent
-    data class AdjustVolume(val delta: Int) : VoicePlaybackIntent
-    data class SleepTimer(val minutes: Int) : VoicePlaybackIntent
-    data class SetTrimMode(val mode: String) : VoicePlaybackIntent
-    data class SetVolumeBoost(val enabled: Boolean) : VoicePlaybackIntent
-    data class AddBookmark(val title: String) : VoicePlaybackIntent
+    data object NextEpisode : VoiceIntent
+    data class SetSpeed(val speed: Double) : VoiceIntent
+    data class AdjustSpeed(val delta: Double) : VoiceIntent
+    data class SetVolume(val volume: Int) : VoiceIntent
+    data class AdjustVolume(val delta: Int) : VoiceIntent
+    data class SleepTimer(val minutes: Int) : VoiceIntent
+    data class SetTrimMode(val mode: String) : VoiceIntent
+    data class SetVolumeBoost(val enabled: Boolean) : VoiceIntent
+    data class AddBookmark(val title: String) : VoiceIntent
 }
 ```
 
@@ -78,7 +78,7 @@ This replaces the old `SetPlaybackSpeed` with the split `SetSpeed` / `AdjustSpee
 - [ ] **Step 3: Commit**
 
 ```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoicePlaybackIntent.kt
+git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/intent/VoiceIntent.kt
 git commit -m "Refactor voice intents: split speed/volume, add trim/boost/bookmark"
 ```
 
@@ -87,7 +87,7 @@ git commit -m "Refactor voice intents: split speed/volume, add trim/boost/bookma
 ### Task 3: Update executor and sink interface
 
 **Files:**
-- Modify: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoicePlaybackIntentExecutor.kt`
+- Modify: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoiceIntentExecutor.kt`
 
 - [ ] **Step 1: Read the current file**
 
@@ -122,29 +122,29 @@ interface VoicePlaybackSink {
 Replace the current when-expression to handle all new intents:
 
 ```kotlin
-suspend fun execute(intent: VoicePlaybackIntent) {
+suspend fun execute(intent: VoiceIntent) {
     when (intent) {
-        VoicePlaybackIntent.Pause -> sink.pause()
-        VoicePlaybackIntent.Resume -> sink.resume()
-        is VoicePlaybackIntent.SeekRelative -> {
+        VoiceIntent.Pause -> sink.pause()
+        VoiceIntent.Resume -> sink.resume()
+        is VoiceIntent.SeekRelative -> {
             val seconds = abs(intent.deltaMs / 1000)
             if (intent.deltaMs >= 0) sink.skipForward(seconds)
             else sink.skipBackward(seconds)
         }
-        is VoicePlaybackIntent.SeekAbsolute -> sink.seekTo(intent.positionMs.coerceAtLeast(0))
-        VoicePlaybackIntent.NextChapter -> sink.nextChapter()
-        VoicePlaybackIntent.PreviousChapter -> sink.previousChapter()
-        VoicePlaybackIntent.NextEpisode -> sink.nextEpisode()
-        is VoicePlaybackIntent.ChapterByIndex -> sink.chapterByIndex(intent.index)
-        is VoicePlaybackIntent.ChapterByTitle -> Unit // TODO: chapter search
-        is VoicePlaybackIntent.SetSpeed -> sink.setSpeed(intent.speed)
-        is VoicePlaybackIntent.AdjustSpeed -> sink.adjustSpeed(intent.delta)
-        is VoicePlaybackIntent.SetVolume -> sink.setVolume(intent.volume)
-        is VoicePlaybackIntent.AdjustVolume -> sink.adjustVolume(intent.delta)
-        is VoicePlaybackIntent.SleepTimer -> sink.sleepAfter(intent.minutes)
-        is VoicePlaybackIntent.SetTrimMode -> sink.setTrimMode(intent.mode)
-        is VoicePlaybackIntent.SetVolumeBoost -> sink.setVolumeBoost(intent.enabled)
-        is VoicePlaybackIntent.AddBookmark -> sink.addBookmark(intent.title)
+        is VoiceIntent.SeekAbsolute -> sink.seekTo(intent.positionMs.coerceAtLeast(0))
+        VoiceIntent.NextChapter -> sink.nextChapter()
+        VoiceIntent.PreviousChapter -> sink.previousChapter()
+        VoiceIntent.NextEpisode -> sink.nextEpisode()
+        is VoiceIntent.ChapterByIndex -> sink.chapterByIndex(intent.index)
+        is VoiceIntent.ChapterByTitle -> Unit // TODO: chapter search
+        is VoiceIntent.SetSpeed -> sink.setSpeed(intent.speed)
+        is VoiceIntent.AdjustSpeed -> sink.adjustSpeed(intent.delta)
+        is VoiceIntent.SetVolume -> sink.setVolume(intent.volume)
+        is VoiceIntent.AdjustVolume -> sink.adjustVolume(intent.delta)
+        is VoiceIntent.SleepTimer -> sink.sleepAfter(intent.minutes)
+        is VoiceIntent.SetTrimMode -> sink.setTrimMode(intent.mode)
+        is VoiceIntent.SetVolumeBoost -> sink.setVolumeBoost(intent.enabled)
+        is VoiceIntent.AddBookmark -> sink.addBookmark(intent.title)
     }
 }
 ```
@@ -154,7 +154,7 @@ Remove any obsolete branches (`SetPlaybackSpeed`). Keep `SeekAbsolute`. The `Cha
 - [ ] **Step 4: Commit**
 
 ```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoicePlaybackIntentExecutor.kt
+git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoiceIntentExecutor.kt
 git commit -m "Update executor and sink interface with new voice intents"
 ```
 
@@ -163,7 +163,7 @@ git commit -m "Update executor and sink interface with new voice intents"
 ### Task 4: Implement PlaybackManagerVoicePlaybackSink new methods
 
 **Files:**
-- Modify: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoicePlaybackIntentExecutor.kt`
+- Modify: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoiceIntentExecutor.kt`
 
 - [ ] **Step 1: Read the PlaybackManagerVoicePlaybackSink class**
 
@@ -270,7 +270,7 @@ import kotlinx.coroutines.runBlocking
 - [ ] **Step 5: Commit**
 
 ```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoicePlaybackIntentExecutor.kt
+git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voice/playback/VoiceIntentExecutor.kt
 git commit -m "Implement sink methods for volume, sleep timer, trim, boost, and bookmark"
 ```
 

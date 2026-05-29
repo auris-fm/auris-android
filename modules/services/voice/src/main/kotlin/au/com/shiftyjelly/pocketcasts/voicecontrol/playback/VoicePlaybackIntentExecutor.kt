@@ -8,7 +8,7 @@ import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.repositories.bookmark.BookmarkManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.SleepTimer
-import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoicePlaybackIntent
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import com.automattic.eventhorizon.BookmarkSourceType
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -19,45 +19,45 @@ import kotlin.time.Duration.Companion.minutes
 class VoicePlaybackIntentExecutor @Inject constructor(
     private val sink: VoicePlaybackSink,
 ) {
-    suspend fun execute(intent: VoicePlaybackIntent) {
+    suspend fun execute(intent: VoiceIntent) {
         when (intent) {
-            VoicePlaybackIntent.Pause -> sink.pause()
+            VoiceIntent.Pause -> sink.pause()
 
-            VoicePlaybackIntent.Resume -> sink.resume()
+            VoiceIntent.Resume -> sink.resume()
 
-            is VoicePlaybackIntent.SeekRelative -> {
+            is VoiceIntent.SeekRelative -> {
                 val seconds = abs(intent.deltaMs / 1000)
                 if (seconds == 0) return
                 if (intent.deltaMs >= 0) sink.skipForward(seconds) else sink.skipBackward(seconds)
             }
 
-            is VoicePlaybackIntent.SeekAbsolute -> sink.seekTo(intent.positionMs.coerceAtLeast(0))
+            is VoiceIntent.SeekAbsolute -> sink.seekTo(intent.positionMs.coerceAtLeast(0))
 
-            VoicePlaybackIntent.NextChapter -> sink.nextChapter()
+            VoiceIntent.NextChapter -> sink.nextChapter()
 
-            VoicePlaybackIntent.PreviousChapter -> sink.previousChapter()
+            VoiceIntent.PreviousChapter -> sink.previousChapter()
 
-            VoicePlaybackIntent.NextEpisode -> sink.nextEpisode()
+            VoiceIntent.NextEpisode -> sink.nextEpisode()
 
-            is VoicePlaybackIntent.ChapterByIndex -> sink.chapterByIndex(intent.index)
+            is VoiceIntent.ChapterByIndex -> sink.chapterByIndex(intent.index)
 
-            is VoicePlaybackIntent.ChapterByTitle -> Unit
+            is VoiceIntent.ChapterByTitle -> Unit
 
-            is VoicePlaybackIntent.SetSpeed -> sink.setSpeed(intent.speed)
+            is VoiceIntent.SetSpeed -> sink.setSpeed(intent.speed)
 
-            is VoicePlaybackIntent.AdjustSpeed -> sink.adjustSpeed(intent.delta)
+            is VoiceIntent.AdjustSpeed -> sink.adjustSpeed(intent.delta)
 
-            is VoicePlaybackIntent.SetVolume -> sink.setVolume(intent.volume)
+            is VoiceIntent.SetVolume -> sink.setVolume(intent.volume)
 
-            is VoicePlaybackIntent.AdjustVolume -> sink.adjustVolume(intent.delta)
+            is VoiceIntent.AdjustVolume -> sink.adjustVolume(intent.delta)
 
-            is VoicePlaybackIntent.SleepTimer -> sink.sleepAfter(intent.minutes)
+            is VoiceIntent.SleepTimer -> sink.sleepAfter(intent.minutes)
 
-            is VoicePlaybackIntent.SetTrimMode -> sink.setTrimMode(intent.mode)
+            is VoiceIntent.SetTrimMode -> sink.setTrimMode(intent.mode)
 
-            is VoicePlaybackIntent.SetVolumeBoost -> sink.setVolumeBoost(intent.enabled)
+            is VoiceIntent.SetVolumeBoost -> sink.setVolumeBoost(intent.enabled)
 
-            is VoicePlaybackIntent.AddBookmark -> sink.addBookmark(intent.title)
+            is VoiceIntent.AddBookmark -> sink.addBookmark(intent.title)
         }
     }
 }

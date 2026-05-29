@@ -168,7 +168,7 @@ class VoiceControlService : Service() {
     }
 
     private fun handleIntent(
-        intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoicePlaybackIntent,
+        intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
     ) {
         val now = System.currentTimeMillis()
         val intentType = intent::class.simpleName ?: intent.toString()

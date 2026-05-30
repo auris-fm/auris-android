@@ -1,23 +1,31 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
+import android.Manifest
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.IBinder
-import au.com.shiftyjelly.pocketcasts.voicecontrol.BuildConfig
-import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.MoonshineVoiceEngine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackendSelector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
+import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.LiveConditionMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGateState
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.EmbeddingIntentMatcher
+import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
+import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningModePolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.launchIn
@@ -27,6 +35,7 @@ import timber.log.Timber
 
 @AndroidEntryPoint
 class VoiceControlService : Service() {
+
     @Inject lateinit var gate: VoiceControlGate
 
     @Inject lateinit var notificationManager: VoiceControlNotificationManager
@@ -41,28 +50,35 @@ class VoiceControlService : Service() {
 
     @Inject lateinit var audioRouteMonitor: AndroidAudioRouteMonitor
 
-    @Inject lateinit var moonshineEngine: dagger.Lazy<MoonshineVoiceEngine>
+    @Inject lateinit var listeningModePolicy: ListeningModePolicy
+
+    @Inject lateinit var liveConditionMonitor: LiveConditionMonitor
+
+    @Inject lateinit var voiceAsrEngine: dagger.Lazy<VoiceAsrEngine>
+
+    @Inject lateinit var asrBackendSelector: AsrBackendSelector
 
     @Inject lateinit var playbackBufferRecorder: PlaybackBufferRecorder
 
     @Inject lateinit var modelManager: au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 
+    @Inject lateinit var modelsReadyCondition: ModelsReadyCondition
+
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var modeJob: Job? = null
     private var lastIntentType: String? = null
     private var lastCommandTime: Long = 0L
     private var engineStarted = false
-    private var startInProgress = false
-    private var stopping = false
 
     companion object {
         private const val COMMAND_DEBOUNCE_MS = 2000L
-        private const val MOONSHINE_MODEL_ARCH = 4 // Small Streaming (123M params, 7.84% WER)
+        internal const val STOP_ACTION = "au.com.shiftyjelly.pocketcasts.voicecontrol.action.STOP"
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == "au.com.shiftyjelly.pocketcasts.voicecontrol.action.STOP") {
+        if (intent?.action == STOP_ACTION) {
             stopVoiceControl()
             return START_NOT_STICKY
         }
@@ -71,12 +87,10 @@ class VoiceControlService : Service() {
     }
 
     private fun startVoiceControl() {
-        if (startInProgress || engineStarted) {
-            Timber.i("Voice control already started, skipping duplicate start")
+        if (engineStarted) {
+            Timber.i("Voice control already started")
             return
         }
-        startInProgress = true
-        Timber.i("Voice control service starting")
 
         if (!hasRequiredPermissions()) {
             Timber.w("Missing permissions, stopping")
@@ -84,8 +98,6 @@ class VoiceControlService : Service() {
             return
         }
 
-        // On API 35+ FOREGROUND_SERVICE_MICROPHONE requires RECORD_AUDIO granted.
-        // If the user hasn't granted it yet, startForeground will throw.
         try {
             val notification = notificationManager.createDownloadingNotification()
             startForeground(notificationManager.notificationId, notification)
@@ -95,76 +107,112 @@ class VoiceControlService : Service() {
             return
         }
 
-        gate.state.onEach { state ->
-            if (state is VoiceControlGateState.Blocked) {
-                Timber.w("Gate blocked: ${state.rules}")
-                stopVoiceControl()
+        // Start monitoring transient conflict conditions
+        liveConditionMonitor.start()
+
+        // Observe listening mode: start/stop capture based on mode
+        modeJob = listeningModePolicy.mode.onEach { mode ->
+            when (mode) {
+                ListeningMode.Off -> stopEngine()
+                ListeningMode.Continuous, ListeningMode.WakeWord -> startEngine(mode)
             }
         }.launchIn(serviceScope)
 
-        serviceScope.launch(Dispatchers.IO) {
-            // 1. Download models in parallel
-            Timber.i("Ensuring models")
-            val embeddingResult = modelManager.ensureEmbeddingModel()
-            val moonshineResult = modelManager.ensureMoonshineModel()
+        // Handle models
+        serviceScope.launch(Dispatchers.IO) { ensureModelsReady() }
 
-            // 2. Start Moonshine engine first (loads libonnxruntime.so)
-            moonshineResult.fold(
-                onSuccess = {
-                    Timber.i("Moonshine model ready, starting engine")
-                    try {
-                        val modelPath = filesDir.resolve("moonshine-model").absolutePath
-                        moonshineEngine.get().start(
-                            modelPath = modelPath,
-                            modelArch = MOONSHINE_MODEL_ARCH,
-                            audioRoute = audioRouteMonitor.route.value,
-                            playbackBufferProvider = playbackBufferRecorder::snapshot,
-                            contextProvider = {
-                                VoiceRecognitionContext(
-                                    playbackContext = playbackContextMonitor.context.value,
-                                    audioRoute = audioRouteMonitor.route.value,
-                                )
-                            },
-                            onIntent = { intent -> handleIntent(intent) },
-                        )
-                        engineStarted = true
-                    } catch (e: Exception) {
-                        Timber.e(e, "Engine start failed")
-                        launch(Dispatchers.Main) { stopSelf() }
-                        return@launch
-                    }
-                },
-                onFailure = { e ->
-                    Timber.e(e, "Moonshine model not ready, stopping")
-                    launch(Dispatchers.Main) { stopSelf() }
-                    return@launch
-                },
-            )
+        Timber.i("Voice control service started, observing listening mode")
+    }
 
-            // 3. Initialize embedding intent matcher (ORT loaded by Moonshine above)
-            embeddingResult.fold(
-                onSuccess = {
-                    Timber.i("Embedding model ready, initializing intent matcher")
-                    val initOk = embeddingIntentMatcher.initialize(
-                        tokenizerPath = modelManager.tokenizerModelFile.absolutePath,
-                        modelPath = modelManager.embeddingModelFile.absolutePath,
+    private suspend fun ensureModelsReady() {
+        Timber.i("Ensuring models")
+        modelsReadyCondition.update(isReady = false)
+
+        val backend = asrBackendSelector.select()
+        Timber.i("Selected ASR backend: %s", backend::class.simpleName)
+
+        val modelResult = modelManager.ensureModel(backend.requiredModel)
+        modelResult.fold(
+            onSuccess = {
+                val modelDir = java.io.File(filesDir, backend.requiredModel.targetDir)
+                val modelFile = backend.requiredModel.files.firstOrNull()?.let {
+                    java.io.File(modelDir, it.filename)
+                }
+                if (modelFile != null && backend is au.com.shiftyjelly.pocketcasts.voicecontrol.asr.WhisperCppBackend) {
+                    backend.setModelFile(modelFile)
+                }
+                Timber.i("ASR model ready")
+            },
+            onFailure = { e ->
+                Timber.e(e, "ASR model download failed")
+                serviceScope.launch(Dispatchers.Main) { stopSelf() }
+                return
+            },
+        )
+
+        val readyResult = backend.ensureReady()
+        if (readyResult.isFailure) {
+            Timber.e(readyResult.exceptionOrNull(), "Backend not ready")
+            serviceScope.launch(Dispatchers.Main) { stopSelf() }
+            return
+        }
+
+        // Init embedding intent matcher
+        val embeddingResult = modelManager.ensureEmbeddingModel()
+        embeddingResult.fold(
+            onSuccess = {
+                Timber.i("Embedding model ready, initializing intent matcher")
+                val initOk = embeddingIntentMatcher.initialize(
+                    tokenizerPath = modelManager.tokenizerModelFile.absolutePath,
+                    modelPath = modelManager.embeddingModelFile.absolutePath,
+                )
+                if (!initOk) {
+                    Timber.e("Intent matcher initialization failed")
+                } else {
+                    Timber.i("Intent matcher initialized")
+                }
+            },
+            onFailure = { e ->
+                Timber.e(e, "Embedding model download failed")
+            },
+        )
+
+        modelsReadyCondition.update(isReady = true)
+        Timber.i("Voice control models ready")
+    }
+
+    private fun startEngine(mode: ListeningMode) {
+        if (engineStarted) return
+        val backend = asrBackendSelector.select()
+
+        try {
+            voiceAsrEngine.get().start(
+                backend = backend,
+                audioRoute = audioRouteMonitor.route.value,
+                playbackBufferProvider = playbackBufferRecorder::snapshot,
+                contextProvider = {
+                    VoiceRecognitionContext(
+                        listeningMode = mode,
+                        micExposure = audioRouteMonitor.route.value.toMicExposure(),
                     )
-                    if (!initOk) {
-                        Timber.e("Intent matcher initialization failed, continuing without embeddings")
-                    } else {
-                        Timber.i("Intent matcher initialized")
-                    }
                 },
-                onFailure = { e ->
-                    Timber.e(e, "Embedding model download failed, continuing without embeddings")
-                },
+                onIntent = { intent -> handleIntent(intent) },
             )
+            engineStarted = true
 
-            // Show listening notification
             val notification = notificationManager.createListeningNotification()
             notificationManager.notify(notification)
-            Timber.i("Voice control ready")
+            Timber.i("Engine started in %s mode", mode)
+        } catch (e: Exception) {
+            Timber.e(e, "Engine start failed")
         }
+    }
+
+    private fun stopEngine() {
+        if (!engineStarted) return
+        voiceAsrEngine.get().stop()
+        engineStarted = false
+        Timber.i("Engine stopped")
     }
 
     private fun handleIntent(
@@ -184,12 +232,10 @@ class VoiceControlService : Service() {
     }
 
     private fun stopVoiceControl() {
-        if (stopping) return
-        stopping = true
         Timber.i("Stopping voice control service")
-        if (engineStarted) moonshineEngine.get().stop()
-        engineStarted = false
-        startInProgress = false
+        modeJob?.cancel()
+        stopEngine()
+        liveConditionMonitor.stop()
         notificationManager.cancelNotification()
         stopForeground(STOP_FOREGROUND_REMOVE)
         serviceScope.cancel()
@@ -197,10 +243,10 @@ class VoiceControlService : Service() {
     }
 
     private fun hasRequiredPermissions(): Boolean {
-        return checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
-            android.content.pm.PackageManager.PERMISSION_GRANTED &&
-            checkSelfPermission(android.Manifest.permission.FOREGROUND_SERVICE_MICROPHONE) ==
-            android.content.pm.PackageManager.PERMISSION_GRANTED
+        return checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED &&
+            checkSelfPermission(Manifest.permission.FOREGROUND_SERVICE_MICROPHONE) ==
+            PackageManager.PERMISSION_GRANTED
     }
 
     override fun onDestroy() {

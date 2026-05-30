@@ -8,6 +8,7 @@ import timber.log.Timber
 
 object NativeVad {
     init {
+        System.loadLibrary("onnxruntime")
         System.loadLibrary("pocketcasts_voice_capture")
     }
 

@@ -8,7 +8,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
-import au.com.shiftyjelly.pocketcasts.voicecontrol.R
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -103,7 +102,7 @@ class VoiceControlNotificationManager @Inject constructor(
      */
     private fun createStopIntent(): Intent {
         return Intent(context, VoiceControlService::class.java).apply {
-            action = "au.com.shiftyjelly.pocketcasts.voicecontrol.action.STOP"
+            action = VoiceControlService.STOP_ACTION
         }
     }
 

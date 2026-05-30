@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.StateFlow
 
 interface VoiceControlRule {
     val id: String
+    val group: VoiceControlRuleGroup
     val state: StateFlow<VoiceControlRuleState>
 }
 

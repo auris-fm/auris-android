@@ -14,7 +14,7 @@ import org.junit.Test
 import org.mockito.kotlin.doReturn
 import org.mockito.kotlin.mock
 
-class PlaybackContextRuleTest {
+class PlaybackContextActiveConditionTest {
     @Test
     fun `paused playback with current episode has active playback context`() = runTest {
         val playbackState = MutableStateFlow(
@@ -35,15 +35,15 @@ class PlaybackContextRuleTest {
 
     @Test
     fun `current episode allows listening even when paused`() {
-        val rule = PlaybackContextRule(MutableStateFlow(PlaybackContext.Active(currentEpisodeUuid = "episode-id", isPlaying = false)))
+        val condition = PlaybackContextActiveCondition(MutableStateFlow(PlaybackContext.Active(currentEpisodeUuid = "episode-id", isPlaying = false)))
 
-        assertEquals(VoiceControlRuleState.Allowed, rule.evaluate())
+        assertEquals(VoiceControlRuleState.Allowed, condition.evaluate())
     }
 
     @Test
     fun `missing episode blocks listening`() {
-        val rule = PlaybackContextRule(MutableStateFlow(PlaybackContext.Inactive))
+        val condition = PlaybackContextActiveCondition(MutableStateFlow(PlaybackContext.Inactive))
 
-        assertEquals(VoiceControlRuleState.Blocked("playback_context_inactive"), rule.evaluate())
+        assertEquals(VoiceControlRuleState.Blocked("playback_context_inactive"), condition.evaluate())
     }
 }

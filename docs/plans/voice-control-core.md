@@ -24,12 +24,16 @@ The audio route is classified into a `MicExposure` value, and the gate plus expo
 - `modules/services/voice/src/main/AndroidManifest.xml`: microphone permission + `FOREGROUND_SERVICE_MICROPHONE` + `VoiceControlService` declaration.
 - `modules/services/preferences/.../Settings.kt` + `SettingsImpl.kt`: `voiceControlUserDisabled`, `voiceControlSetupCompleted`.
 - `.../voice/gate/*.kt`: rule contract, rule state, condition groups, and the gate combinator.
-- `.../voice/gate/conditions/*.kt`: the eight conditions (Setup / Conflicts / Context).
-- `.../voice/route/*.kt`: audio route monitoring and `MicExposure` classification.
+- `.../voice/gate/conditions/*.kt`: the seven core conditions (3 Setup, 3 Conflicts, 1 Context) plus `EnabledByUserCondition`.
+- `.../voice/gate/LiveConditionMonitor.kt`: bridges system callbacks into mutable gate conditions.
+- `.../voice/route/*.kt`: audio route monitoring, `MicExposure` classification, and the `AudioRoutePolicyRule`.
 - `.../voice/mode/*.kt`: `ListeningMode` and `ListeningModePolicy`.
-- `.../voice/intent/*.kt`: intent model types.
-- `.../voice/playback/*.kt`: playback context monitor and `VoiceIntentExecutor`.
+- `.../voice/intent/*.kt`: sealed `VoiceIntent` types.
+- `.../voice/playback/*.kt`: `PlaybackContextMonitor`, `PlaybackContextActiveCondition`, and `VoicePlaybackIntentExecutor` + `VoicePlaybackSink`.
+- `.../voice/model/VoiceRecognizer.kt` + `VoiceRecognitionContext.kt`: recognizer boundary contract.
 - `.../voice/service/VoiceControlService.kt`: foreground microphone service.
+- `.../voice/service/VoiceControlServiceController.kt`: app-level service controller.
+- `.../voice/service/VoiceControlNotificationManager.kt`: persistent notification.
 - `.../voice/di/VoiceControlModule.kt`: Hilt bindings.
 - `.../voice/src/test/**/*.kt`: unit tests.
 
@@ -236,6 +240,9 @@ Each condition implements `VoiceControlRule` with its `group`, derives `state` f
   - `NotOnCallCondition` — `TelephonyManager`/`AudioManager` call state; in a call → `Blocked("on_call")`.
   - `NotCastingCondition` — repositories' cast state; casting → `Blocked("casting")`.
   - `BatteryOkCondition` — `PowerManager.isPowerSaveMode` or critically low battery → `Blocked("battery_saver")`.
+  - `AudioRoutePolicyRule` — `Conflicts` rule gating which audio routes are allowed for voice control, controlled by the `voiceControlAudioRoutePolicy` user setting. `Allowed` for permitted routes, `Blocked("audio_route_disallowed")` otherwise.
+  
+  The three transient Conflict conditions (`NotOnCall`, `NotCasting`, `BatteryOk`) receive live updates from a `LiveConditionMonitor` that bridges Android system callbacks (phone state, power save mode) and CastManager state into the mutable conditions, so they stay current without polling.
 
 - [ ] **Step 3: Context conditions** (`group = Context`, at least one `Allowed`)
   - `PlaybackContextMonitor` — maps `playbackManager.playbackStateFlow` to `Active(episodeUuid)` when a current episode exists and the player is not stopped/empty (paused still counts), else `Inactive`.

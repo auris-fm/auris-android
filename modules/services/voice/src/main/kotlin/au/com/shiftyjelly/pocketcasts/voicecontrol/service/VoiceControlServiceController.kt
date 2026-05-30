@@ -7,7 +7,6 @@ import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import au.com.shiftyjelly.pocketcasts.repositories.playback.AppLifecycleProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGateState
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -60,19 +59,9 @@ class VoiceControlServiceController @Inject constructor(
         combine(gate.state, appLifecycleProvider.isInForeground) { gateState, foreground ->
             gateState to foreground
         }.onEach { (gateState, foreground) ->
-            when (gateState) {
-                is VoiceControlGateState.Allowed -> {
-                    if (foreground) {
-                        start()
-                    } else {
-                        Timber.i("VoiceControlServiceController: gate allowed but app backgrounded, deferring")
-                    }
-                }
-
-                is VoiceControlGateState.Blocked -> {
-                    Timber.w("VoiceControlServiceController: gate blocked: %s", gateState.rules)
-                    stop()
-                }
+            if (gateState.allowed && foreground && !serviceStarted) {
+                Timber.i("VoiceControlServiceController: gate allowed + foreground, starting service")
+                start()
             }
         }.launchIn(scope)
     }

@@ -87,6 +87,35 @@ class ModelManager @Inject constructor(
         }
     }
 
+    // -- Generic ModelSpec download -----------------------------------------
+
+    /**
+     * Download all files in [spec] into [spec.targetDir] under [filesDir].
+     * Existing files are skipped (no SHA256 re-check unless sha256 is non-empty in the spec).
+     */
+    suspend fun ensureModel(spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec): Result<Unit> = withContext(Dispatchers.IO) {
+        val targetDir = File(filesDir, spec.targetDir)
+        if (spec.files.all { File(targetDir, it.filename).exists() }) {
+            return@withContext Result.success(Unit)
+        }
+        downloadMutex.withLock {
+            if (spec.files.all { File(targetDir, it.filename).exists() }) {
+                return@withContext Result.success(Unit)
+            }
+            try {
+                targetDir.mkdirs()
+                for (file in spec.files) {
+                    val dest = File(targetDir, file.filename)
+                    downloadFile(file.url, dest, file.filename, file.sha256)
+                }
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Timber.e(e, "Model download failed for %s", spec.targetDir)
+                Result.failure(e)
+            }
+        }
+    }
+
     // -- Moonshine model ---------------------------------------------------
 
     fun isMoonshineModelReady(): Boolean = MOONSHINE_FILES.all { File(moonshineDir, it).exists() }

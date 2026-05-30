@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding
 
 object EmbeddingJni {
     init {
+        System.loadLibrary("onnxruntime")
         System.loadLibrary("pocketcasts_voice_capture")
     }
 

@@ -1,7 +1,7 @@
 // EmbeddingJni.cpp — multilingual-e5-small inference via Moonshine's ORT.
 //
-// Follows VadJni.cpp's pattern exactly: dlsym(RTLD_NOLOAD) to reuse
-// Moonshine's libonnxruntime.so, CreateSessionFromArray from bytes.
+// Uses ORT C API via dlsym from onnxruntime-android (loaded via System.loadLibrary).
+// CreateSessionFromArray from bytes, no session options.
 // No session options, no shape detection — minimal surface area.
 //
 // Model:  multilingual-e5-small ONNX (118M params, 384-dim).
@@ -42,9 +42,9 @@ static void cleanupOrt() {
 static bool initOrt(JNIEnv* env, jbyteArray jModelData) {
     if (g_session) return true;
 
-    // Resolve ORT from Moonshine's already-loaded libonnxruntime.so.
+    // Resolve ORT from onnxruntime-android (loaded by System.loadLibrary).
     void* ortLib = dlopen("libonnxruntime.so", RTLD_NOLOAD);
-    if (!ortLib) { g_errorMsg = "libonnxruntime.so not loaded (Moonshine engine not started?)"; return false; }
+    if (!ortLib) { g_errorMsg = "libonnxruntime.so not loaded"; return false; }
 
     auto fnGetApiBase = (FnOrtGetApiBase)dlsym(ortLib, "OrtGetApiBase");
     if (!fnGetApiBase) { g_errorMsg = "OrtGetApiBase not found"; dlclose(ortLib); return false; }

@@ -63,7 +63,7 @@ static bool initOrt(JNIEnv* env, jobject assetManager) {
     if (g_session) return true;
 
     // libonnxruntime.so is already loaded by Moonshine's Transcriber.
-    // Resolve OrtGetApiBase via dlsym — no build-time linkage needed.
+    // Resolve ORT from onnxruntime-android (loaded by System.loadLibrary).
     void* ortLib = dlopen("libonnxruntime.so", RTLD_NOLOAD);
     if (!ortLib) { g_errorMsg = "libonnxruntime.so not loaded"; return false; }
 

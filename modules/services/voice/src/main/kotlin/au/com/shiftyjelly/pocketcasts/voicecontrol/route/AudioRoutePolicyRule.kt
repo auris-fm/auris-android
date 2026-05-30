@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.route
 
 import au.com.shiftyjelly.pocketcasts.preferences.model.VoiceControlAudioRoutePolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRule
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleGroup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -16,6 +17,7 @@ class AudioRoutePolicyRule(
     scope: CoroutineScope = CoroutineScope(Dispatchers.Default),
 ) : VoiceControlRule {
     override val id: String = "audio_route_policy"
+    override val group = VoiceControlRuleGroup.Conflicts
 
     override val state: StateFlow<VoiceControlRuleState> = combine(route, policy) { route, policy ->
         evaluate(route, policy)

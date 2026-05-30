@@ -43,7 +43,8 @@ dependencies {
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.coroutines.core)
-    implementation(libs.moonshine.voice)
+    implementation(libs.coroutines.rx2)
+    implementation(libs.onnxruntime.android)
     implementation(libs.timber)
 
     implementation(projects.modules.services.analytics)

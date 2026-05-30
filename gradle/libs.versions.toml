@@ -242,6 +242,7 @@ androidx-test-runner = { module = "androidx.test:runner", version.ref = "test" }
 
 # Voice
 moonshine-voice = { module = "ai.moonshine:moonshine-voice", version = "0.0.59" }
+onnxruntime-android = { module = "com.microsoft.onnxruntime:onnxruntime-android", version = "1.20.0" }
 
 # Tracks
 automattic-crashlogging = { module = "com.automattic.tracks:crashlogging", version.ref = "tracks" }

@@ -7,12 +7,19 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 
+data class VoiceControlGateState(
+    val allowed: Boolean,
+    val rules: Map<String, VoiceControlRuleState>,
+)
+
 class VoiceControlGate(
     rules: List<VoiceControlRule>,
     scope: CoroutineScope = CoroutineScope(Dispatchers.Default),
 ) {
     val state: StateFlow<VoiceControlGateState> = if (rules.isEmpty()) {
-        kotlinx.coroutines.flow.MutableStateFlow(VoiceControlGateState.Blocked(emptyMap()))
+        kotlinx.coroutines.flow.MutableStateFlow(
+            VoiceControlGateState(allowed = true, rules = emptyMap()),
+        )
     } else {
         combine(rules.map { it.state }) { ruleStates ->
             computeState(rules.zip(ruleStates))
@@ -23,20 +30,29 @@ class VoiceControlGate(
         )
     }
 
-    private fun computeState(ruleStates: List<Pair<VoiceControlRule, VoiceControlRuleState>>): VoiceControlGateState {
-        val blockedRules = ruleStates
-            .filter { (_, state) -> state != VoiceControlRuleState.Allowed }
-            .associate { (rule, state) -> rule.id to state }
+    private fun computeState(
+        paired: List<Pair<VoiceControlRule, VoiceControlRuleState>>,
+    ): VoiceControlGateState {
+        val rulesMap = paired.associate { (rule, state) -> rule.id to state }
 
-        return if (blockedRules.isEmpty()) {
-            VoiceControlGateState.Allowed
-        } else {
-            VoiceControlGateState.Blocked(blockedRules)
-        }
+        val groupedByGroup = paired.groupBy { (rule, _) -> rule.group }
+
+        val setupPassed = groupAllAllowed(groupedByGroup[VoiceControlRuleGroup.Setup])
+        val conflictsPassed = groupAllAllowed(groupedByGroup[VoiceControlRuleGroup.Conflicts])
+        val contextPassed = groupAnyAllowed(groupedByGroup[VoiceControlRuleGroup.Context])
+
+        val allowed = setupPassed && conflictsPassed && contextPassed
+
+        return VoiceControlGateState(allowed = allowed, rules = rulesMap)
     }
-}
 
-sealed interface VoiceControlGateState {
-    data object Allowed : VoiceControlGateState
-    data class Blocked(val rules: Map<String, VoiceControlRuleState>) : VoiceControlGateState
+    private fun groupAllAllowed(rulesInGroup: List<Pair<VoiceControlRule, VoiceControlRuleState>>?): Boolean {
+        if (rulesInGroup == null) return true
+        return rulesInGroup.all { (_, state) -> state is VoiceControlRuleState.Allowed }
+    }
+
+    private fun groupAnyAllowed(rulesInGroup: List<Pair<VoiceControlRule, VoiceControlRuleState>>?): Boolean {
+        if (rulesInGroup == null) return true
+        return rulesInGroup.any { (_, state) -> state is VoiceControlRuleState.Allowed }
+    }
 }

@@ -44,7 +44,7 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.coroutines.core)
     implementation(libs.coroutines.rx2)
-    implementation(libs.onnxruntime.android)
+    // onnxruntime .so provided by sherpa-onnx JNI libs in jniLibs/; headers are bundled in src/main/cpp/
     implementation(libs.timber)
 
     implementation(projects.modules.services.analytics)

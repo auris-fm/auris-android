@@ -83,21 +83,27 @@ fires:
 - A combined "Auris, skip forward" utterance is supported: when the wake word is detected at the start of a segment, the remainder of
   that same segment is forwarded to ASR rather than discarded.
 
+### Model
+
+Wake word detection uses **sherpa-onnx Keyword Spotting**, a tiny ASR-based approach. It shares the ONNX Runtime stack already used for Silero VAD and (optionally) for the SenseVoice ASR backend. The model is `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01-mobile` (~17 MB extracted, English), an ONNX Zipformer with ~3.3M parameters running on CPU. It is bundled in the app (not downloaded), so detection always works regardless of network state.
+
 ### Built-in keyword ("Auris")
 
-The default wake word is **"Auris"**, detected by a small, fixed keyword-spotting (KWS) model that emits a confidence score per segment;
-a threshold gates activation. The model is small and fixed, so it is **bundled in the app** rather than downloaded, and is therefore always
-available. It is independent of the ASR backend, so it works identically regardless of which backend is selected.
+sherpa-onnx KWS accepts **custom keywords by text file — no training needed**. The wake word phrase is tokenized into the model's BPE units (`▁AUR IS`), given a boosting score and trigger threshold, and written to a `keywords.txt` that is bundled in assets alongside the model:
+
+```
+▁AUR IS :1.5 #0.35
+```
+
+At detection time the tiny ASR model runs beam search biased toward these token sequences; when the acoustic probability of a path containing the keyword exceeds the trigger threshold, the detector fires. This is the same mechanism as ASR hotword biasing — just with a much smaller model.
 
 ### Custom keyword (voice-sample enrollment)
 
-A user may enroll a **custom wake word** by recording a few short samples. Enrollment is **query-by-example KWS**: each sample is encoded
-into an audio embedding, and the averaged, L2-normalized vector is stored on-device as the reference template. At detection time, each
-segment (or a sliding window over it) is embedded and compared to the template by cosine similarity against an enrollment-tuned
-threshold. No retraining, no server round-trip; the template and raw samples never leave the device and are deletable from settings.
+Custom keywords use the **same sherpa-onnx model and the same text-file mechanism**. The user picks a phrase, it is tokenized and written to `keywords.txt` in app-private storage, and the detector reloads its keywords. No retraining, no TTS generation, no audio samples needed — the model is already trained to recognize English speech, and the text-based keyword file is sufficient.
 
-Custom enrollment uses an audio (speech) embedding model, distinct from the text `multilingual-e5-small` used for intent matching. If a
-custom template is unavailable or fails to load, detection falls back to the built-in "Auris" keyword.
+Because the model is English-only, custom phrases must be English or English-like. Custom keyword enrollment is therefore a UX flow (choose phrase → tokenize → write keywords file → reload detector) rather than a machine-learning flow (record samples → train → deploy). Raw audio is never stored.
+
+If no custom keyword is configured, the bundled "Auris" keywords file is used. If the custom keyword file fails to parse or the phrase cannot be tokenized, detection falls back to "Auris".
 
 ## ASR Backend Layer
 
@@ -257,7 +263,7 @@ The downloader handles resumable HTTP download with retry, SHA-256 verification,
 - SenseVoice (optional acceleration): model + tokens (sherpa-onnx assets), into `filesDir/sensevoice-model/`.
 - whisper-npu (optional phase): QNN context binaries.
 - Embedding: `model_opt2_QInt8.onnx` + `tokenizer.json`, into `filesDir/embedding-model/`.
-- Wake word: the built-in "Auris" KWS model is **bundled in the app** (not downloaded), so it always ships with the binary. The audio-embedding model used for custom-keyword enrollment is downloaded into `filesDir/wakeword-model/`. A user's enrolled custom template is written to app-private storage (not a download) and is deletable from settings; raw enrollment samples and the template never leave the device.
+- Wake word: `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01-mobile` (~17 MB extracted, ONNX) + tokens are **bundled in the app** (not downloaded), so the wake word always ships with the binary. A bundled `keywords.txt` defines "Auris" with boosting score and threshold. A user's custom keyword is a separate `keywords.txt` written to app-private storage (a text file, not audio) and is deletable from settings.
 
 ## Language Coverage
 
@@ -277,7 +283,7 @@ The downloader handles resumable HTTP download with retry, SHA-256 verification,
 | `AsrBackend` (+ 3 impls) | Transcribe an utterance |
 | `AsrBackendSelector` | Pick backend by hardware + locale |
 | `SignalFilter` | Playback cross-correlation |
-| `WakeWordDetector` | Per-segment keyword spotting (built-in "Auris" + custom template); gates ASR in wake-word mode |
+| `WakeWordDetector` | Per-segment keyword spotting via sherpa-onnx KWS; gates ASR in wake-word mode. Bundled "Auris" keywords file, custom keywords by text file — no training needed |
 | `IntentMatcher` | Embedding classification + edit-distance fallback |
 | `EntityExtractor` | Rule-based slot extraction (English by default; native grammar on the SenseVoice path) |
 | `EntityNormalizer` | Rule-based normalization of time/number expressions |
@@ -295,7 +301,7 @@ implementation("com.k2fsa.sherpa.onnx:sherpa-onnx:<ver>")
 
 // whisper.cpp backend — built from source via CMake in the voice module
 // NPU backend (optional) — Qualcomm QNN / WhisperKit-Android, Snapdragon-gated
-// Wake word — KWS + audio-embedding models run on the standalone onnxruntime-android above
+// Wake word — sherpa-onnx KWS model (ONNX, bundled), runs on the same onnxruntime as VAD/embeddings
 ```
 
 The embedding tokenizer is a pure-Kotlin BPE parser over HuggingFace `tokenizer.json`. The entity engine is pure Kotlin/JVM with no native deps. Every bundled `.so` must keep 16 KB page-size alignment.
@@ -313,7 +319,7 @@ The embedding tokenizer is a pure-Kotlin BPE parser over HuggingFace `tokenizer.
 | NPU unavailable at runtime despite Snapdragon probe | Selector falls through to SenseVoice / whisper.cpp |
 | Utterance fails cross-correlation | Dropped silently |
 | In wake-word mode, segment without the wake word | Dropped before ASR; no further processing |
-| Custom wake-word template not ready or fails to load | Fall back to the bundled built-in "Auris" model |
+| Custom keyword file missing or fails to parse | Fall back to the bundled "Auris" keywords file |
 | Wake-word detection cannot run in a WakeWord-mode context | Listening is treated as `Off` (mic stays closed); never fall back to continuous, so an exposed mic can never bypass the wake word |
 | Embedding confidence below threshold AND edit distance low | No intent (null) |
 | Relative intent (seek, adjust speed/volume) with no extracted slot | Use the default delta (seek ±30s, adjust speed ±0.5, adjust volume ±10) |
@@ -325,7 +331,7 @@ The embedding tokenizer is a pure-Kotlin BPE parser over HuggingFace `tokenizer.
 
 - **Unit**: `AsrBackendSelectorTest` — selection matrix across (Snapdragon?, NPU?, locale), including NPU-not-shipped. `IntentMatcherTest` — similarity ranking, edit-distance fallback, thresholds. `EntityExtractorTest` / `EntityNormalizerTest` — English duration/number/ordinal parsing ("half a minute" → 30, "2 and a half minutes" → 150) plus the native grammar on the SenseVoice path ("一分半" → 90).
 - **Backend (instrumentation, real model)**: `WhisperCppBackendTest`, `SenseVoiceBackendTest` — fixed WAV in, assert non-empty transcript and detected language.
-- **Wake word**: `WakeWordDetectorTest` — built-in "Auris" clip fires above threshold, non-wake speech does not; custom-template enrollment + cosine match accepts the enrolled phrase and rejects others; missing/failed custom template falls back to "Auris"; combined "Auris, skip forward" forwards the command remainder to ASR. Command-window behavior: opens on detection, stays open across follow-up utterances (no re-trigger) while speech continues, and closes only after a silence gap exceeding the conversation timeout (default 10s).
+- **Wake word**: `WakeWordDetectorTest` — bundled "Auris" keywords fire above threshold on TTS-generated "Auris" clips, non-wake speech does not fire; custom keyword file with a user-chosen phrase fires on that phrase and not others; missing/failed custom file falls back to "Auris"; combined "Auris, skip forward" forwards the command remainder to ASR. Command-window behavior: opens on detection, stays open across follow-up utterances (no re-trigger) while speech continues, and closes only after a silence gap exceeding the conversation timeout (default 10s).
 - **Integration**: pre-recorded WAV clips per language. "fast forward 30 seconds" (en) and "快进半分钟" (zh) both reach `SeekRelative(30000)` regardless of which backend produced the transcript. "pray" → `Resume` via edit distance. Podcast bleed → no false intent. In wake-word mode, a bare command is ignored until preceded by the wake word.
 - **Performance**: short-command latency (2–4s utterance) on a mid-range device, confirming the whisper.cpp `audio_ctx`/quantization/single-encode tuning.
 - **Regression**: existing `VoiceIntentExecutor` and gate-rule tests pass. Embedding matcher initializes with no ASR backend started (verifies ORT independence).

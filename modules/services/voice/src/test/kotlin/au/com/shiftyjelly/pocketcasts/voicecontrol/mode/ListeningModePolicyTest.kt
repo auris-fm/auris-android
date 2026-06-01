@@ -28,6 +28,7 @@ class ListeningModePolicyTest {
                 micExposure = MicExposure.Exposed,
                 isForeground = true,
                 isPlaybackActive = true,
+                wakeWordReady = true,
             )
             assertEquals(ListeningMode.Off, result)
             cancelAndIgnoreRemainingEvents()
@@ -41,6 +42,7 @@ class ListeningModePolicyTest {
             micExposure = MicExposure.NoMic,
             isForeground = false,
             isPlaybackActive = true,
+            wakeWordReady = true,
         )
         assertEquals(ListeningMode.Off, result)
     }
@@ -52,6 +54,7 @@ class ListeningModePolicyTest {
             micExposure = MicExposure.Exposed,
             isForeground = true,
             isPlaybackActive = false,
+            wakeWordReady = true,
         )
         assertEquals(ListeningMode.Continuous, result)
     }
@@ -63,6 +66,7 @@ class ListeningModePolicyTest {
             micExposure = MicExposure.Isolated,
             isForeground = false,
             isPlaybackActive = true,
+            wakeWordReady = true,
         )
         assertEquals(ListeningMode.Continuous, result)
     }
@@ -74,6 +78,7 @@ class ListeningModePolicyTest {
             micExposure = MicExposure.Exposed,
             isForeground = false,
             isPlaybackActive = true,
+            wakeWordReady = true,
         )
         assertEquals(ListeningMode.WakeWord, result)
     }
@@ -85,6 +90,7 @@ class ListeningModePolicyTest {
             micExposure = MicExposure.Exposed,
             isForeground = false,
             isPlaybackActive = false,
+            wakeWordReady = true,
         )
         assertEquals(ListeningMode.Off, result)
     }
@@ -96,6 +102,7 @@ class ListeningModePolicyTest {
             micExposure = MicExposure.Exposed,
             isForeground = false,
             isPlaybackActive = true,
+            wakeWordReady = true,
         )
         assertEquals(ListeningMode.WakeWord, result)
     }
@@ -107,8 +114,21 @@ class ListeningModePolicyTest {
             micExposure = MicExposure.Isolated,
             isForeground = true,
             isPlaybackActive = false,
+            wakeWordReady = true,
         )
         assertEquals(ListeningMode.Continuous, result)
+    }
+
+    @Test
+    fun `WakeWord mode with detector not ready resolves to Off`() {
+        val result = resolve(
+            gateState = VoiceControlGateState(allowed = true, rules = emptyMap()),
+            micExposure = MicExposure.Exposed,
+            isForeground = false,
+            isPlaybackActive = true,
+            wakeWordReady = false,
+        )
+        assertEquals(ListeningMode.Off, result)
     }
 
     private class FakeRule(

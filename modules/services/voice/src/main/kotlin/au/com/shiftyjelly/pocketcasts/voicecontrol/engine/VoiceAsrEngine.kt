@@ -7,9 +7,13 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
+import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.CommandWindow
+import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -20,21 +24,17 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
-/**
- * Backend-agnostic voice pipeline: Oboe capture -> Silero VAD -> [AsrBackend] -> intent matching.
- *
- * The [AsrBackend] is provided by the [au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackendSelector]
- * and may be whisper.cpp, SenseVoice, or an NPU backend depending on device capabilities.
- */
 @Singleton
 class VoiceAsrEngine @Inject constructor(
     private val voiceAudioProcessor: VoiceAudioProcessor,
     private val utteranceFilter: UtteranceFilter,
     private val intentRecognizer: VoiceRecognizer,
+    private val wakeWordDetector: WakeWordDetector,
     @ApplicationContext private val context: Context,
 ) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val commandWindow = CommandWindow()
     private var processingJob: Job? = null
     private var scoStarted = false
     private var savedAudioMode: Int? = null
@@ -42,16 +42,23 @@ class VoiceAsrEngine @Inject constructor(
 
     private var backend: AsrBackend? = null
     private var onIntent: ((VoiceIntent) -> Unit)? = null
+    private var micExposureProvider: (() -> MicExposure)? = null
+
+    @Volatile
+    private var currentMode: ListeningMode = ListeningMode.Off
 
     fun start(
         backend: AsrBackend,
         audioRoute: AudioRoute,
+        listeningMode: ListeningMode,
         playbackBufferProvider: () -> FloatArray,
-        contextProvider: () -> VoiceRecognitionContext,
+        micExposureProvider: () -> MicExposure,
         onIntent: (VoiceIntent) -> Unit,
     ) {
         this.backend = backend
+        this.currentMode = listeningMode
         this.playbackBufferProvider = playbackBufferProvider
+        this.micExposureProvider = micExposureProvider
         this.onIntent = onIntent
         utteranceFilter.reset()
         openBluetoothSco()
@@ -60,8 +67,10 @@ class VoiceAsrEngine @Inject constructor(
             try {
                 voiceAudioProcessor.startProcessing().collect { result ->
                     when (result) {
-                        is VoiceSegmenterResult.SpeechStarted ->
+                        is VoiceSegmenterResult.SpeechStarted -> {
                             Timber.i("VAD: speech started")
+                            commandWindow.onActivity()
+                        }
 
                         is VoiceSegmenterResult.SpeechContinuing -> { /* accumulating frames */ }
 
@@ -69,7 +78,11 @@ class VoiceAsrEngine @Inject constructor(
                             val frameCount = result.frames.size
                             val durationMs = frameCount * 64L
                             Timber.i("VAD: speech ended (%d frames, ~%dms)", frameCount, durationMs)
-                            transcribeSegment(result, contextProvider())
+
+                            val audio = shouldTranscribe(result)
+                            if (audio != null) {
+                                transcribeSegment(result, overrideAudio = audio)
+                            }
                         }
 
                         is VoiceSegmenterResult.Rejected ->
@@ -82,18 +95,17 @@ class VoiceAsrEngine @Inject constructor(
                 Timber.e(e, "Voice audio processing failed")
             }
         }
-        Timber.i("VoiceAsrEngine started (backend=%s)", backend::class.simpleName)
+        Timber.i("VoiceAsrEngine started (backend=%s, mode=%s)", backend::class.simpleName, listeningMode)
     }
 
-    private suspend fun transcribeSegment(
-        segment: VoiceSegmenterResult.SpeechEnded,
-        context: VoiceRecognitionContext,
-    ) {
-        val b = backend ?: return
-        val frameCount = segment.frames.size
-        val sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000
+    fun updateListeningMode(mode: ListeningMode) {
+        currentMode = mode
+        Timber.i("VoiceAsrEngine mode updated to %s", mode)
+    }
 
-        // Concatenate all frames into one float buffer for batch ASR
+    /** Returns the audio to transcribe, or null if the segment should be dropped. */
+    private suspend fun shouldTranscribe(segment: VoiceSegmenterResult.SpeechEnded): FloatArray? {
+        // Build float samples from the segment
         val totalSamples = segment.frames.sumOf { it.samples.size }
         val floatSamples = FloatArray(totalSamples)
         var offset = 0
@@ -104,24 +116,66 @@ class VoiceAsrEngine @Inject constructor(
             offset += frame.samples.size
         }
 
+        val mode = currentMode
+        return when (mode) {
+            ListeningMode.Continuous -> floatSamples
+
+            ListeningMode.WakeWord -> {
+                val wwResult = runCatching {
+                    wakeWordDetector.detect(floatSamples, segment.frames.firstOrNull()?.sampleRateHz ?: 16000)
+                }.getOrElse { e ->
+                    Timber.w(e, "Wake word detection failed, dropping segment")
+                    return null
+                }
+
+                if (wwResult.detected) {
+                    Timber.i("Wake word detected (confidence=%.2f)", wwResult.confidence)
+                    commandWindow.onWakeWord()
+                    wwResult.remainderSamples ?: floatSamples
+                } else {
+                    if (commandWindow.isActive) floatSamples else null
+                }
+            }
+
+            ListeningMode.Off -> null
+        }
+    }
+
+    private suspend fun transcribeSegment(
+        segment: VoiceSegmenterResult.SpeechEnded,
+        overrideAudio: FloatArray? = null,
+    ) {
+        val b = backend ?: return
+        val sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000
+
+        // Use override audio if provided (e.g., remainder after wake word), else build from frames
+        val floatSamples = overrideAudio ?: run {
+            val totalSamples = segment.frames.sumOf { it.samples.size }
+            val samples = FloatArray(totalSamples)
+            var off = 0
+            for (frame in segment.frames) {
+                for (i in frame.samples.indices) {
+                    samples[off + i] = frame.samples[i].toFloat() / 32768f
+                }
+                off += frame.samples.size
+            }
+            samples
+        }
+
         // Filter out playback bleed before transcribing
         val playbackBuffer = playbackBufferProvider?.invoke() ?: FloatArray(0)
-        if (!utteranceFilter.shouldProcess(floatSamples, false, -1, playbackBuffer)) {
-            Timber.i("Utterance filtered out (playback bleed)")
+        if (!utteranceFilter.shouldProcess(floatSamples, false, 0, playbackBuffer)) {
+            Timber.i("Utterance rejected by bleed filter")
             return
         }
 
-        val t0 = System.currentTimeMillis()
-        val result = b.transcribe(floatSamples, sampleRateHz)
-        val elapsedMs = System.currentTimeMillis() - t0
-
-        if (result.text.isBlank()) {
-            Timber.i("ASR returned empty text (%dms)", elapsedMs)
+        // ASR
+        val asrResult = b.transcribe(floatSamples, sampleRateHz)
+        if (asrResult.text.isBlank()) {
+            Timber.i("ASR returned empty transcript")
             return
         }
-
-        Timber.i("ASR: '%s' (lang=%s, %dms)", result.text, result.detectedLanguage, elapsedMs)
-        processUtterance(result)
+        processUtterance(asrResult)
     }
 
     private suspend fun processUtterance(result: AsrResult) {
@@ -129,10 +183,9 @@ class VoiceAsrEngine @Inject constructor(
         val handler = onIntent ?: return
 
         val t0 = System.currentTimeMillis()
-        // Build a minimal recognition context — the full context is set by the caller's provider
-        val ctx = au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext(
-            listeningMode = au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode.Off,
-            micExposure = au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure.Exposed,
+        val ctx = VoiceRecognitionContext(
+            listeningMode = currentMode,
+            micExposure = micExposureProvider?.invoke() ?: MicExposure.Exposed,
         )
         val intent = recognizer.recognize(result.text, ctx)
         val elapsedMs = System.currentTimeMillis() - t0
@@ -148,26 +201,21 @@ class VoiceAsrEngine @Inject constructor(
     fun stop() {
         processingJob?.cancel()
         processingJob = null
-        voiceAudioProcessor.stopProcessing()
         backend?.release()
         backend = null
-        onIntent = null
         closeBluetoothSco()
+        commandWindow.reset()
         Timber.i("VoiceAsrEngine stopped")
     }
 
     @Suppress("DEPRECATION")
     private fun openBluetoothSco() {
-        if (!audioManager.isBluetoothScoAvailableOffCall) {
-            Timber.i("Bluetooth SCO not available off-call, skipping")
-            return
-        }
+        if (scoStarted) return
         try {
             savedAudioMode = audioManager.mode
-            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager.mode = AudioManager.MODE_NORMAL
             audioManager.startBluetoothSco()
             scoStarted = true
-            Timber.i("Bluetooth SCO started (mode: %d -> MODE_IN_COMMUNICATION)", savedAudioMode)
         } catch (e: Exception) {
             Timber.w(e, "Failed to start Bluetooth SCO")
         }
@@ -178,12 +226,11 @@ class VoiceAsrEngine @Inject constructor(
         if (!scoStarted) return
         try {
             audioManager.stopBluetoothSco()
-            scoStarted = false
             savedAudioMode?.let { audioManager.mode = it }
-            savedAudioMode = null
-            Timber.i("Bluetooth SCO stopped, mode restored to %d", savedAudioMode)
         } catch (e: Exception) {
             Timber.w(e, "Failed to stop Bluetooth SCO")
+        } finally {
+            scoStarted = false
         }
     }
 }

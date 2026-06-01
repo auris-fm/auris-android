@@ -58,9 +58,9 @@ Goal: the full pipeline works for all languages via the universal whisper.cpp ba
 
 - [ ] **Step 1: Capture/VAD/dispatch loop** — own the Oboe capture + `NativeVadSegmenter` segmentation. On `SpeechEnded`, run the `SignalFilter` (playback cross-correlation) against the segment *first*; drop bleed before transcribing. The filter applies **only on the built-in loudspeaker route** (where the mic signal aligns to the playback buffer within a known delay); it is off on A2DP-to-external-speaker (codec latency unbounded) and on `Isolated`/headset routes (no bleed). On wake-word-mode segments, run the `WakeWordDetector` (Task 8) before ASR; only segments that survive the filter and clear the wake-word gate are transcribed. For surviving segments, convert shorts → float (`/ 32768f`) and call `backend.transcribe(...)`, then forward the transcript to the recognizer/`onIntent` path. Keep Bluetooth SCO handling and the playback buffer.
 
-- [ ] **Step 2: Construction** — `VoiceAsrEngine` receives the `AsrBackend` chosen by the selector (Task 4). No model-architecture parameters in `start(...)`.
+- [ ] **Step 2: Construction** — `VoiceAsrEngine` injects `VoiceAudioProcessor`, `UtteranceFilter`, `VoiceRecognizer`, `WakeWordDetector`. `start(backend, audioRoute, listeningMode, playbackBufferProvider, micExposureProvider, onIntent)` accepts the mode from the service; `updateListeningMode(mode)` propagates runtime mode changes without restart. The engine builds `VoiceRecognitionContext` internally from its current mode + the mic exposure provider, so the context always reflects live state.
 
-- [ ] **Step 3: Service wiring** — `VoiceControlService` builds the selected backend, calls `ensureReady()`, then starts the engine. Independently initialize the embedding matcher (no ordering dependency — see Task 6).
+- [ ] **Step 3: Service wiring** — `VoiceControlService` observes `ListeningModePolicy.mode`: on `Off` it stops the engine; on `Continuous`/`WakeWord` it calls `startEngine(mode)` initially, or `voiceAsrEngine.get().updateListeningMode(mode)` when the mode changes while already running (headset unplug, foreground loss, etc.). Models are ensured via `ensureModelsReady()` on `Dispatchers.IO`.
 
 ### Task 4: AsrBackendSelector
 
@@ -226,28 +226,34 @@ data class EntityResult(
 ### Task 8: Wake word detection
 
 **Files to create:**
-- `modules/services/voice/src/main/kotlin/.../wakeword/WakeWordDetector.kt`
-- `modules/services/voice/src/main/kotlin/.../wakeword/BuiltInKeywordDetector.kt` (bundled "Auris" KWS)
-- `modules/services/voice/src/main/kotlin/.../wakeword/CustomKeywordDetector.kt` (query-by-example enrollment)
-- `modules/services/voice/src/main/kotlin/.../wakeword/CommandWindow.kt`
+- `modules/services/voice/src/main/kotlin/.../wakeword/SherpaOnnxKwsDetector.kt` — wraps sherpa-onnx KeywordSpotter, loads the bundled model + tokens + keywords file, runs detection per segment.
+- `modules/services/voice/src/main/kotlin/.../wakeword/CommandWindow.kt` (already exists)
 
 **Files to modify:**
-- `modules/services/voice/src/main/kotlin/.../engine/VoiceAsrEngine.kt` — gate ASR behind the detector in wake-word mode.
-- `modules/services/voice/src/main/kotlin/.../model/ModelManager.kt` — audio-embedding model for custom enrollment.
+- `modules/services/voice/src/main/kotlin/.../wakeword/WakeWordDetector.kt` — simplify to single interface method `detect(segment, sampleRateHz): WakeWordResult`.
+- `modules/services/voice/src/main/kotlin/.../engine/VoiceAsrEngine.kt` — already integrates `WakeWordDetector` + `CommandWindow`; no changes needed here.
+- `modules/services/voice/src/main/kotlin/.../di/VoiceControlModule.kt` — bind `WakeWordDetector` to `SherpaOnnxKwsDetector`.
 
-The detector runs per VAD segment that survives the `SignalFilter`, **before** ASR, so in wake-word mode the heavy ASR + intent stages stay idle until the wake word fires. The listening mode (`Continuous` vs. `WakeWord`) is set by the core spec's `ListeningModePolicy`; this task owns *how* the wake word is detected, not *when* the mode applies.
+**Files to delete:**
+- `BuiltInKeywordDetector.kt` (replaced by SherpaOnnxKwsDetector)
+- `CustomKeywordDetector.kt` (replaced — custom keywords use the same model, just a different keywords file)
+- `CompositeWakeWordDetector.kt` (no longer needed — single detector)
 
-- [ ] **Step 1: Built-in "Auris" keyword** — a small, fixed KWS model **bundled in the app** (not downloaded), emitting a confidence score per segment; a threshold gates activation. Independent of the ASR backend, so it works identically regardless of selected backend.
+The detector uses **sherpa-onnx Keyword Spotting** (`sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01-mobile`, ~17 MB extracted, English). The model + tokens + `keywords.txt` are bundled in `assets/`. Detection runs per VAD segment that survives the `SignalFilter`, **before** ASR.
 
-- [ ] **Step 2: Custom keyword (voice-sample enrollment)** — query-by-example KWS: encode each enrollment sample into an audio embedding, store the averaged, L2-normalized vector as the on-device reference template. At detection time, embed each segment (or a sliding window) and compare to the template by cosine similarity against an enrollment-tuned threshold. Uses an audio (speech) embedding model — **distinct** from the text `multilingual-e5-small` used for intent matching. No retraining, no server round-trip; template and raw samples stay on-device and are deletable from settings. If the template is unavailable or fails to load, fall back to the built-in "Auris" model.
+- [ ] **Step 1: Download the model** — fetch `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01-mobile.tar.bz2` from the [sherpa-onnx kws-models release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models). Extract into `modules/services/voice/src/main/assets/kws/`: `encoder.onnx`, `decoder.onnx`, `joiner.onnx`, `tokens.txt`. Bundle a `keywords.txt`:
 
-- [ ] **Step 3: Command window** — on a **positive** segment, open a command window: while open, follow-up utterances flow to ASR with no wake word required. The window is refreshed by any speech activity (a VAD segment), not only by accepted commands, and closes only after a continuous silence gap exceeding the conversation timeout (default **10 seconds**); after it closes the wake word is required again. Support the combined "Auris, skip forward" utterance — when the wake word is detected at the start of a segment, forward the remainder of that same segment to ASR rather than discarding it.
+```
+▁AUR IS :1.5 #0.35
+```
 
-- [ ] **Step 4: Engine integration** — in `WakeWord` mode, `VoiceAsrEngine` runs the detector on each surviving segment and drops negatives before ASR. In `Continuous` mode the gate is open (every segment is a candidate command). If wake-word detection cannot run in a WakeWord-mode context, listening is treated as `Off` (mic stays closed) — never fall back to continuous, so an exposed mic can never bypass the wake word.
+- [ ] **Step 2: `SherpaOnnxKwsDetector`** — a `@Singleton` that loads the bundled KWS model from assets at init. Implements `WakeWordDetector.detect(segment, sampleRateHz)` by calling the sherpa-onnx KeywordSpotter. The model runs on the already-loaded ONNX Runtime (same `libonnxruntime` used by VAD and embeddings). `isReady` is true once the model + keywords are loaded. `release()` shuts down the spotter.
 
-- [ ] **Step 5: Model management** — the bundled "Auris" KWS model ships in the app binary (no download). Download the audio-embedding model used for custom enrollment into `filesDir/wakeword-model/`. The enrolled custom template is written to app-private storage (not a download) and is deletable from settings.
+- [ ] **Step 3: Custom keyword** — when the user sets a custom wake word phrase, tokenize it into BPE units (using the model's `tokens.txt`), write a new `keywords.txt` to app-private storage, and reload the detector. If the custom file is missing or fails to parse, the detector falls back to the bundled "Auris" keywords. No audio samples, no training — just a text file change.
 
-- [ ] **Step 6: `WakeWordDetectorTest`** — built-in "Auris" clip fires above threshold, non-wake speech does not; custom-template enrollment + cosine match accepts the enrolled phrase and rejects others; missing/failed custom template falls back to "Auris"; combined "Auris, skip forward" forwards the command remainder to ASR. Command-window behavior: opens on detection, stays open across follow-up utterances (no re-trigger) while speech continues, closes only after silence exceeding the conversation timeout (default 10s).
+- [ ] **Step 4: DI wiring** — delete `BuiltInKeywordDetector`, `CustomKeywordDetector`, `CompositeWakeWordDetector`. Bind `WakeWordDetector` directly to `SherpaOnnxKwsDetector`.
+
+- [ ] **Step 5: Clean up old tests** — remove `WakeWordDetectorTest` tests for the old BuiltIn/Custom/Composite detectors. Add tests for `SherpaOnnxKwsDetector`: model loads from assets, "Auris" clip fires above threshold, non-wake speech does not fire, custom keywords file is parsed correctly.
 
 ### Task 9: Phase 1 build + verify
 
@@ -308,7 +314,7 @@ Goal: fastest path on Snapdragon. May be deferred indefinitely; nothing else dep
 | whisper.cpp model (`ggml-small-q5_1`, baseline) | GGML quantized | ~190 MB |
 | whisper.cpp model (`ggml-base-q5_1`, fallback only) | GGML quantized | ~57 MB |
 | SenseVoice-Small (optional) | ONNX int8 | ~228 MB |
-| "Auris" KWS (bundled in app, not downloaded) | — | small/fixed |
-| Wake-word audio-embedding model (custom enrollment) | ONNX | downloaded to `filesDir/wakeword-model/` |
+| sherpa-onnx KWS (zipformer gigaspeech 3.3M, bundled) | ONNX | ~17 MB |
+| KWS tokens + keywords.txt | Text | <1 KB |
 
-`ggml-small-q5_1` is the baseline because the translate-by-default path needs reliable translation, which `base` is markedly weaker at on short commands and bare numbers; `base-q5_1` is a fallback only if validation shows it is adequate and `small` misses the latency target. Only the selected ASR backend's model is downloaded at runtime, alongside the embedding model and (for custom wake words) the audio-embedding model.
+`ggml-small-q5_1` is the baseline because the translate-by-default path needs reliable translation, which `base` is markedly weaker at on short commands and bare numbers; `base-q5_1` is a fallback only if validation shows it is adequate and `small` misses the latency target. Only the selected ASR backend's model is downloaded at runtime, alongside the embedding model. The KWS model is always bundled.

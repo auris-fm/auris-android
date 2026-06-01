@@ -114,7 +114,14 @@ class VoiceControlService : Service() {
         modeJob = listeningModePolicy.mode.onEach { mode ->
             when (mode) {
                 ListeningMode.Off -> stopEngine()
-                ListeningMode.Continuous, ListeningMode.WakeWord -> startEngine(mode)
+
+                ListeningMode.Continuous, ListeningMode.WakeWord -> {
+                    if (engineStarted) {
+                        voiceAsrEngine.get().updateListeningMode(mode)
+                    } else {
+                        startEngine(mode)
+                    }
+                }
             }
         }.launchIn(serviceScope)
 
@@ -189,13 +196,9 @@ class VoiceControlService : Service() {
             voiceAsrEngine.get().start(
                 backend = backend,
                 audioRoute = audioRouteMonitor.route.value,
+                listeningMode = mode,
                 playbackBufferProvider = playbackBufferRecorder::snapshot,
-                contextProvider = {
-                    VoiceRecognitionContext(
-                        listeningMode = mode,
-                        micExposure = audioRouteMonitor.route.value.toMicExposure(),
-                    )
-                },
+                micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
                 onIntent = { intent -> handleIntent(intent) },
             )
             engineStarted = true

@@ -4,7 +4,7 @@
 
 > **For agentic workers:** Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A multi-backend, on-device ASR layer (`AsrBackend` + `AsrBackendSelector`) fed by a `SignalFilter` (playback cross-correlation) and a `WakeWordDetector` (bundled "Auris" + custom voice-sample enrollment) gate, then a language-agnostic intent pipeline: an embedding-based intent matcher (`multilingual-e5-small` ONNX) with edit-distance fallback, plus a pure-Kotlin rule-based entity extractor and normalizer. Everything runs on CPU (or the NPU, in the optional backend).
+**Goal:** A multi-backend, on-device ASR layer (`AsrBackend` + `AsrBackendSelector`) fed by a `SignalFilter` (playback cross-correlation) and a `WakeWordDetector` (openWakeWord "Auris" classifier trained via livekit-wakeword, 3-stage ONNX pipeline, bundled) gate, then a language-agnostic intent pipeline: an embedding-based intent matcher (`multilingual-e5-small` ONNX) with edit-distance fallback, plus a pure-Kotlin rule-based entity extractor and normalizer. Everything runs on CPU (or the NPU, in the optional backend).
 
 **Tech Stack:** sherpa-onnx (SenseVoice + bundled ONNX Runtime), whisper.cpp (built from source via CMake), `onnxruntime-android` (standalone, for embeddings), `multilingual-e5-small` ONNX (INT8, ~118 MB), pure-Kotlin BPE tokenizer + entity engine. Optional: Qualcomm QNN / WhisperKit-Android for the NPU backend.
 
@@ -226,34 +226,48 @@ data class EntityResult(
 ### Task 8: Wake word detection
 
 **Files to create:**
-- `modules/services/voice/src/main/kotlin/.../wakeword/SherpaOnnxKwsDetector.kt` — wraps sherpa-onnx KeywordSpotter, loads the bundled model + tokens + keywords file, runs detection per segment.
-- `modules/services/voice/src/main/kotlin/.../wakeword/CommandWindow.kt` (already exists)
+- `modules/services/voice/src/main/cpp/WakeWordJni.cpp` — C++ JNI bridge running the openWakeWord 3-stage ONNX pipeline (mel spectrogram → embedding → classifier) via onnxruntime. Follows the `dlsym`-based ORT loading pattern from `VadJni.cpp`.
+- `modules/services/voice/src/main/kotlin/.../wakeword/WakeWordJni.kt` — Kotlin `external` declarations for the native wake word functions.
+- `modules/services/voice/src/main/kotlin/.../wakeword/OpenWakeWordDetector.kt` — implements `WakeWordDetector`, loads the three ONNX model files from assets, delegates to `WakeWordJni`.
 
 **Files to modify:**
-- `modules/services/voice/src/main/kotlin/.../wakeword/WakeWordDetector.kt` — simplify to single interface method `detect(segment, sampleRateHz): WakeWordResult`.
-- `modules/services/voice/src/main/kotlin/.../engine/VoiceAsrEngine.kt` — already integrates `WakeWordDetector` + `CommandWindow`; no changes needed here.
-- `modules/services/voice/src/main/kotlin/.../di/VoiceControlModule.kt` — bind `WakeWordDetector` to `SherpaOnnxKwsDetector`.
+- `modules/services/voice/src/main/cpp/CMakeLists.txt` — add `WakeWordJni.cpp` to the existing `pocketcasts_voice_capture` target.
+- `modules/services/voice/src/main/kotlin/.../di/VoiceControlModule.kt` — change binding: `fun bindWakeWordDetector(impl: OpenWakeWordDetector): WakeWordDetector`.
+
+**Files to keep (unused):**
+- `SherpaOnnxKwsDetector.kt` — retained in codebase, not bound in DI, for easy fallback switching.
+- `com.k2fsa.sherpa.onnx.KeywordSpotter` and related JNI wrappers — retained.
 
 **Files to delete:**
-- `BuiltInKeywordDetector.kt` (replaced by SherpaOnnxKwsDetector)
-- `CustomKeywordDetector.kt` (replaced — custom keywords use the same model, just a different keywords file)
-- `CompositeWakeWordDetector.kt` (no longer needed — single detector)
+- `modules/services/voice/src/main/assets/kws/` — old sherpa-onnx KWS model files (encoder.onnx, decoder.onnx, joiner.onnx, tokens.txt, bpe.model, keywords.txt) replaced by the openWakeWord ONNX models.
 
-The detector uses **sherpa-onnx Keyword Spotting** (`sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01-mobile`, ~17 MB extracted, English). The model + tokens + `keywords.txt` are bundled in `assets/`. Detection runs per VAD segment that survives the `SignalFilter`, **before** ASR.
+The detector uses an **openWakeWord Conv-Attention classifier** trained via livekit-wakeword. Inference is a 3-stage ONNX pipeline (mel spectrogram → speech embedding → classifier), all running on the already-loaded `libonnxruntime.so`. All three ONNX models are bundled in `assets/oww/`. Detection runs per VAD segment that survives the `SignalFilter`, **before** ASR.
 
-- [ ] **Step 1: Download the model** — fetch `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01-mobile.tar.bz2` from the [sherpa-onnx kws-models release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/kws-models). Extract into `modules/services/voice/src/main/assets/kws/`: `encoder.onnx`, `decoder.onnx`, `joiner.onnx`, `tokens.txt`. Bundle a `keywords.txt`:
+- [ ] **Step 1: Train the "Auris" model** — install `livekit-wakeword[train,eval,export]`, create a config YAML for "auris", run `livekit-wakeword run` then `livekit-wakeword export`. Output: `auris.onnx` (~160 KB).
 
-```
-▁AUR IS :1.5 #0.35
-```
+- [ ] **Step 2: Obtain supporting ONNX models** — extract `melspectrogram.onnx` and `embedding_model.onnx` from the livekit-wakeword Python package (bundled in its `onnx/` directory). These are fixed for all wake words.
 
-- [ ] **Step 2: `SherpaOnnxKwsDetector`** — a `@Singleton` that loads the bundled KWS model from assets at init. Implements `WakeWordDetector.detect(segment, sampleRateHz)` by calling the sherpa-onnx KeywordSpotter. The model runs on the already-loaded ONNX Runtime (same `libonnxruntime` used by VAD and embeddings). `isReady` is true once the model + keywords are loaded. `release()` shuts down the spotter.
+- [ ] **Step 3: Bundle models in assets** — copy `melspectrogram.onnx`, `embedding_model.onnx`, and `auris.onnx` into `modules/services/voice/src/main/assets/oww/`. Delete old `assets/kws/`.
 
-- [ ] **Step 3: Custom keyword** — when the user sets a custom wake word phrase, tokenize it into BPE units (using the model's `tokens.txt`), write a new `keywords.txt` to app-private storage, and reload the detector. If the custom file is missing or fails to parse, the detector falls back to the bundled "Auris" keywords. No audio samples, no training — just a text file change.
+- [ ] **Step 4: `WakeWordJni.cpp`** — C++ JNI implementing the openWakeWord streaming pipeline:
+  - Accumulate 1280 samples (80ms), convert normalized float [-1,1] → int16-range (×32768), run `melspectrogram.onnx`, apply `mel = mel/10 + 2` transform, push to rolling mel buffer (max 76 frames).
+  - Every 8 new mel frames (80ms stride), run `embedding_model.onnx` on latest 76 mel frames → 96-dim vector, push to rolling embedding buffer (max 16 vectors).
+  - Every new embedding, run `auris.onnx` on latest 16 embeddings → sigmoid score.
+  - Score > threshold (default 0.5) → detection. State is reset between `detect()` calls.
+  - JNI native methods: `nativeInit(melModel, embedModel, classifierModel, threshold)`, `nativeDetect(samples, sampleRateHz)` returning confidence score, `nativeRelease()`.
+  - Uses `dlsym` to resolve `OrtGetApiBase` from the already-loaded `libonnxruntime.so` (same pattern as `VadJni.cpp` and `EmbeddingJni.cpp`).
 
-- [ ] **Step 4: DI wiring** — delete `BuiltInKeywordDetector`, `CustomKeywordDetector`, `CompositeWakeWordDetector`. Bind `WakeWordDetector` directly to `SherpaOnnxKwsDetector`.
+- [ ] **Step 5: `WakeWordJni.kt`** — Kotlin `object` with `external` methods that load `pocketcasts_voice_capture` and declare the three JNI functions.
 
-- [ ] **Step 5: Clean up old tests** — remove `WakeWordDetectorTest` tests for the old BuiltIn/Custom/Composite detectors. Add tests for `SherpaOnnxKwsDetector`: model loads from assets, "Auris" clip fires above threshold, non-wake speech does not fire, custom keywords file is parsed correctly.
+- [ ] **Step 6: `OpenWakeWordDetector.kt`** — `@Singleton` implementing `WakeWordDetector`:
+  - In `init`: load the three ONNX model files from `assets/oww/` as `ByteArray`, pass to `WakeWordJni.nativeInit()`.
+  - `detect(segment, sampleRateHz)`: call `WakeWordJni.nativeDetect()` on the full FloatArray (no chunking — the C++ code handles internal buffering). Extract remainder audio after keyword for combined "Auris, skip forward" support.
+  - `isReady`: true once native init succeeds.
+  - `release()`: calls `WakeWordJni.nativeRelease()`.
+
+- [ ] **Step 7: DI wiring** — change `VoiceControlModule.kt` line 68 to `@Binds abstract fun bindWakeWordDetector(impl: OpenWakeWordDetector): WakeWordDetector`. Keep `SherpaOnnxKwsDetector` in the codebase but remove its `@Singleton` and `@Inject` annotations so it doesn't participate in DI (or keep them and just change the binding — either way, it's not constructed).
+
+- [ ] **Step 8: Register in CMakeLists.txt** — add `WakeWordJni.cpp` to the existing `pocketcasts_voice_capture` library target.
 
 ### Task 9: Phase 1 build + verify
 
@@ -314,7 +328,8 @@ Goal: fastest path on Snapdragon. May be deferred indefinitely; nothing else dep
 | whisper.cpp model (`ggml-small-q5_1`, baseline) | GGML quantized | ~190 MB |
 | whisper.cpp model (`ggml-base-q5_1`, fallback only) | GGML quantized | ~57 MB |
 | SenseVoice-Small (optional) | ONNX int8 | ~228 MB |
-| sherpa-onnx KWS (zipformer gigaspeech 3.3M, bundled) | ONNX | ~17 MB |
-| KWS tokens + keywords.txt | Text | <1 KB |
+| openWakeWord mel spectrogram (bundled) | ONNX | ~100 KB |
+| openWakeWord speech embedding (bundled) | ONNX | ~1.3 MB |
+| openWakeWord "Auris" classifier (bundled, trained) | ONNX | ~160 KB |
 
-`ggml-small-q5_1` is the baseline because the translate-by-default path needs reliable translation, which `base` is markedly weaker at on short commands and bare numbers; `base-q5_1` is a fallback only if validation shows it is adequate and `small` misses the latency target. Only the selected ASR backend's model is downloaded at runtime, alongside the embedding model. The KWS model is always bundled.
+`ggml-small-q5_1` is the baseline because the translate-by-default path needs reliable translation, which `base` is markedly weaker at on short commands and bare numbers; `base-q5_1` is a fallback only if validation shows it is adequate and `small` misses the latency target. Only the selected ASR backend's model is downloaded at runtime, alongside the embedding model. The wake word models are always bundled.

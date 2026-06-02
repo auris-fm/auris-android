@@ -1191,7 +1191,7 @@ class SettingsImpl @Inject constructor(
 
     override val voiceControlAudioRoutePolicy = UserSetting.PrefFromString(
         sharedPrefKey = "voiceControlAudioRoutePolicy",
-        defaultValue = VoiceControlAudioRoutePolicy.HeadsetOnly,
+        defaultValue = VoiceControlAudioRoutePolicy.SpeakerExperimental,
         sharedPrefs = sharedPreferences,
         fromString = VoiceControlAudioRoutePolicy::fromValue,
         toString = VoiceControlAudioRoutePolicy::value,

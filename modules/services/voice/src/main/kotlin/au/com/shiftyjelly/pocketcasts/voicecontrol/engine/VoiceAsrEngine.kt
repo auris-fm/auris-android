@@ -75,9 +75,10 @@ class VoiceAsrEngine @Inject constructor(
                         is VoiceSegmenterResult.SpeechContinuing -> { /* accumulating frames */ }
 
                         is VoiceSegmenterResult.SpeechEnded -> {
+                            val totalSamples = result.frames.sumOf { it.samples.size }
+                            val durationMs = totalSamples * 1000L / 16000
                             val frameCount = result.frames.size
-                            val durationMs = frameCount * 64L
-                            Timber.i("VAD: speech ended (%d frames, ~%dms)", frameCount, durationMs)
+                            Timber.i("VAD: speech ended (%d frames, %d samples, ~%dms)", frameCount, totalSamples, durationMs)
 
                             val audio = shouldTranscribe(result)
                             if (audio != null) {

@@ -12,7 +12,7 @@ Whether a command needs a **wake word** depends on how exposed the microphone is
 - **No wake word** in low-false-positive contexts — when audio is playing through a headset/earbuds with a microphone, or when the
   app is in the foreground with the screen visible. Every recognized command executes directly.
 - **Wake word required** in every other listening context, where the microphone is exposed to podcast audio or ambient speech.
-  The wake word ("Auris" by default, or a user-defined keyword enrolled from a voice sample) must precede a command.
+  The wake word ("Auris" by default) must precede a command.
 
 Recognition runs on a downloaded local model stack and supports natural phrasing, accents, slang, and multiple languages.
 Playback execution stays deterministic: the model interprets intent, but only validated intents can affect playback.
@@ -22,8 +22,8 @@ Playback execution stays deterministic: the model interprets intent, but only va
 - Low-latency response for common playback commands (sub-second target on supported devices).
 - A first-class voice control surface that complements existing media controls rather than replacing them.
 - Fully on-device recognition and intent interpretation after the initial model download.
-- Wake-word-free operation in low-false-positive contexts, with a wake word (built-in "Auris" or a
-  user-enrolled custom keyword) required when the mic is exposed to podcast or ambient audio.
+- Wake-word-free operation in low-false-positive contexts, with a wake word (built-in "Auris")
+  required when the mic is exposed to podcast or ambient audio.
 - Microphone off unless a listening context is active — including paused playback, so hands-free
   "resume" and seek still work — and stopped as soon as the context ends, for privacy and battery.
 - Adjustable gate logic that can be tuned without changing recognition or playback command execution.
@@ -143,9 +143,8 @@ In `WakeWord` mode, the app ignores speech until it hears the wake word. Hearing
 this window, follow-up commands do not need the wake word. The window stays open while the user keeps talking, and closes after a
 silence longer than the conversation timeout (10 seconds by default). After that, the wake word is needed again.
 
-The wake word is **"Auris"** by default. Users may instead enroll a **custom keyword from a short voice sample**. Wake-word detection,
-the built-in and custom keyword models, and the command-window mechanics are owned by the
-[ASR Intent Pipeline spec](asr-intent-pipeline.md); this spec owns only *when* each mode applies.
+The wake word is **"Auris"** by default. Wake-word detection, the model, and the command-window mechanics are
+owned by the [ASR Intent Pipeline spec](asr-intent-pipeline.md); this spec owns only *when* each mode applies.
 
 The mode reacts to change: it is recomputed when playback starts or stops, the route changes, or the app moves into or out of the
 visible foreground. For example, unplugging a headset during playback switches `Continuous` → `WakeWord` without stopping the
@@ -219,7 +218,7 @@ The executor must keep seek positions within the episode's length, and must reje
 
 ## Model Management
 
-Model download, verification, storage, and the custom wake-word template are owned by the recognition pipeline
+Model download, verification, and storage are owned by the recognition pipeline
 ([ASR Intent Pipeline spec](asr-intent-pipeline.md)). The core spec consumes only the pipeline's readiness signal: the gate's
 `ModelsReady` blocks listening until the pipeline reports its models are ready, and first-run setup surfaces download progress
 to the user (see Lifecycle and Privacy and UX).
@@ -268,8 +267,7 @@ Pipeline-internal latency tactics (model warmup, segmentation tuning, determinis
 - The app explains that voice audio is processed locally.
 - Downloaded models are managed on-device.
 - A persistent notification indicates active listening, and should reflect whether the current mode is continuous or wake-word.
-- Settings let the user pick the wake word ("Auris" or a custom keyword) and enroll a custom keyword from a short voice sample. The
-  enrolled sample/template is stored locally and never uploaded; it can be deleted from settings.
+- Settings let the user see the current wake word ("Auris"). Custom wake words require model retraining and are not supported in the initial release.
 - Settings show current status: active (continuous), active (wake-word), no microphone on this route, blocked by model download,
   blocked by permission, blocked by a conflict (call, casting, or battery saver), or disabled by user.
 - No raw audio should be logged, including wake-word enrollment audio.
@@ -311,7 +309,7 @@ Manual/device tests:
 - Wired headset, Bluetooth earbuds, headset without microphone, and speaker route.
 - Continuous mode: headset playback and app-foreground-visible both trigger wake-word-free commands.
 - Wake-word mode: speaker/background playback requires "Auris" before the first command; follow-up commands within the conversation need no wake word; the window times out after ~10s of silence and the wake word is required again.
-- Custom wake-word enrollment from a voice sample, then detection; deletion of the enrolled template.
+- Wake-word detection of "Auris" in wake-word mode; command window opens on detection.
 - Speaker route false-positive rate against podcast audio and ambient speech.
 - Airplane mode after model download.
 - Battery saver.

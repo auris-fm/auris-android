@@ -85,25 +85,21 @@ fires:
 
 ### Model
 
-Wake word detection uses **sherpa-onnx Keyword Spotting**, a tiny ASR-based approach. It shares the ONNX Runtime stack already used for Silero VAD and (optionally) for the SenseVoice ASR backend. The model is `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01-mobile` (~17 MB extracted, English), an ONNX Zipformer with ~3.3M parameters running on CPU. It is bundled in the app (not downloaded), so detection always works regardless of network state.
+Wake word detection uses an **openWakeWord Conv-Attention classifier** trained via [livekit-wakeword](https://github.com/livekit/livekit-wakeword) and exported to ONNX. Inference runs directly on `onnxruntime-android` — the same runtime already used for Silero VAD and the embedding model — through a 3-stage ONNX pipeline bundled in the app:
+
+1. **Mel spectrogram** (`oww/melspectrogram.onnx`, ~100 KB) — converts raw 16kHz PCM to 32 mel-filterbank frames.
+2. **Speech embedding** (`oww/embedding_model.onnx`, ~1.3 MB) — a frozen Google speech-embedding backbone that maps 76 mel frames to a 96-dim vector every 80ms.
+3. **Wake word classifier** (`oww/auris.onnx`, ~160 KB) — a Conv-Attention head trained to detect "Auris" over a 16-embedding (1,280ms) temporal window, outputting a single sigmoid score in [0,1].
+
+All three models are **bundled in the app** (not downloaded). Inference is stateful: mel frames and embeddings accumulate in rolling buffers, and the classifier runs on each new embedding. A score above the threshold (default 0.5) triggers detection. The mel spectrogram and embedding models are fixed for all wake words; only the classifier model is wake-word-specific.
+
+The 3-stage pipeline runs in a single C++ JNI module (`WakeWordJni.cpp`) linked into the existing `pocketcasts_voice_capture` shared library, following the same `dlsym`-based ONNX Runtime loading pattern used by `VadJni.cpp` and `EmbeddingJni.cpp`.
 
 ### Built-in keyword ("Auris")
 
-sherpa-onnx KWS accepts **custom keywords by text file — no training needed**. The wake word phrase is tokenized into the model's BPE units (`▁AUR IS`), given a boosting score and trigger threshold, and written to a `keywords.txt` that is bundled in assets alongside the model:
+The "Auris" classifier is trained with livekit-wakeword on synthetic TTS data, then exported to ONNX and bundled at `assets/oww/auris.onnx`. Training is reproducible from the livekit-wakeword config; retraining for a different wake word follows the same pipeline.
 
-```
-▁AUR IS :1.5 #0.35
-```
-
-At detection time the tiny ASR model runs beam search biased toward these token sequences; when the acoustic probability of a path containing the keyword exceeds the trigger threshold, the detector fires. This is the same mechanism as ASR hotword biasing — just with a much smaller model.
-
-### Custom keyword (voice-sample enrollment)
-
-Custom keywords use the **same sherpa-onnx model and the same text-file mechanism**. The user picks a phrase, it is tokenized and written to `keywords.txt` in app-private storage, and the detector reloads its keywords. No retraining, no TTS generation, no audio samples needed — the model is already trained to recognize English speech, and the text-based keyword file is sufficient.
-
-Because the model is English-only, custom phrases must be English or English-like. Custom keyword enrollment is therefore a UX flow (choose phrase → tokenize → write keywords file → reload detector) rather than a machine-learning flow (record samples → train → deploy). Raw audio is never stored.
-
-If no custom keyword is configured, the bundled "Auris" keywords file is used. If the custom keyword file fails to parse or the phrase cannot be tokenized, detection falls back to "Auris".
+The bundled "Auris" model is the default. The wake word detector can be swapped by changing the DI binding — the existing `SherpaOnnxKwsDetector` is kept in the codebase (unused) as a fallback if needed.
 
 ## ASR Backend Layer
 
@@ -263,7 +259,7 @@ The downloader handles resumable HTTP download with retry, SHA-256 verification,
 - SenseVoice (optional acceleration): model + tokens (sherpa-onnx assets), into `filesDir/sensevoice-model/`.
 - whisper-npu (optional phase): QNN context binaries.
 - Embedding: `model_opt2_QInt8.onnx` + `tokenizer.json`, into `filesDir/embedding-model/`.
-- Wake word: `sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01-mobile` (~17 MB extracted, ONNX) + tokens are **bundled in the app** (not downloaded), so the wake word always ships with the binary. A bundled `keywords.txt` defines "Auris" with boosting score and threshold. A user's custom keyword is a separate `keywords.txt` written to app-private storage (a text file, not audio) and is deletable from settings.
+- Wake word: openWakeWord 3-stage ONNX pipeline (~1.6 MB total: mel spectrogram ~100 KB, embedding ~1.3 MB, "Auris" classifier ~160 KB) **bundled in the app** (not downloaded), so the wake word always ships with the binary. The sherpa-onnx KWS detector is retained in the codebase (unused) for easy fallback.
 
 ## Language Coverage
 
@@ -283,7 +279,7 @@ The downloader handles resumable HTTP download with retry, SHA-256 verification,
 | `AsrBackend` (+ 3 impls) | Transcribe an utterance |
 | `AsrBackendSelector` | Pick backend by hardware + locale |
 | `SignalFilter` | Playback cross-correlation |
-| `WakeWordDetector` | Per-segment keyword spotting via sherpa-onnx KWS; gates ASR in wake-word mode. Bundled "Auris" keywords file, custom keywords by text file — no training needed |
+| `WakeWordDetector` | Per-segment wake word spotting via openWakeWord 3-stage ONNX pipeline; gates ASR in wake-word mode. Bundled "Auris" classifier trained via livekit-wakeword. sherpa-onnx KWS detector retained in codebase (unused) for easy switching |
 | `IntentMatcher` | Embedding classification + edit-distance fallback |
 | `EntityExtractor` | Rule-based slot extraction (English by default; native grammar on the SenseVoice path) |
 | `EntityNormalizer` | Rule-based normalization of time/number expressions |
@@ -301,7 +297,8 @@ implementation("com.k2fsa.sherpa.onnx:sherpa-onnx:<ver>")
 
 // whisper.cpp backend — built from source via CMake in the voice module
 // NPU backend (optional) — Qualcomm QNN / WhisperKit-Android, Snapdragon-gated
-// Wake word — sherpa-onnx KWS model (ONNX, bundled), runs on the same onnxruntime as VAD/embeddings
+// Wake word — openWakeWord 3-stage ONNX pipeline (bundled), runs on the same onnxruntime as VAD/embeddings
+//             sherpa-onnx KWS detector retained in codebase (unused) for easy switching
 ```
 
 The embedding tokenizer is a pure-Kotlin BPE parser over HuggingFace `tokenizer.json`. The entity engine is pure Kotlin/JVM with no native deps. Every bundled `.so` must keep 16 KB page-size alignment.
@@ -319,8 +316,8 @@ The embedding tokenizer is a pure-Kotlin BPE parser over HuggingFace `tokenizer.
 | NPU unavailable at runtime despite Snapdragon probe | Selector falls through to SenseVoice / whisper.cpp |
 | Utterance fails cross-correlation | Dropped silently |
 | In wake-word mode, segment without the wake word | Dropped before ASR; no further processing |
-| Custom keyword file missing or fails to parse | Fall back to the bundled "Auris" keywords file |
 | Wake-word detection cannot run in a WakeWord-mode context | Listening is treated as `Off` (mic stays closed); never fall back to continuous, so an exposed mic can never bypass the wake word |
+| Wake word model fails to load | Detector reports `isReady = false`; `ListeningModePolicy` treats wake-word mode as unavailable and falls back to `Off` |
 | Embedding confidence below threshold AND edit distance low | No intent (null) |
 | Relative intent (seek, adjust speed/volume) with no extracted slot | Use the default delta (seek ±30s, adjust speed ±0.5, adjust volume ±10) |
 | Absolute intent (set speed/volume, seek absolute, sleep timer) with no extracted slot | Reject — no action, since there is no safe default value |
@@ -331,7 +328,7 @@ The embedding tokenizer is a pure-Kotlin BPE parser over HuggingFace `tokenizer.
 
 - **Unit**: `AsrBackendSelectorTest` — selection matrix across (Snapdragon?, NPU?, locale), including NPU-not-shipped. `IntentMatcherTest` — similarity ranking, edit-distance fallback, thresholds. `EntityExtractorTest` / `EntityNormalizerTest` — English duration/number/ordinal parsing ("half a minute" → 30, "2 and a half minutes" → 150) plus the native grammar on the SenseVoice path ("一分半" → 90).
 - **Backend (instrumentation, real model)**: `WhisperCppBackendTest`, `SenseVoiceBackendTest` — fixed WAV in, assert non-empty transcript and detected language.
-- **Wake word**: `WakeWordDetectorTest` — bundled "Auris" keywords fire above threshold on TTS-generated "Auris" clips, non-wake speech does not fire; custom keyword file with a user-chosen phrase fires on that phrase and not others; missing/failed custom file falls back to "Auris"; combined "Auris, skip forward" forwards the command remainder to ASR. Command-window behavior: opens on detection, stays open across follow-up utterances (no re-trigger) while speech continues, and closes only after a silence gap exceeding the conversation timeout (default 10s).
+- **Wake word**: `WakeWordDetectorTest` — bundled "Auris" classifier fires above threshold on TTS-generated "Auris" clips, non-wake speech does not fire; combined "Auris, skip forward" forwards the command remainder to ASR. Command-window behavior: opens on detection, stays open across follow-up utterances (no re-trigger) while speech continues, and closes only after a silence gap exceeding the conversation timeout (default 10s).
 - **Integration**: pre-recorded WAV clips per language. "fast forward 30 seconds" (en) and "快进半分钟" (zh) both reach `SeekRelative(30000)` regardless of which backend produced the transcript. "pray" → `Resume` via edit distance. Podcast bleed → no false intent. In wake-word mode, a bare command is ignored until preceded by the wake word.
 - **Performance**: short-command latency (2–4s utterance) on a mid-range device, confirming the whisper.cpp `audio_ctx`/quantization/single-encode tuning.
 - **Regression**: existing `VoiceIntentExecutor` and gate-rule tests pass. Embedding matcher initializes with no ASR backend started (verifies ORT independence).

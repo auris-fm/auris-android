@@ -59,8 +59,8 @@ class VoiceControlServiceController @Inject constructor(
         combine(gate.state, appLifecycleProvider.isInForeground) { gateState, foreground ->
             gateState to foreground
         }.onEach { (gateState, foreground) ->
-            if (gateState.allowed && foreground && !serviceStarted) {
-                Timber.i("VoiceControlServiceController: gate allowed + foreground, starting service")
+            if (gateState.allowed && !serviceStarted) {
+                Timber.i("VoiceControlServiceController: gate allowed, starting service")
                 start()
             }
         }.launchIn(scope)

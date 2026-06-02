@@ -34,7 +34,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoutePolicyRule
-import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.SherpaOnnxKwsDetector
+import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.OpenWakeWordDetector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import dagger.Binds
 import dagger.Module
@@ -65,7 +65,7 @@ abstract class VoiceControlModule {
 
     @Binds abstract fun bindEntityExtractor(impl: GrammarEntityExtractor): EntityExtractor
 
-    @Binds abstract fun bindWakeWordDetector(impl: SherpaOnnxKwsDetector): WakeWordDetector
+    @Binds abstract fun bindWakeWordDetector(impl: OpenWakeWordDetector): WakeWordDetector
 
     companion object {
         @Provides @Singleton

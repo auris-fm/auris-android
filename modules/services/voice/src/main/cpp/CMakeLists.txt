@@ -56,6 +56,7 @@ add_library(pocketcasts_voice_capture SHARED
     VadJni.cpp
     EmbeddingJni.cpp
     WhisperJni.cpp
+    WakeWordJni.cpp
 )
 
 target_include_directories(pocketcasts_voice_capture PRIVATE

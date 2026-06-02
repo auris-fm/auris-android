@@ -4,9 +4,9 @@
 
 > **For agentic workers:** Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A multi-backend, on-device ASR layer (`AsrBackend` + `AsrBackendSelector`) fed by a `SignalFilter` (playback cross-correlation) and a `WakeWordDetector` (openWakeWord "Auris" classifier trained via livekit-wakeword, 3-stage ONNX pipeline, bundled) gate, then a language-agnostic intent pipeline: an embedding-based intent matcher (`multilingual-e5-small` ONNX) with edit-distance fallback, plus a pure-Kotlin rule-based entity extractor and normalizer. Everything runs on CPU (or the NPU, in the optional backend).
+**Goal:** A multi-backend, on-device ASR layer (`AsrBackend` + `AsrBackendSelector`) fed by a `SignalFilter` (playback cross-correlation) and a `WakeWordDetector` (openWakeWord "Auris" classifier trained via livekit-wakeword, 3-stage ONNX pipeline, bundled) gate, then a finetuned **FunctionGemma-270M** intent router on **LiteRT-LM**: intent classification, entity extraction, and rejection (`no_match`) in a single inference pass. The previous embedding-based matcher, entity grammars, and ONNX Runtime embedding engine are retained in the codebase (unused) as a fallback for future native-text ASR backends.
 
-**Tech Stack:** sherpa-onnx (SenseVoice + bundled ONNX Runtime), whisper.cpp (built from source via CMake), `onnxruntime-android` (standalone, for embeddings), `multilingual-e5-small` ONNX (INT8, ~118 MB), pure-Kotlin BPE tokenizer + entity engine. Optional: Qualcomm QNN / WhisperKit-Android for the NPU backend.
+**Tech Stack:** sherpa-onnx (SenseVoice + bundled ONNX Runtime), whisper.cpp (built from source via CMake), LiteRT-LM (Google on-device inference, for FunctionGemma-270M). Optional: Qualcomm QNN / WhisperKit-Android for the NPU backend.
 
 The work is phased so the pipeline is functional after Phase 1 and improves with each later phase.
 
@@ -81,147 +81,112 @@ Goal: the full pipeline works for all languages via the universal whisper.cpp ba
 
 - [ ] **Step 1: Download by `ModelSpec`** — given the selected backend's `ModelSpec`, download its files (resume, retry, SHA-256, atomic rename) into the backend's `targetDir`. whisper.cpp: one quantized `ggml-*.bin` into `filesDir/whisper-model/`.
 
-### Task 6: Embedding intent matcher with standalone ONNX Runtime
+### Task 6: FunctionGemma intent router with LiteRT-LM
 
-**Files to create/modify:**
-- `modules/services/voice/src/main/kotlin/.../intent/EmbeddingIntentMatcher.kt`
-- `modules/services/voice/src/main/cpp/EmbeddingJni.cpp` + `.h` (or pure-Kotlin ORT Java API)
-- `modules/services/voice/src/main/kotlin/.../di/VoiceControlModule.kt`
-- `modules/services/voice/build.gradle.kts` — add `onnxruntime-android`.
+**Files to create:**
+- `modules/services/voice/src/main/kotlin/.../intent/FunctionGemmaIntentRouter.kt` — implements `VoiceRecognizer`, builds prompt from transcript + tool schema JSON, calls LiteRT-LM, parses JSON response, maps to `VoiceIntent`.
+- `modules/services/voice/src/main/kotlin/.../intent/ToolSchema.kt` — the 12-tool JSON schema as a constant plus a `ToolCall` data class and a JSON parser.
 
-- [ ] **Step 1: Standalone ORT** — the embedding model links/loads its own `onnxruntime-android`, independent of any ASR backend. No reliance on another component loading ORT first.
+**Files to modify:**
+- `modules/services/voice/build.gradle.kts` — add `com.google.ai.edge.litert:litert-lm`.
+- `modules/services/voice/src/main/kotlin/.../di/VoiceControlModule.kt` — bind `FunctionGemmaIntentRouter` as the `VoiceRecognizer` implementation. `EmbeddingIntentMatcher` binding is removed (class kept, not bound).
 
-- [ ] **Step 2: Tokenizer** — pure-Kotlin BPE over HuggingFace `tokenizer.json` (preferred), or a JNI SentencePiece wrapper.
+**Existing files kept but unused (same pattern as `SherpaOnnxKwsDetector`):**
+- `EmbeddingIntentMatcher.kt`, `EmbeddingEngine.kt`, `EmbeddingJni.kt`, `JniEmbeddingEngine.kt`, `BpeTokenizer.kt`, `TextTokenizer.kt`, `EditDistance.kt` — embedding pipeline retained for future native-text ASR backends.
+- `GrammarEntityExtractor.kt`, `EnGrammar.kt`, `ZhGrammar.kt`, `LanguageGrammar.kt` — entity grammars retained for future native-text ASR backends.
+- `EntityExtractor.kt`, `EntityResult` — interface and data class retained.
 
-- [ ] **Step 3: `EmbeddingIntentMatcher`** implementing `VoiceRecognizer`:
+- [ ] **Step 1: Add LiteRT-LM dependency** — `implementation("com.google.ai.edge.litert:litert-lm:<ver>")` in `build.gradle.kts`.
+
+- [ ] **Step 2: `ToolSchema.kt`** — define the 12-tool JSON schema as a compile-time constant. Define `ToolCall(name: String, arguments: Map<String, JsonElement>)` data class and a parser that extracts the first tool call from the model's JSON response.
+
+- [ ] **Step 3: `FunctionGemmaIntentRouter`** implementing `VoiceRecognizer`:
 
 ```kotlin
 @Singleton
-class EmbeddingIntentMatcher @Inject constructor(
-    @Named("embeddingModel") private val modelFile: File,
+class FunctionGemmaIntentRouter @Inject constructor(
+    @ApplicationContext private val context: Context,
 ) : VoiceRecognizer {
 
-    private val intentEmbeddings: MutableMap<String, FloatArray> = linkedMapOf()
+    private var model: LiteRtModel? = null
+    private var initialized = false
 
-    private val intentKeywords = linkedMapOf(
-        "pause" to listOf("pause", "stop", "hold"),
-        "resume" to listOf("resume", "play", "continue", "start"),
-        "seek_relative_forward" to listOf("fast forward", "skip forward", "jump ahead"),
-        "seek_relative_backward" to listOf("rewind", "go back", "skip back"),
-        "seek_absolute" to listOf("go to", "jump to"),
-        "next_chapter" to listOf("next chapter", "skip chapter"),
-        "previous_chapter" to listOf("previous chapter", "last chapter", "prior chapter"),
-        "next_episode" to listOf("next episode"),
-        "set_speed" to listOf("set speed", "change speed"),
-        "adjust_speed_up" to listOf("faster", "speed up", "increase speed"),
-        "adjust_speed_down" to listOf("slower", "speed down", "decrease speed"),
-        "set_volume" to listOf("set volume"),
-        "adjust_volume_up" to listOf("volume up", "louder", "increase volume"),
-        "adjust_volume_down" to listOf("volume down", "quieter", "decrease volume"),
-        "sleep_timer" to listOf("sleep timer", "set timer", "stop in"),
-        "set_trim" to listOf("trim silence", "silence trimming"),
-        "set_volume_boost" to listOf("boost", "volume boost", "loudness"),
-        "add_bookmark" to listOf("bookmark", "save this", "mark this"),
-    )
-
-    private val editDistanceFallback = linkedMapOf(
-        "pause" to "pause", "stop" to "pause", "hold" to "pause",
-        "resume" to "resume", "play" to "resume", "start" to "resume",
-        "fast forward" to "seek_relative_forward", "skip forward" to "seek_relative_forward",
-        "rewind" to "seek_relative_backward", "go back" to "seek_relative_backward",
-        "next chapter" to "next_chapter", "previous chapter" to "previous_chapter",
-        "next episode" to "next_episode",
-        "faster" to "adjust_speed_up", "speed up" to "adjust_speed_up",
-        "slower" to "adjust_speed_down", "speed down" to "adjust_speed_down",
-        "volume up" to "adjust_volume_up", "louder" to "adjust_volume_up",
-        "volume down" to "adjust_volume_down", "quieter" to "adjust_volume_down",
-        "sleep timer" to "sleep_timer", "set timer" to "sleep_timer",
-        "trim silence" to "set_trim",
-        "boost" to "set_volume_boost", "volume boost" to "set_volume_boost",
-        "bookmark" to "add_bookmark", "save this" to "add_bookmark",
-    )
-
-    fun initialize() {
-        for ((intent, keywords) in intentKeywords) {
-            intentEmbeddings[intent] = averageAndNormalize(keywords.map { embed(it) })
+    override suspend fun ensureReady(): Result<Unit> {
+        if (initialized) return Result.success(Unit)
+        return withContext(Dispatchers.IO) {
+            try {
+                val modelFile = File(context.filesDir, "functiongemma-model/model.litertlm")
+                model = LiteRtModel.load(modelFile.absolutePath)
+                initialized = true
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
         }
     }
 
-    fun match(transcript: String): IntentMatch? {
-        val q = embed(transcript)
-        var bestScore = 0.0; var bestIntent: String? = null
-        for ((intent, vec) in intentEmbeddings) {
-            val score = cosineSimilarity(q, vec)
-            if (score > bestScore) { bestScore = score; bestIntent = intent }
-        }
-        if (bestScore >= EMBEDDING_THRESHOLD && bestIntent != null) {
-            return IntentMatch(bestIntent, bestScore, "embedding")
-        }
-        val lower = transcript.lowercase().trim()
-        var bestDist = Int.MAX_VALUE; var fallback: String? = null
-        for ((cmd, intent) in editDistanceFallback) {
-            val dist = levenshteinDistance(lower, cmd)
-            val norm = dist.toDouble() / maxOf(lower.length, cmd.length)
-            if (norm < EDIT_DISTANCE_THRESHOLD && dist < bestDist) { bestDist = dist; fallback = intent }
-        }
-        if (fallback != null) return IntentMatch(fallback, 1.0 - bestDist.toDouble() / lower.length, "edit_distance")
-        return null
+    override suspend fun recognize(
+        transcript: String,
+        context: VoiceRecognitionContext,
+    ): VoiceIntent? = withContext(Dispatchers.IO) {
+        if (!initialized || transcript.isBlank()) return@withContext null
+
+        val prompt = buildPrompt(transcript, TOOL_SCHEMA_JSON)
+        val response = model!!.generate(prompt, maxTokens = 128)
+        val toolCall = parseToolCall(response) ?: return@withContext null
+        mapToIntent(toolCall)
     }
 
-    companion object {
-        private const val EMBEDDING_THRESHOLD = 0.6
-        private const val EDIT_DISTANCE_THRESHOLD = 0.3
+    private fun buildPrompt(transcript: String, tools: String): String {
+        // FunctionGemma prompt format: query + tools
+        return "<start_of_turn>user
+$transcript
+
+Tools:
+$tools<end_of_turn>
+<start_of_turn>model
+"
+    }
+
+    private fun parseToolCall(response: String): ToolCall? { /* JSON extraction */ }
+
+    private fun mapToIntent(call: ToolCall): VoiceIntent? = when (call.name) {
+        "pause" -> VoiceIntent.Pause
+        "resume" -> VoiceIntent.Resume
+        "seek_relative" -> { /* extract delta_seconds → SeekRelative */ }
+        "set_speed" -> { /* extract speed or delta → SetSpeed or AdjustSpeed */ }
+        "set_volume" -> { /* extract volume or delta → SetVolume or AdjustVolume */ }
+        "sleep_timer" -> { /* extract minutes → SleepTimer */ }
+        "set_trim" -> { /* extract mode → SetTrimMode */ }
+        "seek_absolute" -> { /* extract position_seconds → SeekAbsolute */ }
+        "next_chapter" -> VoiceIntent.NextChapter
+        "previous_chapter" -> VoiceIntent.PreviousChapter
+        "next_episode" -> VoiceIntent.NextEpisode
+        "no_match" -> null
+        else -> null
     }
 }
-
-data class IntentMatch(val intent: String, val confidence: Double, val method: String)
 ```
 
-- [ ] **Step 4: `VoiceRecognizer`** — `ensureReady()` waits for model load + `initialize()`; `recognize(transcript, context)` calls `match()` → `EntityExtractor.extract()` → assembles a `VoiceIntent`. Bind in DI: `@Binds fun bindVoiceRecognizer(impl: EmbeddingIntentMatcher): VoiceRecognizer`.
+- [ ] **Step 4: DI wiring** — in `VoiceControlModule.kt`, change the `VoiceRecognizer` binding: `@Binds abstract fun bindVoiceRecognizer(impl: FunctionGemmaIntentRouter): VoiceRecognizer`. Remove the `EmbeddingIntentMatcher` binding. Keep the `EntityExtractor` binding but it is no longer used by the active `VoiceRecognizer`.
 
-- [ ] **Step 5: Download** — `model_opt2_QInt8.onnx` + `tokenizer.json` into `filesDir/embedding-model/`, provided via `@Named("embeddingModel")` / `@Named("embeddingTokenizer")`.
+- [ ] **Step 5: Model download** — add FunctionGemma model to `ModelManager`: resumable HTTP download of the finetuned `.litertlm` model + tokenizer into `filesDir/functiongemma-model/`. SHA-256 verification, atomic rename. The `ModelsReady` gate condition blocks listening until the model is downloaded and loaded.
 
-### Task 7: Entity extractor + normalizer (pure Kotlin)
+- [ ] **Step 6: Fine-tuning** — produce the finetuned model:
+  1. Write 50-100 seed examples covering all 12 tools + `no_match` (podcast bleed, ambient speech, questions, non-command utterances).
+  2. Expand to 2,000-5,000 synthetic examples via Google's FunctionGemma data pipeline.
+  3. Fine-tune on M2 Mac via MLX-LM with LoRA rank 8 (15 min) or free Colab TPU (5 min).
+  4. Evaluate on held-out 20%: target >95% tool accuracy, >90% argument accuracy, >98% rejection.
+  5. Convert SafeTensors to LiteRT `.litertlm` format via Google's conversion tool.
+  6. Host the model file and tokenizer alongside existing model downloads.
 
-**Files to create:**
-- `modules/services/voice/src/main/kotlin/.../intent/EntityExtractor.kt`
-- `modules/services/voice/src/main/kotlin/.../intent/EntityNormalizer.kt`
-- `modules/services/voice/src/main/kotlin/.../intent/lang/{NumberGrammar,DurationGrammar,OrdinalGrammar,EnGrammar,ZhGrammar}.kt`
+### Task 7: Entity extraction — retained, not wired
 
-- [ ] **Step 1: Grammar interface**
+The entity extraction layer (`GrammarEntityExtractor`, `EnGrammar`, `ZhGrammar`, `LanguageGrammar`, `EntityExtractor`, `EntityResult`) is **already implemented** from the original embedding-based pipeline. In the FunctionGemma architecture, entity extraction is handled by the model itself — the mapper in `FunctionGemmaIntentRouter` reads typed arguments directly from the JSON tool call output.
 
-```kotlin
-interface LanguageGrammar {
-    val languageCode: String
-    fun canParse(text: String): Boolean
-    fun extractDuration(text: String): List<ExtractedEntity<Int>>   // → seconds
-    fun extractNumber(text: String): List<ExtractedEntity<Double>>
-    fun extractOrdinal(text: String): List<ExtractedEntity<Int>>    // → 0-based
-    fun extractTrimMode(text: String): List<ExtractedEntity<String>>
-    fun extractBoolean(text: String): List<ExtractedEntity<Boolean>>
-}
+**No changes needed.** The entity extraction code is retained in the codebase, not bound in DI for the default Whisper-English path. It serves as a fallback if a future native-text ASR backend (SenseVoice) is activated.
 
-data class ExtractedEntity<T>(val value: T, val span: String, val startIndex: Int, val endIndex: Int)
-```
-
-- [ ] **Step 2: English grammar** — durations ("30 seconds", "half a minute" → 30; "2 and a half minutes" → 150), numbers ("1.5", "two", "2x", "double" → 2.0), ordinals ("first" → 0, "last" → -1), trim modes, booleans.
-
-- [ ] **Step 3: Chinese grammar** — "半分钟" → 30, "一分半" → 90, "5分钟" → 300, "两倍" → 2.0, "第三" → 2, booleans 开/关.
-
-- [ ] **Step 4: `EntityExtractor`** — pick grammar by `canParse` (script/language hint), dispatch by intent type to the relevant slot, with defaults: seek ±30s, adjust speed ±0.5, adjust volume ±10, sleep 30 min.
-
-```kotlin
-data class EntityResult(
-    val deltaSeconds: Int? = null, val positionSeconds: Int? = null,
-    val speed: Double? = null, val speedDelta: Double? = null,
-    val volume: Int? = null, val volumeDelta: Int? = null,
-    val sleepMinutes: Int? = null, val chapterIndex: Int? = null,
-    val trimMode: String? = null, val boostEnabled: Boolean? = null,
-    val bookmarkTitle: String? = null, val chapterTitle: String? = null,
-)
-```
-
-- [ ] **Step 5: Wire into `recognize()`** — `match()` → `IntentMatch` → `extract()` → `VoiceIntent`. Chapter/bookmark titles: remaining text after stripping matched keywords and extracted spans.
+- [ ] **Step 1: Verify compilation** — confirm existing entity extraction files compile without changes.
 
 ### Task 8: Wake word detection
 
@@ -272,9 +237,10 @@ The detector uses an **openWakeWord Conv-Attention classifier** trained via live
 ### Task 9: Phase 1 build + verify
 
 - [ ] **Compile** `./gradlew :modules:services:voice:assembleDebug`
-- [ ] **Unit tests** `./gradlew :modules:services:voice:testDebugUnitTest` — `AsrBackendSelectorTest`, `EmbeddingIntentMatcherTest`, `EntityExtractorTest`, `EntityNormalizerTest`, `WakeWordDetectorTest`.
+- [ ] **Unit tests** `./gradlew :modules:services:voice:testDebugUnitTest` — `AsrBackendSelectorTest`, `FunctionGemmaIntentRouterTest` (mapper coverage, `no_match` → null, parameter clamping), `ToolSchemaTest` (valid JSON, all 12 tools map to `VoiceIntent` variants), existing `EntityExtractorTest` / `EntityNormalizerTest` (retained, still pass), `WakeWordDetectorTest`.
 - [ ] **Spotless** `./gradlew spotlessApply`
-- [ ] **Integration smoke (device)**: "fast forward 30 seconds" (en) → `SeekRelative(30000)`; "快进半分钟" (zh) → `SeekRelative(30000)`; "pray" → `Resume`; podcast bleed → no false intent; in wake-word mode a bare command is ignored until preceded by "Auris".
+- [ ] **Intent router instrumentation**: evaluate the finetuned FunctionGemma model on a held-out test set — tool accuracy >95%, argument accuracy >90%, rejection >98%.
+- [ ] **Integration smoke (device)**: "fast forward 30 seconds" (en) → `SeekRelative(30000)`; "快进半分钟" (zh) → `SeekRelative(30000)`; "3x speed" → `SetSpeed(3.0)`; "go back a minute" → `SeekRelative(-60000)`; podcast bleed → null (`no_match`); "what time is it" → null; in wake-word mode a bare command is ignored until preceded by "Auris".
 
 ---
 
@@ -322,14 +288,15 @@ Goal: fastest path on Snapdragon. May be deferred indefinitely; nothing else dep
 
 | Component | Format | Size |
 |---|---|---|
-| multilingual-e5-small | ONNX INT8 | ~118 MB |
-| BPE tokenizer (`tokenizer.json`) | JSON | ~16 MB |
-| Entity engine | Pure Kotlin | ~50 KB |
+| FunctionGemma-270M (finetuned) | LiteRT INT8 | ~270 MB |
 | whisper.cpp model (`ggml-small-q5_1`, baseline) | GGML quantized | ~190 MB |
 | whisper.cpp model (`ggml-base-q5_1`, fallback only) | GGML quantized | ~57 MB |
 | SenseVoice-Small (optional) | ONNX int8 | ~228 MB |
 | openWakeWord mel spectrogram (bundled) | ONNX | ~100 KB |
 | openWakeWord speech embedding (bundled) | ONNX | ~1.3 MB |
 | openWakeWord "Auris" classifier (bundled, trained) | ONNX | ~160 KB |
+| Embedding matcher + tokenizer + entity engine | ONNX + JSON + Kotlin (retained, unused) | ~134 MB |
 
-`ggml-small-q5_1` is the baseline because the translate-by-default path needs reliable translation, which `base` is markedly weaker at on short commands and bare numbers; `base-q5_1` is a fallback only if validation shows it is adequate and `small` misses the latency target. Only the selected ASR backend's model is downloaded at runtime, alongside the embedding model. The wake word models are always bundled.
+Total downloaded (baseline): whisper.cpp (~190 MB) + FunctionGemma (~270 MB) = **~460 MB**. The embedding model (~118 MB) and tokenizer (~16 MB) remain in the codebase but are not downloaded unless a native-text ASR backend is activated.
+
+`ggml-small-q5_1` is the baseline because the translate-by-default path needs reliable translation, which `base` is markedly weaker at on short commands and bare numbers; `base-q5_1` is a fallback only if validation shows it is adequate and `small` misses the latency target. Only the selected ASR backend's model and the FunctionGemma model are downloaded at runtime. The wake word models are always bundled.

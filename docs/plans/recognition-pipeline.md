@@ -85,7 +85,7 @@ Goal: the full pipeline works for all languages via the universal whisper.cpp ba
 
 **Files to create:**
 - `modules/services/voice/src/main/kotlin/.../intent/FunctionGemmaIntentRouter.kt` — implements `VoiceRecognizer`, builds prompt from transcript + tool schema JSON, calls LiteRT-LM, parses JSON response, maps to `VoiceIntent`.
-- `modules/services/voice/src/main/kotlin/.../intent/ToolSchema.kt` — the 12-tool JSON schema as a constant plus a `ToolCall` data class and a JSON parser.
+- `modules/services/voice/src/main/kotlin/.../intent/ToolSchema.kt` — the 25-tool JSON schema (one per domain + `no_match`) as a constant plus a `ToolCall` data class and a JSON parser.
 
 **Files to modify:**
 - `modules/services/voice/build.gradle.kts` — add `com.google.ai.edge.litert:litert-lm`.
@@ -98,7 +98,7 @@ Goal: the full pipeline works for all languages via the universal whisper.cpp ba
 
 - [ ] **Step 1: Add LiteRT-LM dependency** — `implementation("com.google.ai.edge.litert:litert-lm:<ver>")` in `build.gradle.kts`.
 
-- [ ] **Step 2: `ToolSchema.kt`** — define the 12-tool JSON schema as a compile-time constant. Define `ToolCall(name: String, arguments: Map<String, JsonElement>)` data class and a parser that extracts the first tool call from the model's JSON response.
+- [ ] **Step 2: `ToolSchema.kt`** — define the 25-tool JSON schema (one per feature domain + `no_match`) as defined in the [Voice Intents spec](../specs/voice-intents.md). Each domain is one tool with an `action` enum discriminating the specific operation. Define `ToolCall(name: String, action: String, params: Map<String, JsonElement>)` data class and a parser that extracts the first tool call from the model's JSON response.
 
 - [ ] **Step 3: `FunctionGemmaIntentRouter`** implementing `VoiceRecognizer`:
 
@@ -150,21 +150,9 @@ $tools<end_of_turn>
 
     private fun parseToolCall(response: String): ToolCall? { /* JSON extraction */ }
 
-    private fun mapToIntent(call: ToolCall): VoiceIntent? = when (call.name) {
-        "pause" -> VoiceIntent.Pause
-        "resume" -> VoiceIntent.Resume
-        "seek_relative" -> { /* extract delta_seconds → SeekRelative */ }
-        "set_speed" -> { /* extract speed or delta → SetSpeed or AdjustSpeed */ }
-        "set_volume" -> { /* extract volume or delta → SetVolume or AdjustVolume */ }
-        "sleep_timer" -> { /* extract minutes → SleepTimer */ }
-        "set_trim" -> { /* extract mode → SetTrimMode */ }
-        "seek_absolute" -> { /* extract position_seconds → SeekAbsolute */ }
-        "next_chapter" -> VoiceIntent.NextChapter
-        "previous_chapter" -> VoiceIntent.PreviousChapter
-        "next_episode" -> VoiceIntent.NextEpisode
-        "no_match" -> null
-        else -> null
-    }
+    private val mapper = ToolCallMapper()
+
+    private fun mapToIntent(call: ToolCall): VoiceIntent? = mapper.map(call)
 }
 ```
 
@@ -173,7 +161,7 @@ $tools<end_of_turn>
 - [ ] **Step 5: Model download** — add FunctionGemma model to `ModelManager`: resumable HTTP download of the finetuned `.litertlm` model + tokenizer into `filesDir/functiongemma-model/`. SHA-256 verification, atomic rename. The `ModelsReady` gate condition blocks listening until the model is downloaded and loaded.
 
 - [ ] **Step 6: Fine-tuning** — produce the finetuned model:
-  1. Write 50-100 seed examples covering all 12 tools + `no_match` (podcast bleed, ambient speech, questions, non-command utterances).
+  1. Write 100-200 seed examples covering all 25 tools + `no_match` (podcast bleed, ambient speech, questions, non-command utterances).
   2. Expand to 2,000-5,000 synthetic examples via Google's FunctionGemma data pipeline.
   3. Fine-tune on M2 Mac via MLX-LM with LoRA rank 8 (15 min) or free Colab TPU (5 min).
   4. Evaluate on held-out 20%: target >95% tool accuracy, >90% argument accuracy, >98% rejection.
@@ -237,7 +225,7 @@ The detector uses an **openWakeWord Conv-Attention classifier** trained via live
 ### Task 9: Phase 1 build + verify
 
 - [ ] **Compile** `./gradlew :modules:services:voice:assembleDebug`
-- [ ] **Unit tests** `./gradlew :modules:services:voice:testDebugUnitTest` — `AsrBackendSelectorTest`, `FunctionGemmaIntentRouterTest` (mapper coverage, `no_match` → null, parameter clamping), `ToolSchemaTest` (valid JSON, all 12 tools map to `VoiceIntent` variants), existing `EntityExtractorTest` / `EntityNormalizerTest` (retained, still pass), `WakeWordDetectorTest`.
+- [ ] **Unit tests** `./gradlew :modules:services:voice:testDebugUnitTest` — `AsrBackendSelectorTest`, `FunctionGemmaIntentRouterTest` (mapper coverage, `no_match` → null, parameter clamping), `ToolSchemaTest` (valid JSON, all 25 tools map to `VoiceIntent` variants), existing `EntityExtractorTest` / `EntityNormalizerTest` (retained, still pass), `WakeWordDetectorTest`.
 - [ ] **Spotless** `./gradlew spotlessApply`
 - [ ] **Intent router instrumentation**: evaluate the finetuned FunctionGemma model on a held-out test set — tool accuracy >95%, argument accuracy >90%, rejection >98%.
 - [ ] **Integration smoke (device)**: "fast forward 30 seconds" (en) → `SeekRelative(30000)`; "快进半分钟" (zh) → `SeekRelative(30000)`; "3x speed" → `SetSpeed(3.0)`; "go back a minute" → `SeekRelative(-60000)`; podcast bleed → null (`no_match`); "what time is it" → null; in wake-word mode a bare command is ignored until preceded by "Auris".

@@ -9,16 +9,22 @@ The [dialog docs](../dialogs/) define the full interaction patterns (phrasing, c
 ## Architecture
 
 ```text
-VoiceIntent (sealed hierarchy, domain-grouped)
+  ASR transcript
        │
        ▼
-VoiceIntentExecutor ─── dispatches by domain ───► VoiceSink (per domain)
+  FunctionGemma ── tool schema (~25 tools, one per feature + no_match)
        │
        ▼
-VoiceResponse? (silent | earcon | spoken)
+  ToolCallMapper ── (tool, action, params) → VoiceIntent
+       │
+       ▼
+  VoiceIntentExecutor ─── dispatches by domain ───► VoiceSink (per domain)
+       │
+       ▼
+  VoiceResponse (silent | earcon | spoken)
 ```
 
-Each domain has its own `VoiceSink` interface because domains touch different infrastructure (PlaybackManager, QueueManager, PodcastManager, etc.). The executor dispatches by intent domain to the correct sink and returns a `VoiceResponse` for the confirmation strategy (earcon, spoken, or silent — as defined in the dialogs).
+Each tool covers a coherent feature with 2–12 actions. The `action` enum discriminates the specific operation. This keeps individual tool schemas small enough for FunctionGemma-270M to reliably discriminate.
 
 ```kotlin
 sealed interface VoiceResponse {
@@ -28,889 +34,770 @@ sealed interface VoiceResponse {
 }
 ```
 
-## Intents by Domain
+## Tool Schema
 
-### Playback — Transport
+Each tool's parameters are the union of all its actions' parameters. Most are optional since different actions use different params. The `action` field is always required.
 
-| Intent | Slot | Response |
-|---|---|---|
-| `Pause` | — | earcon |
-| `Resume` | — | silent |
-| `SeekRelative(deltaMs: Int)` | `deltaMs` (+ forward, − backward) | silent |
-| `SeekAbsolute(positionMs: Int)` | `positionMs` | silent |
-| `NextEpisode` | — | earcon + announce title |
+### `playback`
 
-### Playback — Effects
-
-| Intent | Slot | Response |
-|---|---|---|
-| `SetSpeed(speed: Double)` | `speed` (0.5–5.0) | earcon + spoken value |
-| `AdjustSpeed(delta: Double)` | `delta` | earcon + spoken value |
-| `SetTrimMode(mode: String)` | `mode` (off/low/medium/high) | earcon + spoken mode |
-| `SetVolumeBoost(enabled: Boolean)` | `enabled` | earcon + spoken state |
-| `SetVolume(volume: Int)` | `volume` (0–100) | earcon |
-| `AdjustVolume(delta: Int)` | `delta` | earcon |
-
-### Playback — Sleep Timer
-
-| Intent | Slot | Response |
-|---|---|---|
-| `SleepSet(minutes: Int)` | `minutes` | earcon + spoken duration |
-| `SleepEndOfEpisode` | — | earcon + spoken |
-| `SleepEndOfChapter` | — | earcon + spoken |
-| `SleepAddTime(minutes: Int)` | `minutes` | earcon + spoken remaining |
-| `SleepCancel` | — | earcon + spoken |
-
-### Playback — Queries
-
-| Intent | Slot | Response |
-|---|---|---|
-| `QueryEffectsState` | — | spoken |
-| `QuerySleepTimer` | — | spoken |
-
-### Chapters
-
-| Intent | Slot | Response |
-|---|---|---|
-| `NextChapter` | — | silent |
-| `PreviousChapter` | — | silent |
-| `ChapterByIndex(index: Int)` | `index` (1-based) | silent |
-| `ChapterByTitle(query: String)` | `query` | silent |
-| `OpenChapterLink(index: Int)` | `index` | earcon |
-| `QueryChapterList` | — | spoken |
-| `QueryCurrentChapter` | — | spoken |
-| `QueryChapterCount` | — | spoken |
-| `QueryNextChapter` | — | spoken |
-
-### Bookmarks
-
-| Intent | Slot | Response |
-|---|---|---|
-| `AddBookmark(title: String?)` | `title` | earcon + spoken position |
-| `RenameBookmark(ref: BookmarkRef, title: String)` | `ref`, `title` | earcon |
-| `PlayBookmark(ref: BookmarkRef)` | `ref` | silent |
-| `DeleteBookmark(ref: BookmarkRef)` | `ref` | earcon |
-| `DeleteAllBookmarks` | — | earcon (explicit confirm) |
-| `QueryBookmarkList` | — | spoken |
-| `QueryBookmarkCount` | — | spoken |
-| `QueryNearbyBookmarks` | — | spoken |
-
-`BookmarkRef` is a discriminated reference — by title, by index, or "just made":
-```kotlin
-sealed interface BookmarkRef {
-    data class ByTitle(val query: String) : BookmarkRef
-    data class ByIndex(val index: Int) : BookmarkRef
-    data object Latest : BookmarkRef
+```json
+{
+  "name": "playback",
+  "description": "Basic playback controls: pause, resume, skip forward or backward, seek to a position, play next episode.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["pause", "resume", "seek_relative", "seek_to", "next_episode"]},
+    "seconds": {"type": "integer", "description": "Seconds. For seek_relative: signed delta (positive=forward, negative=backward). For seek_to: absolute position from 0."}
+  }
 }
 ```
 
-### Queue
-
-| Intent | Slot | Response |
+| Action | Params | Response |
 |---|---|---|
-| `QueueAddTop(episode: EpisodeRef)` | `episode` | earcon |
-| `QueueAddBottom(episode: EpisodeRef)` | `episode` | earcon |
-| `QueueRemove(episode: EpisodeRef)` | `episode` | earcon |
-| `QueueMoveToTop(episode: EpisodeRef)` | `episode` | earcon |
-| `QueueMoveToBottom(episode: EpisodeRef)` | `episode` | earcon |
-| `QueueClear` | — | earcon (explicit confirm) |
-| `QueueRemoveByPodcast(podcast: PodcastRef)` | `podcast` | earcon |
-| `QueueSort(order: SortOrder)` | `order` | earcon |
-| `QueryQueueContents` | — | spoken |
-| `QueryQueueNext` | — | spoken |
-| `QueryQueueLength` | — | spoken |
-| `QueryIsQueued(episode: EpisodeRef)` | `episode` | spoken |
+| `pause` | — | earcon |
+| `resume` | — | silent |
+| `seek_relative` | `seconds` | silent |
+| `seek_to` | `seconds` | silent |
+| `next_episode` | — | earcon + announce title |
 
-### Podcasts
+### `effects`
 
-| Intent | Slot | Response |
-|---|---|---|
-| `Subscribe(podcast: PodcastRef)` | `podcast` | earcon |
-| `Unsubscribe(podcast: PodcastRef)` | `podcast` | earcon |
-| `DownloadEpisode(episode: EpisodeRef)` | `episode` | earcon |
-| `DeleteDownload(episode: EpisodeRef)` | `episode` | earcon (explicit confirm) |
-| `StarEpisode(episode: EpisodeRef)` | `episode` | earcon |
-| `UnstarEpisode(episode: EpisodeRef)` | `episode` | earcon |
-| `ArchiveEpisode(episode: EpisodeRef)` | `episode` | earcon |
-| `UnarchiveEpisode(episode: EpisodeRef)` | `episode` | earcon |
-| `MarkPlayed(episode: EpisodeRef)` | `episode` | earcon |
-| `MarkUnplayed(episode: EpisodeRef)` | `episode` | earcon |
-| `RemoveFromHistory(episode: EpisodeRef)` | `episode` | earcon (explicit confirm) |
-| `BulkDownload(filter: EpisodeFilter)` | `filter` | earcon (explicit confirm) |
-| `BulkArchive(filter: EpisodeFilter)` | `filter` | earcon (explicit confirm) |
-| `BulkMarkPlayed(filter: EpisodeFilter)` | `filter` | earcon |
-| `AddToPlaylist(episode: EpisodeRef, playlist: PlaylistRef)` | `episode`, `playlist` | earcon |
-| `CreateFolder(name: String)` | `name` | earcon |
-| `RenameFolder(folder: FolderRef, name: String)` | `folder`, `name` | earcon |
-| `AssignToFolder(podcast: PodcastRef, folder: FolderRef)` | `podcast`, `folder` | earcon |
-| `RemoveFromFolder(podcast: PodcastRef)` | `podcast` | earcon |
-| `DeleteFolder(folder: FolderRef)` | `folder` | earcon (explicit confirm) |
-| `RatePodcast(podcast: PodcastRef, rating: Int)` | `podcast`, `rating` (1–5) | earcon |
-| `ToggleNotifications(podcast: PodcastRef, enabled: Boolean)` | `podcast`, `enabled` | earcon |
-| `AutoAddToQueue(podcast: PodcastRef, position: QueuePosition)` | `podcast`, `position` | earcon |
-| `AutoDownloadPodcast(podcast: PodcastRef, enabled: Boolean)` | `podcast`, `enabled` | earcon |
-
-### Playlists
-
-| Intent | Slot | Response |
-|---|---|---|
-| `CreatePlaylist(name: String?)` | `name` | earcon + spoken name |
-| `CreateSmartPlaylist(rules: SmartRules, name: String?)` | `rules`, `name` | earcon + spoken name |
-| `DeletePlaylist(playlist: PlaylistRef)` | `playlist` | earcon (explicit confirm) |
-| `RenamePlaylist(playlist: PlaylistRef, name: String)` | `playlist`, `name` | earcon |
-| `PlayAll(playlist: PlaylistRef, shuffle: Boolean)` | `playlist`, `shuffle` | silent |
-| `DownloadAll(playlist: PlaylistRef)` | `playlist` | earcon (explicit confirm) |
-| `PlaylistAddEpisode(episode: EpisodeRef, playlist: PlaylistRef)` | `episode`, `playlist` | earcon |
-| `PlaylistRemoveEpisode(episode: EpisodeRef, playlist: PlaylistRef)` | `episode`, `playlist` | earcon |
-| `ArchiveAll(playlist: PlaylistRef)` | `playlist` | earcon (explicit confirm) |
-| `UnarchiveAll(playlist: PlaylistRef)` | `playlist` | earcon |
-| `AutoDownloadPlaylist(playlist: PlaylistRef, enabled: Boolean)` | `playlist`, `enabled` | earcon |
-
-### Search & Discover
-
-| Intent | Slot | Response |
-|---|---|---|
-| `Search(query: String)` | `query` | spoken results |
-| `FilterResults(type: ContentType?)` | `type` (podcasts/episodes) | spoken results |
-| `SubscribeFromResult(ref: ResultRef)` | `ref` | earcon |
-| `PlayFromResult(ref: ResultRef)` | `ref` | silent |
-| `DescribeResult(ref: ResultRef)` | `ref` | spoken |
-| `SearchHistoryReRun(query: String?)` | `query` | spoken results |
-| `ClearSearchHistory` | — | earcon (explicit confirm) |
-| `DiscoverTrending` | — | spoken |
-| `DiscoverRecommendations` | — | spoken |
-| `DiscoverCategory(category: String)` | `category` | spoken |
-| `DiscoverNewReleases(timeframe: String?)` | `timeframe` | spoken |
-| `ChangeRegion(region: String)` | `region` | earcon |
-
-### Content Queries
-
-| Intent | Slot | Response |
-|---|---|---|
-| `QueryWhatsPlaying` | — | spoken |
-| `QueryPosition` | — | spoken |
-| `QueryTimeRemaining` | — | spoken |
-| `QueryCurrentPodcast` | — | spoken |
-| `QueryEpisodeDuration` | — | spoken |
-| `QueryPublishDate` | — | spoken |
-| `QueryEpisodeDescription` | — | spoken (summarize if long) |
-| `QueryDownloadStatus` | — | spoken |
-| `QueryEpisodeTitle` | — | spoken |
-| `QueryListeningTime(period: String?)` | `period` | spoken |
-| `QueryTopPodcasts` | — | spoken |
-| `QueryEpisodesFinished(period: String?)` | `period` | spoken |
-| `QueryListeningStreak` | — | spoken |
-| `QuerySubscriptionCount` | — | spoken |
-| `QueryUnplayedTotal` | — | spoken |
-| `QueryDownloadStats` | — | spoken |
-| `QueryQueueTotal` | — | spoken |
-| `QueryNewEpisodes(timeframe: String?)` | `timeframe` | spoken |
-| `QueryTimeSinceLastListen` | — | spoken |
-
-### Transcripts
-
-| Intent | Slot | Response |
-|---|---|---|
-| `OpenTranscript` | — | earcon |
-| `SearchTranscript(term: String)` | `term` | spoken match count |
-| `NavigateTranscript(direction: NavigationDirection)` | `direction` | spoken context |
-| `SeekToTopic(topic: String)` | `topic` | silent |
-| `ReadTranscriptLine` | — | spoken |
-| `QueryTranscriptTopic(topic: String)` | `topic` | spoken |
-| `SeekToQuote(quote: String)` | `quote` | silent |
-| `ReadTranscriptSection(start: String?, end: String?)` | `start`, `end` | spoken |
-
-### Assistant
-
-| Intent | Slot | Response |
-|---|---|---|
-| `AskEpisode(question: String)` | `question` | spoken (AI) |
-| `SummarizeEpisode` | — | spoken (AI) |
-| `QueryEpisodeContent(question: String)` | `question` | spoken (AI) |
-| `JumpToTopic(topic: String)` | `topic` | silent |
-| `PlayQuote(ref: String?)` | `ref` | silent |
-| `StopQuote` | — | silent |
-| `RetryFailedMessage` | — | earcon |
-| `ClearChat` | — | earcon (explicit confirm) |
-| `CastToDevice(device: String?)` | `device` | spoken |
-| `StopCasting` | — | earcon |
-| `SendGuestPass` | — | earcon |
-| `ClaimGuestPass` | — | earcon |
-| `ViewStories` | — | earcon |
-| `NextStory` | — | silent |
-| `PreviousStory` | — | silent |
-| `ShareStory` | — | earcon |
-| `ReplayStories` | — | earcon |
-
-### Settings
-
-| Intent | Slot | Response |
-|---|---|---|
-| `SetTheme(theme: String)` | `theme` (light/dark/classic dark/ink/system) | earcon |
-| `SetAutoDownloadUpNext(enabled: Boolean)` | `enabled` | earcon |
-| `SetAutoDownloadNew(enabled: Boolean)` | `enabled` | earcon |
-| `SetAutoDownloadOnFollow(enabled: Boolean)` | `enabled` | earcon |
-| `SetWifiOnly(enabled: Boolean)` | `enabled` | earcon |
-| `SetChargingOnly(enabled: Boolean)` | `enabled` | earcon |
-| `SetPodcastAutoDownload(podcast: PodcastRef, enabled: Boolean)` | `podcast`, `enabled` | earcon |
-| `StopAllDownloads` | — | earcon (explicit confirm) |
-| `ClearDownloadErrors` | — | earcon (explicit confirm) |
-| `SetDownloadLimit(count: Int)` | `count` | earcon |
-| `SetNextTrackAction(action: TrackAction)` | `action` | earcon |
-| `SetPreviousTrackAction(action: TrackAction)` | `action` | earcon |
-| `SetConfirmationSound(enabled: Boolean)` | `enabled` | earcon |
-| `SetAutoAdd(podcast: PodcastRef, enabled: Boolean)` | `podcast`, `enabled` | earcon |
-| `SetAutoAddPosition(position: QueuePosition)` | `position` | earcon |
-| `SetAutoAddLimit(count: Int)` | `count` | earcon |
-| `SetArchiveAfterPlaying(delay: String)` | `delay` | earcon |
-| `SetArchiveInactive(period: String)` | `period` | earcon |
-| `SetIncludeStarredAutoArchive(enabled: Boolean)` | `enabled` | earcon |
-| `SetNotifications(enabled: Boolean)` | `enabled` | earcon |
-| `SetPodcastNotifications(podcast: PodcastRef, enabled: Boolean)` | `podcast`, `enabled` | earcon |
-| `ManualCleanup` | — | earcon (explicit confirm) |
-| `ExportOpml` | — | earcon |
-
-### Account
-
-| Intent | Slot | Response |
-|---|---|---|
-| `SignInEmail(email: String?, password: String?)` | `email`, `password` | spoken (multi-turn slot fill) |
-| `SignInGoogle` | — | spoken (requires screen tap) |
-| `CreateAccount(email: String, password: String, newsletter: Boolean?)` | `email`, `password`, `newsletter` | spoken (multi-turn slot fill) |
-| `ChangeEmail(newEmail: String, password: String)` | `newEmail`, `password` | spoken (multi-turn slot fill) |
-| `ChangePassword(current: String, new: String)` | `current`, `new` | spoken (multi-turn slot fill) |
-| `ResetPassword(email: String?)` | `email` | spoken |
-| `RedeemPromoCode(code: String?)` | `code` | spoken |
-| `SignOut` | — | earcon (explicit confirm) |
-| `ChangePlan(plan: String)` | `plan` (monthly/yearly) | earcon (explicit confirm) |
-| `ClaimOffer(offer: String?)` | `offer` | spoken |
-| `CancelSubscription` | — | earcon (explicit confirm) |
-| `KeepSubscription` | — | spoken |
-
-### Sharing
-
-| Intent | Slot | Response |
-|---|---|---|
-| `ShareEpisode(episode: EpisodeRef?)` | `episode` | earcon |
-| `ShareAtCurrentTime` | — | earcon |
-| `ShareAtTime(time: String)` | `time` | earcon |
-| `SharePodcast(podcast: PodcastRef?)` | `podcast` | earcon |
-| `ShareClip(start: String?, end: String?)` | `start`, `end` | earcon |
-| `ShareBookmark(ref: BookmarkRef)` | `ref` | earcon |
-| `ShareTranscript(section: String?)` | `section` | earcon |
-| `CreateSharedList(name: String, podcasts: List<PodcastRef>)` | `name`, `podcasts` | earcon |
-| `ShareViaApp(app: String)` | `app` | earcon |
-| `AcceptSharedList(mode: AcceptMode)` | `mode` (all/select) | spoken |
-
-## Shared Reference Types
-
-Several domains reference the same entity types. These are shared across intents:
-
-```kotlin
-sealed interface EpisodeRef {
-    data class ByTitle(val query: String) : EpisodeRef
-    data class ByIndex(val index: Int) : EpisodeRef
-    data object Current : EpisodeRef
+```json
+{
+  "name": "effects",
+  "description": "Playback effects: speed, trim silence, volume boost.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["set_speed", "adjust_speed", "set_trim_mode", "set_volume_boost", "query_effects"]},
+    "speed": {"type": "number", "description": "Playback speed (0.5–5.0)."},
+    "delta": {"type": "number", "description": "Speed delta. Positive = faster, negative = slower."},
+    "mode": {"type": "string", "enum": ["off", "low", "medium", "high"], "description": "Trim silence mode."},
+    "enabled": {"type": "boolean", "description": "On/off for volume boost."}
+  }
 }
-
-sealed interface PodcastRef {
-    data class ByTitle(val query: String) : PodcastRef
-    data object Current : PodcastRef
-}
-
-sealed interface PlaylistRef {
-    data class ByName(val query: String) : PlaylistRef
-    data class ByIndex(val index: Int) : PlaylistRef
-}
-
-sealed interface FolderRef {
-    data class ByName(val query: String) : FolderRef
-}
-
-sealed interface ResultRef {
-    data class ByTitle(val query: String) : ResultRef
-    data class ByIndex(val index: Int) : ResultRef
-}
-
-enum class QueuePosition { Top, Bottom }
-enum class NavigationDirection { Next, Previous }
-enum class ContentType { Podcasts, Episodes }
-enum class TrackAction { SkipForward, SkipBackward, AddBookmark }
-enum class SortOrder { NewestFirst, OldestFirst }
-enum class AcceptMode { All, Select }
-
-data class EpisodeFilter(
-    val podcast: PodcastRef? = null,
-    val status: String? = null,  // "unplayed", "played", "downloaded"
-    val limit: Int? = null,
-)
-
-data class SmartRules(
-    val podcast: PodcastRef? = null,
-    val duration: String? = null,
-    val downloaded: Boolean? = null,
-    val played: Boolean? = null,
-    val mediaType: String? = null,
-)
 ```
 
-## Intent Sealed Interface
+| Action | Params | Response |
+|---|---|---|
+| `set_speed` | `speed` | earcon + spoken value |
+| `adjust_speed` | `delta` | earcon + spoken value |
+| `set_trim_mode` | `mode` | earcon + spoken mode |
+| `set_volume_boost` | `enabled` | earcon + spoken state |
+| `query_effects` | — | spoken |
+
+### `volume`
+
+```json
+{
+  "name": "volume",
+  "description": "Control device volume.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["set_volume", "adjust_volume", "query"]},
+    "volume": {"type": "integer", "description": "Volume level (0–100)."},
+    "delta": {"type": "integer", "description": "Volume delta. Positive = louder, negative = quieter."}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `set_volume` | `volume` | earcon |
+| `adjust_volume` | `delta` | earcon |
+| `query` | — | spoken |
+
+### `sleep`
+
+```json
+{
+  "name": "sleep",
+  "description": "Sleep timer: set a timer, stop at end of episode or chapter, add time, cancel.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["set", "end_of_episode", "end_of_chapter", "add_time", "cancel", "query"]},
+    "minutes": {"type": "integer", "description": "Duration in minutes."}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `set` | `minutes` | earcon + spoken duration |
+| `end_of_episode` | — | earcon + spoken |
+| `end_of_chapter` | — | earcon + spoken |
+| `add_time` | `minutes` | earcon + spoken remaining |
+| `cancel` | — | earcon + spoken |
+| `query` | — | spoken |
+
+### `chapter`
+
+```json
+{
+  "name": "chapter",
+  "description": "Navigate and query episode chapters.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["next", "previous", "by_index", "by_title", "open_link", "query_list", "query_current", "query_count", "query_next"]},
+    "index": {"type": "integer", "description": "Chapter number (1-based)."},
+    "query": {"type": "string", "description": "Chapter title search query."}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `next` | — | silent |
+| `previous` | — | silent |
+| `by_index` | `index` | silent |
+| `by_title` | `query` | silent |
+| `open_link` | `index` | earcon |
+| `query_list` | — | spoken |
+| `query_current` | — | spoken |
+| `query_count` | — | spoken |
+| `query_next` | — | spoken |
+
+### `bookmark`
+
+```json
+{
+  "name": "bookmark",
+  "description": "Create, rename, play, delete, and query bookmarks.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["add", "rename", "play", "delete", "delete_all", "query_list", "query_count", "query_nearby"]},
+    "title": {"type": "string", "description": "Bookmark title. For add (optional), rename (new title)."},
+    "ref": {"type": "string", "description": "Bookmark reference: title, index number (e.g. '3'), or 'latest'."}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `add` | `title` (optional) | earcon + spoken position |
+| `rename` | `ref`, `title` | earcon |
+| `play` | `ref` | silent |
+| `delete` | `ref` | earcon |
+| `delete_all` | — | earcon (explicit confirm) |
+| `query_list` | — | spoken |
+| `query_count` | — | spoken |
+| `query_nearby` | — | spoken |
+
+### `queue`
+
+```json
+{
+  "name": "queue",
+  "description": "Manage the Up Next queue: add, remove, reorder, clear.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["add_top", "add_bottom", "remove", "move_to_top", "move_to_bottom", "clear", "remove_by_podcast", "sort", "query_contents", "query_next", "query_length", "query_is_queued"]},
+    "episode": {"type": "string", "description": "Episode title or description."},
+    "podcast": {"type": "string", "description": "Podcast name."},
+    "sort_order": {"type": "string", "enum": ["newest_first", "oldest_first"]}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `add_top` | `episode` | earcon |
+| `add_bottom` | `episode` | earcon |
+| `remove` | `episode` | earcon |
+| `move_to_top` | `episode` | earcon |
+| `move_to_bottom` | `episode` | earcon |
+| `clear` | — | earcon (explicit confirm) |
+| `remove_by_podcast` | `podcast` | earcon |
+| `sort` | `sort_order` | earcon |
+| `query_contents` | — | spoken |
+| `query_next` | — | spoken |
+| `query_length` | — | spoken |
+| `query_is_queued` | `episode` | spoken |
+
+### `episode`
+
+```json
+{
+  "name": "episode",
+  "description": "Manage individual episodes: download, star, archive, mark played, add to playlist.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["download", "delete_download", "star", "unstar", "archive", "unarchive", "mark_played", "mark_unplayed", "remove_from_history", "add_to_playlist"]},
+    "episode": {"type": "string", "description": "Episode title or description."},
+    "playlist": {"type": "string", "description": "Playlist name. For add_to_playlist."}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `download` | `episode` | earcon |
+| `delete_download` | `episode` | earcon (explicit confirm) |
+| `star` | `episode` | earcon |
+| `unstar` | `episode` | earcon |
+| `archive` | `episode` | earcon |
+| `unarchive` | `episode` | earcon |
+| `mark_played` | `episode` | earcon |
+| `mark_unplayed` | `episode` | earcon |
+| `remove_from_history` | `episode` | earcon (explicit confirm) |
+| `add_to_playlist` | `episode`, `playlist` | earcon |
+
+### `podcast`
+
+```json
+{
+  "name": "podcast",
+  "description": "Manage podcast subscriptions: subscribe, unsubscribe, rate, configure notifications and auto-add.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["subscribe", "unsubscribe", "rate", "toggle_notifications", "auto_add", "auto_download"]},
+    "podcast": {"type": "string", "description": "Podcast name."},
+    "rating": {"type": "integer", "description": "Star rating (1–5)."},
+    "enabled": {"type": "boolean"},
+    "position": {"type": "string", "enum": ["top", "bottom"], "description": "Queue position for auto-add."}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `subscribe` | `podcast` | earcon |
+| `unsubscribe` | `podcast` | earcon |
+| `rate` | `podcast`, `rating` | earcon |
+| `toggle_notifications` | `podcast`, `enabled` | earcon |
+| `auto_add` | `podcast`, `position` | earcon |
+| `auto_download` | `podcast`, `enabled` | earcon |
+
+### `bulk`
+
+```json
+{
+  "name": "bulk",
+  "description": "Bulk actions on episodes: bulk download, archive, or mark as played.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["download", "archive", "mark_played"]},
+    "podcast": {"type": "string", "description": "Podcast name. Optional — omit for global scope."},
+    "filter": {"type": "string", "description": "Filter: 'unplayed', 'played', 'downloaded', or 'last N'."}
+  }
+}
+```
+
+All actions return earcon and require explicit confirmation.
+
+### `folder`
+
+```json
+{
+  "name": "folder",
+  "description": "Manage podcast folders: create, rename, assign podcasts, remove, delete.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["create", "rename", "assign", "remove_from", "delete"]},
+    "folder": {"type": "string", "description": "Folder name."},
+    "name": {"type": "string", "description": "New name. For create and rename."},
+    "podcast": {"type": "string", "description": "Podcast name. For assign and remove_from."}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `create` | `name` | earcon |
+| `rename` | `folder`, `name` | earcon |
+| `assign` | `podcast`, `folder` | earcon |
+| `remove_from` | `podcast` | earcon |
+| `delete` | `folder` | earcon (explicit confirm) |
+
+### `playlist`
+
+```json
+{
+  "name": "playlist",
+  "description": "Manage playlists: create, delete, rename, play all, add/remove episodes.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["create", "create_smart", "delete", "rename", "play_all", "download_all", "add_episode", "remove_episode", "archive_all", "unarchive_all", "auto_download"]},
+    "playlist": {"type": "string", "description": "Playlist name."},
+    "name": {"type": "string", "description": "New playlist name. For create, rename."},
+    "episode": {"type": "string", "description": "Episode title."},
+    "shuffle": {"type": "boolean"},
+    "enabled": {"type": "boolean"},
+    "rules": {"type": "string", "description": "Smart playlist rules as natural language."}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `create` | `name` (optional) | earcon + spoken name |
+| `create_smart` | `rules`, `name` (optional) | earcon + spoken name |
+| `delete` | `playlist` | earcon (explicit confirm) |
+| `rename` | `playlist`, `name` | earcon |
+| `play_all` | `playlist`, `shuffle` (optional) | silent |
+| `download_all` | `playlist` | earcon (explicit confirm) |
+| `add_episode` | `episode`, `playlist` | earcon |
+| `remove_episode` | `episode`, `playlist` | earcon |
+| `archive_all` | `playlist` | earcon (explicit confirm) |
+| `unarchive_all` | `playlist` | earcon |
+| `auto_download` | `playlist`, `enabled` | earcon |
+
+### `search`
+
+```json
+{
+  "name": "search",
+  "description": "Search for podcasts and episodes, browse trending and recommendations.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["search", "filter", "subscribe_result", "play_result", "describe_result", "rerun", "clear_history", "trending", "recommendations", "category", "new_releases", "change_region"]},
+    "query": {"type": "string"},
+    "type": {"type": "string", "enum": ["podcasts", "episodes"]},
+    "ref": {"type": "string", "description": "Result reference: title or index number (e.g. '3')."},
+    "category": {"type": "string"},
+    "timeframe": {"type": "string"},
+    "region": {"type": "string"}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `search` | `query` | spoken results |
+| `filter` | `type` | spoken results |
+| `subscribe_result` | `ref` | earcon |
+| `play_result` | `ref` | silent |
+| `describe_result` | `ref` | spoken |
+| `rerun` | `query` (optional) | spoken results |
+| `clear_history` | — | earcon (explicit confirm) |
+| `trending` | — | spoken |
+| `recommendations` | — | spoken |
+| `category` | `category` | spoken |
+| `new_releases` | `timeframe` (optional) | spoken |
+| `change_region` | `region` | earcon |
+
+### `playback_query`
+
+```json
+{
+  "name": "playback_query",
+  "description": "Query current playback state and episode info.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["whats_playing", "position", "time_remaining", "current_podcast", "episode_duration", "publish_date", "episode_description", "download_status", "episode_title"]}
+  }
+}
+```
+
+All actions return spoken. No additional parameters.
+
+### `stats_query`
+
+```json
+{
+  "name": "stats_query",
+  "description": "Query listening statistics: listening time, top podcasts, streaks, subscription counts.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["listening_time", "top_podcasts", "episodes_finished", "listening_streak", "subscription_count", "unplayed_total", "download_stats", "queue_total", "new_episodes", "time_since_last_listen"]},
+    "period": {"type": "string", "description": "Time period: 'today', 'this week', 'this month', 'all time'."},
+    "timeframe": {"type": "string", "description": "Time window for new_episodes."}
+  }
+}
+```
+
+All actions return spoken. `period` and `timeframe` are optional.
+
+### `transcript`
+
+```json
+{
+  "name": "transcript",
+  "description": "Open, search, and navigate episode transcripts.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["open", "search", "navigate", "seek_to_topic", "read_line", "query_topic", "seek_to_quote", "read_section"]},
+    "term": {"type": "string"},
+    "direction": {"type": "string", "enum": ["next", "previous"]},
+    "topic": {"type": "string"},
+    "quote": {"type": "string"},
+    "start": {"type": "string"},
+    "end": {"type": "string"}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `open` | — | earcon |
+| `search` | `term` | spoken match count |
+| `navigate` | `direction` | spoken context |
+| `seek_to_topic` | `topic` | silent |
+| `read_line` | — | spoken |
+| `query_topic` | `topic` | spoken |
+| `seek_to_quote` | `quote` | silent |
+| `read_section` | `start`, `end` (optional) | spoken |
+
+### `assistant`
+
+```json
+{
+  "name": "assistant",
+  "description": "AI assistant: ask about episodes, summarize, navigate by content.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["ask", "summarize", "query_content", "jump_to_topic", "play_quote", "stop_quote", "retry", "clear_chat"]},
+    "question": {"type": "string"},
+    "topic": {"type": "string"},
+    "ref": {"type": "string", "description": "Quote reference or timestamp."}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `ask` | `question` | spoken (AI) |
+| `summarize` | — | spoken (AI) |
+| `query_content` | `question` | spoken (AI) |
+| `jump_to_topic` | `topic` | silent |
+| `play_quote` | `ref` (optional) | silent |
+| `stop_quote` | — | silent |
+| `retry` | — | earcon |
+| `clear_chat` | — | earcon (explicit confirm) |
+
+### `cast`
+
+```json
+{
+  "name": "cast",
+  "description": "Cast playback to a device or stop casting.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["start", "stop"]},
+    "device": {"type": "string", "description": "Cast device name. Optional — prompts if omitted."}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `start` | `device` (optional) | spoken |
+| `stop` | — | earcon |
+
+### `stories`
+
+```json
+{
+  "name": "stories",
+  "description": "End of Year listening review stories.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["view", "next", "previous", "share", "replay"]}
+  }
+}
+```
+
+| Action | Response |
+|---|---|
+| `view` | earcon |
+| `next` | silent |
+| `previous` | silent |
+| `share` | earcon |
+| `replay` | earcon |
+
+### `guest_pass`
+
+```json
+{
+  "name": "guest_pass",
+  "description": "Send or claim a guest pass / referral link.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["send", "claim"]}
+  }
+}
+```
+
+Both actions return earcon.
+
+### `download_settings`
+
+```json
+{
+  "name": "download_settings",
+  "description": "Configure auto-download, WiFi/charging restrictions, download limits.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["auto_download_up_next", "auto_download_new", "auto_download_on_follow", "wifi_only", "charging_only", "podcast_auto_download", "stop_all_downloads", "clear_errors", "download_limit"]},
+    "enabled": {"type": "boolean"},
+    "podcast": {"type": "string", "description": "Podcast name. For podcast_auto_download."},
+    "count": {"type": "integer", "description": "Download limit per podcast."}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `auto_download_up_next` | `enabled` | earcon |
+| `auto_download_new` | `enabled` | earcon |
+| `auto_download_on_follow` | `enabled` | earcon |
+| `wifi_only` | `enabled` | earcon |
+| `charging_only` | `enabled` | earcon |
+| `podcast_auto_download` | `podcast`, `enabled` | earcon |
+| `stop_all_downloads` | — | earcon (explicit confirm) |
+| `clear_errors` | — | earcon (explicit confirm) |
+| `download_limit` | `count` | earcon |
+
+### `playback_settings`
+
+```json
+{
+  "name": "playback_settings",
+  "description": "Configure headphone actions, auto-add to queue, and auto-archive rules.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["next_track_action", "previous_track_action", "confirmation_sound", "auto_add", "auto_add_position", "auto_add_limit", "archive_after_playing", "archive_inactive", "include_starred_auto_archive"]},
+    "track_action": {"type": "string", "enum": ["skip_forward", "skip_backward", "add_bookmark"]},
+    "enabled": {"type": "boolean"},
+    "podcast": {"type": "string", "description": "Podcast name. For auto_add."},
+    "position": {"type": "string", "enum": ["top", "bottom"]},
+    "count": {"type": "integer"},
+    "delay": {"type": "string", "description": "Archive delay: 'immediately', 'after_24_hours', etc."},
+    "period": {"type": "string", "description": "Inactivity period: 'never', '2_weeks', etc."}
+  }
+}
+```
+
+All actions return earcon.
+
+### `app_settings`
+
+```json
+{
+  "name": "app_settings",
+  "description": "App-wide settings: theme, notifications, cleanup, export.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["set_theme", "notifications", "podcast_notifications", "manual_cleanup", "export_opml"]},
+    "theme": {"type": "string", "enum": ["light", "dark", "classic_dark", "ink", "system"]},
+    "enabled": {"type": "boolean"},
+    "podcast": {"type": "string", "description": "Podcast name. For podcast_notifications."}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `set_theme` | `theme` | earcon |
+| `notifications` | `enabled` | earcon |
+| `podcast_notifications` | `podcast`, `enabled` | earcon |
+| `manual_cleanup` | — | earcon (explicit confirm) |
+| `export_opml` | — | earcon |
+
+### `account`
+
+```json
+{
+  "name": "account",
+  "description": "Account management: sign in, sign out, change plan, manage subscription, redeem promo codes.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["sign_in_email", "sign_in_google", "create_account", "change_email", "change_password", "reset_password", "redeem_promo", "sign_out", "change_plan", "claim_offer", "cancel_subscription", "keep_subscription"]},
+    "email": {"type": "string"},
+    "password": {"type": "string"},
+    "new_email": {"type": "string"},
+    "current_password": {"type": "string"},
+    "new_password": {"type": "string"},
+    "newsletter": {"type": "boolean"},
+    "code": {"type": "string"},
+    "plan": {"type": "string", "enum": ["monthly", "yearly"]},
+    "offer": {"type": "string"}
+  }
+}
+```
+
+| Action | Params | Response |
+|---|---|---|
+| `sign_in_email` | `email`, `password` (slot-filled) | spoken (multi-turn) |
+| `sign_in_google` | — | spoken (requires screen tap) |
+| `create_account` | `email`, `password`, `newsletter` (slot-filled) | spoken (multi-turn) |
+| `change_email` | `new_email`, `password` (slot-filled) | spoken (multi-turn) |
+| `change_password` | `current_password`, `new_password` (slot-filled) | spoken (multi-turn) |
+| `reset_password` | `email` (optional) | spoken |
+| `redeem_promo` | `code` (optional) | spoken |
+| `sign_out` | — | earcon (explicit confirm) |
+| `change_plan` | `plan` | earcon (explicit confirm) |
+| `claim_offer` | `offer` (optional) | spoken |
+| `cancel_subscription` | — | earcon (explicit confirm) |
+| `keep_subscription` | — | spoken |
+
+### `sharing`
+
+```json
+{
+  "name": "sharing",
+  "description": "Share episodes, clips, bookmarks, podcasts, and transcript sections.",
+  "parameters": {
+    "action": {"type": "string", "enum": ["share_episode", "share_at_current_time", "share_at_time", "share_podcast", "share_clip", "share_bookmark", "share_transcript", "create_shared_list", "share_via_app", "accept_shared_list"]},
+    "episode": {"type": "string"},
+    "time": {"type": "string"},
+    "podcast": {"type": "string"},
+    "start": {"type": "string"},
+    "end": {"type": "string"},
+    "bookmark": {"type": "string"},
+    "section": {"type": "string"},
+    "list_name": {"type": "string"},
+    "podcasts": {"type": "string"},
+    "app": {"type": "string"},
+    "accept_mode": {"type": "string", "enum": ["all", "select"]}
+  }
+}
+```
+
+All actions return earcon except `accept_shared_list` (spoken).
+
+### `no_match`
+
+```json
+{
+  "name": "no_match",
+  "description": "No command was recognized. Select this when the user is not issuing a voice command."
+}
+```
+
+Returns no intent (null). Explicit rejection for ambient speech, podcast bleed, questions, and other non-commands.
+
+## Kotlin Model
+
+The tool schema is the wire format. The Kotlin sealed-interface hierarchy is the domain model. A `ToolCallMapper` converts between them.
 
 ```kotlin
 sealed interface VoiceIntent {
-    // Playback
+    // Each tool maps to a sealed sub-interface
     sealed interface Playback : VoiceIntent
+    sealed interface Effects : VoiceIntent
+    sealed interface Volume : VoiceIntent
+    sealed interface Sleep : VoiceIntent
     sealed interface Chapter : VoiceIntent
     sealed interface Bookmark : VoiceIntent
     sealed interface Queue : VoiceIntent
+    sealed interface Episode : VoiceIntent
     sealed interface Podcast : VoiceIntent
+    sealed interface Bulk : VoiceIntent
+    sealed interface Folder : VoiceIntent
     sealed interface Playlist : VoiceIntent
     sealed interface Search : VoiceIntent
-    sealed interface ContentQuery : VoiceIntent
+    sealed interface PlaybackQuery : VoiceIntent
+    sealed interface StatsQuery : VoiceIntent
     sealed interface Transcript : VoiceIntent
     sealed interface Assistant : VoiceIntent
-    sealed interface Settings : VoiceIntent
+    sealed interface Cast : VoiceIntent
+    sealed interface Stories : VoiceIntent
+    sealed interface GuestPass : VoiceIntent
+    sealed interface DownloadSettings : VoiceIntent
+    sealed interface PlaybackSettings : VoiceIntent
+    sealed interface AppSettings : VoiceIntent
     sealed interface Account : VoiceIntent
     sealed interface Sharing : VoiceIntent
 }
+```
 
-// Playback
+Each sub-interface has one data class (or data object) per action enum value. The tool schema tables above define the complete set; the Kotlin model mirrors them 1:1. Example:
+
+```kotlin
 sealed interface PlaybackIntent : VoiceIntent.Playback {
     data object Pause : PlaybackIntent
     data object Resume : PlaybackIntent
     data class SeekRelative(val deltaMs: Int) : PlaybackIntent
     data class SeekAbsolute(val positionMs: Int) : PlaybackIntent
     data object NextEpisode : PlaybackIntent
-    data class SetSpeed(val speed: Double) : PlaybackIntent
-    data class AdjustSpeed(val delta: Double) : PlaybackIntent
-    data class SetTrimMode(val mode: String) : PlaybackIntent
-    data class SetVolumeBoost(val enabled: Boolean) : PlaybackIntent
-    data class SetVolume(val volume: Int) : PlaybackIntent
-    data class AdjustVolume(val delta: Int) : PlaybackIntent
-    data class SleepSet(val minutes: Int) : PlaybackIntent
-    data object SleepEndOfEpisode : PlaybackIntent
-    data object SleepEndOfChapter : PlaybackIntent
-    data class SleepAddTime(val minutes: Int) : PlaybackIntent
-    data object SleepCancel : PlaybackIntent
-    data object QueryEffectsState : PlaybackIntent
-    data object QuerySleepTimer : PlaybackIntent
-}
-
-// Chapters
-sealed interface ChapterIntent : VoiceIntent.Chapter {
-    data object NextChapter : ChapterIntent
-    data object PreviousChapter : ChapterIntent
-    data class ChapterByIndex(val index: Int) : ChapterIntent
-    data class ChapterByTitle(val query: String) : ChapterIntent {
-        val normalizedQuery: String = query.trim()
-    }
-    data class OpenChapterLink(val index: Int) : ChapterIntent
-    data object QueryChapterList : ChapterIntent
-    data object QueryCurrentChapter : ChapterIntent
-    data object QueryChapterCount : ChapterIntent
-    data object QueryNextChapter : ChapterIntent
-}
-
-// Bookmarks
-sealed interface BookmarkIntent : VoiceIntent.Bookmark {
-    data class AddBookmark(val title: String?) : BookmarkIntent
-    data class RenameBookmark(val ref: BookmarkRef, val title: String) : BookmarkIntent
-    data class PlayBookmark(val ref: BookmarkRef) : BookmarkIntent
-    data class DeleteBookmark(val ref: BookmarkRef) : BookmarkIntent
-    data object DeleteAllBookmarks : BookmarkIntent
-    data object QueryBookmarkList : BookmarkIntent
-    data object QueryBookmarkCount : BookmarkIntent
-    data object QueryNearbyBookmarks : BookmarkIntent
-}
-
-// Queue
-sealed interface QueueIntent : VoiceIntent.Queue {
-    data class QueueAddTop(val episode: EpisodeRef) : QueueIntent
-    data class QueueAddBottom(val episode: EpisodeRef) : QueueIntent
-    data class QueueRemove(val episode: EpisodeRef) : QueueIntent
-    data class QueueMoveToTop(val episode: EpisodeRef) : QueueIntent
-    data class QueueMoveToBottom(val episode: EpisodeRef) : QueueIntent
-    data object QueueClear : QueueIntent
-    data class QueueRemoveByPodcast(val podcast: PodcastRef) : QueueIntent
-    data class QueueSort(val order: SortOrder) : QueueIntent
-    data object QueryQueueContents : QueueIntent
-    data object QueryQueueNext : QueueIntent
-    data object QueryQueueLength : QueueIntent
-    data class QueryIsQueued(val episode: EpisodeRef) : QueueIntent
-}
-
-// Podcasts
-sealed interface PodcastIntent : VoiceIntent.Podcast {
-    data class Subscribe(val podcast: PodcastRef) : PodcastIntent
-    data class Unsubscribe(val podcast: PodcastRef) : PodcastIntent
-    data class DownloadEpisode(val episode: EpisodeRef) : PodcastIntent
-    data class DeleteDownload(val episode: EpisodeRef) : PodcastIntent
-    data class StarEpisode(val episode: EpisodeRef) : PodcastIntent
-    data class UnstarEpisode(val episode: EpisodeRef) : PodcastIntent
-    data class ArchiveEpisode(val episode: EpisodeRef) : PodcastIntent
-    data class UnarchiveEpisode(val episode: EpisodeRef) : PodcastIntent
-    data class MarkPlayed(val episode: EpisodeRef) : PodcastIntent
-    data class MarkUnplayed(val episode: EpisodeRef) : PodcastIntent
-    data class RemoveFromHistory(val episode: EpisodeRef) : PodcastIntent
-    data class BulkDownload(val filter: EpisodeFilter) : PodcastIntent
-    data class BulkArchive(val filter: EpisodeFilter) : PodcastIntent
-    data class BulkMarkPlayed(val filter: EpisodeFilter) : PodcastIntent
-    data class AddToPlaylist(val episode: EpisodeRef, val playlist: PlaylistRef) : PodcastIntent
-    data class CreateFolder(val name: String) : PodcastIntent
-    data class RenameFolder(val folder: FolderRef, val name: String) : PodcastIntent
-    data class AssignToFolder(val podcast: PodcastRef, val folder: FolderRef) : PodcastIntent
-    data class RemoveFromFolder(val podcast: PodcastRef) : PodcastIntent
-    data class DeleteFolder(val folder: FolderRef) : PodcastIntent
-    data class RatePodcast(val podcast: PodcastRef, val rating: Int) : PodcastIntent
-    data class ToggleNotifications(val podcast: PodcastRef, val enabled: Boolean) : PodcastIntent
-    data class AutoAddToQueue(val podcast: PodcastRef, val position: QueuePosition) : PodcastIntent
-    data class AutoDownloadPodcast(val podcast: PodcastRef, val enabled: Boolean) : PodcastIntent
-}
-
-// Playlists
-sealed interface PlaylistIntent : VoiceIntent.Playlist {
-    data class CreatePlaylist(val name: String?) : PlaylistIntent
-    data class CreateSmartPlaylist(val rules: SmartRules, val name: String?) : PlaylistIntent
-    data class DeletePlaylist(val playlist: PlaylistRef) : PlaylistIntent
-    data class RenamePlaylist(val playlist: PlaylistRef, val name: String) : PlaylistIntent
-    data class PlayAll(val playlist: PlaylistRef, val shuffle: Boolean) : PlaylistIntent
-    data class DownloadAll(val playlist: PlaylistRef) : PlaylistIntent
-    data class PlaylistAddEpisode(val episode: EpisodeRef, val playlist: PlaylistRef) : PlaylistIntent
-    data class PlaylistRemoveEpisode(val episode: EpisodeRef, val playlist: PlaylistRef) : PlaylistIntent
-    data class ArchiveAll(val playlist: PlaylistRef) : PlaylistIntent
-    data class UnarchiveAll(val playlist: PlaylistRef) : PlaylistIntent
-    data class AutoDownloadPlaylist(val playlist: PlaylistRef, val enabled: Boolean) : PlaylistIntent
-}
-
-// Search & Discover
-sealed interface SearchIntent : VoiceIntent.Search {
-    data class Search(val query: String) : SearchIntent
-    data class FilterResults(val type: ContentType?) : SearchIntent
-    data class SubscribeFromResult(val ref: ResultRef) : SearchIntent
-    data class PlayFromResult(val ref: ResultRef) : SearchIntent
-    data class DescribeResult(val ref: ResultRef) : SearchIntent
-    data class SearchHistoryReRun(val query: String?) : SearchIntent
-    data object ClearSearchHistory : SearchIntent
-    data object DiscoverTrending : SearchIntent
-    data object DiscoverRecommendations : SearchIntent
-    data class DiscoverCategory(val category: String) : SearchIntent
-    data class DiscoverNewReleases(val timeframe: String?) : SearchIntent
-    data class ChangeRegion(val region: String) : SearchIntent
-}
-
-// Content Queries
-sealed interface ContentQueryIntent : VoiceIntent.ContentQuery {
-    data object QueryWhatsPlaying : ContentQueryIntent
-    data object QueryPosition : ContentQueryIntent
-    data object QueryTimeRemaining : ContentQueryIntent
-    data object QueryCurrentPodcast : ContentQueryIntent
-    data object QueryEpisodeDuration : ContentQueryIntent
-    data object QueryPublishDate : ContentQueryIntent
-    data object QueryEpisodeDescription : ContentQueryIntent
-    data object QueryDownloadStatus : ContentQueryIntent
-    data object QueryEpisodeTitle : ContentQueryIntent
-    data class QueryListeningTime(val period: String?) : ContentQueryIntent
-    data object QueryTopPodcasts : ContentQueryIntent
-    data class QueryEpisodesFinished(val period: String?) : ContentQueryIntent
-    data object QueryListeningStreak : ContentQueryIntent
-    data object QuerySubscriptionCount : ContentQueryIntent
-    data object QueryUnplayedTotal : ContentQueryIntent
-    data object QueryDownloadStats : ContentQueryIntent
-    data object QueryQueueTotal : ContentQueryIntent
-    data class QueryNewEpisodes(val timeframe: String?) : ContentQueryIntent
-    data object QueryTimeSinceLastListen : ContentQueryIntent
-}
-
-// Transcripts
-sealed interface TranscriptIntent : VoiceIntent.Transcript {
-    data object OpenTranscript : TranscriptIntent
-    data class SearchTranscript(val term: String) : TranscriptIntent
-    data class NavigateTranscript(val direction: NavigationDirection) : TranscriptIntent
-    data class SeekToTopic(val topic: String) : TranscriptIntent
-    data object ReadTranscriptLine : TranscriptIntent
-    data class QueryTranscriptTopic(val topic: String) : TranscriptIntent
-    data class SeekToQuote(val quote: String) : TranscriptIntent
-    data class ReadTranscriptSection(val start: String?, val end: String?) : TranscriptIntent
-}
-
-// Assistant
-sealed interface AssistantIntent : VoiceIntent.Assistant {
-    data class AskEpisode(val question: String) : AssistantIntent
-    data object SummarizeEpisode : AssistantIntent
-    data class QueryEpisodeContent(val question: String) : AssistantIntent
-    data class JumpToTopic(val topic: String) : AssistantIntent
-    data class PlayQuote(val ref: String?) : AssistantIntent
-    data object StopQuote : AssistantIntent
-    data object RetryFailedMessage : AssistantIntent
-    data object ClearChat : AssistantIntent
-    data class CastToDevice(val device: String?) : AssistantIntent
-    data object StopCasting : AssistantIntent
-    data object SendGuestPass : AssistantIntent
-    data object ClaimGuestPass : AssistantIntent
-    data object ViewStories : AssistantIntent
-    data object NextStory : AssistantIntent
-    data object PreviousStory : AssistantIntent
-    data object ShareStory : AssistantIntent
-    data object ReplayStories : AssistantIntent
-}
-
-// Settings
-sealed interface SettingsIntent : VoiceIntent.Settings {
-    data class SetTheme(val theme: String) : SettingsIntent
-    data class SetAutoDownloadUpNext(val enabled: Boolean) : SettingsIntent
-    data class SetAutoDownloadNew(val enabled: Boolean) : SettingsIntent
-    data class SetAutoDownloadOnFollow(val enabled: Boolean) : SettingsIntent
-    data class SetWifiOnly(val enabled: Boolean) : SettingsIntent
-    data class SetChargingOnly(val enabled: Boolean) : SettingsIntent
-    data class SetPodcastAutoDownload(val podcast: PodcastRef, val enabled: Boolean) : SettingsIntent
-    data object StopAllDownloads : SettingsIntent
-    data object ClearDownloadErrors : SettingsIntent
-    data class SetDownloadLimit(val count: Int) : SettingsIntent
-    data class SetNextTrackAction(val action: TrackAction) : SettingsIntent
-    data class SetPreviousTrackAction(val action: TrackAction) : SettingsIntent
-    data class SetConfirmationSound(val enabled: Boolean) : SettingsIntent
-    data class SetAutoAdd(val podcast: PodcastRef, val enabled: Boolean) : SettingsIntent
-    data class SetAutoAddPosition(val position: QueuePosition) : SettingsIntent
-    data class SetAutoAddLimit(val count: Int) : SettingsIntent
-    data class SetArchiveAfterPlaying(val delay: String) : SettingsIntent
-    data class SetArchiveInactive(val period: String) : SettingsIntent
-    data class SetIncludeStarredAutoArchive(val enabled: Boolean) : SettingsIntent
-    data class SetNotifications(val enabled: Boolean) : SettingsIntent
-    data class SetPodcastNotifications(val podcast: PodcastRef, val enabled: Boolean) : SettingsIntent
-    data object ManualCleanup : SettingsIntent
-    data object ExportOpml : SettingsIntent
-}
-
-// Account
-sealed interface AccountIntent : VoiceIntent.Account {
-    data class SignInEmail(val email: String?, val password: String?) : AccountIntent
-    data object SignInGoogle : AccountIntent
-    data class CreateAccount(val email: String, val password: String, val newsletter: Boolean?) : AccountIntent
-    data class ChangeEmail(val newEmail: String, val password: String) : AccountIntent
-    data class ChangePassword(val current: String, val new: String) : AccountIntent
-    data class ResetPassword(val email: String?) : AccountIntent
-    data class RedeemPromoCode(val code: String?) : AccountIntent
-    data object SignOut : AccountIntent
-    data class ChangePlan(val plan: String) : AccountIntent
-    data class ClaimOffer(val offer: String?) : AccountIntent
-    data object CancelSubscription : AccountIntent
-    data object KeepSubscription : AccountIntent
-}
-
-// Sharing
-sealed interface SharingIntent : VoiceIntent.Sharing {
-    data class ShareEpisode(val episode: EpisodeRef?) : SharingIntent
-    data object ShareAtCurrentTime : SharingIntent
-    data class ShareAtTime(val time: String) : SharingIntent
-    data class SharePodcast(val podcast: PodcastRef?) : SharingIntent
-    data class ShareClip(val start: String?, val end: String?) : SharingIntent
-    data class ShareBookmark(val ref: BookmarkRef) : SharingIntent
-    data class ShareTranscript(val section: String?) : SharingIntent
-    data class CreateSharedList(val name: String, val podcasts: List<PodcastRef>) : SharingIntent
-    data class ShareViaApp(val app: String) : SharingIntent
-    data class AcceptSharedList(val mode: AcceptMode) : SharingIntent
 }
 ```
 
+## ToolCallMapper
+
+Converts FunctionGemma's JSON tool call output to the typed `VoiceIntent` hierarchy:
+
+```kotlin
+class ToolCallMapper {
+    fun map(call: ToolCall): VoiceIntent? {
+        if (call.name == "no_match") return null
+        return when (call.name) {
+            "playback" -> mapPlayback(call.action, call.params)
+            "effects" -> mapEffects(call.action, call.params)
+            "volume" -> mapVolume(call.action, call.params)
+            "sleep" -> mapSleep(call.action, call.params)
+            "chapter" -> mapChapter(call.action, call.params)
+            "bookmark" -> mapBookmark(call.action, call.params)
+            "queue" -> mapQueue(call.action, call.params)
+            "episode" -> mapEpisode(call.action, call.params)
+            "podcast" -> mapPodcast(call.action, call.params)
+            "bulk" -> mapBulk(call.action, call.params)
+            "folder" -> mapFolder(call.action, call.params)
+            "playlist" -> mapPlaylist(call.action, call.params)
+            "search" -> mapSearch(call.action, call.params)
+            "playback_query" -> mapPlaybackQuery(call.action, call.params)
+            "stats_query" -> mapStatsQuery(call.action, call.params)
+            "transcript" -> mapTranscript(call.action, call.params)
+            "assistant" -> mapAssistant(call.action, call.params)
+            "cast" -> mapCast(call.action, call.params)
+            "stories" -> mapStories(call.action, call.params)
+            "guest_pass" -> mapGuestPass(call.action, call.params)
+            "download_settings" -> mapDownloadSettings(call.action, call.params)
+            "playback_settings" -> mapPlaybackSettings(call.action, call.params)
+            "app_settings" -> mapAppSettings(call.action, call.params)
+            "account" -> mapAccount(call.action, call.params)
+            "sharing" -> mapSharing(call.action, call.params)
+            else -> null
+        }
+    }
+}
+```
+
+Each `map<Domain>` method switches on the `action` string and constructs the typed intent with extracted params. Invalid/unknown actions or missing required params return null.
+
 ## Sink Interfaces
 
-Each domain has its own sink. Sinks for mutating actions return `VoiceResponse`. Query sinks return `VoiceResponse.Spoken`.
+Each domain has its own sink. Sinks return `VoiceResponse`.
 
 ```kotlin
 interface VoicePlaybackSink {
     suspend fun pause(): VoiceResponse
     suspend fun resume(): VoiceResponse
-    suspend fun skipForward(seconds: Int): VoiceResponse
-    suspend fun skipBackward(seconds: Int): VoiceResponse
-    suspend fun seekTo(positionMs: Int): VoiceResponse
+    suspend fun seekRelative(deltaSeconds: Int): VoiceResponse
+    suspend fun seekTo(positionSeconds: Int): VoiceResponse
     fun nextEpisode(): VoiceResponse
+}
+
+interface VoiceEffectsSink {
     fun setSpeed(speed: Double): VoiceResponse
     fun adjustSpeed(delta: Double): VoiceResponse
     fun setTrimMode(mode: String): VoiceResponse
     fun setVolumeBoost(enabled: Boolean): VoiceResponse
+    fun queryEffects(): VoiceResponse.Spoken
+}
+
+interface VoiceVolumeSink {
     fun setVolume(volume: Int): VoiceResponse
     fun adjustVolume(delta: Int): VoiceResponse
-    fun sleepSet(minutes: Int): VoiceResponse
-    fun sleepEndOfEpisode(): VoiceResponse
-    fun sleepEndOfChapter(): VoiceResponse
-    fun sleepAddTime(minutes: Int): VoiceResponse
-    fun sleepCancel(): VoiceResponse
-    fun queryEffectsState(): VoiceResponse.Spoken
-    fun querySleepTimer(): VoiceResponse.Spoken
+    fun query(): VoiceResponse.Spoken
 }
 
-interface VoiceChapterSink {
-    fun next(): VoiceResponse
-    fun previous(): VoiceResponse
-    fun byIndex(index: Int): VoiceResponse
-    fun byTitle(query: String): VoiceResponse
-    fun openLink(index: Int): VoiceResponse
-    fun queryList(): VoiceResponse.Spoken
-    fun queryCurrent(): VoiceResponse.Spoken
-    fun queryCount(): VoiceResponse.Spoken
-    fun queryNext(): VoiceResponse.Spoken
-}
-
-interface VoiceBookmarkSink {
-    fun add(title: String?): VoiceResponse
-    fun rename(ref: BookmarkRef, title: String): VoiceResponse
-    fun play(ref: BookmarkRef): VoiceResponse
-    fun delete(ref: BookmarkRef): VoiceResponse
-    fun deleteAll(): VoiceResponse
-    fun queryList(): VoiceResponse.Spoken
-    fun queryCount(): VoiceResponse.Spoken
-    fun queryNearby(): VoiceResponse.Spoken
-}
-
-interface VoiceQueueSink {
-    fun addTop(episode: EpisodeRef): VoiceResponse
-    fun addBottom(episode: EpisodeRef): VoiceResponse
-    fun remove(episode: EpisodeRef): VoiceResponse
-    fun moveToTop(episode: EpisodeRef): VoiceResponse
-    fun moveToBottom(episode: EpisodeRef): VoiceResponse
-    fun clear(): VoiceResponse
-    fun removeByPodcast(podcast: PodcastRef): VoiceResponse
-    fun sort(order: SortOrder): VoiceResponse
-    fun queryContents(): VoiceResponse.Spoken
-    fun queryNext(): VoiceResponse.Spoken
-    fun queryLength(): VoiceResponse.Spoken
-    fun queryIsQueued(episode: EpisodeRef): VoiceResponse.Spoken
-}
-
-interface VoicePodcastSink {
-    fun subscribe(podcast: PodcastRef): VoiceResponse
-    fun unsubscribe(podcast: PodcastRef): VoiceResponse
-    fun downloadEpisode(episode: EpisodeRef): VoiceResponse
-    fun deleteDownload(episode: EpisodeRef): VoiceResponse
-    fun starEpisode(episode: EpisodeRef): VoiceResponse
-    fun unstarEpisode(episode: EpisodeRef): VoiceResponse
-    fun archiveEpisode(episode: EpisodeRef): VoiceResponse
-    fun unarchiveEpisode(episode: EpisodeRef): VoiceResponse
-    fun markPlayed(episode: EpisodeRef): VoiceResponse
-    fun markUnplayed(episode: EpisodeRef): VoiceResponse
-    fun removeFromHistory(episode: EpisodeRef): VoiceResponse
-    fun bulkDownload(filter: EpisodeFilter): VoiceResponse
-    fun bulkArchive(filter: EpisodeFilter): VoiceResponse
-    fun bulkMarkPlayed(filter: EpisodeFilter): VoiceResponse
-    fun addToPlaylist(episode: EpisodeRef, playlist: PlaylistRef): VoiceResponse
-    fun createFolder(name: String): VoiceResponse
-    fun renameFolder(folder: FolderRef, name: String): VoiceResponse
-    fun assignToFolder(podcast: PodcastRef, folder: FolderRef): VoiceResponse
-    fun removeFromFolder(podcast: PodcastRef): VoiceResponse
-    fun deleteFolder(folder: FolderRef): VoiceResponse
-    fun ratePodcast(podcast: PodcastRef, rating: Int): VoiceResponse
-    fun toggleNotifications(podcast: PodcastRef, enabled: Boolean): VoiceResponse
-    fun autoAddToQueue(podcast: PodcastRef, position: QueuePosition): VoiceResponse
-    fun autoDownloadPodcast(podcast: PodcastRef, enabled: Boolean): VoiceResponse
-}
-
-interface VoicePlaylistSink {
-    fun create(name: String?): VoiceResponse
-    fun createSmart(rules: SmartRules, name: String?): VoiceResponse
-    fun delete(playlist: PlaylistRef): VoiceResponse
-    fun rename(playlist: PlaylistRef, name: String): VoiceResponse
-    fun playAll(playlist: PlaylistRef, shuffle: Boolean): VoiceResponse
-    fun downloadAll(playlist: PlaylistRef): VoiceResponse
-    fun addEpisode(episode: EpisodeRef, playlist: PlaylistRef): VoiceResponse
-    fun removeEpisode(episode: EpisodeRef, playlist: PlaylistRef): VoiceResponse
-    fun archiveAll(playlist: PlaylistRef): VoiceResponse
-    fun unarchiveAll(playlist: PlaylistRef): VoiceResponse
-    fun autoDownload(playlist: PlaylistRef, enabled: Boolean): VoiceResponse
-}
-
-interface VoiceSearchSink {
-    suspend fun search(query: String): VoiceResponse.Spoken
-    suspend fun filterResults(type: ContentType?): VoiceResponse.Spoken
-    suspend fun subscribeFromResult(ref: ResultRef): VoiceResponse
-    suspend fun playFromResult(ref: ResultRef): VoiceResponse
-    suspend fun describeResult(ref: ResultRef): VoiceResponse.Spoken
-    suspend fun searchHistoryReRun(query: String?): VoiceResponse.Spoken
-    suspend fun clearSearchHistory(): VoiceResponse
-    suspend fun discoverTrending(): VoiceResponse.Spoken
-    suspend fun discoverRecommendations(): VoiceResponse.Spoken
-    suspend fun discoverCategory(category: String): VoiceResponse.Spoken
-    suspend fun discoverNewReleases(timeframe: String?): VoiceResponse.Spoken
-    suspend fun changeRegion(region: String): VoiceResponse
-}
-
-interface VoiceContentQuerySink {
-    fun whatsPlaying(): VoiceResponse.Spoken
-    fun position(): VoiceResponse.Spoken
-    fun timeRemaining(): VoiceResponse.Spoken
-    fun currentPodcast(): VoiceResponse.Spoken
-    fun episodeDuration(): VoiceResponse.Spoken
-    fun publishDate(): VoiceResponse.Spoken
-    fun episodeDescription(): VoiceResponse.Spoken
-    fun downloadStatus(): VoiceResponse.Spoken
-    fun episodeTitle(): VoiceResponse.Spoken
-    fun listeningTime(period: String?): VoiceResponse.Spoken
-    fun topPodcasts(): VoiceResponse.Spoken
-    fun episodesFinished(period: String?): VoiceResponse.Spoken
-    fun listeningStreak(): VoiceResponse.Spoken
-    fun subscriptionCount(): VoiceResponse.Spoken
-    fun unplayedTotal(): VoiceResponse.Spoken
-    fun downloadStats(): VoiceResponse.Spoken
-    fun queueTotal(): VoiceResponse.Spoken
-    fun newEpisodes(timeframe: String?): VoiceResponse.Spoken
-    fun timeSinceLastListen(): VoiceResponse.Spoken
-}
-
-interface VoiceTranscriptSink {
-    fun open(): VoiceResponse
-    fun search(term: String): VoiceResponse.Spoken
-    fun navigate(direction: NavigationDirection): VoiceResponse.Spoken
-    fun seekToTopic(topic: String): VoiceResponse
-    fun readLine(): VoiceResponse.Spoken
-    fun queryTopic(topic: String): VoiceResponse.Spoken
-    fun seekToQuote(quote: String): VoiceResponse
-    fun readSection(start: String?, end: String?): VoiceResponse.Spoken
-}
-
-interface VoiceAssistantSink {
-    suspend fun askEpisode(question: String): VoiceResponse.Spoken
-    suspend fun summarizeEpisode(): VoiceResponse.Spoken
-    suspend fun queryEpisodeContent(question: String): VoiceResponse.Spoken
-    fun jumpToTopic(topic: String): VoiceResponse
-    fun playQuote(ref: String?): VoiceResponse
-    fun stopQuote(): VoiceResponse
-    fun retryFailedMessage(): VoiceResponse
-    fun clearChat(): VoiceResponse
-    fun castToDevice(device: String?): VoiceResponse.Spoken
-    fun stopCasting(): VoiceResponse
-    fun sendGuestPass(): VoiceResponse
-    fun claimGuestPass(): VoiceResponse
-    fun viewStories(): VoiceResponse
-    fun nextStory(): VoiceResponse
-    fun previousStory(): VoiceResponse
-    fun shareStory(): VoiceResponse
-    fun replayStories(): VoiceResponse
-}
-
-interface VoiceSettingsSink {
-    fun setTheme(theme: String): VoiceResponse
-    fun setAutoDownloadUpNext(enabled: Boolean): VoiceResponse
-    fun setAutoDownloadNew(enabled: Boolean): VoiceResponse
-    fun setAutoDownloadOnFollow(enabled: Boolean): VoiceResponse
-    fun setWifiOnly(enabled: Boolean): VoiceResponse
-    fun setChargingOnly(enabled: Boolean): VoiceResponse
-    fun setPodcastAutoDownload(podcast: PodcastRef, enabled: Boolean): VoiceResponse
-    fun stopAllDownloads(): VoiceResponse
-    fun clearDownloadErrors(): VoiceResponse
-    fun setDownloadLimit(count: Int): VoiceResponse
-    fun setNextTrackAction(action: TrackAction): VoiceResponse
-    fun setPreviousTrackAction(action: TrackAction): VoiceResponse
-    fun setConfirmationSound(enabled: Boolean): VoiceResponse
-    fun setAutoAdd(podcast: PodcastRef, enabled: Boolean): VoiceResponse
-    fun setAutoAddPosition(position: QueuePosition): VoiceResponse
-    fun setAutoAddLimit(count: Int): VoiceResponse
-    fun setArchiveAfterPlaying(delay: String): VoiceResponse
-    fun setArchiveInactive(period: String): VoiceResponse
-    fun setIncludeStarredAutoArchive(enabled: Boolean): VoiceResponse
-    fun setNotifications(enabled: Boolean): VoiceResponse
-    fun setPodcastNotifications(podcast: PodcastRef, enabled: Boolean): VoiceResponse
-    fun manualCleanup(): VoiceResponse
-    fun exportOpml(): VoiceResponse
-}
-
-interface VoiceAccountSink {
-    suspend fun signInEmail(email: String?, password: String?): VoiceResponse.Spoken
-    suspend fun signInGoogle(): VoiceResponse.Spoken
-    suspend fun createAccount(email: String, password: String, newsletter: Boolean?): VoiceResponse.Spoken
-    suspend fun changeEmail(newEmail: String, password: String): VoiceResponse.Spoken
-    suspend fun changePassword(current: String, new: String): VoiceResponse.Spoken
-    suspend fun resetPassword(email: String?): VoiceResponse.Spoken
-    suspend fun redeemPromoCode(code: String?): VoiceResponse.Spoken
-    fun signOut(): VoiceResponse
-    fun changePlan(plan: String): VoiceResponse
-    suspend fun claimOffer(offer: String?): VoiceResponse.Spoken
-    fun cancelSubscription(): VoiceResponse
-    fun keepSubscription(): VoiceResponse.Spoken
-}
-
-interface VoiceSharingSink {
-    fun shareEpisode(episode: EpisodeRef?): VoiceResponse
-    fun shareAtCurrentTime(): VoiceResponse
-    fun shareAtTime(time: String): VoiceResponse
-    fun sharePodcast(podcast: PodcastRef?): VoiceResponse
-    fun shareClip(start: String?, end: String?): VoiceResponse
-    fun shareBookmark(ref: BookmarkRef): VoiceResponse
-    fun shareTranscript(section: String?): VoiceResponse
-    fun createSharedList(name: String, podcasts: List<PodcastRef>): VoiceResponse
-    fun shareViaApp(app: String): VoiceResponse
-    fun acceptSharedList(mode: AcceptMode): VoiceResponse.Spoken
+interface VoiceSleepSink {
+    fun set(minutes: Int): VoiceResponse
+    fun endOfEpisode(): VoiceResponse
+    fun endOfChapter(): VoiceResponse
+    fun addTime(minutes: Int): VoiceResponse
+    fun cancel(): VoiceResponse
+    fun query(): VoiceResponse.Spoken
 }
 ```
 
-## Executor — `VoiceIntentExecutor`
+Each tool maps to one sink. Sink method names match the action enum values. The pattern is the same for all 24 remaining sinks.
 
-The executor dispatches by intent domain to the correct sink. Each branch is exhaustive within its domain.
+## Executor
 
 ```kotlin
 class VoiceIntentExecutor @Inject constructor(
     private val playbackSink: VoicePlaybackSink,
-    private val chapterSink: VoiceChapterSink,
-    private val bookmarkSink: VoiceBookmarkSink,
-    private val queueSink: VoiceQueueSink,
-    private val podcastSink: VoicePodcastSink,
-    private val playlistSink: VoicePlaylistSink,
-    private val searchSink: VoiceSearchSink,
-    private val contentQuerySink: VoiceContentQuerySink,
-    private val transcriptSink: VoiceTranscriptSink,
-    private val assistantSink: VoiceAssistantSink,
-    private val settingsSink: VoiceSettingsSink,
-    private val accountSink: VoiceAccountSink,
-    private val sharingSink: VoiceSharingSink,
+    private val effectsSink: VoiceEffectsSink,
+    private val volumeSink: VoiceVolumeSink,
+    private val sleepSink: VoiceSleepSink,
+    // ... one sink per tool
 ) {
-    suspend fun execute(intent: VoiceIntent): VoiceResponse? = when (intent) {
+    suspend fun execute(intent: VoiceIntent): VoiceResponse = when (intent) {
         is PlaybackIntent -> executePlayback(intent)
-        is ChapterIntent -> executeChapter(intent)
-        is BookmarkIntent -> executeBookmark(intent)
-        is QueueIntent -> executeQueue(intent)
-        is PodcastIntent -> executePodcast(intent)
-        is PlaylistIntent -> executePlaylist(intent)
-        is SearchIntent -> executeSearch(intent)
-        is ContentQueryIntent -> executeContentQuery(intent)
-        is TranscriptIntent -> executeTranscript(intent)
-        is AssistantIntent -> executeAssistant(intent)
-        is SettingsIntent -> executeSettings(intent)
-        is AccountIntent -> executeAccount(intent)
-        is SharingIntent -> executeSharing(intent)
+        is EffectsIntent -> executeEffects(intent)
+        is VolumeIntent -> executeVolume(intent)
+        is SleepIntent -> executeSleep(intent)
+        // ... one branch per tool
     }
-
-    private suspend fun executePlayback(intent: PlaybackIntent): VoiceResponse = when (intent) {
-        is PlaybackIntent.Pause -> playbackSink.pause()
-        is PlaybackIntent.Resume -> playbackSink.resume()
-        is PlaybackIntent.SeekRelative -> if (intent.deltaMs >= 0)
-            playbackSink.skipForward(intent.deltaMs / 1000)
-        else
-            playbackSink.skipBackward(-intent.deltaMs / 1000)
-        is PlaybackIntent.SeekAbsolute -> playbackSink.seekTo(intent.positionMs.coerceAtLeast(0))
-        is PlaybackIntent.NextEpisode -> playbackSink.nextEpisode()
-        is PlaybackIntent.SetSpeed -> playbackSink.setSpeed(intent.speed)
-        is PlaybackIntent.AdjustSpeed -> playbackSink.adjustSpeed(intent.delta)
-        is PlaybackIntent.SetTrimMode -> playbackSink.setTrimMode(intent.mode)
-        is PlaybackIntent.SetVolumeBoost -> playbackSink.setVolumeBoost(intent.enabled)
-        is PlaybackIntent.SetVolume -> playbackSink.setVolume(intent.volume)
-        is PlaybackIntent.AdjustVolume -> playbackSink.adjustVolume(intent.delta)
-        is PlaybackIntent.SleepSet -> playbackSink.sleepSet(intent.minutes)
-        is PlaybackIntent.SleepEndOfEpisode -> playbackSink.sleepEndOfEpisode()
-        is PlaybackIntent.SleepEndOfChapter -> playbackSink.sleepEndOfChapter()
-        is PlaybackIntent.SleepAddTime -> playbackSink.sleepAddTime(intent.minutes)
-        is PlaybackIntent.SleepCancel -> playbackSink.sleepCancel()
-        is PlaybackIntent.QueryEffectsState -> playbackSink.queryEffectsState()
-        is PlaybackIntent.QuerySleepTimer -> playbackSink.querySleepTimer()
-    }
-
-    // ... equivalent private dispatch methods per domain
 }
 ```
 
+Each domain's dispatch method is exhaustive within its sealed sub-interface.
+
 ## Analytics
 
-Tag all voice-initiated actions with `SourceView.VOICE_COMMANDS`. Each domain sink implementation records domain-specific analytics (e.g. `PLAYBACK_SPEED_CHANGED`, `BOOKMARK_CREATED`, `QUEUE_EPISODE_ADDED`) using the voice source view.
+Tag all voice-initiated actions with `SourceView.VOICE_COMMANDS`. Each domain sink records domain-specific analytics using the voice source view.
 
 ## Multi-Turn and Confirmation
 
-Some intents require multi-turn slot filling (account sign-in) or explicit confirmation before execution (queue clear, bulk actions, sign out). These flows are owned by the dialog layer, not this spec. The intent is only dispatched once all slots are filled and confirmations are obtained.
+Some intents require multi-turn slot filling (account sign-in) or explicit confirmation (queue clear, bulk actions, sign out). These flows are owned by the dialog layer, not this spec. The intent is only dispatched once all slots are filled and confirmations are obtained.
 
 The confirmation flow produces a `VoiceIntent` only when confirmed — a denied confirmation produces no intent. The executor never sees cancelled flows.

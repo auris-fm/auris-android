@@ -36,7 +36,34 @@ git commit -m "Add SourceView.VOICE_COMMANDS for voice-triggered action analytic
 
 ---
 
-### Task 2: Refactor VoiceIntent sealed interface
+### Task 2: Add ToolCallMapper and VoiceResponse
+
+**Files:**
+- Create: `modules/services/voice/src/main/kotlin/.../intent/ToolCallMapper.kt`
+- Create: `modules/services/voice/src/main/kotlin/.../intent/VoiceResponse.kt`
+
+- [ ] **Step 1: `VoiceResponse`** — `sealed interface VoiceResponse { data object Silent; data class Earcon(val id: String); data class Spoken(val text: String) }`.
+
+- [ ] **Step 2: `ToolCallMapper`** — converts FunctionGemma's JSON tool call output `(toolName, action, params)` to the typed `VoiceIntent` hierarchy. One `map<Domain>(action, params)` method per tool. Resolves shared ref types (`BookmarkRef`, `EpisodeRef`, etc.) via fuzzy title/index matching. Invalid actions or missing required params return null.
+
+```kotlin
+class ToolCallMapper {
+    fun map(call: ToolCall): VoiceIntent? {
+        if (call.name == "no_match") return null
+        return when (call.name) {
+            "playback" -> mapPlayback(call.action, call.params)
+            "effects" -> mapEffects(call.action, call.params)
+            "volume" -> mapVolume(call.action, call.params)
+            // ... one branch per tool
+            else -> null
+        }
+    }
+}
+```
+
+- [ ] **Step 3: Compile and commit.**
+
+### Task 3: Refactor VoiceIntent sealed interface
 
 **Files:**
 - Modify: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/intent/VoiceIntent.kt`
@@ -45,35 +72,29 @@ git commit -m "Add SourceView.VOICE_COMMANDS for voice-triggered action analytic
 
 - [ ] **Step 2: Replace with new intent types**
 
-Replace the file contents with:
+Replace the file contents with the domain-grouped `VoiceIntent` hierarchy from the [Voice Intents spec](../specs/voice-intents.md). Each tool domain is a sealed sub-interface with a data class per action. Example for the playback domain:
 
 ```kotlin
 package au.com.shiftyjelly.pocketcasts.voicecontrol.intent
 
 sealed interface VoiceIntent {
-    data object Pause : VoiceIntent
-    data object Resume : VoiceIntent
-    data class SeekRelative(val deltaMs: Int) : VoiceIntent
-    data class SeekAbsolute(val positionMs: Int) : VoiceIntent
-    data object NextChapter : VoiceIntent
-    data object PreviousChapter : VoiceIntent
-    data class ChapterByIndex(val index: Int) : VoiceIntent
-    data class ChapterByTitle(val query: String) : VoiceIntent {
-        val normalizedQuery: String = query.trim()
-    }
-    data object NextEpisode : VoiceIntent
-    data class SetSpeed(val speed: Double) : VoiceIntent
-    data class AdjustSpeed(val delta: Double) : VoiceIntent
-    data class SetVolume(val volume: Int) : VoiceIntent
-    data class AdjustVolume(val delta: Int) : VoiceIntent
-    data class SleepTimer(val minutes: Int) : VoiceIntent
-    data class SetTrimMode(val mode: String) : VoiceIntent
-    data class SetVolumeBoost(val enabled: Boolean) : VoiceIntent
-    data class AddBookmark(val title: String) : VoiceIntent
+    sealed interface Playback : VoiceIntent
+    sealed interface Effects : VoiceIntent
+    sealed interface Volume : VoiceIntent
+    sealed interface Sleep : VoiceIntent
+    // ... one sub-interface per tool (25 total)
+}
+
+sealed interface PlaybackIntent : VoiceIntent.Playback {
+    data object Pause : PlaybackIntent
+    data object Resume : PlaybackIntent
+    data class SeekRelative(val deltaMs: Int) : PlaybackIntent
+    data class SeekAbsolute(val positionMs: Int) : PlaybackIntent
+    data object NextEpisode : PlaybackIntent
 }
 ```
 
-This replaces the old `SetPlaybackSpeed` with the split `SetSpeed` / `AdjustSpeed` and adds `SetVolume`, `AdjustVolume`, `SleepTimer`, `SetTrimMode`, `SetVolumeBoost`, `AddBookmark`.
+The full hierarchy covers all 25 tool domains. See the spec for the complete list. This replaces the old flat `VoiceIntent` with the domain-grouped pattern and adds `AdjustSpeed`, `Sleep` variants, `SetTrimMode`, `SetVolumeBoost`, `AddBookmark` across the relevant sub-interfaces.
 
 - [ ] **Step 3: Commit**
 
@@ -84,7 +105,7 @@ git commit -m "Refactor voice intents: split speed/volume, add trim/boost/bookma
 
 ---
 
-### Task 3: Update executor and sink interface
+### Task 4: Update executor and sink interfaces
 
 **Files:**
 - Modify: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/playback/VoiceIntentExecutor.kt`
@@ -93,63 +114,86 @@ git commit -m "Refactor voice intents: split speed/volume, add trim/boost/bookma
 
 - [ ] **Step 2: Update the VoicePlaybackSink interface**
 
-Replace the existing interface with the expanded version:
+Replace the existing interface with the per-domain sink pattern from the [Voice Intents spec](../specs/voice-intents.md). Each tool domain gets its own sink. Sinks return `VoiceResponse` for the confirmation strategy (silent, earcon, or spoken — as defined in the dialogs):
 
 ```kotlin
-interface VoicePlaybackSink {
-    suspend fun pause()
-    suspend fun resume()
-    suspend fun skipForward(seconds: Int)
-    suspend fun skipBackward(seconds: Int)
-    suspend fun seekTo(positionMs: Int)
-    fun nextChapter()
-    fun previousChapter()
-    fun chapterByIndex(index: Int)
-    fun nextEpisode()
-    fun setSpeed(speed: Double)
-    fun adjustSpeed(delta: Double)
-    fun setVolume(volume: Int)
-    fun adjustVolume(delta: Int)
-    fun sleepAfter(minutes: Int)
-    fun setTrimMode(mode: String)
-    fun setVolumeBoost(enabled: Boolean)
-    fun addBookmark(title: String)
+sealed interface VoiceResponse {
+    data object Silent : VoiceResponse
+    data class Earcon(val id: String) : VoiceResponse
+    data class Spoken(val text: String) : VoiceResponse
 }
+
+interface VoicePlaybackSink {
+    suspend fun pause(): VoiceResponse
+    suspend fun resume(): VoiceResponse
+    suspend fun skipForward(seconds: Int): VoiceResponse
+    suspend fun skipBackward(seconds: Int): VoiceResponse
+    suspend fun seekTo(positionMs: Int): VoiceResponse
+    fun nextEpisode(): VoiceResponse
+}
+
+interface VoiceEffectsSink {
+    fun setSpeed(speed: Double): VoiceResponse
+    fun adjustSpeed(delta: Double): VoiceResponse
+    fun setTrimMode(mode: String): VoiceResponse
+    fun setVolumeBoost(enabled: Boolean): VoiceResponse
+    fun queryEffects(): VoiceResponse.Spoken
+}
+
+interface VoiceVolumeSink {
+    fun setVolume(volume: Int): VoiceResponse
+    fun adjustVolume(delta: Int): VoiceResponse
+    fun query(): VoiceResponse.Spoken
+}
+
+interface VoiceSleepSink {
+    fun set(minutes: Int): VoiceResponse
+    fun endOfEpisode(): VoiceResponse
+    fun endOfChapter(): VoiceResponse
+    fun addTime(minutes: Int): VoiceResponse
+    fun cancel(): VoiceResponse
+    fun query(): VoiceResponse.Spoken
+}
+
+// ... one sink per tool (VoiceChapterSink, VoiceBookmarkSink, VoiceQueueSink, etc.)
 ```
+
+This replaces the old single `VoicePlaybackSink` that mixed playback, chapters, bookmarks, and effects into one interface. Each sink maps 1:1 to a FunctionGemma tool.
 
 - [ ] **Step 3: Update the executor when-branch**
 
-Replace the current when-expression to handle all new intents:
+Replace the current when-expression with domain dispatch:
 
 ```kotlin
-suspend fun execute(intent: VoiceIntent) {
-    when (intent) {
-        VoiceIntent.Pause -> sink.pause()
-        VoiceIntent.Resume -> sink.resume()
-        is VoiceIntent.SeekRelative -> {
-            val seconds = abs(intent.deltaMs / 1000)
-            if (intent.deltaMs >= 0) sink.skipForward(seconds)
-            else sink.skipBackward(seconds)
-        }
-        is VoiceIntent.SeekAbsolute -> sink.seekTo(intent.positionMs.coerceAtLeast(0))
-        VoiceIntent.NextChapter -> sink.nextChapter()
-        VoiceIntent.PreviousChapter -> sink.previousChapter()
-        VoiceIntent.NextEpisode -> sink.nextEpisode()
-        is VoiceIntent.ChapterByIndex -> sink.chapterByIndex(intent.index)
-        is VoiceIntent.ChapterByTitle -> Unit // TODO: chapter search
-        is VoiceIntent.SetSpeed -> sink.setSpeed(intent.speed)
-        is VoiceIntent.AdjustSpeed -> sink.adjustSpeed(intent.delta)
-        is VoiceIntent.SetVolume -> sink.setVolume(intent.volume)
-        is VoiceIntent.AdjustVolume -> sink.adjustVolume(intent.delta)
-        is VoiceIntent.SleepTimer -> sink.sleepAfter(intent.minutes)
-        is VoiceIntent.SetTrimMode -> sink.setTrimMode(intent.mode)
-        is VoiceIntent.SetVolumeBoost -> sink.setVolumeBoost(intent.enabled)
-        is VoiceIntent.AddBookmark -> sink.addBookmark(intent.title)
+class VoiceIntentExecutor @Inject constructor(
+    private val playbackSink: VoicePlaybackSink,
+    private val effectsSink: VoiceEffectsSink,
+    private val volumeSink: VoiceVolumeSink,
+    private val sleepSink: VoiceSleepSink,
+    // ... one sink per tool domain
+) {
+    suspend fun execute(intent: VoiceIntent): VoiceResponse = when (intent) {
+        is PlaybackIntent -> executePlayback(intent)
+        is EffectsIntent -> executeEffects(intent)
+        is VolumeIntent -> executeVolume(intent)
+        is SleepIntent -> executeSleep(intent)
+        // ... one branch per domain
+    }
+
+    private suspend fun executePlayback(intent: PlaybackIntent): VoiceResponse = when (intent) {
+        is PlaybackIntent.Pause -> playbackSink.pause()
+        is PlaybackIntent.Resume -> playbackSink.resume()
+        is PlaybackIntent.SeekRelative -> if (intent.deltaMs >= 0)
+            playbackSink.skipForward(intent.deltaMs / 1000)
+        else
+            playbackSink.skipBackward(-intent.deltaMs / 1000)
+        is PlaybackIntent.SeekAbsolute -> playbackSink.seekTo(intent.positionMs.coerceAtLeast(0))
+        is PlaybackIntent.NextEpisode -> playbackSink.nextEpisode()
     }
 }
 ```
 
-Remove any obsolete branches (`SetPlaybackSpeed`). Keep `SeekAbsolute`. The `ChapterByTitle` branch remains a no-op until chapter search is implemented.
+Remove any obsolete branches (`SetPlaybackSpeed`). The `ChapterByTitle` branch remains a no-op until chapter search is implemented. See the spec for the complete executor dispatch across all 25 domains.
 
 - [ ] **Step 4: Commit**
 
@@ -160,123 +204,94 @@ git commit -m "Update executor and sink interface with new voice intents"
 
 ---
 
-### Task 4: Implement PlaybackManagerVoicePlaybackSink new methods
+### Task 5: Implement sink methods per domain
 
 **Files:**
-- Modify: `modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/playback/VoiceIntentExecutor.kt`
+- Create: `modules/services/voice/src/main/kotlin/.../playback/PlaybackManagerPlaybackSink.kt`
+- Create: `modules/services/voice/src/main/kotlin/.../playback/PlaybackManagerEffectsSink.kt`
+- Create: `modules/services/voice/src/main/kotlin/.../playback/AudioManagerVolumeSink.kt`
+- Create: `modules/services/voice/src/main/kotlin/.../playback/SleepTimerSink.kt`
 
-- [ ] **Step 1: Read the PlaybackManagerVoicePlaybackSink class**
+Implement each domain sink as its own class, returning `VoiceResponse` per the confirmation strategy defined in the spec. The old single `PlaybackManagerVoicePlaybackSink` is split into domain-specific classes.
 
-- [ ] **Step 2: Add SleepTimer and BookmarkManager to constructor**
+Example — effects sink:
 
 ```kotlin
-class PlaybackManagerVoicePlaybackSink @Inject constructor(
+@Singleton
+class PlaybackManagerEffectsSink @Inject constructor(
     private val playbackManager: PlaybackManager,
     private val settings: Settings,
+) : VoiceEffectsSink {
+    override fun setSpeed(speed: Double): VoiceResponse {
+        val clamped = speed.coerceIn(0.5, 5.0)
+        val effects = settings.globalPlaybackEffects.value
+        effects.playbackSpeed = clamped
+        settings.globalPlaybackEffects.set(effects, updateModifiedAt = true)
+        playbackManager.updatePlayerEffects(effects = effects)
+        return VoiceResponse.Earcon("speed")
+    }
+
+    override fun adjustSpeed(delta: Double): VoiceResponse {
+        val current = playbackManager.getPlaybackSpeed()
+        return setSpeed(current + delta)
+    }
+    // setTrimMode, setVolumeBoost, queryEffects similarly
+}
+```
+
+Volume sink wraps `AudioManager`:
+
+```kotlin
+@Singleton
+class AudioManagerVolumeSink @Inject constructor(
+    @ApplicationContext private val context: Context,
+) : VoiceVolumeSink {
+    private val audioManager: AudioManager
+        get() = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+    override fun setVolume(volume: Int): VoiceResponse {
+        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, (volume * max / 100).coerceIn(0, max), 0)
+        return VoiceResponse.Earcon("volume")
+    }
+    // adjustVolume, query similarly
+}
+```
+
+Sleep sink wraps `SleepTimer`:
+
+```kotlin
+@Singleton
+class SleepTimerSink @Inject constructor(
     private val sleepTimer: SleepTimer,
-    private val bookmarkManager: BookmarkManager,
-    private val audioManager: android.media.AudioManager,
-) : VoicePlaybackSink {
-```
-
-- [ ] **Step 3: Implement new methods, keep existing ones**
-
-Add these methods:
-
-```kotlin
-override fun setSpeed(speed: Double) {
-    val clamped = speed.coerceIn(0.5, 5.0)
-    val effects = settings.globalPlaybackEffects.value
-    effects.playbackSpeed = clamped
-    settings.globalPlaybackEffects.set(effects, updateModifiedAt = true)
-    playbackManager.updatePlayerEffects(effects = effects)
-}
-
-override fun adjustSpeed(delta: Double) {
-    val current = playbackManager.getPlaybackSpeed()
-    setSpeed(current + delta)
-}
-
-override fun setVolume(volume: Int) {
-    val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-    val scaled = (volume * max / 100).coerceIn(0, max)
-    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, scaled, 0)
-}
-
-override fun adjustVolume(delta: Int) {
-    val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-    val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-    val target = (current + delta * max / 100).coerceIn(0, max)
-    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
-}
-
-override fun sleepAfter(minutes: Int) {
-    if (minutes > 0) {
+) : VoiceSleepSink {
+    override fun set(minutes: Int): VoiceResponse {
         sleepTimer.sleepAfter(java.time.Duration.ofMinutes(minutes.toLong()))
-    } else {
-        sleepTimer.cancelTimer()
+        return VoiceResponse.Earcon("sleep")
     }
-}
-
-override fun setTrimMode(mode: String) {
-    val trimMode = when (mode.lowercase()) {
-        "low" -> TrimMode.LOW
-        "medium" -> TrimMode.MEDIUM
-        "high" -> TrimMode.HIGH
-        else -> TrimMode.OFF
+    override fun addTime(minutes: Int): VoiceResponse {
+        sleepTimer.addExtraTime(java.time.Duration.ofMinutes(minutes.toLong()))
+        return VoiceResponse.Earcon("sleep")
     }
-    val effects = settings.globalPlaybackEffects.value
-    effects.trimMode = trimMode
-    settings.globalPlaybackEffects.set(effects, updateModifiedAt = true)
-    playbackManager.updatePlayerEffects(effects = effects)
-}
-
-override fun setVolumeBoost(enabled: Boolean) {
-    val effects = settings.globalPlaybackEffects.value
-    effects.isVolumeBoosted = enabled
-    settings.globalPlaybackEffects.set(effects, updateModifiedAt = true)
-    playbackManager.updatePlayerEffects(effects = effects)
-}
-
-override fun addBookmark(title: String) {
-    val episode = playbackManager.getCurrentEpisode() ?: return
-    val positionMs = playbackManager.getCurrentTimeMs(episode)
-    val timeSecs = (positionMs / 1000).toInt()
-    bookmarkManager.sourceView = SourceView.VOICE_COMMANDS
-    runBlocking {
-        bookmarkManager.add(
-            episode = episode,
-            timeSecs = timeSecs,
-            title = title,
-            creationSource = BookmarkSourceType.Headphones,
-        )
-    }
+    // endOfEpisode, endOfChapter, cancel, query similarly
 }
 ```
 
-- [ ] **Step 4: Add needed imports**
+Update DI bindings in `VoiceControlModule.kt`:
 
-Add to the top of the file:
 ```kotlin
-import au.com.shiftyjelly.pocketcasts.analytics.SourceView
-import au.com.shiftyjelly.pocketcasts.models.type.TrimMode
-import au.com.shiftyjelly.pocketcasts.repositories.bookmark.BookmarkManager
-import au.com.shiftyjelly.pocketcasts.repositories.playback.SleepTimer
-import com.automattic.eventhorizon.BookmarkSourceType
-import android.media.AudioManager
-import kotlinx.coroutines.runBlocking
+@Binds abstract fun bindVoicePlaybackSink(impl: PlaybackManagerPlaybackSink): VoicePlaybackSink
+@Binds abstract fun bindVoiceEffectsSink(impl: PlaybackManagerEffectsSink): VoiceEffectsSink
+@Binds abstract fun bindVoiceVolumeSink(impl: AudioManagerVolumeSink): VoiceVolumeSink
+@Binds abstract fun bindVoiceSleepSink(impl: SleepTimerSink): VoiceSleepSink
 ```
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/playback/VoiceIntentExecutor.kt
-git commit -m "Implement sink methods for volume, sleep timer, trim, boost, and bookmark"
-```
+- [ ] **Step 2: Add needed imports**
+- [ ] **Step 3: Commit**
 
 ---
 
-### Task 5: Build and verify
+### Task 6: Build and verify
 
 - [ ] **Step 1: Build the app**
 

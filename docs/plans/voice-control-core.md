@@ -29,7 +29,7 @@ The audio route is classified into a `MicExposure` value, and the gate plus expo
 - `.../voice/route/*.kt`: audio route monitoring, `MicExposure` classification, and the `AudioRoutePolicyRule`.
 - `.../voice/mode/*.kt`: `ListeningMode` and `ListeningModePolicy`.
 - `.../voice/intent/*.kt`: sealed `VoiceIntent` types.
-- `.../voice/playback/*.kt`: `PlaybackContextMonitor`, `PlaybackContextActiveCondition`, and `VoicePlaybackIntentExecutor` + `VoicePlaybackSink`.
+- `.../voice/playback/*.kt`: `PlaybackContextMonitor`, `PlaybackContextActiveCondition`, and `VoiceIntentExecutor` + per-domain `Voice*Sink` interfaces.
 - `.../voice/model/VoiceRecognizer.kt` + `VoiceRecognitionContext.kt`: recognizer boundary contract.
 - `.../voice/service/VoiceControlService.kt`: foreground microphone service.
 - `.../voice/service/VoiceControlServiceController.kt`: app-level service controller.
@@ -121,29 +121,25 @@ val voiceControlSetupCompleted: UserSetting<Boolean>
 
 - [ ] **Step 1: Write the intent test** — assert `SeekRelative(30_000).deltaMs == 30_000` and `ChapterByTitle("  interview  ").normalizedQuery == "interview"`. Run it; it fails.
 
-- [ ] **Step 2: Add the full intent model** — the closed `VoiceIntent` set owned by [Voice Intents](voice-intents.md); the core defines all types so the executor's `when` is exhaustive:
+- [ ] **Step 2: Add the full intent model** — the domain-grouped `VoiceIntent` sealed hierarchy owned by [Voice Intents](voice-intents.md). Each of the 25 tool domains is a sealed sub-interface with a data class per action. See the spec for the complete hierarchy; representative sample:
 
 ```kotlin
 sealed interface VoiceIntent {
-    data object Pause : VoiceIntent
-    data object Resume : VoiceIntent
-    data class SeekRelative(val deltaMs: Int) : VoiceIntent
-    data class SeekAbsolute(val positionMs: Int) : VoiceIntent
-    data object NextChapter : VoiceIntent
-    data object PreviousChapter : VoiceIntent
-    data class ChapterByIndex(val index: Int) : VoiceIntent
-    data class ChapterByTitle(val query: String) : VoiceIntent {
-        val normalizedQuery: String = query.trim()
-    }
-    data object NextEpisode : VoiceIntent
-    data class SetSpeed(val speed: Double) : VoiceIntent
-    data class AdjustSpeed(val delta: Double) : VoiceIntent
-    data class SetVolume(val volume: Int) : VoiceIntent
-    data class AdjustVolume(val delta: Int) : VoiceIntent
-    data class SleepTimer(val minutes: Int) : VoiceIntent
-    data class SetTrimMode(val mode: String) : VoiceIntent
-    data class SetVolumeBoost(val enabled: Boolean) : VoiceIntent
-    data class AddBookmark(val title: String) : VoiceIntent
+    sealed interface Playback : VoiceIntent
+    sealed interface Effects : VoiceIntent
+    sealed interface Volume : VoiceIntent
+    sealed interface Sleep : VoiceIntent
+    sealed interface Chapter : VoiceIntent
+    sealed interface Bookmark : VoiceIntent
+    // ... 19 more sub-interfaces
+}
+
+sealed interface PlaybackIntent : VoiceIntent.Playback {
+    data object Pause : PlaybackIntent
+    data object Resume : PlaybackIntent
+    data class SeekRelative(val deltaMs: Int) : PlaybackIntent
+    data class SeekAbsolute(val positionMs: Int) : PlaybackIntent
+    data object NextEpisode : PlaybackIntent
 }
 ```
 
@@ -279,44 +275,43 @@ This is the `ListeningModePolicy` the [Recognition Pipeline spec](../specs/recog
 **Files:**
 - Create: `.../voice/playback/VoiceIntentExecutor.kt` + `VoiceIntentExecutorTest.kt`
 
-The executor is the only class allowed to change playback from voice recognition. It maps each validated intent to a `VoicePlaybackSink` method, keeps seek positions within the episode, and rejects any command when no current episode exists. The added playback intents (speed/volume/sleep/trim/boost/bookmark) and their sink implementations are wired in [Voice Intents](voice-intents.md); this task establishes the executor, the sink interface, and the core playback mappings.
+The executor is the only class allowed to change playback from voice recognition. It dispatches each validated intent by domain to a per-domain sink, keeps seek positions within the episode, and rejects commands when no current episode exists. Sinks return `VoiceResponse` for the confirmation strategy (silent, earcon, or spoken). The full set of domains and sink interfaces is owned by [Voice Intents](voice-intents.md); this task establishes the executor and the core playback-related sinks.
 
-- [ ] **Step 1: Executor test with a fake sink** — `SeekRelative(30_000)` → `skipForward:30`; `SeekRelative(-10_000)` → `skipBackward:10`. Run; it fails.
+- [ ] **Step 1: Executor test with fake sinks** — `PlaybackIntent.SeekRelative(30_000)` → calls `playbackSink.skipForward(30)` returning `VoiceResponse.Silent`; `PlaybackIntent.SeekRelative(-10_000)` → calls `playbackSink.skipBackward(10)`. Run; it fails.
 
-- [ ] **Step 2: Executor + sink**
+- [ ] **Step 2: Executor + sinks**
 
 ```kotlin
 class VoiceIntentExecutor @Inject constructor(
-    private val sink: VoicePlaybackSink,
+    private val playbackSink: VoicePlaybackSink,
+    private val effectsSink: VoiceEffectsSink,
+    private val volumeSink: VoiceVolumeSink,
+    private val sleepSink: VoiceSleepSink,
+    // ... one sink per domain
 ) {
-    suspend fun execute(intent: VoiceIntent) {
-        when (intent) {
-            VoiceIntent.Pause -> sink.pause()
-            VoiceIntent.Resume -> sink.resume()
-            is VoiceIntent.SeekRelative -> {
-                val seconds = abs(intent.deltaMs / 1000)
-                if (intent.deltaMs >= 0) sink.skipForward(seconds) else sink.skipBackward(seconds)
-            }
-            is VoiceIntent.SeekAbsolute -> sink.seekTo(intent.positionMs.coerceAtLeast(0))
-            VoiceIntent.NextChapter -> sink.nextChapter()
-            VoiceIntent.PreviousChapter -> sink.previousChapter()
-            VoiceIntent.NextEpisode -> sink.nextEpisode()
-            is VoiceIntent.ChapterByIndex -> sink.chapterByIndex(intent.index)
-            is VoiceIntent.ChapterByTitle -> Unit // chapter search wired in voice-intents
-            is VoiceIntent.SetSpeed -> sink.setSpeed(intent.speed)
-            is VoiceIntent.AdjustSpeed -> sink.adjustSpeed(intent.delta)
-            is VoiceIntent.SetVolume -> sink.setVolume(intent.volume)
-            is VoiceIntent.AdjustVolume -> sink.adjustVolume(intent.delta)
-            is VoiceIntent.SleepTimer -> sink.sleepAfter(intent.minutes)
-            is VoiceIntent.SetTrimMode -> sink.setTrimMode(intent.mode)
-            is VoiceIntent.SetVolumeBoost -> sink.setVolumeBoost(intent.enabled)
-            is VoiceIntent.AddBookmark -> sink.addBookmark(intent.title)
-        }
+    suspend fun execute(intent: VoiceIntent): VoiceResponse = when (intent) {
+        is PlaybackIntent -> executePlayback(intent)
+        is EffectsIntent -> executeEffects(intent)
+        is VolumeIntent -> executeVolume(intent)
+        is SleepIntent -> executeSleep(intent)
+        is ChapterIntent -> executeChapter(intent)
+        // ... one branch per domain
+    }
+
+    private suspend fun executePlayback(intent: PlaybackIntent): VoiceResponse = when (intent) {
+        is PlaybackIntent.Pause -> playbackSink.pause()
+        is PlaybackIntent.Resume -> playbackSink.resume()
+        is PlaybackIntent.SeekRelative -> if (intent.deltaMs >= 0)
+            playbackSink.skipForward(intent.deltaMs / 1000)
+        else
+            playbackSink.skipBackward(-intent.deltaMs / 1000)
+        is PlaybackIntent.SeekAbsolute -> playbackSink.seekTo(intent.positionMs.coerceAtLeast(0))
+        is PlaybackIntent.NextEpisode -> playbackSink.nextEpisode()
     }
 }
 ```
 
-The `VoicePlaybackSink` interface and `PlaybackManagerVoicePlaybackSink` are defined here (core playback methods) and extended in [Voice Intents](voice-intents.md). Tag analytics with `SourceView.VOICE_COMMANDS` (added by the Voice Intents plan).
+The per-domain `VoiceSink` interfaces and their implementations are defined in [Voice Intents](voice-intents.md). Tag analytics with `SourceView.VOICE_COMMANDS`.
 
 - [ ] **Step 3: Run the test** — it passes. Commit.
 
@@ -350,7 +345,7 @@ class NoOpVoiceRecognizer @Inject constructor() : VoiceRecognizer {
 
 - [ ] **Step 3: Notification** — `VoiceControlNotificationManager` shows a persistent notification that clearly states voice control is active and reflects whether the current mode is `Continuous` or `WakeWord`. No raw audio is logged.
 
-- [ ] **Step 4: Hilt module** — bind `VoiceRecognizer`, `VoicePlaybackSink`, `AudioRouteMonitor`; provide the rule list (the eight conditions grouped), `VoiceControlGate`, `MicExposure` flow, and `ListeningModePolicy`.
+- [ ] **Step 4: Hilt module** — bind `VoiceRecognizer`, each per-domain `Voice*Sink`, `AudioRouteMonitor`; provide the rule list (the eight conditions grouped), `VoiceControlGate`, `MicExposure` flow, and `ListeningModePolicy`.
 
 - [ ] **Step 5: Compile** `./gradlew :modules:services:voice:compileDebugKotlin`. Commit.
 

@@ -177,86 +177,86 @@ class EmbeddingIntentMatcher @Inject constructor(
      */
     private fun assembleIntent(intentType: String, text: String): VoiceIntent? {
         return when (intentType) {
-            "pause" -> VoiceIntent.Pause
+            "pause" -> VoiceIntent.Playback.Pause
 
-            "resume" -> VoiceIntent.Resume
+            "resume" -> VoiceIntent.Playback.Resume
 
-            "next_chapter" -> VoiceIntent.NextChapter
+            "next_chapter" -> VoiceIntent.Chapter.NextChapter
 
-            "previous_chapter" -> VoiceIntent.PreviousChapter
+            "previous_chapter" -> VoiceIntent.Chapter.PreviousChapter
 
-            "next_episode" -> VoiceIntent.NextEpisode
+            "next_episode" -> VoiceIntent.Playback.NextEpisode
 
             "seek_relative_forward" -> {
                 val entities = entityExtractor.extract(text, intentType)
                 val deltaMs = (entities.deltaSeconds ?: 30) * 1000
-                VoiceIntent.SeekRelative(deltaMs)
+                VoiceIntent.Playback.SeekRelative(deltaMs)
             }
 
             "seek_relative_backward" -> {
                 val entities = entityExtractor.extract(text, intentType)
                 val deltaMs = -(entities.deltaSeconds ?: 30) * 1000
-                VoiceIntent.SeekRelative(deltaMs)
+                VoiceIntent.Playback.SeekRelative(deltaMs)
             }
 
             "set_speed" -> {
                 val speed = entityExtractor.extract(text, intentType).speed ?: return null
-                if (speed in 0.5..5.0) VoiceIntent.SetSpeed(speed) else null
+                if (speed in 0.5..5.0) VoiceIntent.Effects.SetSpeed(speed) else null
             }
 
             "adjust_speed_up" -> {
                 val delta = entityExtractor.extract(text, intentType).speedDelta ?: 0.5
-                VoiceIntent.AdjustSpeed(delta)
+                VoiceIntent.Effects.AdjustSpeed(delta)
             }
 
             "adjust_speed_down" -> {
                 val delta = entityExtractor.extract(text, intentType).speedDelta ?: -0.5
-                VoiceIntent.AdjustSpeed(delta)
+                VoiceIntent.Effects.AdjustSpeed(delta)
             }
 
             "set_volume" -> {
                 val volume = entityExtractor.extract(text, intentType).volume ?: return null
-                if (volume in 0..100) VoiceIntent.SetVolume(volume) else null
+                if (volume in 0..100) VoiceIntent.Volume.SetVolume(volume) else null
             }
 
             "adjust_volume_up" -> {
                 val delta = entityExtractor.extract(text, intentType).volumeDelta ?: 10
-                VoiceIntent.AdjustVolume(delta)
+                VoiceIntent.Volume.AdjustVolume(delta)
             }
 
             "adjust_volume_down" -> {
                 val delta = entityExtractor.extract(text, intentType).volumeDelta ?: -10
-                VoiceIntent.AdjustVolume(delta)
+                VoiceIntent.Volume.AdjustVolume(delta)
             }
 
             "sleep_timer" -> {
                 val minutes = entityExtractor.extract(text, intentType).sleepMinutes ?: 30
-                VoiceIntent.SleepTimer(minutes)
+                VoiceIntent.Sleep.Set(minutes)
             }
 
             "chapter_by_index" -> {
                 val index = entityExtractor.extract(text, intentType).chapterIndex ?: return null
-                VoiceIntent.ChapterByIndex(index)
+                VoiceIntent.Chapter.ByIndex(index)
             }
 
             "chapter_by_title" -> {
                 val query = entityExtractor.extract(text, intentType).chapterTitle ?: return null
-                VoiceIntent.ChapterByTitle(query)
+                VoiceIntent.Chapter.ByTitle(query)
             }
 
             "set_trim" -> {
                 val mode = entityExtractor.extract(text, intentType).trimMode ?: return null
-                VoiceIntent.SetTrimMode(mode)
+                VoiceIntent.Effects.SetTrimMode(mode)
             }
 
             "set_volume_boost" -> {
                 val enabled = entityExtractor.extract(text, intentType).boostEnabled ?: true
-                VoiceIntent.SetVolumeBoost(enabled)
+                VoiceIntent.Effects.SetVolumeBoost(enabled)
             }
 
             "add_bookmark" -> {
                 val title = entityExtractor.extract(text, intentType).bookmarkTitle ?: return null
-                VoiceIntent.AddBookmark(title)
+                VoiceIntent.Bookmark.Add(title)
             }
 
             else -> {

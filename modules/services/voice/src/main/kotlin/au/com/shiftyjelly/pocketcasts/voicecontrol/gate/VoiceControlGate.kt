@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import timber.log.Timber
 
 data class VoiceControlGateState(
     val allowed: Boolean,
@@ -42,6 +43,15 @@ class VoiceControlGate(
         val contextPassed = groupAnyAllowed(groupedByGroup[VoiceControlRuleGroup.Context])
 
         val allowed = setupPassed && conflictsPassed && contextPassed
+
+        Timber.d(
+            "Gate: allowed=%b [setup=%b conflicts=%b context=%b] rules=%s",
+            allowed,
+            setupPassed,
+            conflictsPassed,
+            contextPassed,
+            rulesMap.entries.joinToString { (id, state) -> "$id=$state" },
+        )
 
         return VoiceControlGateState(allowed = allowed, rules = rulesMap)
     }

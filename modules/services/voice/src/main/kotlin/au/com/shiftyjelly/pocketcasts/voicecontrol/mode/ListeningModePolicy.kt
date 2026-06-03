@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import timber.log.Timber
 
 @Singleton
 class ListeningModePolicy @Inject constructor(
@@ -55,13 +56,30 @@ internal fun resolve(
     isPlaybackActive: Boolean,
     wakeWordReady: Boolean,
 ): ListeningMode {
-    if (!gateState.allowed) return ListeningMode.Off
-    if (micExposure == MicExposure.NoMic) return ListeningMode.Off
-    if (isForeground) return ListeningMode.Continuous
-    if (isPlaybackActive && micExposure == MicExposure.Isolated) return ListeningMode.Continuous
+    if (!gateState.allowed) {
+        Timber.d("Mode: Off (gate blocked)")
+        return ListeningMode.Off
+    }
+    if (micExposure == MicExposure.NoMic) {
+        Timber.d("Mode: Off (no mic)")
+        return ListeningMode.Off
+    }
+    if (isForeground) {
+        Timber.d("Mode: Continuous (foreground)")
+        return ListeningMode.Continuous
+    }
+    if (isPlaybackActive && micExposure == MicExposure.Isolated) {
+        Timber.d("Mode: Continuous (playback + isolated mic)")
+        return ListeningMode.Continuous
+    }
     if (isPlaybackActive && micExposure == MicExposure.Exposed) {
-        if (!wakeWordReady) return ListeningMode.Off
+        if (!wakeWordReady) {
+            Timber.d("Mode: Off (playback + exposed mic, wake word not ready)")
+            return ListeningMode.Off
+        }
+        Timber.d("Mode: WakeWord (playback + exposed mic)")
         return ListeningMode.WakeWord
     }
+    Timber.d("Mode: Off (not foreground, no active playback) fg=%b playback=%b exposure=%s", isForeground, isPlaybackActive, micExposure)
     return ListeningMode.Off
 }

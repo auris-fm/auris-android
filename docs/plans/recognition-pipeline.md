@@ -1,6 +1,6 @@
-# ASR Intent Pipeline — Implementation Plan
+# Recognition Pipeline — Implementation Plan
 
-> **Spec:** [asr-intent-pipeline spec](../specs/asr-intent-pipeline.md) — architecture, backend layer, intent/entity design, language coverage, error handling.
+> **Spec:** [recognition-pipeline spec](../specs/recognition-pipeline.md) — architecture, backend layer, intent/entity design, language coverage, error handling.
 
 > **For agentic workers:** Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

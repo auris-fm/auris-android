@@ -1,4 +1,4 @@
-# ASR Intent Pipeline
+# Recognition Pipeline
 
 ## Problem
 
@@ -240,7 +240,7 @@ Directional intent pairs are unified into parameterized tools where direction is
 ## Intent Schema
 
 The pipeline's output is a validated `VoiceIntent`. The intent set, parameters, and value ranges are owned by the
-[Playback Controls spec](playback-controls.md) and are not restated here. The matcher selects one of those intent types; the
+[Voice Intents spec](voice-intents.md) and are not restated here. The matcher selects one of those intent types; the
 extractor and normalizer fill its typed slots.
 
 ## Model Management

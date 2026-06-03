@@ -110,17 +110,17 @@ class VoiceControlService : Service() {
         // Start monitoring transient conflict conditions
         liveConditionMonitor.start()
 
-        // Observe listening mode: start/stop capture based on mode
-        modeJob = listeningModePolicy.mode.onEach { mode ->
+        // Observe listening mode + audio route: restart engine on any change
+        modeJob = kotlinx.coroutines.flow.combine(
+            listeningModePolicy.mode,
+            audioRouteMonitor.route,
+        ) { mode, _ -> mode }.onEach { mode ->
             when (mode) {
                 ListeningMode.Off -> stopEngine()
 
                 ListeningMode.Continuous, ListeningMode.WakeWord -> {
-                    if (engineStarted) {
-                        voiceAsrEngine.get().updateListeningMode(mode)
-                    } else {
-                        startEngine(mode)
-                    }
+                    if (engineStarted) stopEngine()
+                    startEngine(mode)
                 }
             }
         }.launchIn(serviceScope)

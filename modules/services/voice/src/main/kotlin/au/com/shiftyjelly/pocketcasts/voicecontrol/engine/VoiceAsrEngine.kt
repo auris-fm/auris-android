@@ -1,6 +1,9 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.engine
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
@@ -22,6 +25,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import timber.log.Timber
 
 @Singleton
@@ -33,7 +37,7 @@ class VoiceAsrEngine @Inject constructor(
     @ApplicationContext private val context: Context,
 ) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val commandWindow = CommandWindow()
     private var processingJob: Job? = null
     private var scoStarted = false
@@ -61,9 +65,11 @@ class VoiceAsrEngine @Inject constructor(
         this.micExposureProvider = micExposureProvider
         this.onIntent = onIntent
         utteranceFilter.reset()
-        openBluetoothSco()
 
         processingJob = scope.launch {
+            if (audioRoute is AudioRoute.BluetoothA2dpOnly) {
+                awaitBluetoothSco()
+            }
             try {
                 voiceAudioProcessor.startProcessing().collect { result ->
                     when (result) {
@@ -210,15 +216,39 @@ class VoiceAsrEngine @Inject constructor(
     }
 
     @Suppress("DEPRECATION")
-    private fun openBluetoothSco() {
+    private suspend fun awaitBluetoothSco() {
         if (scoStarted) return
-        try {
+        suspendCancellableCoroutine { cont ->
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(ctx: Context, intent: Intent) {
+                    val state = intent.getIntExtra(
+                        AudioManager.EXTRA_SCO_AUDIO_STATE,
+                        AudioManager.SCO_AUDIO_STATE_ERROR,
+                    )
+                    Timber.i("SCO state: %d", state)
+                    if (state == AudioManager.SCO_AUDIO_STATE_CONNECTED ||
+                        state == AudioManager.SCO_AUDIO_STATE_DISCONNECTED
+                    ) {
+                        context.unregisterReceiver(this)
+                        if (cont.isActive) cont.resumeWith(Result.success(Unit))
+                    }
+                }
+            }
+            context.registerReceiver(
+                receiver,
+                IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED),
+            )
             savedAudioMode = audioManager.mode
             audioManager.mode = AudioManager.MODE_NORMAL
             audioManager.startBluetoothSco()
             scoStarted = true
-        } catch (e: Exception) {
-            Timber.w(e, "Failed to start Bluetooth SCO")
+            Timber.i("SCO requested, waiting for connection")
+
+            cont.invokeOnCancellation {
+                try {
+                    context.unregisterReceiver(receiver)
+                } catch (_: Exception) {}
+            }
         }
     }
 

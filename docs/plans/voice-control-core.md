@@ -12,7 +12,7 @@
 
 ## Scope
 
-This plan owns everything between **device & playback signals** and the **`VoiceIntentExecutor` → `PlaybackManager`** call: the gate, microphone-exposure classification, listening-mode policy, foreground-service lifecycle, and the executor. Everything between "microphone audio in" and "validated `VoiceIntent` out" — capture, VAD, signal filtering, wake-word detection, ASR backends, intent matching, entity extraction, and model sources — is owned by the [ASR Intent Pipeline](asr-intent-pipeline.md) plan. This plan consumes only the pipeline's boundary contract (`VoiceRecognizer`) and its readiness signal.
+This plan owns everything between **device & playback signals** and the **`VoiceIntentExecutor` → `PlaybackManager`** call: the gate, microphone-exposure classification, listening-mode policy, foreground-service lifecycle, and the executor. Everything between "microphone audio in" and "validated `VoiceIntent` out" — capture, VAD, signal filtering, wake-word detection, ASR backends, intent matching, entity extraction, and model sources — is owned by the [Recognition Pipeline](recognition-pipeline.md) plan. This plan consumes only the pipeline's boundary contract (`VoiceRecognizer`) and its readiness signal.
 
 The audio route is classified into a `MicExposure` value, and the gate plus exposure resolve a `ListeningMode` (`Off` / `Continuous` / `WakeWord`). The mode decides whether a wake word is required.
 
@@ -121,7 +121,7 @@ val voiceControlSetupCompleted: UserSetting<Boolean>
 
 - [ ] **Step 1: Write the intent test** — assert `SeekRelative(30_000).deltaMs == 30_000` and `ChapterByTitle("  interview  ").normalizedQuery == "interview"`. Run it; it fails.
 
-- [ ] **Step 2: Add the full intent model** — the closed `VoiceIntent` set owned by [Playback Controls](playback-controls.md); the core defines all types so the executor's `when` is exhaustive:
+- [ ] **Step 2: Add the full intent model** — the closed `VoiceIntent` set owned by [Voice Intents](voice-intents.md); the core defines all types so the executor's `when` is exhaustive:
 
 ```kotlin
 sealed interface VoiceIntent {
@@ -257,7 +257,7 @@ Each condition implements `VoiceControlRule` with its `group`, derives `state` f
 **Files:**
 - Create: `.../voice/mode/ListeningMode.kt`, `.../voice/mode/ListeningModePolicy.kt`, `ListeningModePolicyTest.kt`
 
-This is the `ListeningModePolicy` the [ASR Intent Pipeline spec](../specs/asr-intent-pipeline.md) refers to: it turns the gate result + microphone exposure into the mode the pipeline runs in.
+This is the `ListeningModePolicy` the [Recognition Pipeline spec](../specs/recognition-pipeline.md) refers to: it turns the gate result + microphone exposure into the mode the pipeline runs in.
 
 - [ ] **Step 1: Mode type** — `enum class ListeningMode { Off, Continuous, WakeWord }`.
 
@@ -279,7 +279,7 @@ This is the `ListeningModePolicy` the [ASR Intent Pipeline spec](../specs/asr-in
 **Files:**
 - Create: `.../voice/playback/VoiceIntentExecutor.kt` + `VoiceIntentExecutorTest.kt`
 
-The executor is the only class allowed to change playback from voice recognition. It maps each validated intent to a `VoicePlaybackSink` method, keeps seek positions within the episode, and rejects any command when no current episode exists. The added playback intents (speed/volume/sleep/trim/boost/bookmark) and their sink implementations are wired in [Playback Controls](playback-controls.md); this task establishes the executor, the sink interface, and the core playback mappings.
+The executor is the only class allowed to change playback from voice recognition. It maps each validated intent to a `VoicePlaybackSink` method, keeps seek positions within the episode, and rejects any command when no current episode exists. The added playback intents (speed/volume/sleep/trim/boost/bookmark) and their sink implementations are wired in [Voice Intents](voice-intents.md); this task establishes the executor, the sink interface, and the core playback mappings.
 
 - [ ] **Step 1: Executor test with a fake sink** — `SeekRelative(30_000)` → `skipForward:30`; `SeekRelative(-10_000)` → `skipBackward:10`. Run; it fails.
 
@@ -302,7 +302,7 @@ class VoiceIntentExecutor @Inject constructor(
             VoiceIntent.PreviousChapter -> sink.previousChapter()
             VoiceIntent.NextEpisode -> sink.nextEpisode()
             is VoiceIntent.ChapterByIndex -> sink.chapterByIndex(intent.index)
-            is VoiceIntent.ChapterByTitle -> Unit // chapter search wired in playback-controls
+            is VoiceIntent.ChapterByTitle -> Unit // chapter search wired in voice-intents
             is VoiceIntent.SetSpeed -> sink.setSpeed(intent.speed)
             is VoiceIntent.AdjustSpeed -> sink.adjustSpeed(intent.delta)
             is VoiceIntent.SetVolume -> sink.setVolume(intent.volume)
@@ -316,7 +316,7 @@ class VoiceIntentExecutor @Inject constructor(
 }
 ```
 
-The `VoicePlaybackSink` interface and `PlaybackManagerVoicePlaybackSink` are defined here (core playback methods) and extended in [Playback Controls](playback-controls.md). Tag analytics with `SourceView.VOICE_COMMANDS` (added by the Playback Controls plan).
+The `VoicePlaybackSink` interface and `PlaybackManagerVoicePlaybackSink` are defined here (core playback methods) and extended in [Voice Intents](voice-intents.md). Tag analytics with `SourceView.VOICE_COMMANDS` (added by the Voice Intents plan).
 
 - [ ] **Step 3: Run the test** — it passes. Commit.
 
@@ -344,7 +344,7 @@ class NoOpVoiceRecognizer @Inject constructor() : VoiceRecognizer {
 }
 ```
 
-`EmbeddingIntentMatcher` (from the [ASR Intent Pipeline](asr-intent-pipeline.md) plan) implements `VoiceRecognizer`; `ModelsReadyCondition` consumes `ensureReady()` state.
+`EmbeddingIntentMatcher` (from the [Recognition Pipeline](recognition-pipeline.md) plan) implements `VoiceRecognizer`; `ModelsReadyCondition` consumes `ensureReady()` state.
 
 - [ ] **Step 2: Foreground service** — `@AndroidEntryPoint VoiceControlService` owns the foreground microphone lifecycle. It observes `ListeningModePolicy.mode`: starts capture and goes foreground when the mode is `Continuous` or `WakeWord`, stops capture and leaves foreground when it is `Off`. Capture runs **without taking audio focus** (so playback is never interrupted). The service coordinates the pipeline, readiness, and the executor; it does not parse commands itself.
 

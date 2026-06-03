@@ -1,12 +1,12 @@
 # Playback Controls — Implementation Plan
 
-> **Spec:** [playback-controls spec](../specs/playback-controls.md) — intent definitions, executor wiring, sink interface.
+> **Spec:** [voice-intents spec](../specs/voice-intents.md) — intent definitions, executor wiring, sink interface.
 
 > **For agentic workers:** Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Wire up all voice intents through to actual playback actions — sleep timer, volume, trim mode, volume boost, and bookmarks — and refactor dual-param speed/volume intents into separate absolute/adjust types.
 
-**Scope:** This plan covers only the **execution layer**: the sealed intent interface, the executor, the sink interface, and sink implementations. The recognition layer — intent matching and entity extraction — is handled by the [ASR Intent Pipeline plan](asr-intent-pipeline.md), which registers the intent keywords and slot grammars for every intent listed here.
+**Scope:** This plan covers only the **execution layer**: the sealed intent interface, the executor, the sink interface, and sink implementations. The recognition layer — intent matching and entity extraction — is handled by the [Recognition Pipeline plan](recognition-pipeline.md), which registers the intent keywords and slot grammars for every intent listed here.
 
 **Tech Stack:** Kotlin, Hilt DI, PlaybackManager, SleepTimer, BookmarkManager, AudioManager, Android analytics (SourceView)
 

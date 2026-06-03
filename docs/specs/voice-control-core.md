@@ -68,7 +68,7 @@ This spec owns the gate, the listening-mode policy, the foreground-service lifec
 privacy/battery/UX rules. Everything between "microphone audio in" and "validated `VoiceIntent` out" is the
 **recognition pipeline**: capture, voice activity detection, playback-bleed filtering, wake-word detection, ASR backends and
 their selection, intent matching, entity extraction, and model sources. The pipeline is owned by the
-[ASR Intent Pipeline spec](asr-intent-pipeline.md). This spec uses only the pipeline's boundary contract (see
+[Recognition Pipeline spec](recognition-pipeline.md). This spec uses only the pipeline's boundary contract (see
 [Recognition pipeline](#recognition-pipeline)), so the pipeline can change inside without affecting this spec.
 
 ### VoiceControlGate
@@ -144,7 +144,7 @@ this window, follow-up commands do not need the wake word. The window stays open
 silence longer than the conversation timeout (10 seconds by default). After that, the wake word is needed again.
 
 The wake word is **"Auris"** by default. Wake-word detection, the model, and the command-window mechanics are
-owned by the [ASR Intent Pipeline spec](asr-intent-pipeline.md); this spec owns only *when* each mode applies.
+owned by the [Recognition Pipeline spec](recognition-pipeline.md); this spec owns only *when* each mode applies.
 
 The mode reacts to change: it is recomputed when playback starts or stops, the route changes, or the app moves into or out of the
 visible foreground. For example, unplugging a headset during playback switches `Continuous` → `WakeWord` without stopping the
@@ -176,7 +176,7 @@ The service lifecycle follows the listening context, which decides whether the m
 
 The recognition pipeline is the single unit between the service and the executor. The core spec depends only on its boundary
 contract; the pipeline's internal stages, components, ordering, models, and mechanisms are owned by the
-[ASR Intent Pipeline spec](asr-intent-pipeline.md) and may change without touching this spec.
+[Recognition Pipeline spec](recognition-pipeline.md) and may change without touching this spec.
 
 **Boundary contract:**
 
@@ -219,7 +219,7 @@ The executor must keep seek positions within the episode's length, and must reje
 ## Model Management
 
 Model download, verification, and storage are owned by the recognition pipeline
-([ASR Intent Pipeline spec](asr-intent-pipeline.md)). The core spec consumes only the pipeline's readiness signal: the gate's
+([Recognition Pipeline spec](recognition-pipeline.md)). The core spec consumes only the pipeline's readiness signal: the gate's
 `ModelsReady` blocks listening until the pipeline reports its models are ready, and first-run setup surfaces download progress
 to the user (see Lifecycle and Privacy and UX).
 
@@ -247,7 +247,7 @@ to the user (see Lifecycle and Privacy and UX).
 Target response for common commands should be under one second after the user finishes speaking on supported devices. The
 core spec contributes by keeping the pipeline warm while listening is gated-allowed and tearing it down promptly otherwise.
 Pipeline-internal latency tactics (model warmup, segmentation tuning, deterministic slot parsing) are owned by the
-[ASR Intent Pipeline spec](asr-intent-pipeline.md).
+[Recognition Pipeline spec](recognition-pipeline.md).
 
 ## Battery Strategy
 
@@ -255,7 +255,7 @@ Pipeline-internal latency tactics (model warmup, segmentation tuning, determinis
 - Never listen unless all required gates are allowed and at least one listening-context signal holds.
 - The active listening mode bounds pipeline work: wake-word mode keeps the heavier recognition stages idle until the wake word
   fires, which keeps speaker/background listening cheap. The per-stage cost behavior is owned by the
-  [ASR Intent Pipeline spec](asr-intent-pipeline.md).
+  [Recognition Pipeline spec](recognition-pipeline.md).
 - Stop listening when no listening-context signal holds, not merely because audio is paused.
 - Core diagnostics cover listening mode, gate state, and microphone on-time; pipeline-internal counters (inference time,
   segmenter duty cycle, wake-word activations) are reported by the pipeline.
@@ -282,7 +282,7 @@ Pipeline-internal latency tactics (model warmup, segmentation tuning, determinis
 - Repeated command duplicates: debounce identical commands within a short interval.
 - Recognition-internal failures (no intent, low confidence, recognition timeout, stuck segmentation, wake-word model/template
   fallback) resolve to "no validated intent" and are handled inside the recognition pipeline
-  ([ASR Intent Pipeline spec](asr-intent-pipeline.md)); the core simply executes nothing.
+  ([Recognition Pipeline spec](recognition-pipeline.md)); the core simply executes nothing.
 
 ## Testing Strategy
 
@@ -291,7 +291,7 @@ Unit tests:
 - Gate condition combinations and blocked reasons across the Setup, Conflicts, and Context groups.
 - Mode resolution: continuous vs. wake-word across foreground × route × playback-context combinations.
 - Route changes and playback-state transitions, including continuous ↔ wake-word switches without stopping the service.
-- Recognition-pipeline internals — playback-bleed filtering, backend selection, intent-match thresholds, entity extraction, and wake-word detection — are tested in the [ASR Intent Pipeline spec](asr-intent-pipeline.md).
+- Recognition-pipeline internals — playback-bleed filtering, backend selection, intent-match thresholds, entity extraction, and wake-word detection — are tested in the [Recognition Pipeline spec](recognition-pipeline.md).
 - Executor command mapping and seek clamping.
 - Duplicate command debounce.
 
@@ -327,5 +327,5 @@ Manual/device tests:
 - Speaker mode may be difficult to make reliable because podcast speech is semantically similar to user commands and room echo varies
   by device, volume, environment, and distance from the phone.
 - Recognition only ever selects from the closed `VoiceIntent` set, so it cannot emit out-of-scope commands; the residual
-  risk is misclassification or low-confidence misses, whose tuning is owned by the [ASR Intent Pipeline spec](asr-intent-pipeline.md).
+  risk is misclassification or low-confidence misses, whose tuning is owned by the [Recognition Pipeline spec](recognition-pipeline.md).
 - False positives can still happen from nearby human speech, even without podcast feedback.

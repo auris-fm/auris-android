@@ -1,219 +1,295 @@
 # Transcripts
 
-Voice dialog reference for all actions in the Transcripts category.
+Transcripts are inherently voice-friendly. Users search episode content by speaking naturally, navigate by meaning rather than timestamp, and ask questions about what's being said. Every action is designed for eyes-free use — reading text aloud, jumping to passages, and answering questions about content without looking at a screen.
 
 ---
 
-## Open transcript
+## Open Transcript
 
-> **User:** Open the transcript.
-> **Bot:** Opening transcript.
-
-Result: Opens the transcript view for the current episode.
+Confirmation: implicit
 
 > **User:** Show me the transcript.
-> **Bot:** Here's the transcript.
+> **Bot:** [confirm]
+Result: Transcript panel opens and syncs to current playback position.
 
-Result: Opens the transcript overlay/panel for the current episode.
+> **User:** Open transcript.
+> **Bot:** [confirm]
+Result: Transcript panel opens.
+
+> **User:** Can I see the transcript?
+> **Bot:** [confirm]
+Result: Transcript panel opens.
 
 > **User:** Read along.
-> **Bot:** Opening transcript.
+> **Bot:** [confirm]
+Result: Transcript panel opens and highlights the current line.
 
-Result: Opens the transcript view, scrolled to the current playback position.
+### Edge cases
 
-> **User:** Show transcript for this episode.
-> **Bot:** Opening transcript.
-
-Result: Opens the transcript for the current episode.
-
-Edge cases:
-- **No transcript available**:
-  > **User:** Open the transcript.
-  > **Bot:** This episode doesn't have a transcript available.
-- **Nothing playing**:
+- **No transcript available:**
   > **User:** Show me the transcript.
-  > **Bot:** Nothing is playing right now. Start an episode first.
-- **Transcript failed to load**:
-  > **User:** Open the transcript.
-  > **Bot:** The transcript couldn't load. Want to try again?
+  > **Bot:** [error]
+
+- **Transcript failed to load:**
+  > **User:** Open transcript.
+  > **Bot:** Couldn't load the transcript. Try again in a moment.
+
+- **Nothing playing:**
+  > **Bot:** Nothing is playing right now. Play an episode first.
 
 ---
 
-## Search in transcript
+## Search Transcript
 
-> **User:** Search the transcript for "climate change."
-> **Bot:** Found 3 matches for "climate change."
+Confirmation: implicit
 
-Result: Highlights all matches in the transcript and scrolls to the first one.
+> **User:** Search the transcript for climate change.
+> **Bot:** Found 7 mentions of "climate change". First at 12:34.
+Result: Transcript highlights all matches and scrolls to the first one.
 
-> **User:** Find where they talk about AI.
-> **Bot:** Found 5 matches for "AI."
+> **User:** Does the transcript mention AI?
+> **Bot:** Found 3 mentions of "AI". First at 5:12.
+Result: All matches highlighted, scrolled to first.
 
-Result: Searches the transcript text and highlights matching lines.
+> **User:** Find where they talk about Paris.
+> **Bot:** Found 4 mentions of "Paris". First at 22:08.
+Result: All matches highlighted, scrolled to first.
 
-> **User:** Search transcript for "quantum computing."
-> **Bot:** No matches for "quantum computing."
+> **User:** Is there anything about regulation?
+> **Bot:** Found 2 mentions of "regulation". First at 31:15.
+Result: All matches highlighted, scrolled to first.
 
-Result: Searches the transcript but finds no results; displays the "no matches" state.
+### Edge cases
 
-> **User:** Look for "election" in the transcript.
-> **Bot:** Found 2 matches for "election."
+- **No matches:**
+  > **User:** Search the transcript for cryptocurrency.
+  > **Bot:** No mentions of "cryptocurrency" found. Want me to try a similar term?
 
-Result: Filters or highlights matching transcript lines.
+- **No transcript available:**
+  > **Bot:** [error]
 
-Edge cases:
-- **No matches found**:
-  > **User:** Search for "banana."
-  > **Bot:** No matches found in this transcript.
-- **Transcript not loaded yet**:
-  > **User:** Search the transcript for "AI."
-  > **Bot:** The transcript is still loading. Try again in a moment.
-- **Transcript not open**:
-  > **User:** Search the transcript for "AI."
-  > **Bot:** Let me open the transcript first.
-  Result: Opens the transcript and then searches.
+- **Nothing playing:**
+  > **Bot:** Nothing is playing right now.
 
 ---
 
-## Navigate matches
+## Navigate Matches
+
+Confirmation: implicit
 
 > **User:** Next match.
-> **Bot:** Match 2 of 5.
-
-Result: Scrolls to the next search match in the transcript.
+> **Bot:** At 14:22. "...the impact of **climate change** on coastal cities..."
+Result: Seeks to next match and reads surrounding context.
 
 > **User:** Previous match.
-> **Bot:** Match 4 of 5.
+> **Bot:** At 12:34. "...**climate change** is accelerating faster than..."
+Result: Seeks to previous match and reads surrounding context.
 
-Result: Scrolls to the previous search match in the transcript.
+> **User:** Go to the third one.
+> **Bot:** At 22:08. "...we discussed **climate change** policy with..."
+Result: Seeks to the third match and reads surrounding context.
 
-> **User:** Go to the third match.
-> **Bot:** Match 3 of 5.
+> **User:** Next.
+> **Bot:** At 28:41. "...addressing **climate change** requires global..."
+Result: Seeks to next match.
 
-Result: Jumps directly to the third search match.
+### Edge cases
 
-> **User:** Jump to the last result.
-> **Bot:** Match 5 of 5.
-
-Result: Scrolls to the final search match.
-
-Edge cases:
-- **No active search**:
+- **No active search:**
   > **User:** Next match.
-  > **Bot:** Search the transcript first and I can navigate through matches.
-- **Already on the last match**:
+  > **Bot:** [error]
+
+- **Already at last match:**
   > **User:** Next match.
-  > **Bot:** That's the last match. Go back to the first?
-- **Already on the first match**:
+  > **Bot:** That was the last match. Back to the first?
+  > **User:** Yes.
+  > **Bot:** At 12:34. "...the impact of **climate change** on..."
+Result: Wraps to first match.
+
+- **Already at first match:**
   > **User:** Previous match.
-  > **Bot:** That's the first match.
+  > **Bot:** That was the first match. Go to the last?
+  > **User:** Sure.
+  > **Bot:** At 45:03. "...**climate change** will define the next..."
+Result: Wraps to last match.
 
 ---
 
-## Clear search
+## Content-Based Seek
 
-> **User:** Clear the search.
-> **Bot:** Search cleared.
+Confirmation: implicit
 
-Result: Removes the search highlight and returns to the full transcript view.
+> **User:** Skip to where they talk about climate.
+Result: Seeks playback to the first transcript mention of "climate" at 12:34.
 
-> **User:** Stop searching.
-> **Bot:** Search cleared.
+> **User:** Jump to the part about Paris.
+Result: Seeks playback to the first transcript mention of "Paris" at 22:08.
 
-Result: Clears the search filter and resets the transcript view.
+> **User:** Go to where the guest makes their main argument.
+Result: Seeks to the best-matching section at 35:10.
 
-> **User:** Show the whole transcript again.
-> **Bot:** Search cleared, showing full transcript.
+> **User:** When do they discuss regulation?
+Result: Seeks to the first mention of "regulation" at 31:15.
 
-Result: Removes search highlighting and shows the complete transcript.
+### Edge cases
 
----
+- **No transcript available:**
+  > **Bot:** [error]
 
-## Seek to position
+- **Topic not found:**
+  > **User:** Skip to where they talk about cryptocurrency.
+  > **Bot:** I couldn't find that topic. The closest match is "finance" at 18:42. Jump there?
+  > **User:** Yes.
+Result: Seeks to closest match at 18:42.
 
-> **User:** Go to where it says "the stock market crashed."
-> **Bot:** Jumping to that part.
-
-Result: Seeks playback to the timestamp where the quoted text appears in the transcript.
-
-> **User:** Tap on "climate change" in the transcript.
-> **Bot:** Playing from that point.
-
-Result: Seeks to the position of the tapped transcript text.
-
-> **User:** Jump to the part about machine learning.
-> **Bot:** Jumping to the section on machine learning.
-
-Result: Seeks to the approximate timestamp where machine learning is discussed.
-
-> **User:** Skip to where they mention Tesla.
-> **Bot:** Playing from that point.
-
-Result: Seeks playback to the transcript line mentioning Tesla.
-
-Edge cases:
-- **Text not found in transcript**:
-  > **User:** Go to where they talk about gardening.
-  > **Bot:** I couldn't find that in the transcript. Want me to search for it?
-- **Nothing playing**:
-  > **User:** Jump to the part about AI.
-  > **Bot:** Starting playback from that point.
-  Result: Starts the episode and seeks to the matched position.
+- **Nothing playing:**
+  > **Bot:** Nothing is playing right now.
 
 ---
 
-## Share transcript
+## Read Current Line
 
-> **User:** Share the transcript.
-> **Bot:** Opening share for the transcript.
+Confirmation: implicit
 
-Result: Opens the system share sheet with the transcript content or link.
+> **User:** What are they saying right now?
+> **Bot:** "...and that's why the policy needs to change at a fundamental level."
+Result: Reads the current transcript line aloud.
 
-> **User:** Send this transcript to someone.
-> **Bot:** Opening share.
+> **User:** What did they just say?
+> **Bot:** "...and that's why the policy needs to change at a fundamental level."
+Result: Reads the most recently spoken line.
 
-Result: Opens the share dialog for the transcript.
+> **User:** Read that again.
+> **Bot:** "...and that's why the policy needs to change at a fundamental level."
+Result: Re-reads the current line.
 
-> **User:** Share the transcript as text.
-> **Bot:** Opening share for transcript text.
+> **User:** What was that?
+> **Bot:** "...and that's why the policy needs to change at a fundamental level."
+Result: Reads the current line.
 
-Result: Opens the share sheet with the transcript formatted as plain text.
+### Edge cases
 
-Edge cases:
-- **Transcript not loaded**:
-  > **User:** Share the transcript.
-  > **Bot:** The transcript hasn't loaded yet. Try again in a moment.
-- **Sharing failure**:
-  > **User:** Share the transcript.
-  > **Bot:** Couldn't share right now. Try again in a moment.
+- **No transcript:**
+  > **Bot:** [error]
+
+- **Nothing playing:**
+  > **Bot:** Nothing is playing right now.
+
+- **Between lines (silence):**
+  > **Bot:** Nothing being said right now. They paused at 14:22.
 
 ---
 
-## Reload transcript
+## Query Topic
 
-> **User:** Reload the transcript.
-> **Bot:** Reloading transcript.
+Confirmation: implicit
 
-Result: Fetches a fresh copy of the transcript from the server.
+> **User:** Do they mention AI?
+> **Bot:** Yes, "AI" comes up 3 times. First mention at 5:12.
+Result: Reports count and first timestamp.
 
-> **User:** The transcript looks wrong, refresh it.
-> **Bot:** Refreshing transcript.
+> **User:** Is regulation discussed in this episode?
+> **Bot:** Yes, "regulation" comes up 2 times. First mention at 31:15.
+Result: Reports count and first timestamp.
 
-Result: Reloads the transcript data.
+> **User:** Do they talk about Paris?
+> **Bot:** Yes, "Paris" comes up 4 times. First mention at 22:08.
+Result: Reports count and first timestamp.
 
-> **User:** Try loading the transcript again.
-> **Bot:** Reloading.
+> **User:** Does this episode get into privacy concerns?
+> **Bot:** Yes, "privacy" comes up 5 times. First mention at 8:45.
+Result: Reports count and first timestamp.
 
-Result: Attempts to fetch the transcript again.
+### Edge cases
 
-Edge cases:
-- **Network error**:
-  > **User:** Reload the transcript.
-  > **Bot:** Couldn't reload. Check your connection and try again.
-- **Transcript not available**:
-  > **User:** Reload the transcript.
-  > **Bot:** This episode doesn't have a transcript available.
-- **Transcript not open**:
-  > **User:** Reload the transcript.
-  > **Bot:** Let me open the transcript first.
-  Result: Opens the transcript view and then reloads.
+- **Topic not found:**
+  > **User:** Do they mention cryptocurrency?
+  > **Bot:** No mentions of "cryptocurrency" in this episode. The closest topic is "finance" with 2 mentions.
+
+- **No transcript:**
+  > **Bot:** [error]
+
+- **Nothing playing:**
+  > **Bot:** Nothing is playing right now.
+
+---
+
+## Find Quote
+
+Confirmation: implicit
+
+> **User:** Find where they say "the future of work is remote".
+> **Bot:** Found at 41:07: "the future of work is remote."
+Result: Seeks to the exact quote and highlights it.
+
+> **User:** Where do they say "this changes everything"?
+> **Bot:** Found at 15:33: "this changes everything."
+Result: Seeks to the exact quote.
+
+> **User:** Find the part about "never giving up".
+> **Bot:** Found at 52:20: "you just never give up, no matter what."
+Result: Seeks to the closest match containing the phrase.
+
+> **User:** Where does she say "we built this from nothing"?
+> **Bot:** Found at 33:45: "we built this from nothing."
+Result: Seeks to the matching quote.
+
+### Edge cases
+
+- **Quote not found:**
+  > **User:** Find where they say "technology will save us all".
+  > **Bot:** Couldn't find that exact quote. The closest match is at 19:12: "technology alone won't save us." Jump there?
+  > **User:** Yes.
+Result: Seeks to closest match at 19:12.
+
+- **Multiple matches:**
+  > **User:** Find where they say "you know".
+  > **Bot:** That phrase appears 14 times. First at 2:15. Want a more specific quote?
+
+- **No transcript:**
+  > **Bot:** [error]
+
+- **Nothing playing:**
+  > **Bot:** Nothing is playing right now.
+
+---
+
+## Read Section
+
+Confirmation: implicit
+
+> **User:** Read from 15 minutes to 20 minutes.
+> **Bot:** Reading from 15:00 to 20:00.
+Result: Reads transcript text for that range aloud. Playback does not change.
+
+> **User:** Read the next minute.
+> **Bot:** Reading the next minute.
+Result: Reads transcript text from current position through the next 60 seconds.
+
+> **User:** Read from here to the end of the chapter.
+> **Bot:** Reading from 34:12 to 38:50.
+Result: Reads transcript text for that section.
+
+> **User:** Read the last two minutes.
+> **Bot:** Reading from 43:15 to 45:22.
+Result: Reads transcript text for the final two minutes of the episode.
+
+### Edge cases
+
+- **Range extends past end of episode:**
+  > **User:** Read from 40 minutes to 50 minutes.
+  > **Bot:** The episode ends at 45:22. Reading from 40:00 to the end.
+
+- **Invalid range (start after end):**
+  > **User:** Read from 50 minutes to 40 minutes.
+  > **Bot:** That start time is past the end of the episode. The episode is 45 minutes long.
+
+- **No transcript:**
+  > **Bot:** [error]
+
+- **Nothing playing:**
+  > **Bot:** Nothing is playing right now.
+
+- **Section is very long:**
+  > **User:** Read the whole transcript.
+  > **Bot:** That's a 45-minute episode. I can read a shorter section instead. How much do you need?

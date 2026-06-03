@@ -1,265 +1,404 @@
 # Sharing
 
-Voice dialog reference for all actions in the Sharing category.
+Sharing by voice is natural — users share what they are listening to in the moment. The bot handles opening the share sheet with the right content pre-filled. Most share actions open the system share sheet so the user can pick a destination on screen; the bot confirms what it prepared, not where it sent anything.
 
 ---
 
-## Share episode
+## Share Episode
+
+Confirmation: implicit
 
 > **User:** Share this episode.
-> **Bot:** Opening share for "The Future of Urban Transit."
+> **Bot:** [confirm]
 
-Result: Opens the system share sheet with a link to the episode.
+Result: System share sheet opens with a link to the currently playing (or most recently played) episode.
 
-> **User:** Send this episode to a friend.
-> **Bot:** Opening share.
+> **User:** Send this to a friend.
+> **Bot:** [confirm]
 
-Result: Opens the share dialog with the episode link.
+Result: Same as above — natural paraphrase resolves to share-episode intent.
 
-> **User:** Share the current episode.
-> **Bot:** Opening share for "The Future of Urban Transit."
+> **User:** Share the episode I listened to yesterday.
+> **Bot:** [confirm]
 
-Result: Opens the share sheet with the current episode.
+Result: Share sheet opens with the specified episode from history.
 
-> **User:** Let me share this one.
-> **Bot:** Opening share.
+> **User:** Share the newest episode of Reply All.
+> **Bot:** [confirm]
 
-Result: Opens the share sheet for the episode.
+Result: Share sheet opens with the latest episode of the named podcast.
 
-Edge cases:
-- **No episode selected:**
-  > **User:** Share this episode.
-  > **Bot:** Which episode? Open one first or tell me the name.
-- **Sharing failure:**
-  > **User:** Share this episode.
-  > **Bot:** Couldn't share right now. Try again in a moment.
-- **No sharing apps installed:**
-  > **User:** Share this episode.
-  > **Bot:** No apps available to share with. Install a messaging or email app first.
+### Edge Cases
+
+**Nothing playing and no recent episode.**
+
+> **User:** Share this episode.
+> **Bot:** [error]
+
+**Episode title too long for a concise response.** The bot truncates with an ellipsis.
+
+> **User:** Share this.
+> **Bot:** [confirm]
 
 ---
 
-## Share episode at timestamp
+## Share at Current Timestamp
 
-> **User:** Share this episode at the current timestamp.
-> **Bot:** Opening share for "The Future of Urban Transit" at 12:34.
-
-Result: Opens the share sheet with a timestamped link to the episode.
+Confirmation: implicit
 
 > **User:** Share from here.
-> **Bot:** Opening share at 12:34.
+> **Bot:** [confirm]
 
-Result: Opens the share sheet with a link starting at the current playback position.
+Result: Share sheet opens with a timestamped link starting at the current playback position.
 
-> **User:** Send a link to this part of the episode.
-> **Bot:** Opening share at 12:34.
+> **User:** Share at this point.
+> **Bot:** [confirm]
 
-Result: Opens the share dialog with a timestamped episode link.
+Result: Same action, natural paraphrase.
+
+> **User:** Share where I am right now.
+> **Bot:** [confirm]
+
+Result: Same action, natural paraphrase.
+
+> **User:** Send this moment to someone.
+> **Bot:** [confirm]
+
+Result: Same action, natural paraphrase.
+
+### Edge Cases
+
+**Nothing playing.**
+
+> **User:** Share from here.
+> **Bot:** [error]
+
+---
+
+## Share at Specific Time
+
+Confirmation: implicit
 
 > **User:** Share at 15 minutes.
-> **Bot:** Opening share at 15:00.
+> **Bot:** [confirm]
 
-Result: Opens the share sheet with a link starting at the 15-minute mark.
+Result: Share sheet opens with a timestamped link starting at exactly 15:00.
 
-Edge cases:
-- **Nothing playing and no position specified:**
-  > **User:** Share from here.
-  > **Bot:** Nothing is playing. Share the episode without a timestamp instead?
-- **Timestamp exceeds episode duration:**
-  > **User:** Share at 2 hours.
-  > **Bot:** That's past the end of the episode.
+> **User:** Share from 30 minutes in.
+> **Bot:** [confirm]
+
+Result: Share sheet opens at 30:00.
+
+> **User:** Share starting at one hour twelve.
+> **Bot:** [confirm]
+
+Result: Share sheet opens at the spoken time, parsed from natural language.
+
+> **User:** Share from the beginning.
+> **Bot:** [confirm]
+
+Result: Share sheet opens at the start of the episode.
+
+### Edge Cases
+
+**Time exceeds episode length.**
+
+> **User:** Share at 90 minutes.
+> **Bot:** That's past the end. Sharing from 42:15 instead.
+
+**Nothing playing.**
+
+> **User:** Share at 10 minutes.
+> **Bot:** [error]
 
 ---
 
-## Share podcast
+## Share Podcast
+
+Confirmation: implicit
 
 > **User:** Share this podcast.
-> **Bot:** Opening share for "The Daily Podcast."
+> **Bot:** [confirm]
 
-Result: Opens the share sheet with a link to the podcast.
+Result: Share sheet opens with a link to the podcast show page.
 
-> **User:** Send the podcast link to someone.
-> **Bot:** Opening share.
+> **User:** Send a link to Reply All.
+> **Bot:** [confirm]
 
-Result: Opens the share dialog with the podcast link.
+Result: Same — podcast identified by name.
 
-> **User:** Share the podcast with a friend.
-> **Bot:** Opening share for "The Daily Podcast."
+> **User:** Share the podcast I'm listening to.
+> **Bot:** [confirm]
 
-Result: Opens the share sheet for the podcast.
+Result: Shares the podcast of the currently playing episode.
 
-> **User:** Let me share this show.
-> **Bot:** Opening share.
+> **User:** Share the show.
+> **Bot:** [confirm]
 
-Result: Opens the share sheet with the podcast link.
+Result: Shares the podcast of the currently playing episode.
 
-Edge cases:
-- **No podcast selected:**
-  > **User:** Share this podcast.
-  > **Bot:** Which podcast? Open one first or tell me the name.
-- **Sharing failure:**
-  > **User:** Share this podcast.
-  > **Bot:** Couldn't share right now. Try again in a moment.
+### Edge Cases
 
----
+**Podcast name not found.**
 
-## Share clip
+> **User:** Share a link to Bananacasts.
+> **Bot:** I couldn't find "Bananacasts". Check the name?
 
-> **User:** Share this clip.
-> **Bot:** Opening share for your clip.
+**Nothing playing and no podcast specified.**
 
-Result: Opens the share sheet with the audio clip.
-
-> **User:** Send this clip to someone.
-> **Bot:** Opening share.
-
-Result: Opens the share dialog for the clip.
-
-> **User:** Share the clip I just made.
-> **Bot:** Opening share for your clip.
-
-Result: Opens the share sheet with the clip.
-
-Edge cases:
-- **Clip too short to share:**
-  > **User:** Share this clip.
-  > **Bot:** The clip is too short to share. It needs to be at least 5 seconds.
-- **No clip created:**
-  > **User:** Share this clip.
-  > **Bot:** You haven't created a clip yet. Make one first.
-- **Sharing failure:**
-  > **User:** Share the clip.
-  > **Bot:** Couldn't share right now. Try again in a moment.
+> **User:** Share the show.
+> **Bot:** Nothing playing right now. Which podcast?
 
 ---
 
-## Share bookmark
+## Share Clip
 
-> **User:** Share this bookmark.
-> **Bot:** Opening share for "Funny bit."
+Confirmation: implicit
 
-Result: Opens the share sheet with the bookmark details and timestamp.
+> **User:** Share a clip.
+> **Bot:** [confirm]
 
-> **User:** Send this bookmark to someone.
-> **Bot:** Opening share.
+Result: Clip editor opens with the current playback position as the default start point.
 
-Result: Opens the share dialog for the bookmark.
+> **User:** Clip this part.
+> **Bot:** [confirm]
 
-> **User:** Share the bookmark at 12 minutes.
-> **Bot:** Opening share for "Funny bit" at 12:34.
+Result: Same action.
 
-Result: Opens the share sheet for the matching bookmark.
+> **User:** Make a clip of the last 30 seconds.
+> **Bot:** [confirm]
 
-> **User:** Share my bookmark.
-> **Bot:** Which one? You have: "Funny bit," "Key takeaway," "Best part."
-  > **User:** Best part.
-  > **Bot:** Opening share for "Best part."
+Result: Clip editor opens with the specified range pre-filled.
 
-Result: Lists bookmarks and opens share for the chosen one.
+> **User:** Clip from 5 to 10 minutes.
+> **Bot:** [confirm]
 
-Edge cases:
-- **Bookmark not found:**
-  > **User:** Share the bookmark "Intro."
-  > **Bot:** I couldn't find a bookmark called "Intro."
-- **No bookmarks:**
-  > **User:** Share a bookmark.
-  > **Bot:** You don't have any bookmarks to share.
-- **Sharing failure:**
-  > **User:** Share this bookmark.
-  > **Bot:** Couldn't share right now. Try again in a moment.
+Result: Clip editor opens with the specified range pre-filled.
+
+### Edge Cases
+
+**Clip range too short.**
+
+> **User:** Clip the last 2 seconds.
+> **Bot:** Clips need at least 5 seconds. Opening the editor — adjust the range there.
+
+**Nothing playing.**
+
+> **User:** Share a clip.
+> **Bot:** [error]
 
 ---
 
-## Share transcript
+## Share Bookmark
 
-> **User:** Share this transcript.
-> **Bot:** Opening share for the transcript.
+Confirmation: implicit
 
-Result: Opens the share sheet with the transcript or a link to it.
+> **User:** Share my bookmark "the funny bit".
+> **Bot:** [confirm]
 
-> **User:** Share the transcript of this episode.
-> **Bot:** Opening share.
+Result: Share sheet opens with a link at the bookmark's timestamp.
 
-Result: Opens the share dialog with the transcript content.
+> **User:** Share the bookmark I just made.
+> **Bot:** [confirm]
+
+Result: Share sheet opens for the most recently created bookmark.
+
+> **User:** Share all my bookmarks from this episode.
+> **Bot:** [confirm]
+
+Result: Share sheet opens with a list of bookmarked timestamps.
+
+### Edge Cases
+
+**Bookmark not found.**
+
+> **User:** Share my bookmark "the conclusion".
+> **Bot:** No bookmark called "the conclusion". Check the title?
+
+**No bookmarks.**
+
+> **User:** Share my bookmarks.
+> **Bot:** No bookmarks yet. Add one first.
+
+---
+
+## Share Transcript
+
+Confirmation: implicit
+
+> **User:** Share the transcript.
+> **Bot:** [confirm]
+
+Result: Share sheet opens with the episode transcript as text.
 
 > **User:** Send the transcript to someone.
-> **Bot:** Opening share for the transcript.
+> **Bot:** [confirm]
 
-Result: Opens the share sheet with the transcript.
+Result: Same action.
 
-Edge cases:
-- **Transcript not available:**
-  > **User:** Share the transcript.
-  > **Bot:** This episode doesn't have a transcript.
-- **No episode selected:**
-  > **User:** Share the transcript.
-  > **Bot:** Which episode? Open one first.
+> **User:** Copy the transcript.
+> **Bot:** [confirm]
+
+Result: Transcript text copied to clipboard.
+
+> **User:** Share this part of the transcript.
+> **Bot:** [confirm]
+
+Result: Share sheet opens with the portion of the transcript around the current position.
+
+### Edge Cases
+
+**Transcript unavailable.**
+
+> **User:** Share the transcript.
+> **Bot:** [error]
+
+**Nothing playing.**
+
+> **User:** Share the transcript.
+> **Bot:** [error]
 
 ---
 
-## Create / share shared list
+## Create Shared List
 
-> **User:** Create a shared list.
-> **Bot:** What would you like to name it?
-  > **User:** My favorites.
-  > **Bot:** Created shared list "My favorites."
+Confirmation: implicit
 
-Result: Creates a new shared podcast list with the given name.
+Slot-filling dialog collects a name and at least one podcast. If the user provides everything upfront, the bot confirms and opens the share sheet in one turn.
 
-> **User:** Make a shared podcast list.
-> **Bot:** What should I call it?
-  > **User:** Tech podcasts.
-  > **Bot:** Created "Tech podcasts."
+> **User:** Create a shared list of my favorite podcasts.
+> **Bot:** What should the list be called?
+> **User:** Best of 2024.
+> **Bot:** Which podcasts? Say a name or "done" to finish.
+> **User:** Reply All, and 99% Invisible.
+> **Bot:** Got it. Anything else?
+> **User:** That's it.
+> **Bot:** [confirm]
 
-Result: Creates a shared list and prompts for a name.
+Result: A new shared list named "Best of 2024" containing Reply All and 99% Invisible is created and the share sheet opens.
+
+> **User:** Create a shared list called Tech Podcasts with The Vergecast and Decoder Ring.
+> **Bot:** [confirm]
+
+Result: List created with both podcasts, share sheet opens.
 
 > **User:** Share my podcast list.
-> **Bot:** Opening share for "My favorites."
+> **Bot:** Which list? Favorites, or a new one?
+> **User:** Favorites.
+> **Bot:** [confirm]
 
-Result: Opens the share sheet with a link to the shared list.
+Result: A shared list is generated from the user's existing Favorites list and the share sheet opens.
 
-> **User:** Share the list "Tech podcasts."
-> **Bot:** Opening share for "Tech podcasts."
+> **User:** Make a list with this podcast and send it to Sarah.
+> **Bot:** What should the list be called?
+> **User:** Podcast recs.
+> **Bot:** [confirm]
 
-Result: Opens the share sheet for the named list.
+Result: List created with the current podcast, share sheet opens pre-directed to Messages.
 
-Edge cases:
-- **No lists to share:**
-  > **User:** Share my podcast list.
-  > **Bot:** You don't have any shared lists yet. Create one first.
-- **List name not found:**
-  > **User:** Share the list "News."
-  > **Bot:** I couldn't find a list called "News."
-- **Shared list creation failure:**
-  > **User:** Create a shared list.
-  > **Bot:** Couldn't create the list right now. Try again in a moment.
+### Edge Cases
+
+**No podcasts provided.**
+
+> **User:** Create a shared list.
+> **Bot:** Sure. What should it be called?
+> **User:** Empty list.
+> **Bot:** Add at least one podcast to share.
+
+**Podcast not found.**
+
+> **User:** Add BananaCasts to my list.
+> **Bot:** Couldn't find "BananaCasts". Try again?
+
+**User cancels mid-flow.**
+
+> **User:** Actually, never mind.
+> **Bot:** Cancelled. No list was created.
 
 ---
 
-## Accept incoming shared list
+## Share via Specific App
 
-> **User:** Open this shared list.
-> **Bot:** Adding "Sarah's picks" to your library.
+Confirmation: implicit
 
-Result: Imports the shared list and adds it to the user's podcast library.
+> **User:** Share this on WhatsApp.
+> **Bot:** [confirm]
 
-> **User:** Accept the shared list.
-> **Bot:** Adding "Tech podcasts" to your library.
+Result: Share sheet bypassed; the episode link opens directly in WhatsApp's share screen.
 
-Result: Imports the shared list from the link.
+> **User:** Send via email.
+> **Bot:** [confirm]
 
-> **User:** Add this list to my podcasts.
-> **Bot:** Adding "My favorites" to your library.
+Result: Email compose screen opens with the episode link.
 
-Result: Imports the shared list.
+> **User:** Share on Slack.
+> **Bot:** [confirm]
 
-Edge cases:
-- **Invalid shared list link:**
-  > **User:** Open this shared list.
-  > **Bot:** This link doesn't look like a valid shared list.
-- **List already added:**
-  > **User:** Accept the shared list.
-  > **Bot:** You already have "Tech podcasts" in your library.
-- **Network error accepting list:**
-  > **User:** Add this list to my podcasts.
-  > **Bot:** Couldn't load the list. Check your connection and try again.
+Result: Slack share screen opens with the episode link.
+
+> **User:** Text this to someone.
+> **Bot:** [confirm]
+
+Result: SMS/Messages compose screen opens with the episode link.
+
+### Edge Cases
+
+**App not installed.**
+
+> **User:** Share this on WhatsApp.
+> **Bot:** WhatsApp isn't installed. Open the share sheet instead?
+
+**No sharing apps available.**
+
+> **User:** Share this.
+> **Bot:** No apps to share with. Check your installed apps?
+
+**Sharing fails.**
+
+> **User:** Share on Slack.
+> **Bot:** Couldn't open Slack. Try the share sheet instead?
+
+---
+
+## Accept Shared List
+
+Confirmation: implicit
+
+This action is context-dependent — the user has received or opened a shared-list link and the app presents it. The bot describes what was received and asks whether to subscribe.
+
+> **User:** Open that shared list.
+> **Bot:** Shared list from Alex: 5 podcasts. Subscribe to all?
+
+> **User:** Yes.
+> **Bot:** Subscribed to 5 podcasts.
+
+Result: All podcasts in the shared list are added to the user's library.
+
+> **User:** Let me pick.
+> **Bot:** Here are the 5 podcasts. Say the ones you want.
+> **User:** Reply All and 99% Invisible.
+> **Bot:** Subscribed to 2 podcasts.
+
+Result: Only the named podcasts are added.
+
+> **User:** No thanks.
+> **Bot:** No problem. The list is saved if you change your mind.
+
+Result: List is stored but no subscriptions are added.
+
+### Edge Cases
+
+**Invalid or expired link.**
+
+> **User:** Open that shared list.
+> **Bot:** That link didn't work. Ask the sender for a new one?
+
+**Already subscribed to all.**
+
+> **User:** Subscribe to all.
+> **Bot:** You're already subscribed to all 5. Nothing to add.
+
+**Network error.**
+
+> **User:** Subscribe to all.
+> **Bot:** Couldn't load the list. Check your connection and try again.

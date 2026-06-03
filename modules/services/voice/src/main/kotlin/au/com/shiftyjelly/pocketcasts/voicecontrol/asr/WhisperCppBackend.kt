@@ -69,6 +69,6 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
     )
 
     override fun release() {
-        modelFile = null
+        // Model file persists; only native resources (if any) should be released here.
     }
 }

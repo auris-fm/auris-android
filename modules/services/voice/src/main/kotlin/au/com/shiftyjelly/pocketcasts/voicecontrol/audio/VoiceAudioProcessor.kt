@@ -1,5 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.audio
 
+import android.Manifest
+import androidx.annotation.RequiresPermission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioSegmenter
@@ -20,6 +22,7 @@ class VoiceAudioProcessor @Inject constructor(
      *
      * @return Flow of VoiceSegmenterResult objects indicating speech activity
      */
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun startProcessing(): Flow<VoiceSegmenterResult> {
         return microphoneCapture.startCapture()
             .map { frame ->

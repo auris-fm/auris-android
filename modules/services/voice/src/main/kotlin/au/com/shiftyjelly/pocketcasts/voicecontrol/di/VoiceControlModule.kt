@@ -107,7 +107,7 @@ abstract class VoiceControlModule {
         fun provideModelsReadyCondition(): ModelsReadyCondition = ModelsReadyCondition()
 
         @Provides @Singleton
-        @Suppress("DEPRECATION")
+        @Suppress("DEPRECATION") // TelephonyManager.callState deprecated in API 31; CallStateCallback requires CALL_STATE permission
         fun provideNotOnCallCondition(
             @ApplicationContext context: Context,
         ): NotOnCallCondition {

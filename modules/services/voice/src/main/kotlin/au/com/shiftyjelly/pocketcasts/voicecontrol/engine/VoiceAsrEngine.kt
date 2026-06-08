@@ -1,10 +1,12 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.engine
 
+import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.media.AudioManager
+import androidx.annotation.RequiresPermission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
@@ -51,6 +53,7 @@ class VoiceAsrEngine @Inject constructor(
     @Volatile
     private var currentMode: ListeningMode = ListeningMode.Off
 
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun start(
         backend: AsrBackend,
         audioRoute: AudioRoute,
@@ -215,7 +218,7 @@ class VoiceAsrEngine @Inject constructor(
         Timber.i("VoiceAsrEngine stopped")
     }
 
-    @Suppress("DEPRECATION")
+    @Suppress("DEPRECATION") // startBluetoothSco + SCO broadcast deprecated in API 33; no replacement
     private suspend fun awaitBluetoothSco() {
         if (scoStarted) return
         suspendCancellableCoroutine { cont ->
@@ -252,7 +255,7 @@ class VoiceAsrEngine @Inject constructor(
         }
     }
 
-    @Suppress("DEPRECATION")
+    @Suppress("DEPRECATION") // stopBluetoothSco deprecated in API 33; no replacement
     private fun closeBluetoothSco() {
         if (!scoStarted) return
         try {

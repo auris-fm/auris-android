@@ -5,6 +5,7 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.IBinder
+import androidx.annotation.RequiresPermission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackendSelector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine
@@ -120,6 +121,7 @@ class VoiceControlService : Service() {
 
                 ListeningMode.Continuous, ListeningMode.WakeWord -> {
                     if (engineStarted) stopEngine()
+                    @Suppress("MissingPermission") // permission checked in hasRequiredPermissions() above
                     startEngine(mode)
                 }
             }
@@ -188,6 +190,7 @@ class VoiceControlService : Service() {
         Timber.i("Voice control models ready")
     }
 
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun startEngine(mode: ListeningMode) {
         if (engineStarted) return
         val backend = asrBackendSelector.select()

@@ -7,10 +7,6 @@
     <application>
         <uses-native-library android:name="libOpenCL.so" android:required="false" />
         <activity
-            android:name=".ui.EnrollmentActivity"
-            android:exported="false"
-            android:theme="@style/Theme.AppCompat.DayNight" />
-        <activity
             android:name=".ui.PermissionRequestActivity"
             android:exported="false"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />

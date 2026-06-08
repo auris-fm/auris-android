@@ -4,7 +4,6 @@ import android.content.Context
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
-import android.os.Build
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -21,31 +20,21 @@ class AndroidAudioRouteMonitor @Inject constructor(
 
     override val route: StateFlow<AudioRoute> = mutableRoute.asStateFlow()
 
-    private val audioDeviceCallback = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-        object : AudioDeviceCallback() {
-            override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
-                mutableRoute.value = readRoute()
-            }
-
-            override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
-                mutableRoute.value = readRoute()
-            }
+    private val audioDeviceCallback = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
+            mutableRoute.value = readRoute()
         }
-    } else {
-        null
+
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+            mutableRoute.value = readRoute()
+        }
     }
 
     init {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            audioManager.registerAudioDeviceCallback(audioDeviceCallback, null)
-        }
+        audioManager.registerAudioDeviceCallback(audioDeviceCallback, null)
     }
 
     private fun readRoute(): AudioRoute {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-            return AudioRoute.Unknown
-        }
-
         val outputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
         val inputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).toList()
 
@@ -86,8 +75,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
         }
 
         private fun Int.isBleHeadset(): Boolean {
-            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                this == AudioDeviceInfo.TYPE_BLE_HEADSET
+            return this == AudioDeviceInfo.TYPE_BLE_HEADSET
         }
     }
 }

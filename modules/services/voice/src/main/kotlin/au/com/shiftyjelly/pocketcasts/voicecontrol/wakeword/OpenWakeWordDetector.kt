@@ -99,6 +99,6 @@ class OpenWakeWordDetector @Inject constructor(
     }
 
     private companion object {
-        const val DETECTION_THRESHOLD = 0.3f
+        const val DETECTION_THRESHOLD = 0.80f
     }
 }

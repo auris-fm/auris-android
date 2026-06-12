@@ -29,18 +29,28 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.entity.GrammarEntityEx
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.AudioManagerVolumeSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.NoOpCloudRouteSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextActiveCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackManagerBookmarkSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackManagerChapterSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackManagerEffectsSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackManagerPlaybackContextProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackManagerPlaybackSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackQuerySink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.SleepTimerSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.StatsQuerySink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.UpNextQueueSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceBookmarkSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceChapterSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceCloudRouteSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceEffectsSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackQuerySink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceQueueSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceSleepSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceStatsQuerySink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceVolumeSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
@@ -77,6 +87,16 @@ abstract class VoiceControlModule {
     @Binds abstract fun bindVoiceChapterSink(impl: PlaybackManagerChapterSink): VoiceChapterSink
 
     @Binds abstract fun bindVoiceBookmarkSink(impl: PlaybackManagerBookmarkSink): VoiceBookmarkSink
+
+    @Binds abstract fun bindVoiceCloudRouteSink(impl: NoOpCloudRouteSink): VoiceCloudRouteSink
+
+    @Binds abstract fun bindPlaybackContextProvider(impl: PlaybackManagerPlaybackContextProvider): PlaybackContextProvider
+
+    @Binds abstract fun bindVoiceQueueSink(impl: UpNextQueueSink): VoiceQueueSink
+
+    @Binds abstract fun bindVoicePlaybackQuerySink(impl: PlaybackQuerySink): VoicePlaybackQuerySink
+
+    @Binds abstract fun bindVoiceStatsQuerySink(impl: StatsQuerySink): VoiceStatsQuerySink
 
     @Binds abstract fun bindAudioRouteMonitor(impl: AndroidAudioRouteMonitor): AudioRouteMonitor
 

@@ -307,6 +307,16 @@ object ToolSchema {
             }
           },
           {
+            "name": "cloud_route",
+            "description": "Route cloud-enhanced assistant requests to the cloud assistant. Use for cloud dialogs. Preserve the full user request; do not locally decompose it into assistant actions.",
+            "parameters": {
+              "action": {"type": "string", "enum": ["route"]},
+              "request": {"type": "string", "description": "The complete user utterance or resolved multi-turn request to send to cloud."},
+              "tier": {"type": "string", "enum": ["free", "premium", "unknown"], "description": "Lowest cloud tier that appears to cover the request. Use unknown when tier cannot be determined locally."},
+              "category": {"type": "string", "enum": ["understanding", "discovery", "learning", "assistant", "research", "engagement", "synthesis", "unknown"], "description": "Best-effort dialog category for routing and analytics."}
+            }
+          },
+          {
             "name": "no_match",
             "description": "No command was recognized. Select this when the user is not issuing a voice command."
           }

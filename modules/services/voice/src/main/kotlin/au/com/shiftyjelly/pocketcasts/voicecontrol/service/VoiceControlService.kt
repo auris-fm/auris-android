@@ -7,6 +7,8 @@ import android.content.pm.PackageManager
 import android.os.IBinder
 import androidx.annotation.RequiresPermission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackendSelector
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.SenseVoiceBackend
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.WhisperCppBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.LiveConditionMonitor
@@ -135,59 +137,74 @@ class VoiceControlService : Service() {
 
     private suspend fun ensureModelsReady() {
         Timber.i("Ensuring models")
-        modelsReadyCondition.update(isReady = false)
 
         val backend = asrBackendSelector.select()
         Timber.i("Selected ASR backend: %s", backend::class.simpleName)
 
-        val modelResult = modelManager.ensureModel(backend.requiredModel)
-        modelResult.fold(
-            onSuccess = {
-                val modelDir = java.io.File(filesDir, backend.requiredModel.targetDir)
-                val modelFile = backend.requiredModel.files.firstOrNull()?.let {
-                    java.io.File(modelDir, it.filename)
-                }
-                if (modelFile != null && backend is au.com.shiftyjelly.pocketcasts.voicecontrol.asr.WhisperCppBackend) {
-                    backend.setModelFile(modelFile)
-                }
-                Timber.i("ASR model ready")
-            },
-            onFailure = { e ->
-                Timber.e(e, "ASR model download failed")
-                serviceScope.launch(Dispatchers.Main) { stopSelf() }
-                return
-            },
-        )
+        val needDownload = !modelManager.isModelReady(backend.requiredModel) ||
+            !modelManager.isEmbeddingModelReady() ||
+            !modelManager.isFunctionGemmaModelReady()
 
-        val readyResult = backend.ensureReady()
-        if (readyResult.isFailure) {
-            Timber.e(readyResult.exceptionOrNull(), "Backend not ready")
+        if (needDownload) {
+            modelsReadyCondition.update(isReady = false)
+        }
+
+        if (modelManager.ensureModel(backend.requiredModel).isFailure) {
+            Timber.e("ASR model download failed")
+            serviceScope.launch(Dispatchers.Main) { stopSelf() }
+            return
+        }
+        wireBackend(backend)
+
+        if (backend.ensureReady().isFailure) {
+            Timber.e("Backend not ready")
             serviceScope.launch(Dispatchers.Main) { stopSelf() }
             return
         }
 
-        // Init embedding intent matcher
-        val embeddingResult = modelManager.ensureEmbeddingModel()
-        embeddingResult.fold(
-            onSuccess = {
-                Timber.i("Embedding model ready, initializing intent matcher")
-                val initOk = embeddingIntentMatcher.initialize(
-                    tokenizerPath = modelManager.tokenizerModelFile.absolutePath,
-                    modelPath = modelManager.embeddingModelFile.absolutePath,
-                )
-                if (!initOk) {
-                    Timber.e("Intent matcher initialization failed")
-                } else {
-                    Timber.i("Intent matcher initialized")
-                }
-            },
-            onFailure = { e ->
-                Timber.e(e, "Embedding model download failed")
-            },
-        )
+        if (modelManager.ensureEmbeddingModel().isSuccess) {
+            Timber.i("Embedding model ready, initializing intent matcher")
+            val initOk = embeddingIntentMatcher.initialize(
+                tokenizerPath = modelManager.tokenizerModelFile.absolutePath,
+                modelPath = modelManager.embeddingModelFile.absolutePath,
+            )
+            if (!initOk) {
+                Timber.e("Intent matcher initialization failed")
+            } else {
+                Timber.i("Intent matcher initialized")
+            }
+        } else {
+            Timber.e("Embedding model download failed")
+        }
+
+        if (modelManager.ensureFunctionGemmaModel().isSuccess) {
+            Timber.i("FunctionGemma model ready, initializing intent router")
+            val routerResult = voiceRecognizer.ensureReady()
+            if (routerResult.isFailure) {
+                Timber.e(routerResult.exceptionOrNull(), "Intent router initialization failed")
+            } else {
+                Timber.i("Intent router initialized")
+            }
+        } else {
+            Timber.e("FunctionGemma model download failed")
+        }
 
         modelsReadyCondition.update(isReady = true)
         Timber.i("Voice control models ready")
+    }
+
+    private fun wireBackend(backend: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend) {
+        val modelDir = java.io.File(filesDir, backend.requiredModel.targetDir)
+        val modelFile = backend.requiredModel.files.firstOrNull()?.let {
+            java.io.File(modelDir, it.filename)
+        }
+        if (modelFile != null && backend is WhisperCppBackend) {
+            backend.setModelFile(modelFile)
+        }
+        if (backend is SenseVoiceBackend) {
+            backend.setModelDir(modelDir)
+        }
+        Timber.i("ASR model ready")
     }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)

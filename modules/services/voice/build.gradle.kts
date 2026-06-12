@@ -54,6 +54,8 @@ dependencies {
     implementation(projects.modules.services.repositories)
     implementation(projects.modules.services.utils)
 
+    implementation("com.google.ai.edge.litertlm:litertlm-android:latest.release")
+
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.material)
     implementation(libs.compose.ui)

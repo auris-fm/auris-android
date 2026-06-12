@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import kotlinx.coroutines.test.runTest
@@ -173,13 +174,64 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
-    fun `unhandled domain returns silent`() = runTest {
+    fun `cloud route delegates to cloud route sink`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+
+        val response = executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "summarize this episode",
+                tier = VoiceIntent.CloudTier.Premium,
+                category = VoiceIntent.CloudCategory.Assistant,
+            ),
+        )
+
+        assertEquals(VoiceResponse.Silent, response)
+        assertEquals(
+            listOf("routeToCloud:summarize this episode:Premium:Assistant"),
+            sinks.cloudRoute.calls,
+        )
+    }
+
+    @Test
+    fun `unhandled optional domain returns silent`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+
+        val response = executor.execute(VoiceIntent.Search.Trending)
+
+        assertEquals(VoiceResponse.Silent, response)
+    }
+
+    @Test
+    fun `playback query whats playing returns spoken`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
 
         val response = executor.execute(VoiceIntent.PlaybackQuery.WhatsPlaying)
 
-        assertEquals(VoiceResponse.Silent, response)
+        assertEquals(VoiceResponse.Spoken("whats playing"), response)
+    }
+
+    @Test
+    fun `queue clear calls queue sink`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+
+        val response = executor.execute(VoiceIntent.Queue.Clear)
+
+        assertEquals(VoiceResponse.Earcon("queue"), response)
+        assertEquals(listOf("clear"), sinks.queue.calls)
+    }
+
+    @Test
+    fun `stats query returns spoken`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+
+        val response = executor.execute(VoiceIntent.StatsQuery.ListeningStreak)
+
+        assertEquals(VoiceResponse.Spoken("streak"), response)
     }
 
     private class FakeSinks {
@@ -189,6 +241,11 @@ class VoicePlaybackIntentExecutorTest {
         val sleep = FakeSleepSink()
         val chapter = FakeChapterSink()
         val bookmark = FakeBookmarkSink()
+        val cloudRoute = FakeCloudRouteSink()
+        val playbackContext = FakePlaybackContextProvider()
+        val queue = FakeQueueSink()
+        val playbackQuery = FakePlaybackQuerySink()
+        val statsQuery = FakeStatsQuerySink()
 
         fun executor() = VoicePlaybackIntentExecutor(
             playbackSink = playback,
@@ -197,6 +254,11 @@ class VoicePlaybackIntentExecutorTest {
             sleepSink = sleep,
             chapterSink = chapter,
             bookmarkSink = bookmark,
+            cloudRouteSink = cloudRoute,
+            playbackContextProvider = playbackContext,
+            queueSink = queue,
+            playbackQuerySink = playbackQuery,
+            statsQuerySink = statsQuery,
         )
     }
 
@@ -336,5 +398,99 @@ class VoicePlaybackIntentExecutorTest {
         override fun queryList(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
         override fun queryCount(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
         override fun queryNearby(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
+    }
+
+    private class FakeCloudRouteSink : VoiceCloudRouteSink {
+        val calls = mutableListOf<String>()
+        override suspend fun routeToCloud(
+            request: String,
+            tier: VoiceIntent.CloudTier,
+            category: VoiceIntent.CloudCategory,
+            context: PlaybackContext,
+        ): VoiceResponse {
+            calls += "routeToCloud:$request:${tier.name}:${category.name}"
+            return VoiceResponse.Silent
+        }
+    }
+
+    private class FakePlaybackContextProvider : PlaybackContextProvider {
+        override fun current(): PlaybackContext = PlaybackContext()
+    }
+
+    private class FakeQueueSink : VoiceQueueSink {
+        val calls = mutableListOf<String>()
+        override suspend fun addTop(episode: String?): VoiceResponse {
+            calls += "addTop:$episode"
+            return VoiceResponse.Earcon("queue")
+        }
+        override suspend fun addBottom(episode: String?): VoiceResponse {
+            calls += "addBottom:$episode"
+            return VoiceResponse.Earcon("queue")
+        }
+        override suspend fun remove(episode: String): VoiceResponse {
+            calls += "remove:$episode"
+            return VoiceResponse.Earcon("queue")
+        }
+        override suspend fun moveToTop(episode: String): VoiceResponse {
+            calls += "moveToTop:$episode"
+            return VoiceResponse.Earcon("queue")
+        }
+        override suspend fun moveToBottom(episode: String): VoiceResponse {
+            calls += "moveToBottom:$episode"
+            return VoiceResponse.Earcon("queue")
+        }
+        override fun clear(): VoiceResponse {
+            calls += "clear"
+            return VoiceResponse.Earcon("queue")
+        }
+        override suspend fun removeByPodcast(podcast: String): VoiceResponse {
+            calls += "removeByPodcast:$podcast"
+            return VoiceResponse.Earcon("queue")
+        }
+        override fun sort(sortOrder: String): VoiceResponse {
+            calls += "sort:$sortOrder"
+            return VoiceResponse.Earcon("queue")
+        }
+        override fun queryContents(): VoiceResponse.Spoken {
+            calls += "queryContents"
+            return VoiceResponse.Spoken("queue query")
+        }
+        override fun queryNext(): VoiceResponse.Spoken {
+            calls += "queryNext"
+            return VoiceResponse.Spoken("queue next")
+        }
+        override fun queryLength(): VoiceResponse.Spoken {
+            calls += "queryLength"
+            return VoiceResponse.Spoken("queue length")
+        }
+        override suspend fun queryIsQueued(episode: String): VoiceResponse.Spoken {
+            calls += "queryIsQueued:$episode"
+            return VoiceResponse.Spoken("queue check")
+        }
+    }
+
+    private class FakePlaybackQuerySink : VoicePlaybackQuerySink {
+        override fun whatsPlaying(): VoiceResponse.Spoken = VoiceResponse.Spoken("whats playing")
+        override fun position(): VoiceResponse.Spoken = VoiceResponse.Spoken("position")
+        override fun timeRemaining(): VoiceResponse.Spoken = VoiceResponse.Spoken("time remaining")
+        override fun currentPodcast(): VoiceResponse.Spoken = VoiceResponse.Spoken("podcast")
+        override fun episodeDuration(): VoiceResponse.Spoken = VoiceResponse.Spoken("duration")
+        override fun publishDate(): VoiceResponse.Spoken = VoiceResponse.Spoken("date")
+        override fun episodeDescription(): VoiceResponse.Spoken = VoiceResponse.Spoken("description")
+        override fun downloadStatus(): VoiceResponse.Spoken = VoiceResponse.Spoken("status")
+        override fun episodeTitle(): VoiceResponse.Spoken = VoiceResponse.Spoken("title")
+    }
+
+    private class FakeStatsQuerySink : VoiceStatsQuerySink {
+        override fun listeningTime(period: String?): VoiceResponse.Spoken = VoiceResponse.Spoken("time")
+        override fun topPodcasts(period: String?): VoiceResponse.Spoken = VoiceResponse.Spoken("top")
+        override fun episodesFinished(period: String?): VoiceResponse.Spoken = VoiceResponse.Spoken("finished")
+        override fun listeningStreak(): VoiceResponse.Spoken = VoiceResponse.Spoken("streak")
+        override fun subscriptionCount(): VoiceResponse.Spoken = VoiceResponse.Spoken("subs")
+        override fun unplayedTotal(): VoiceResponse.Spoken = VoiceResponse.Spoken("unplayed")
+        override fun downloadStats(): VoiceResponse.Spoken = VoiceResponse.Spoken("downloads")
+        override fun queueTotal(): VoiceResponse.Spoken = VoiceResponse.Spoken("queue")
+        override fun newEpisodes(timeframe: String?): VoiceResponse.Spoken = VoiceResponse.Spoken("new")
+        override fun timeSinceLastListen(): VoiceResponse.Spoken = VoiceResponse.Spoken("last")
     }
 }

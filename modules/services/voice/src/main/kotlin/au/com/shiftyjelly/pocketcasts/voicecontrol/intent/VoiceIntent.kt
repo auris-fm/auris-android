@@ -261,4 +261,29 @@ sealed interface VoiceIntent {
         data class ShareViaApp(val episode: String? = null, val app: String? = null) : Sharing
         data class AcceptSharedList(val acceptMode: String? = null) : Sharing
     }
+
+    data class CloudRoute(
+        val request: String,
+        val tier: CloudTier,
+        val category: CloudCategory,
+        val context: PlaybackContext = PlaybackContext(),
+    ) : VoiceIntent
+
+    enum class CloudTier { Free, Premium, Unknown }
+    enum class CloudCategory {
+        Understanding,
+        Discovery,
+        Learning,
+        Assistant,
+        Research,
+        Engagement,
+        Synthesis,
+        Unknown,
+    }
 }
+
+data class PlaybackContext(
+    val episodeId: String = "",
+    val positionMs: Long = 0L,
+    val recentTimestamps: List<Long> = emptyList(),
+)

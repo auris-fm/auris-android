@@ -10,22 +10,27 @@ class AsrBackendSelectorTest {
 
     private lateinit var deviceProbe: DeviceProbe
     private lateinit var whisperCppBackend: WhisperCppBackend
+    private lateinit var senseVoiceBackend: SenseVoiceBackend
     private lateinit var selector: AsrBackendSelector
 
     @Before
     fun setUp() {
         deviceProbe = DeviceProbe(hardware = "", socManufacturer = "", sdkInt = 30)
         whisperCppBackend = WhisperCppBackend()
+        senseVoiceBackend = SenseVoiceBackend()
         selector = AsrBackendSelector(
             deviceProbe = deviceProbe,
             whisperCppBackend = object : Lazy<WhisperCppBackend> {
                 override fun get(): WhisperCppBackend = whisperCppBackend
             },
+            senseVoiceBackend = object : Lazy<SenseVoiceBackend> {
+                override fun get(): SenseVoiceBackend = senseVoiceBackend
+            },
         )
     }
 
     @Test
-    fun `select returns whisperCppBackend by default`() {
+    fun `select returns whisperCppBackend by default for non-CJK locale`() {
         val backend = selector.select()
         assertSame(whisperCppBackend, backend)
     }
@@ -55,12 +60,11 @@ class AsrBackendSelectorTest {
     }
 
     @Test
-    fun `manual override to sensevoice throws not yet implemented error`() {
+    fun `manual override to sensevoice selects senseVoiceBackend`() {
         selector.manualOverride = "sensevoice"
 
-        assertThrows(IllegalStateException::class.java) {
-            selector.select()
-        }
+        val backend = selector.select()
+        assertSame(senseVoiceBackend, backend)
     }
 
     @Test

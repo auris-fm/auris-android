@@ -53,6 +53,11 @@ class ModelManager @Inject constructor(
         private const val TOKENIZER_PATH =
             "/intfloat/multilingual-e5-small/resolve/main/tokenizer.json"
         const val TOKENIZER_FILENAME = "tokenizer.json"
+
+        // FunctionGemma finetuned model (~270 MB INT8, LiteRT-LM format)
+        // URL updated once fine-tuning completes (Recognition Pipeline Item 6 Step 6).
+        private const val FUNCTION_GEMMA_BASE_URL = "https://download.moonshine.ai/model/functiongemma"
+        private const val FUNCTION_GEMMA_MODEL_FILENAME = "model.litertlm"
     }
 
     @VisibleForTesting
@@ -87,17 +92,47 @@ class ModelManager @Inject constructor(
         }
     }
 
+    // -- FunctionGemma model ------------------------------------------------
+
+    val functionGemmaDir get() = File(filesDir, "functiongemma-model")
+    val functionGemmaModelFile get() = File(functionGemmaDir, FUNCTION_GEMMA_MODEL_FILENAME)
+
+    fun isFunctionGemmaModelReady(): Boolean = functionGemmaModelFile.exists()
+
+    suspend fun ensureFunctionGemmaModel(): Result<Unit> = withContext(Dispatchers.IO) {
+        if (isFunctionGemmaModelReady()) return@withContext Result.success(Unit)
+        downloadMutex.withLock {
+            if (isFunctionGemmaModelReady()) return@withContext Result.success(Unit)
+            try {
+                functionGemmaDir.mkdirs()
+                downloadFile(
+                    "$FUNCTION_GEMMA_BASE_URL/$FUNCTION_GEMMA_MODEL_FILENAME",
+                    functionGemmaModelFile,
+                    "FunctionGemma",
+                    "",
+                )
+                Result.success(Unit)
+            } catch (e: Exception) {
+                Timber.e(e, "FunctionGemma model download failed")
+                Result.failure(e)
+            }
+        }
+    }
+
     // -- Generic ModelSpec download -----------------------------------------
+
+    fun isModelReady(spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec): Boolean {
+        val targetDir = File(filesDir, spec.targetDir)
+        return spec.files.all { File(targetDir, it.filename).exists() }
+    }
 
     /**
      * Download all files in [spec] into [spec.targetDir] under [filesDir].
      * Existing files are skipped (no SHA256 re-check unless sha256 is non-empty in the spec).
      */
     suspend fun ensureModel(spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec): Result<Unit> = withContext(Dispatchers.IO) {
+        if (isModelReady(spec)) return@withContext Result.success(Unit)
         val targetDir = File(filesDir, spec.targetDir)
-        if (spec.files.all { File(targetDir, it.filename).exists() }) {
-            return@withContext Result.success(Unit)
-        }
         downloadMutex.withLock {
             if (spec.files.all { File(targetDir, it.filename).exists() }) {
                 return@withContext Result.success(Unit)

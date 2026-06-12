@@ -34,6 +34,7 @@ class ToolCallMapper @Inject constructor() {
             "app_settings" -> mapAppSettings(call.action, call)
             "account" -> mapAccount(call.action, call)
             "sharing" -> mapSharing(call.action, call)
+            "cloud_route" -> mapCloudRoute(call.action, call)
             else -> null
         }
     }
@@ -570,5 +571,26 @@ class ToolCallMapper @Inject constructor() {
         "accept_shared_list" -> VoiceIntent.Sharing.AcceptSharedList(call.stringParam("accept_mode"))
 
         else -> null
+    }
+
+    private fun mapCloudRoute(action: String, call: ToolCall): VoiceIntent.CloudRoute? {
+        if (action != "route") return null
+        val request = call.stringParam("request") ?: return null
+        val tier = when (call.stringParam("tier")?.lowercase()) {
+            "free" -> VoiceIntent.CloudTier.Free
+            "premium" -> VoiceIntent.CloudTier.Premium
+            else -> VoiceIntent.CloudTier.Unknown
+        }
+        val category = when (call.stringParam("category")?.lowercase()) {
+            "understanding" -> VoiceIntent.CloudCategory.Understanding
+            "discovery" -> VoiceIntent.CloudCategory.Discovery
+            "learning" -> VoiceIntent.CloudCategory.Learning
+            "assistant" -> VoiceIntent.CloudCategory.Assistant
+            "research" -> VoiceIntent.CloudCategory.Research
+            "engagement" -> VoiceIntent.CloudCategory.Engagement
+            "synthesis" -> VoiceIntent.CloudCategory.Synthesis
+            else -> VoiceIntent.CloudCategory.Unknown
+        }
+        return VoiceIntent.CloudRoute(request, tier, category)
     }
 }

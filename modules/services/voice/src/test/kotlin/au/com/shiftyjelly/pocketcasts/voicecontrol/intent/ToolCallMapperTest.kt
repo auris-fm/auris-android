@@ -134,39 +134,30 @@ class ToolCallMapperTest {
     }
 
     @Test
-    fun `stories next`() {
-        val result = mapper.map(ToolCall("stories", "next", emptyMap()))
-        assertEquals(VoiceIntent.Stories.NextStory, result)
-    }
-
-    @Test
-    fun `cast start with device`() {
-        val result = mapper.map(ToolCall("cast", "start", mapOf("device" to "Living Room")))
-        assertEquals(VoiceIntent.Cast.Start("Living Room"), result)
-    }
-
-    @Test
-    fun `cast start without device`() {
-        val result = mapper.map(ToolCall("cast", "start", emptyMap()))
-        assertEquals(VoiceIntent.Cast.Start(null), result)
-    }
-
-    @Test
     fun `playback query whats playing`() {
         val result = mapper.map(ToolCall("playback_query", "whats_playing", emptyMap()))
         assertEquals(VoiceIntent.PlaybackQuery.WhatsPlaying, result)
     }
 
     @Test
-    fun `podcast subscribe`() {
-        val result = mapper.map(ToolCall("podcast", "subscribe", mapOf("podcast" to "Serial")))
-        assertEquals(VoiceIntent.Podcast.Subscribe("Serial"), result)
+    fun `cloud route maps to CloudRoute intent`() {
+        val result = mapper.map(
+            ToolCall(
+                "cloud_route",
+                "route",
+                mapOf("request" to "summarize this episode", "tier" to "premium"),
+            ),
+        )
+        assertEquals(
+            VoiceIntent.CloudRoute("summarize this episode", VoiceIntent.CloudTier.Premium),
+            result,
+        )
     }
 
     @Test
-    fun `account sign out`() {
-        val result = mapper.map(ToolCall("account", "sign_out", emptyMap()))
-        assertEquals(VoiceIntent.Account.SignOut, result)
+    fun `unknown tool name returns null`() {
+        val result = mapper.map(ToolCall("unknown_tool", "do_something", emptyMap()))
+        assertNull(result)
     }
 
     @Test

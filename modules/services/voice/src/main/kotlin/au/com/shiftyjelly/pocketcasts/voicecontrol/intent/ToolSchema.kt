@@ -113,71 +113,6 @@ object ToolSchema {
             }
           },
           {
-            "name": "episode",
-            "description": "Manage individual episodes: download, star, archive, mark played, add to playlist.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["download", "delete_download", "star", "unstar", "archive", "unarchive", "mark_played", "mark_unplayed", "remove_from_history", "add_to_playlist"]},
-              "episode": {"type": "string", "description": "Episode title or description."},
-              "playlist": {"type": "string", "description": "Playlist name."}
-            }
-          },
-          {
-            "name": "podcast",
-            "description": "Manage podcast subscriptions: subscribe, unsubscribe, rate, configure notifications and auto-add.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["subscribe", "unsubscribe", "rate", "toggle_notifications", "auto_add", "auto_download"]},
-              "podcast": {"type": "string", "description": "Podcast name."},
-              "rating": {"type": "integer", "description": "Star rating (1-5)."},
-              "enabled": {"type": "boolean"},
-              "position": {"type": "string", "enum": ["top", "bottom"], "description": "Queue position for auto-add."}
-            }
-          },
-          {
-            "name": "bulk",
-            "description": "Bulk actions on episodes: bulk download, archive, or mark as played.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["download", "archive", "mark_played"]},
-              "podcast": {"type": "string", "description": "Podcast name. Optional."},
-              "filter": {"type": "string", "description": "Filter: 'unplayed', 'played', 'downloaded', or 'last N'."}
-            }
-          },
-          {
-            "name": "folder",
-            "description": "Manage podcast folders: create, rename, assign podcasts, remove, delete.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["create", "rename", "assign", "remove_from", "delete"]},
-              "folder": {"type": "string", "description": "Folder name."},
-              "name": {"type": "string", "description": "New name."},
-              "podcast": {"type": "string", "description": "Podcast name."}
-            }
-          },
-          {
-            "name": "playlist",
-            "description": "Manage playlists: create, delete, rename, play all, add/remove episodes.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["create", "create_smart", "delete", "rename", "play_all", "download_all", "add_episode", "remove_episode", "archive_all", "unarchive_all", "auto_download"]},
-              "playlist": {"type": "string", "description": "Playlist name."},
-              "name": {"type": "string", "description": "New playlist name."},
-              "episode": {"type": "string", "description": "Episode title."},
-              "shuffle": {"type": "boolean"},
-              "enabled": {"type": "boolean"},
-              "rules": {"type": "string", "description": "Smart playlist rules."}
-            }
-          },
-          {
-            "name": "search",
-            "description": "Search for podcasts and episodes, browse trending and recommendations.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["search", "filter", "subscribe_result", "play_result", "describe_result", "rerun", "clear_history", "trending", "recommendations", "category", "new_releases", "change_region"]},
-              "query": {"type": "string"},
-              "type": {"type": "string", "enum": ["podcasts", "episodes"]},
-              "ref": {"type": "string", "description": "Result reference."},
-              "category": {"type": "string"},
-              "timeframe": {"type": "string"},
-              "region": {"type": "string"}
-            }
-          },
-          {
             "name": "playback_query",
             "description": "Query current playback state and episode info.",
             "parameters": {
@@ -194,126 +129,23 @@ object ToolSchema {
             }
           },
           {
-            "name": "transcript",
-            "description": "Open, search, and navigate episode transcripts.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["open", "search", "navigate", "seek_to_topic", "read_line", "query_topic", "seek_to_quote", "read_section"]},
-              "term": {"type": "string"},
-              "direction": {"type": "string", "enum": ["next", "previous"]},
-              "topic": {"type": "string"},
-              "quote": {"type": "string"},
-              "start": {"type": "string"},
-              "end": {"type": "string"}
-            }
-          },
-          {
-            "name": "assistant",
-            "description": "AI assistant: ask about episodes, summarize, navigate by content.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["ask", "summarize", "query_content", "jump_to_topic", "play_quote", "stop_quote", "retry", "clear_chat"]},
-              "question": {"type": "string"},
-              "topic": {"type": "string"},
-              "ref": {"type": "string"}
-            }
-          },
-          {
-            "name": "cast",
-            "description": "Cast playback to a device or stop casting.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["start", "stop"]},
-              "device": {"type": "string", "description": "Cast device name."}
-            }
-          },
-          {
-            "name": "stories",
-            "description": "End of Year listening review stories.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["view", "next", "previous", "share", "replay"]}
-            }
-          },
-          {
-            "name": "guest_pass",
-            "description": "Send or claim a guest pass / referral link.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["send", "claim"]}
-            }
-          },
-          {
-            "name": "download_settings",
-            "description": "Configure auto-download, WiFi/charging restrictions, download limits.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["auto_download_up_next", "auto_download_new", "auto_download_on_follow", "wifi_only", "charging_only", "podcast_auto_download", "stop_all_downloads", "clear_errors", "download_limit"]},
-              "enabled": {"type": "boolean"},
-              "podcast": {"type": "string"},
-              "count": {"type": "integer"}
-            }
-          },
-          {
-            "name": "playback_settings",
-            "description": "Configure headphone actions, auto-add to queue, and auto-archive rules.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["next_track_action", "previous_track_action", "confirmation_sound", "auto_add", "auto_add_position", "auto_add_limit", "archive_after_playing", "archive_inactive", "include_starred_auto_archive"]},
-              "track_action": {"type": "string", "enum": ["skip_forward", "skip_backward", "add_bookmark"]},
-              "enabled": {"type": "boolean"},
-              "podcast": {"type": "string"},
-              "position": {"type": "string", "enum": ["top", "bottom"]},
-              "count": {"type": "integer"},
-              "delay": {"type": "string"},
-              "period": {"type": "string"}
-            }
-          },
-          {
-            "name": "app_settings",
-            "description": "App-wide settings: theme, notifications, cleanup, export.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["set_theme", "notifications", "podcast_notifications", "manual_cleanup", "export_opml"]},
-              "theme": {"type": "string", "enum": ["light", "dark", "classic_dark", "ink", "system"]},
-              "enabled": {"type": "boolean"},
-              "podcast": {"type": "string"}
-            }
-          },
-          {
-            "name": "account",
-            "description": "Account management: sign in, sign out, change plan, manage subscription.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["sign_in_email", "sign_in_google", "create_account", "change_email", "change_password", "reset_password", "redeem_promo", "sign_out", "change_plan", "claim_offer", "cancel_subscription", "keep_subscription"]},
-              "email": {"type": "string"},
-              "password": {"type": "string"},
-              "new_email": {"type": "string"},
-              "current_password": {"type": "string"},
-              "new_password": {"type": "string"},
-              "newsletter": {"type": "boolean"},
-              "code": {"type": "string"},
-              "plan": {"type": "string", "enum": ["monthly", "yearly"]},
-              "offer": {"type": "string"}
-            }
-          },
-          {
-            "name": "sharing",
-            "description": "Share episodes, clips, bookmarks, podcasts, and transcript sections.",
-            "parameters": {
-              "action": {"type": "string", "enum": ["share_episode", "share_at_current_time", "share_at_time", "share_podcast", "share_clip", "share_bookmark", "share_transcript", "create_shared_list", "share_via_app", "accept_shared_list"]},
-              "episode": {"type": "string"},
-              "time": {"type": "string"},
-              "podcast": {"type": "string"},
-              "start": {"type": "string"},
-              "end": {"type": "string"},
-              "bookmark": {"type": "string"},
-              "section": {"type": "string"},
-              "list_name": {"type": "string"},
-              "podcasts": {"type": "string"},
-              "app": {"type": "string"},
-              "accept_mode": {"type": "string", "enum": ["all", "select"]}
-            }
-          },
-          {
             "name": "cloud_route",
-            "description": "Route cloud-enhanced assistant requests to the cloud assistant. Use for cloud dialogs. Preserve the full user request; do not locally decompose it into assistant actions.",
+            "description": "Route cross-podcast, cross-episode, web-backed, or cloud-enhanced assistant requests to the cloud assistant. Use when the request is broader than current episode local playback, metadata, queue, chapter, bookmark, or transcript tools. Preserve the full user request; do not locally decompose it into local actions.",
             "parameters": {
               "action": {"type": "string", "enum": ["route"]},
               "request": {"type": "string", "description": "The complete user utterance or resolved multi-turn request to send to cloud."},
-              "tier": {"type": "string", "enum": ["free", "premium", "unknown"], "description": "Lowest cloud tier that appears to cover the request. Use unknown when tier cannot be determined locally."},
-              "category": {"type": "string", "enum": ["understanding", "discovery", "learning", "assistant", "research", "engagement", "synthesis", "unknown"], "description": "Best-effort dialog category for routing and analytics."}
+              "tier": {"type": "string", "enum": ["free", "premium", "unknown"], "description": "Lowest cloud tier that appears to cover the request. Use unknown when tier cannot be determined locally."}
+            }
+          },
+          {
+            "name": "dialog_control",
+            "description": "Router-only control for bounded multi-turn voice dialogs. Use only to start a supported clarification/confirmation flow, fill a pending slot, confirm, deny, cancel, or signal that the user started a new command. This tool never dispatches an app action directly.",
+            "parameters": {
+              "action": {"type": "string", "enum": ["begin", "provide_slot", "confirm", "deny", "cancel", "new_command"]},
+              "target_tool": {"type": "string", "description": "Tool being clarified, such as bookmark or queue."},
+              "target_action": {"type": "string", "description": "Action being clarified, such as rename or clear."},
+              "slot": {"type": "string", "description": "Pending slot supplied by the current turn, such as ref or title."},
+              "value": {"type": "string", "description": "Normalized slot value, or the replacement utterance when action is new_command."}
             }
           },
           {

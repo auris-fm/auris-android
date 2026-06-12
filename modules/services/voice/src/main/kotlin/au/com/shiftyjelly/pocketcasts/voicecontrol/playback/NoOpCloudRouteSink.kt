@@ -11,7 +11,6 @@ class NoOpCloudRouteSink @Inject constructor() : VoiceCloudRouteSink {
     override suspend fun routeToCloud(
         request: String,
         tier: VoiceIntent.CloudTier,
-        category: VoiceIntent.CloudCategory,
         context: PlaybackContext,
     ): VoiceResponse = VoiceResponse.Silent
 }

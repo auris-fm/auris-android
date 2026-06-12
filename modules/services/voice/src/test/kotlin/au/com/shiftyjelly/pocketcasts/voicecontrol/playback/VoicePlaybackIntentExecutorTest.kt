@@ -182,25 +182,14 @@ class VoicePlaybackIntentExecutorTest {
             VoiceIntent.CloudRoute(
                 request = "summarize this episode",
                 tier = VoiceIntent.CloudTier.Premium,
-                category = VoiceIntent.CloudCategory.Assistant,
             ),
         )
 
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(
-            listOf("routeToCloud:summarize this episode:Premium:Assistant"),
+            listOf("routeToCloud:summarize this episode:Premium"),
             sinks.cloudRoute.calls,
         )
-    }
-
-    @Test
-    fun `unhandled optional domain returns silent`() = runTest {
-        val sinks = FakeSinks()
-        val executor = sinks.executor()
-
-        val response = executor.execute(VoiceIntent.Search.Trending)
-
-        assertEquals(VoiceResponse.Silent, response)
     }
 
     @Test
@@ -405,10 +394,9 @@ class VoicePlaybackIntentExecutorTest {
         override suspend fun routeToCloud(
             request: String,
             tier: VoiceIntent.CloudTier,
-            category: VoiceIntent.CloudCategory,
             context: PlaybackContext,
         ): VoiceResponse {
-            calls += "routeToCloud:$request:${tier.name}:${category.name}"
+            calls += "routeToCloud:$request:${tier.name}"
             return VoiceResponse.Silent
         }
     }

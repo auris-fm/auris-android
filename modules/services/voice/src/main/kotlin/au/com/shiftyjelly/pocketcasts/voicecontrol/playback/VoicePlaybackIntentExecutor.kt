@@ -34,7 +34,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
 
         is VoiceIntent.CloudRoute -> {
             val context = playbackContextProvider.current()
-            cloudRouteSink.routeToCloud(intent.request, intent.tier, intent.category, context)
+            cloudRouteSink.routeToCloud(intent.request, intent.tier, context)
         }
 
         is VoiceIntent.Queue -> executeQueue(intent)
@@ -42,39 +42,6 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         is VoiceIntent.PlaybackQuery -> executePlaybackQuery(intent)
 
         is VoiceIntent.StatsQuery -> executeStatsQuery(intent)
-
-        // Optional domains — not yet implemented as sinks
-        is VoiceIntent.Episode -> VoiceResponse.Silent
-
-        is VoiceIntent.Podcast -> VoiceResponse.Silent
-
-        is VoiceIntent.Bulk -> VoiceResponse.Silent
-
-        is VoiceIntent.Folder -> VoiceResponse.Silent
-
-        is VoiceIntent.Playlist -> VoiceResponse.Silent
-
-        is VoiceIntent.Search -> VoiceResponse.Silent
-
-        is VoiceIntent.Transcript -> VoiceResponse.Silent
-
-        is VoiceIntent.Assistant -> VoiceResponse.Silent
-
-        is VoiceIntent.Cast -> VoiceResponse.Silent
-
-        is VoiceIntent.Stories -> VoiceResponse.Silent
-
-        is VoiceIntent.GuestPass -> VoiceResponse.Silent
-
-        is VoiceIntent.DownloadSettings -> VoiceResponse.Silent
-
-        is VoiceIntent.PlaybackSettings -> VoiceResponse.Silent
-
-        is VoiceIntent.AppSettings -> VoiceResponse.Silent
-
-        is VoiceIntent.Account -> VoiceResponse.Silent
-
-        is VoiceIntent.Sharing -> VoiceResponse.Silent
     }
 
     private suspend fun executePlayback(intent: VoiceIntent.Playback): VoiceResponse = when (intent) {
@@ -252,7 +219,6 @@ interface VoiceCloudRouteSink {
     suspend fun routeToCloud(
         request: String,
         tier: VoiceIntent.CloudTier,
-        category: VoiceIntent.CloudCategory,
         context: PlaybackContext,
     ): VoiceResponse
 }

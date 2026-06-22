@@ -135,6 +135,41 @@ class PreparedFunctionGemmaSessionPoolTest {
     }
 
     @Test
+    fun `prepare does not create a session when close wins before engine lock`() = runTest {
+        val prepareEngineGate = BlockingGate()
+        val runtime = FakeRuntime()
+        val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val pool = PreparedFunctionGemmaSessionPool(
+            runtime = runtime,
+            scope = workerScope,
+            elapsedRealtimeMs = { testScheduler.currentTime },
+            beforePrepareEngineLock = prepareEngineGate::block,
+        )
+        try {
+            val preparation = workerScope.async { pool.prepare("STATIC") }
+            prepareEngineGate.awaitEntered()
+
+            pool.close()
+            prepareEngineGate.release()
+
+            try {
+                preparation.await()
+                fail("Expected preparation to fail after close")
+            } catch (_: IllegalStateException) {
+                // Expected because close won before session creation.
+            }
+
+            assertEquals(listOf("runtime-close"), runtime.calls)
+            assertEquals(0, runtime.createdSessionCount)
+            assertEquals(1, runtime.closeCount)
+        } finally {
+            prepareEngineGate.release()
+            pool.close()
+            workerScope.cancel()
+        }
+    }
+
+    @Test
     fun `close during replenishment cancels waiter without leaking replacement`() = runTest {
         val replacementGate = BlockingGate()
         val runtime = FakeRuntime(prefillGates = mapOf(2 to replacementGate))

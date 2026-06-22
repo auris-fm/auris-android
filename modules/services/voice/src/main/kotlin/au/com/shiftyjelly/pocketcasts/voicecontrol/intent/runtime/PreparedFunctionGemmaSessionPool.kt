@@ -23,11 +23,18 @@ data class PreparedSessionResult<T>(
     val sessionWaitMs: Long,
 )
 
-class PreparedFunctionGemmaSessionPool(
+class PreparedFunctionGemmaSessionPool internal constructor(
     private val runtime: FunctionGemmaRuntime,
     private val scope: CoroutineScope,
-    private val elapsedRealtimeMs: () -> Long = SystemClock::elapsedRealtime,
+    private val elapsedRealtimeMs: () -> Long,
+    private val beforePrepareEngineLock: () -> Unit,
 ) : Closeable {
+    constructor(
+        runtime: FunctionGemmaRuntime,
+        scope: CoroutineScope,
+        elapsedRealtimeMs: () -> Long = SystemClock::elapsedRealtime,
+    ) : this(runtime, scope, elapsedRealtimeMs, {})
+
     val backend get() = runtime.backend
 
     private val consumerMutex = Mutex()
@@ -47,7 +54,11 @@ class PreparedFunctionGemmaSessionPool(
             staticPrefix = prefix
         }
 
+        beforePrepareEngineLock()
         return engineLock.withLock {
+            synchronized(stateLock) {
+                checkOpen()
+            }
             val (session, metrics) = createPreparedSession(prefix)
             publishPreparedSession(session, availability)
             metrics
@@ -84,6 +95,7 @@ class PreparedFunctionGemmaSessionPool(
             job = replacementJob
             replacementJob = null
             waitingAvailability = availability
+            staticPrefix = null
         }
 
         job?.cancel()

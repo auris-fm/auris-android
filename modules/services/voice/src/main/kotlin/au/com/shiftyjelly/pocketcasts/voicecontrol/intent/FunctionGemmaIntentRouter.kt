@@ -11,6 +11,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -28,12 +29,13 @@ class FunctionGemmaIntentRouter @Inject constructor(
     private val transitionMutex = Mutex()
     private val stateMutex = Mutex()
     private var activeState: ActiveState? = null
+    private var transitionInProgress: CompletableDeferred<Unit>? = null
+
+    internal var beforePoolInvalidation: () -> Unit = {}
 
     override suspend fun ensureReady(): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            transitionMutex.withLock {
-                prepareCurrentRelease()
-            }
+            ensureCurrentRelease()
             Result.success(Unit)
         } catch (error: CancellationException) {
             throw error
@@ -66,7 +68,23 @@ class FunctionGemmaIntentRouter @Inject constructor(
         }
     }
 
-    private suspend fun prepareCurrentRelease() {
+    private suspend fun ensureCurrentRelease() {
+        while (true) {
+            when (val action = planReadinessTransition()) {
+                ReadinessAction.Ready -> return
+
+                is ReadinessAction.Wait -> action.completion.await()
+
+                is ReadinessAction.Prepare -> {
+                    executeReadinessTransition(action)
+                    return
+                }
+            }
+        }
+    }
+
+    private suspend fun planReadinessTransition(): ReadinessAction = transitionMutex.withLock {
+        transitionInProgress?.let { return@withLock ReadinessAction.Wait(it) }
         check(modelManager.isFunctionGemmaModelReady()) {
             "FunctionGemma model or manifest is unavailable"
         }
@@ -74,18 +92,31 @@ class FunctionGemmaIntentRouter @Inject constructor(
             "FunctionGemma manifest release is unavailable"
         }
         val current = stateMutex.withLock { activeState }
-        if (current?.release == release) return
+        if (current?.release == release) return@withLock ReadinessAction.Ready
 
-        if (current != null) {
-            stateMutex.withLock {
-                if (activeState === current) activeState = null
-            }
-            current.pool.close()
-        }
-
-        val prepared = createGpuFirstPool()
+        val completion = CompletableDeferred<Unit>()
+        transitionInProgress = completion
         stateMutex.withLock {
-            activeState = ActiveState(release, prepared)
+            if (activeState === current) activeState = null
+        }
+        ReadinessAction.Prepare(current, release, completion)
+    }
+
+    private suspend fun executeReadinessTransition(action: ReadinessAction.Prepare) {
+        try {
+            action.previous?.pool?.close()
+            val prepared = createGpuFirstPool()
+            transitionMutex.withLock {
+                check(transitionInProgress === action.completion)
+                stateMutex.withLock {
+                    activeState = ActiveState(action.release, prepared)
+                }
+                transitionInProgress = null
+                action.completion.complete(Unit)
+            }
+        } catch (error: Throwable) {
+            failTransition(action.completion, error)
+            throw error
         }
     }
 
@@ -170,37 +201,11 @@ class FunctionGemmaIntentRouter @Inject constructor(
         failedGpuState: ActiveState,
         transcript: String,
         gpuFailure: Throwable,
-    ): VoiceIntent? = transitionMutex.withLock {
+    ): VoiceIntent? {
         logRuntimeWarning("FunctionGemma GPU inference failed; retrying on CPU", gpuFailure)
-        val current = stateMutex.withLock { activeState }
-        val cpuState = when {
-            current?.pool?.backend == FunctionGemmaBackend.CPU -> current
+        val cpuState = replaceFailedGpuWithCpu(failedGpuState) ?: return null
 
-            current !== failedGpuState -> return@withLock null
-
-            else -> {
-                stateMutex.withLock {
-                    if (activeState === failedGpuState) activeState = null
-                }
-                failedGpuState.pool.close()
-                val cpuPool = try {
-                    createPreparedPool(FunctionGemmaBackend.CPU)
-                } catch (error: CancellationException) {
-                    throw error
-                } catch (error: Throwable) {
-                    error.throwIfFatal()
-                    logRuntimeWarning("FunctionGemma CPU fallback initialization failed", error)
-                    return@withLock null
-                }
-                ActiveState(failedGpuState.release, cpuPool).also { replacement ->
-                    stateMutex.withLock {
-                        activeState = replacement
-                    }
-                }
-            }
-        }
-
-        try {
+        return try {
             consumeAndResolve(cpuState.pool, transcript)
         } catch (error: CancellationException) {
             throw error
@@ -212,16 +217,96 @@ class FunctionGemmaIntentRouter @Inject constructor(
         }
     }
 
-    private suspend fun invalidatePool(state: ActiveState) {
-        val shouldClose = stateMutex.withLock {
-            if (activeState === state) {
-                activeState = null
-                true
-            } else {
-                false
+    private suspend fun replaceFailedGpuWithCpu(failedState: ActiveState): ActiveState? {
+        while (true) {
+            when (val action = planGpuFallback(failedState)) {
+                is GpuFallbackAction.UseCpu -> return action.state
+                GpuFallbackAction.Stale -> return null
+                is GpuFallbackAction.Wait -> action.completion.await()
+                is GpuFallbackAction.Replace -> return executeGpuFallback(action)
             }
         }
-        if (shouldClose) state.pool.close()
+    }
+
+    private suspend fun planGpuFallback(failedState: ActiveState): GpuFallbackAction = transitionMutex.withLock {
+        transitionInProgress?.let { return@withLock GpuFallbackAction.Wait(it) }
+        val current = stateMutex.withLock { activeState }
+        if (current?.pool?.backend == FunctionGemmaBackend.CPU) {
+            return@withLock GpuFallbackAction.UseCpu(current)
+        }
+        if (current !== failedState) return@withLock GpuFallbackAction.Stale
+
+        val completion = CompletableDeferred<Unit>()
+        transitionInProgress = completion
+        stateMutex.withLock {
+            if (activeState === failedState) activeState = null
+        }
+        GpuFallbackAction.Replace(failedState, completion)
+    }
+
+    private suspend fun executeGpuFallback(action: GpuFallbackAction.Replace): ActiveState? {
+        return try {
+            action.failed.pool.close()
+            val cpuPool = createPreparedPool(FunctionGemmaBackend.CPU)
+            val replacement = ActiveState(action.failed.release, cpuPool)
+            transitionMutex.withLock {
+                check(transitionInProgress === action.completion)
+                stateMutex.withLock {
+                    activeState = replacement
+                }
+                transitionInProgress = null
+                action.completion.complete(Unit)
+            }
+            replacement
+        } catch (error: CancellationException) {
+            failTransition(action.completion, error)
+            throw error
+        } catch (error: Throwable) {
+            error.throwIfFatal()
+            failTransition(action.completion, error)
+            logRuntimeWarning("FunctionGemma CPU fallback initialization failed", error)
+            null
+        }
+    }
+
+    private suspend fun invalidatePool(state: ActiveState) {
+        while (true) {
+            val action = transitionMutex.withLock {
+                transitionInProgress?.let { return@withLock InvalidationAction.Wait(it) }
+                beforePoolInvalidation()
+                val shouldClose = stateMutex.withLock {
+                    if (activeState === state) {
+                        activeState = null
+                        true
+                    } else {
+                        false
+                    }
+                }
+                if (shouldClose) InvalidationAction.Close else InvalidationAction.Stale
+            }
+            when (action) {
+                InvalidationAction.Close -> {
+                    state.pool.close()
+                    return
+                }
+
+                InvalidationAction.Stale -> return
+
+                is InvalidationAction.Wait -> action.completion.await()
+            }
+        }
+    }
+
+    private suspend fun failTransition(
+        completion: CompletableDeferred<Unit>,
+        error: Throwable,
+    ) {
+        transitionMutex.withLock {
+            if (transitionInProgress === completion) {
+                transitionInProgress = null
+                completion.completeExceptionally(error)
+            }
+        }
     }
 
     private fun logRuntimeWarning(
@@ -249,6 +334,39 @@ class FunctionGemmaIntentRouter @Inject constructor(
         val release: String,
         val pool: PreparedFunctionGemmaSessionPool,
     )
+
+    private sealed interface ReadinessAction {
+        data object Ready : ReadinessAction
+
+        data class Wait(val completion: CompletableDeferred<Unit>) : ReadinessAction
+
+        data class Prepare(
+            val previous: ActiveState?,
+            val release: String,
+            val completion: CompletableDeferred<Unit>,
+        ) : ReadinessAction
+    }
+
+    private sealed interface GpuFallbackAction {
+        data class UseCpu(val state: ActiveState) : GpuFallbackAction
+
+        data object Stale : GpuFallbackAction
+
+        data class Wait(val completion: CompletableDeferred<Unit>) : GpuFallbackAction
+
+        data class Replace(
+            val failed: ActiveState,
+            val completion: CompletableDeferred<Unit>,
+        ) : GpuFallbackAction
+    }
+
+    private sealed interface InvalidationAction {
+        data object Close : InvalidationAction
+
+        data object Stale : InvalidationAction
+
+        data class Wait(val completion: CompletableDeferred<Unit>) : InvalidationAction
+    }
 
     private companion object {
         const val MAX_LOGGED_ERROR_CHARS = 200

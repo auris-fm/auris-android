@@ -158,6 +158,42 @@ class FunctionGemmaIntentRouterTest {
     }
 
     @Test
+    fun `ensureReady waits for failed CPU pool invalidation before reporting ready`() = runTest {
+        val invalidationStarted = CountDownLatch(1)
+        val releaseInvalidation = CountDownLatch(1)
+        val factory = FakeRuntimeFactory(
+            gpuDecodes = queueOf(Result.failure(IllegalStateException("gpu decode failed"))),
+            cpuDecodes = queueOf(
+                Result.success(NO_MATCH_CALL),
+                Result.failure(IllegalStateException("cpu decode failed")),
+            ),
+        )
+        val router = createRouter(factory)
+        router.ensureReady().getOrThrow()
+        assertNull(router.recognize("First.", RECOGNITION_CONTEXT))
+        router.beforePoolInvalidation = {
+            invalidationStarted.countDown()
+            check(releaseInvalidation.await(5, TimeUnit.SECONDS)) { "Timed out waiting to release invalidation" }
+        }
+
+        val failedRecognition = async { router.recognize("Second.", RECOGNITION_CONTEXT) }
+        assertTrue(withContext(Dispatchers.IO) { invalidationStarted.await(5, TimeUnit.SECONDS) })
+        val readiness = async { router.ensureReady() }
+        yield()
+
+        assertFalse(readiness.isCompleted)
+
+        releaseInvalidation.countDown()
+        assertNull(failedRecognition.await())
+        assertTrue(readiness.await().isSuccess)
+        assertEquals(
+            listOf(FunctionGemmaBackend.GPU, FunctionGemmaBackend.CPU, FunctionGemmaBackend.GPU),
+            factory.createdBackends,
+        )
+        assertEquals(1, factory.runtimes[1].closeCount)
+    }
+
+    @Test
     fun `parse failure returns null and replenishes prepared session`() = runTest {
         val factory = FakeRuntimeFactory(gpuDecodes = queueOf(Result.success("not a tool call")))
         val router = createRouter(factory)

@@ -136,6 +136,35 @@ class ModelManagerTest {
         assertTrue(manager.isFunctionGemmaModelReady())
     }
 
+    @Test
+    fun `FunctionGemma release version is read from installed manifest`() {
+        val modelDir = File(tempDir.root, "functiongemma-model").apply { mkdirs() }
+        File(modelDir, "manifest.json").writeText(
+            manifestFor(
+                modelBytes = 5,
+                modelSha = sha256("model"),
+                cacheBytes = 5,
+                cacheSha = sha256("cache"),
+            ),
+        )
+        val manager = ModelManager(context).apply {
+            filesDir = tempDir.root
+        }
+
+        assertEquals("2026-06-21-143005", manager.functionGemmaReleaseVersion())
+    }
+
+    @Test
+    fun `FunctionGemma release version is null for invalid manifest`() {
+        val modelDir = File(tempDir.root, "functiongemma-model").apply { mkdirs() }
+        File(modelDir, "manifest.json").writeText("not-json")
+        val manager = ModelManager(context).apply {
+            filesDir = tempDir.root
+        }
+
+        assertEquals(null, manager.functionGemmaReleaseVersion())
+    }
+
     private fun manifestFor(
         modelBytes: Int,
         modelSha: String,

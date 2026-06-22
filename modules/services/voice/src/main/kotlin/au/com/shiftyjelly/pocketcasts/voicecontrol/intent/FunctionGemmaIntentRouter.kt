@@ -1,19 +1,20 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.intent
 
+import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.FunctionGemmaBackend
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.FunctionGemmaRuntimeFactory
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.PreparedFunctionGemmaSessionPool
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
-import com.google.ai.edge.litertlm.Backend
-import com.google.ai.edge.litertlm.Engine
-import com.google.ai.edge.litertlm.EngineConfig
-import com.google.ai.edge.litertlm.InputData
-import com.google.ai.edge.litertlm.SamplerConfig
-import com.google.ai.edge.litertlm.Session
-import com.google.ai.edge.litertlm.SessionConfig
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
@@ -21,34 +22,24 @@ import timber.log.Timber
 class FunctionGemmaIntentRouter @Inject constructor(
     private val dialogManager: VoiceDialogManager,
     private val modelManager: ModelManager,
+    private val runtimeFactory: FunctionGemmaRuntimeFactory,
+    @ApplicationScope private val applicationScope: CoroutineScope,
 ) : VoiceRecognizer {
+    private val transitionMutex = Mutex()
+    private val stateMutex = Mutex()
+    private var activeState: ActiveState? = null
 
-    @Volatile
-    private var engine: Engine? = null
-
-    override suspend fun ensureReady(): Result<Unit> {
-        if (engine != null) return Result.success(Unit)
-        return withContext(Dispatchers.IO) {
-            try {
-                val modelFile = modelManager.functionGemmaModelFile
-                if (!modelFile.exists()) {
-                    return@withContext Result.failure(
-                        IllegalStateException("FunctionGemma model not found at ${modelFile.absolutePath}"),
-                    )
-                }
-                val config = EngineConfig(
-                    modelPath = modelFile.absolutePath,
-                    backend = Backend.CPU(),
-                    maxNumTokens = 2048,
-                    cacheDir = modelManager.functionGemmaDir.absolutePath,
-                )
-                engine = Engine(config).also { it.initialize() }
-                Timber.i("FunctionGemmaIntentRouter initialized")
-                Result.success(Unit)
-            } catch (e: Exception) {
-                Timber.e(e, "Failed to initialize FunctionGemmaIntentRouter")
-                Result.failure(e)
+    override suspend fun ensureReady(): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            transitionMutex.withLock {
+                prepareCurrentRelease()
             }
+            Result.success(Unit)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            Timber.e(error, "Failed to initialize FunctionGemmaIntentRouter")
+            Result.failure(error)
         }
     }
 
@@ -56,63 +47,172 @@ class FunctionGemmaIntentRouter @Inject constructor(
         transcript: String,
         context: VoiceRecognitionContext,
     ): VoiceIntent? = withContext(Dispatchers.IO) {
-        val engine = engine ?: return@withContext null
         if (transcript.isBlank()) return@withContext null
+        val state = stateMutex.withLock { activeState } ?: return@withContext null
 
         try {
-            val startMs = System.currentTimeMillis()
-            val prompt = buildPrompt(transcript)
-
-            Timber.i(
-                "FunctionGemma inference start (transcript='%s', promptLen=%d)",
-                transcript.take(200),
-                prompt.length,
-            )
-
-            @Suppress("DEPRECATION")
-            val generated: String
-            val session = engine.createSession(SessionConfig())
-            val prefillMs = System.currentTimeMillis() - startMs
-            session.use {
-                session.runPrefill(listOf(InputData.Text(prompt)))
-                generated = session.runDecode().trim { it <= ' ' }
-            }
-            val decodeMs = System.currentTimeMillis() - startMs - prefillMs
-            val totalMs = System.currentTimeMillis() - startMs
-
-            Timber.i(
-                "FunctionGemma inference done (prefillMs=%d, decodeMs=%d, totalMs=%d, generated='%s')",
-                prefillMs,
-                decodeMs,
-                totalMs,
-                generated.take(300),
-            )
-
-            val toolCall = ToolCall.parse(generated) ?: run {
-                Timber.w("FunctionGemma parse failed (generated='%s')", generated.take(300))
+            consumeAndResolve(state.pool, transcript)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            if (state.pool.backend != FunctionGemmaBackend.GPU) {
+                invalidatePool(state)
+                logRuntimeWarning("FunctionGemma CPU inference failed", error)
                 return@withContext null
             }
-            Timber.i(
-                "FunctionGemma tool call parsed (name=%s, action=%s, params=%s)",
-                toolCall.name,
-                toolCall.action,
-                toolCall.params,
+            recoverOnCpuOnce(state, transcript, error)
+        }
+    }
+
+    private suspend fun prepareCurrentRelease() {
+        check(modelManager.isFunctionGemmaModelReady()) {
+            "FunctionGemma model or manifest is unavailable"
+        }
+        val release = requireNotNull(modelManager.functionGemmaReleaseVersion()) {
+            "FunctionGemma manifest release is unavailable"
+        }
+        val current = stateMutex.withLock { activeState }
+        if (current?.release == release) return
+
+        if (current != null) {
+            stateMutex.withLock {
+                if (activeState === current) activeState = null
+            }
+            current.pool.close()
+        }
+
+        val prepared = createGpuFirstPool()
+        stateMutex.withLock {
+            activeState = ActiveState(release, prepared)
+        }
+    }
+
+    private suspend fun createGpuFirstPool(): PreparedFunctionGemmaSessionPool {
+        return try {
+            createPreparedPool(FunctionGemmaBackend.GPU)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (gpuFailure: Exception) {
+            logRuntimeWarning("FunctionGemma GPU initialization failed; using CPU", gpuFailure)
+            createPreparedPool(FunctionGemmaBackend.CPU)
+        }
+    }
+
+    private suspend fun createPreparedPool(
+        backend: FunctionGemmaBackend,
+    ): PreparedFunctionGemmaSessionPool {
+        val runtime = runtimeFactory.create(
+            modelPath = modelManager.functionGemmaModelFile.absolutePath,
+            cacheDir = modelManager.functionGemmaDir.absolutePath,
+            backend = backend,
+        )
+        val pool = PreparedFunctionGemmaSessionPool(runtime, applicationScope)
+        try {
+            pool.prepare(FunctionGemmaPrompt.staticPrefix)
+            return pool
+        } catch (error: Throwable) {
+            try {
+                pool.close()
+            } catch (closeFailure: Throwable) {
+                error.addSuppressed(closeFailure)
+            }
+            throw error
+        }
+    }
+
+    private suspend fun consumeAndResolve(
+        pool: PreparedFunctionGemmaSessionPool,
+        transcript: String,
+    ): VoiceIntent? {
+        return pool.consume { session ->
+            val suffix = FunctionGemmaPrompt.requestSuffix(
+                transcript = transcript,
+                history = dialogManager.promptHistory(),
             )
-            dialogManager.resolve(toolCall)
-        } catch (e: Exception) {
-            Timber.e(e, "FunctionGemma inference failed")
+            check(!suffix.contains("<start_function_declaration>")) {
+                "FunctionGemma request suffix contains static declarations"
+            }
+            session.prefill(suffix)
+            val generated = session.decode().trim { it <= ' ' }
+            val call = ToolCall.parse(generated) ?: return@consume null
+            dialogManager.resolve(transcript, generated, call)
+        }.value
+    }
+
+    private suspend fun recoverOnCpuOnce(
+        failedGpuState: ActiveState,
+        transcript: String,
+        gpuFailure: Exception,
+    ): VoiceIntent? = transitionMutex.withLock {
+        logRuntimeWarning("FunctionGemma GPU inference failed; retrying on CPU", gpuFailure)
+        val current = stateMutex.withLock { activeState }
+        val cpuState = when {
+            current?.pool?.backend == FunctionGemmaBackend.CPU -> current
+
+            current !== failedGpuState -> return@withLock null
+
+            else -> {
+                stateMutex.withLock {
+                    if (activeState === failedGpuState) activeState = null
+                }
+                failedGpuState.pool.close()
+                val cpuPool = try {
+                    createPreparedPool(FunctionGemmaBackend.CPU)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    logRuntimeWarning("FunctionGemma CPU fallback initialization failed", error)
+                    return@withLock null
+                }
+                ActiveState(failedGpuState.release, cpuPool).also { replacement ->
+                    stateMutex.withLock {
+                        activeState = replacement
+                    }
+                }
+            }
+        }
+
+        try {
+            consumeAndResolve(cpuState.pool, transcript)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            invalidatePool(cpuState)
+            logRuntimeWarning("FunctionGemma CPU retry failed", error)
             null
         }
     }
 
-    // Matches the eval prompt format exactly:
-    //   <start_of_turn>developer
-    //   You are a model that can do function calling with the following functions{DECLARATIONS}<end_of_turn>
-    //   <start_of_turn>user
-    //   {transcript}<end_of_turn>
-    //   <start_of_turn>model
-    private fun buildPrompt(transcript: String): String {
-        return FunctionGemmaPrompt.staticPrefix +
-            FunctionGemmaPrompt.requestSuffix(transcript, emptyList())
+    private suspend fun invalidatePool(state: ActiveState) {
+        val shouldClose = stateMutex.withLock {
+            if (activeState === state) {
+                activeState = null
+                true
+            } else {
+                false
+            }
+        }
+        if (shouldClose) state.pool.close()
+    }
+
+    private fun logRuntimeWarning(
+        message: String,
+        error: Throwable,
+    ) {
+        Timber.w(
+            "%s (%s: %s)",
+            message,
+            error::class.java.simpleName,
+            error.message.orEmpty().take(MAX_LOGGED_ERROR_CHARS),
+        )
+    }
+
+    private data class ActiveState(
+        val release: String,
+        val pool: PreparedFunctionGemmaSessionPool,
+    )
+
+    private companion object {
+        const val MAX_LOGGED_ERROR_CHARS = 200
     }
 }

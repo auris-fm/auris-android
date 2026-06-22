@@ -153,6 +153,13 @@ class ModelManager @Inject constructor(
         }
     }
 
+    fun functionGemmaReleaseVersion(): String? {
+        if (!functionGemmaManifestFile.exists()) return null
+        return runCatching {
+            parseFunctionGemmaManifest(functionGemmaManifestFile.readText()).version
+        }.getOrNull()
+    }
+
     suspend fun ensureFunctionGemmaModel(): Result<Unit> = withContext(Dispatchers.IO) {
         if (isFunctionGemmaModelReady()) return@withContext Result.success(Unit)
         downloadMutex.withLock {

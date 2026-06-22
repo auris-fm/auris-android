@@ -14,6 +14,11 @@ android {
     }
     ndkVersion = "27.0.12077973"
     defaultConfig {
+        buildConfigField(
+            "String",
+            "LITERTLM_VERSION",
+            "\"${libs.versions.litertlm.get()}\"",
+        )
         externalNativeBuild {
             cmake {
                 cppFlags += listOf("-std=c++17")
@@ -54,7 +59,7 @@ dependencies {
     implementation(projects.modules.services.repositories)
     implementation(projects.modules.services.utils)
 
-    implementation("com.google.ai.edge.litertlm:litertlm-android:latest.release")
+    implementation(libs.litertlm.android)
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.material)

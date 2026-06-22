@@ -26,6 +26,8 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.EmbeddingEng
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.JniEmbeddingEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.TextTokenizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.entity.GrammarEntityExtractor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.FunctionGemmaRuntimeFactory
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.LiteRtFunctionGemmaRuntimeFactory
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.AudioManagerVolumeSink
@@ -75,6 +77,10 @@ abstract class VoiceControlModule {
     @Binds abstract fun bindVoiceAudioSegmenter(impl: NativeVadSegmenter): VoiceAudioSegmenter
 
     @Binds abstract fun bindVoiceRecognizer(impl: FunctionGemmaIntentRouter): VoiceRecognizer
+
+    @Binds abstract fun bindFunctionGemmaRuntimeFactory(
+        impl: LiteRtFunctionGemmaRuntimeFactory,
+    ): FunctionGemmaRuntimeFactory
 
     @Binds abstract fun bindVoicePlaybackSink(impl: PlaybackManagerPlaybackSink): VoicePlaybackSink
 

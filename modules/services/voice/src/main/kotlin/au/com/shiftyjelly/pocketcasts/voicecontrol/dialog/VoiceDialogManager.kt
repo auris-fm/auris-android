@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.dialog
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.DialogPromptTurn
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCall
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCallMapper
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
@@ -15,6 +16,25 @@ class VoiceDialogManager @Inject constructor(
 
     val isInProgress: Boolean get() = pending != null
     val pendingDialog: PendingVoiceDialog? get() = pending
+
+    fun promptHistory(): List<DialogPromptTurn> = pending?.promptHistory.orEmpty()
+
+    fun resolve(
+        transcript: String,
+        generated: String,
+        call: ToolCall,
+    ): VoiceIntent? {
+        val previous = pending
+        val result = resolve(call)
+        pending = pending?.copy(
+            promptHistory = (
+                previous?.promptHistory.orEmpty() +
+                    DialogPromptTurn("user", transcript) +
+                    DialogPromptTurn("model", generated)
+                ).takeLast(MAX_PROMPT_TURNS),
+        )
+        return result
+    }
 
     /**
      * Process a raw tool call before intent mapping. Consumes `dialog_control` tool calls
@@ -105,6 +125,8 @@ class VoiceDialogManager @Inject constructor(
     }
 
     companion object {
+        private const val MAX_PROMPT_TURNS = 4
+
         private val DESTRUCTIVE_ACTIONS = setOf(
             "clear",
             "delete",

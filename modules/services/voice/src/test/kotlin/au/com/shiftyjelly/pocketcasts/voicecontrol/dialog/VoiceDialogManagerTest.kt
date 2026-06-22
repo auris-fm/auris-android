@@ -30,23 +30,70 @@ class VoiceDialogManagerTest {
     }
 
     @Test
-    fun `prompt history is capped at four turns and preserves generated text`() {
-        manager.resolve("first", nativeCall("begin"), beginCall())
+    fun `replacement begin resets history to the new initiating prompt pair`() {
+        manager.resolve("Rename a bookmark.", nativeCall("begin"), beginCall())
+        val replacementGenerated = nativeCall("begin replacement")
 
-        repeat(3) { index ->
-            val generated = nativeCall("unknown_$index")
-            manager.resolve("user_$index", generated, ToolCall("dialog_control", "unknown_$index", emptyMap()))
-        }
+        manager.resolve("Clear the queue.", replacementGenerated, beginCall("queue", "clear"))
 
         assertEquals(
             listOf(
-                DialogPromptTurn("user", "user_1"),
-                DialogPromptTurn("model", nativeCall("unknown_1")),
-                DialogPromptTurn("user", "user_2"),
-                DialogPromptTurn("model", nativeCall("unknown_2")),
+                DialogPromptTurn("user", "Clear the queue."),
+                DialogPromptTurn("model", replacementGenerated),
             ),
             manager.promptHistory(),
         )
+    }
+
+    @Test
+    fun `provide slot retains prompt history while confirmation remains pending`() {
+        manager.resolve("Delete a bookmark.", nativeCall("begin"), beginCall("bookmark", "delete"))
+        val generated = nativeCall("provide_slot")
+
+        assertNull(
+            manager.resolve(
+                "The latest one.",
+                generated,
+                provideSlotCall("ref", "latest"),
+            ),
+        )
+
+        assertTrue(manager.isInProgress)
+        assertEquals(
+            listOf(
+                DialogPromptTurn("user", "Delete a bookmark."),
+                DialogPromptTurn("model", nativeCall("begin")),
+                DialogPromptTurn("user", "The latest one."),
+                DialogPromptTurn("model", generated),
+            ),
+            manager.promptHistory(),
+        )
+    }
+
+    @Test
+    fun `prompt history is capped at four turns through valid dialog transitions`() {
+        manager.resolve("Delete a bookmark.", nativeCall("begin"), beginCall("bookmark", "delete"))
+        manager.resolve("The latest one.", nativeCall("provide ref"), provideSlotCall("ref", "latest"))
+        manager.resolve("Call it highlight.", nativeCall("provide title"), provideSlotCall("title", "highlight"))
+
+        assertEquals(
+            listOf(
+                DialogPromptTurn("user", "The latest one."),
+                DialogPromptTurn("model", nativeCall("provide ref")),
+                DialogPromptTurn("user", "Call it highlight."),
+                DialogPromptTurn("model", nativeCall("provide title")),
+            ),
+            manager.promptHistory(),
+        )
+    }
+
+    @Test
+    fun `generated model payload is preserved byte for byte in history`() {
+        val generated = " \n\t${nativeCall("begin")}\n  "
+
+        manager.resolve("Rename a bookmark.", generated, beginCall())
+
+        assertEquals(DialogPromptTurn("model", generated), manager.promptHistory().last())
     }
 
     @Test
@@ -69,6 +116,22 @@ class VoiceDialogManagerTest {
             assertFalse(manager.isInProgress)
             assertTrue(manager.promptHistory().isEmpty())
         }
+    }
+
+    @Test
+    fun `new command clears pending dialog and prompt history`() {
+        manager.resolve("Rename a bookmark.", nativeCall("begin"), beginCall())
+
+        assertNull(
+            manager.resolve(
+                "Actually pause.",
+                nativeCall("new_command"),
+                ToolCall("dialog_control", "new_command", mapOf("value" to "Pause.")),
+            ),
+        )
+
+        assertFalse(manager.isInProgress)
+        assertTrue(manager.promptHistory().isEmpty())
     }
 
     @Test
@@ -105,6 +168,18 @@ class VoiceDialogManagerTest {
         params = mapOf(
             "target_tool" to targetTool,
             "target_action" to targetAction,
+        ),
+    )
+
+    private fun provideSlotCall(
+        slot: String,
+        value: String,
+    ) = ToolCall(
+        name = "dialog_control",
+        action = "provide_slot",
+        params = mapOf(
+            "slot" to slot,
+            "value" to value,
         ),
     )
 

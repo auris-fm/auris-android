@@ -26,14 +26,23 @@ class VoiceDialogManager @Inject constructor(
     ): VoiceIntent? {
         val previous = pending
         val result = resolve(call)
+        val previousHistory = if (call.isReplacementBegin(previous)) {
+            emptyList()
+        } else {
+            previous?.promptHistory.orEmpty()
+        }
         pending = pending?.copy(
             promptHistory = (
-                previous?.promptHistory.orEmpty() +
+                previousHistory +
                     DialogPromptTurn("user", transcript) +
                     DialogPromptTurn("model", generated)
                 ).takeLast(MAX_PROMPT_TURNS),
         )
         return result
+    }
+
+    private fun ToolCall.isReplacementBegin(previous: PendingVoiceDialog?): Boolean {
+        return name == "dialog_control" && action == "begin" && pending !== previous
     }
 
     /**

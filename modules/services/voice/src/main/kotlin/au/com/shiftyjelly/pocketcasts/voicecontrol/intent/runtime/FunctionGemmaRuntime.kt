@@ -10,6 +10,9 @@ fun interface MonotonicClock {
 }
 
 interface FunctionGemmaRuntimeFactory {
+    /**
+     * Initializes the model runtime and blocks the calling thread. Call from a worker thread.
+     */
     fun create(
         modelPath: String,
         cacheDir: String,

@@ -37,7 +37,7 @@ ksp = "2.3.9"
 ktlint = "1.8.0"
 ktlint-compose-rules = "0.5.9"
 lifecycle = "2.10.0"
-litertlm = "0.13.1"
+litertlm = { strictly = "0.13.1" }
 lottie = "6.7.1"
 measure-builds = "3.2.2"
 media3 = "1.10.1"

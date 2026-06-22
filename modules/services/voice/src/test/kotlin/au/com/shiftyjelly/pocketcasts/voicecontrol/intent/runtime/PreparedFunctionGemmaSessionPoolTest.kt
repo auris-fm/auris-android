@@ -51,7 +51,7 @@ class PreparedFunctionGemmaSessionPoolTest {
         assertEquals("generated:1", result.value)
         assertEquals(0, result.sessionWaitMs)
         assertEquals(2, runtime.createdSessionCount)
-        assertEquals(listOf(1), runtime.closedSessionIds)
+        assertEquals(listOf(1), runtime.closedSessionIdsSnapshot)
         assertEquals(2, runtime.staticPrefillCount)
         assertTrue(runtime.calls.indexOf("close:1") < runtime.calls.indexOf("create:2"))
     }
@@ -95,7 +95,7 @@ class PreparedFunctionGemmaSessionPoolTest {
             advanceUntilIdle()
         }
 
-        assertEquals(listOf(1), runtime.closedSessionIds)
+        assertEquals(listOf(1), runtime.closedSessionIdsSnapshot)
         assertEquals(2, runtime.createdSessionCount)
         assertEquals(2, runtime.staticPrefillCount)
     }
@@ -120,13 +120,13 @@ class PreparedFunctionGemmaSessionPoolTest {
                 try {
                     preparation.await()
                     fail("Expected closed preparation to be cancelled")
-                } catch (_: Throwable) {
-                    // Expected when close wins publication.
+                } catch (error: IllegalStateException) {
+                    assertEquals("FunctionGemma session pool is closing", error.message)
                 }
                 closing.await()
             }
 
-            assertEquals(listOf(1), runtime.closedSessionIds)
+            assertEquals(listOf(1), runtime.closedSessionIdsSnapshot)
             assertEquals(1, runtime.closeCount)
         } finally {
             preparationGate.release()
@@ -189,7 +189,7 @@ class PreparedFunctionGemmaSessionPoolTest {
             replacementGate.release()
             withTimeout(5_000) { closing.await() }
 
-            assertEquals(listOf(1, 2), runtime.closedSessionIds.sorted())
+            assertEquals(listOf(1, 2), runtime.closedSessionIdsSnapshot.sorted())
             assertEquals(1, runtime.closeCount)
         } finally {
             replacementGate.release()
@@ -211,7 +211,7 @@ class PreparedFunctionGemmaSessionPoolTest {
             assertEquals(failure, actual)
         }
 
-        assertEquals(listOf(1), runtime.closedSessionIds)
+        assertEquals(listOf(1), runtime.closedSessionIdsSnapshot)
     }
 
     @Test
@@ -298,7 +298,7 @@ class PreparedFunctionGemmaSessionPoolTest {
 
             workerScope.cancel()
             replacementGate.release()
-            awaitCondition { 2 in runtime.closedSessionIds }
+            awaitCondition { 2 in runtime.closedSessionIdsSnapshot }
 
             try {
                 waiter.await()
@@ -306,7 +306,7 @@ class PreparedFunctionGemmaSessionPoolTest {
             } catch (_: CancellationException) {
                 // Expected.
             }
-            assertEquals(listOf(1, 2), runtime.closedSessionIds.sorted())
+            assertEquals(listOf(1, 2), runtime.closedSessionIdsSnapshot.sorted())
         } finally {
             replacementGate.release()
             pool.close()
@@ -330,6 +330,37 @@ class PreparedFunctionGemmaSessionPoolTest {
             }
             assertTrue(failure is CancellationException)
         } finally {
+            pool.close()
+        }
+    }
+
+    @Test
+    fun `cancellation after replacement publication removes and closes published session`() = runTest {
+        val publishedGate = BlockingGate()
+        val runtime = FakeRuntime()
+        val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val pool = PreparedFunctionGemmaSessionPool(
+            runtime = runtime,
+            scope = workerScope,
+            elapsedRealtimeMs = { testScheduler.currentTime },
+            beforePrepareEngineLock = {},
+            afterReplacementPublication = publishedGate::block,
+        )
+        try {
+            pool.prepare("STATIC")
+            pool.consume { it.decode() }
+            publishedGate.awaitEntered()
+
+            workerScope.cancel()
+            publishedGate.release()
+            awaitCondition { 2 in runtime.closedSessionIdsSnapshot }
+
+            val failure = runCatching { pool.consume { it.decode() } }.exceptionOrNull()
+            assertTrue(failure is CancellationException)
+            assertEquals(listOf(1, 2), runtime.closedSessionIdsSnapshot.sorted())
+            assertEquals(1, runtime.decodeCount)
+        } finally {
+            publishedGate.release()
             pool.close()
         }
     }
@@ -380,12 +411,13 @@ class PreparedFunctionGemmaSessionPoolTest {
     }
 
     @Test
-    fun `session wait includes consumer mutex queue and engine handoff`() = runTest {
+    fun `session wait measures only prepared availability wait`() = runTest {
         var now = 0L
         val firstConsumerGate = BlockingGate()
+        val replacementGate = BlockingGate()
         val consumerCount = AtomicInteger()
-        val secondConsumerStarted = CountDownLatch(1)
-        val runtime = FakeRuntime()
+        val secondAwaitStarted = CountDownLatch(1)
+        val runtime = FakeRuntime(prefillGates = mapOf(2 to replacementGate))
         val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val pool = PreparedFunctionGemmaSessionPool(
             runtime = runtime,
@@ -393,8 +425,11 @@ class PreparedFunctionGemmaSessionPoolTest {
             elapsedRealtimeMs = { now },
             beforePrepareEngineLock = {},
             beforeConsumerMutex = {
-                if (consumerCount.incrementAndGet() == 2) {
-                    secondConsumerStarted.countDown()
+                consumerCount.incrementAndGet()
+            },
+            beforeAvailabilityAwait = {
+                if (consumerCount.get() == 2) {
+                    secondAwaitStarted.countDown()
                 }
             },
         )
@@ -410,14 +445,18 @@ class PreparedFunctionGemmaSessionPoolTest {
 
             now = 100
             val second = workerScope.async { pool.consume { it.decode() } }
-            check(secondConsumerStarted.await(5, TimeUnit.SECONDS))
             now = 175
             firstConsumerGate.release()
+            replacementGate.awaitEntered()
+            check(secondAwaitStarted.await(5, TimeUnit.SECONDS))
+            now = 250
+            replacementGate.release()
 
             first.await()
             assertEquals(75, second.await().sessionWaitMs)
         } finally {
             firstConsumerGate.release()
+            replacementGate.release()
             pool.close()
             workerScope.cancel()
         }
@@ -473,7 +512,7 @@ class PreparedFunctionGemmaSessionPoolTest {
         pool.close()
         pool.close()
 
-        assertEquals(listOf(1), runtime.closedSessionIds)
+        assertEquals(listOf(1), runtime.closedSessionIdsSnapshot)
         assertEquals(1, runtime.closeCount)
     }
 
@@ -489,13 +528,9 @@ class PreparedFunctionGemmaSessionPoolTest {
         expected: Throwable,
         block: suspend () -> Unit,
     ) {
-        try {
-            block()
-            fail("Expected failure")
-        } catch (actual: Throwable) {
-            assertEquals(expected::class, actual::class)
-            assertEquals(expected.message, actual.message)
-        }
+        val actual = runCatching { block() }.exceptionOrNull() ?: throw AssertionError("Expected failure")
+        assertEquals(expected::class, actual::class)
+        assertEquals(expected.message, actual.message)
     }
 
     private class FakeClock(
@@ -537,7 +572,7 @@ class PreparedFunctionGemmaSessionPoolTest {
         override val backend = FunctionGemmaBackend.GPU
 
         val calls = mutableListOf<String>()
-        val closedSessionIds = mutableListOf<Int>()
+        private val closedSessionIds = mutableListOf<Int>()
         private val nextSessionId = AtomicInteger()
         private val createdSessions = AtomicInteger()
         private val staticPrefills = AtomicInteger()
@@ -548,6 +583,7 @@ class PreparedFunctionGemmaSessionPoolTest {
         val staticPrefillCount get() = staticPrefills.get()
         val decodeCount get() = decodes.get()
         val closeCount get() = closes.get()
+        val closedSessionIdsSnapshot get() = synchronized(closedSessionIds) { closedSessionIds.toList() }
 
         override fun createSession(): FunctionGemmaSession {
             val id = nextSessionId.incrementAndGet()

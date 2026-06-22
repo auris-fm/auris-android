@@ -32,12 +32,14 @@ class PreparedFunctionGemmaSessionPool internal constructor(
     private val elapsedRealtimeMs: () -> Long,
     private val beforePrepareEngineLock: () -> Unit,
     private val beforeConsumerMutex: () -> Unit = {},
+    private val beforeAvailabilityAwait: () -> Unit = {},
+    private val afterReplacementPublication: () -> Unit = {},
 ) : Closeable {
     constructor(
         runtime: FunctionGemmaRuntime,
         scope: CoroutineScope,
         elapsedRealtimeMs: () -> Long = SystemClock::elapsedRealtime,
-    ) : this(runtime, scope, elapsedRealtimeMs, {}, {})
+    ) : this(runtime, scope, elapsedRealtimeMs, {}, {}, {}, {})
 
     val backend get() = runtime.backend
 
@@ -49,6 +51,7 @@ class PreparedFunctionGemmaSessionPool internal constructor(
     private var staticPrefix: String? = null
     private var availability = CompletableDeferred<FunctionGemmaSession>()
     private var preparedSession: FunctionGemmaSession? = null
+    private var preparedSessionOwner: Job? = null
     private var replacementJob: Job? = null
     private var activeConsumerThread: Thread? = null
 
@@ -70,7 +73,7 @@ class PreparedFunctionGemmaSessionPool internal constructor(
                     ensureOpen()
                 }
                 val (session, metrics) = createPreparedSession(prefix)
-                publishPreparedSessionOrClose(session, targetAvailability, context::ensureActive)
+                publishPreparedSessionOrClose(session, targetAvailability, owner = null, context::ensureActive)
                 metrics
             }
         } catch (error: Throwable) {
@@ -82,13 +85,14 @@ class PreparedFunctionGemmaSessionPool internal constructor(
     suspend fun <T> consume(
         block: (FunctionGemmaSession) -> T,
     ): PreparedSessionResult<T> {
-        val waitStart = elapsedRealtimeMs()
         beforeConsumerMutex()
         return consumerMutex.withLock {
+            val waitStart = elapsedRealtimeMs()
+            beforeAvailabilityAwait()
             val signalledSession = availability.await()
+            val sessionWaitMs = elapsedRealtimeMs() - waitStart
             engineLock.withLock {
                 val session = claimPreparedSession(signalledSession)
-                val sessionWaitMs = elapsedRealtimeMs() - waitStart
                 executeLease(session, sessionWaitMs, block)
             }
         }
@@ -184,6 +188,7 @@ class PreparedFunctionGemmaSessionPool internal constructor(
                 val session = synchronized(stateLock) {
                     preparedSession.also {
                         preparedSession = null
+                        preparedSessionOwner = null
                         staticPrefix = null
                     }
                 }
@@ -213,6 +218,7 @@ class PreparedFunctionGemmaSessionPool internal constructor(
         ensureOpen()
         check(preparedSession === signalledSession) { "Prepared FunctionGemma session is no longer available" }
         preparedSession = null
+        preparedSessionOwner = null
         availability = CompletableDeferred()
         signalledSession
     }
@@ -227,6 +233,7 @@ class PreparedFunctionGemmaSessionPool internal constructor(
         }
 
         lateinit var job: Job
+        var replacementFailure: Throwable? = null
         job = scope.launch(start = CoroutineStart.LAZY) {
             try {
                 val context = currentCoroutineContext()
@@ -236,10 +243,12 @@ class PreparedFunctionGemmaSessionPool internal constructor(
                         ensureOpen()
                     }
                     val (session) = createPreparedSession(prefix)
-                    publishPreparedSessionOrClose(session, targetAvailability, context::ensureActive)
+                    publishPreparedSessionOrClose(session, targetAvailability, job, context::ensureActive)
+                    afterReplacementPublication()
+                    context.ensureActive()
                 }
             } catch (error: Throwable) {
-                transitionToFailure(error)
+                replacementFailure = error
                 if (error is CancellationException) throw error
             }
         }
@@ -249,7 +258,11 @@ class PreparedFunctionGemmaSessionPool internal constructor(
                     replacementJob = null
                 }
             }
-            cause?.let(::transitionToFailure)
+            val failure = cause ?: replacementFailure
+            if (failure != null) {
+                closePublishedReplacement(job, targetAvailability, failure)
+                transitionToFailure(failure)
+            }
         }
 
         val shouldStart = synchronized(stateLock) {
@@ -294,6 +307,7 @@ class PreparedFunctionGemmaSessionPool internal constructor(
     private fun publishPreparedSessionOrClose(
         session: FunctionGemmaSession,
         targetAvailability: CompletableDeferred<FunctionGemmaSession>,
+        owner: Job?,
         ensureActive: () -> Unit,
     ) {
         try {
@@ -303,11 +317,35 @@ class PreparedFunctionGemmaSessionPool internal constructor(
                 check(availability === targetAvailability) { "Prepared FunctionGemma availability changed" }
                 check(preparedSession == null) { "FunctionGemma session pool capacity exceeded" }
                 preparedSession = session
+                preparedSessionOwner = owner
                 targetAvailability.complete(session)
             }
         } catch (error: Throwable) {
             closeAfterFailure(session, error)
             throw error
+        }
+    }
+
+    private fun closePublishedReplacement(
+        owner: Job,
+        targetAvailability: CompletableDeferred<FunctionGemmaSession>,
+        primaryFailure: Throwable,
+    ) {
+        engineLock.withLock {
+            val session = synchronized(stateLock) {
+                if (
+                    availability === targetAvailability &&
+                    preparedSessionOwner === owner
+                ) {
+                    preparedSession.also {
+                        preparedSession = null
+                        preparedSessionOwner = null
+                    }
+                } else {
+                    null
+                }
+            }
+            session?.let { closeAfterFailure(it, primaryFailure) }
         }
     }
 

@@ -37,7 +37,8 @@ class FunctionGemmaIntentRouter @Inject constructor(
             Result.success(Unit)
         } catch (error: CancellationException) {
             throw error
-        } catch (error: Exception) {
+        } catch (error: Throwable) {
+            error.throwIfFatal()
             Timber.e(error, "Failed to initialize FunctionGemmaIntentRouter")
             Result.failure(error)
         }
@@ -54,7 +55,8 @@ class FunctionGemmaIntentRouter @Inject constructor(
             consumeAndResolve(state.pool, transcript)
         } catch (error: CancellationException) {
             throw error
-        } catch (error: Exception) {
+        } catch (error: Throwable) {
+            error.throwIfFatal()
             if (state.pool.backend != FunctionGemmaBackend.GPU) {
                 invalidatePool(state)
                 logRuntimeWarning("FunctionGemma CPU inference failed", error)
@@ -92,7 +94,8 @@ class FunctionGemmaIntentRouter @Inject constructor(
             createPreparedPool(FunctionGemmaBackend.GPU)
         } catch (error: CancellationException) {
             throw error
-        } catch (gpuFailure: Exception) {
+        } catch (gpuFailure: Throwable) {
+            gpuFailure.throwIfFatal()
             logRuntimeWarning("FunctionGemma GPU initialization failed; using CPU", gpuFailure)
             createPreparedPool(FunctionGemmaBackend.CPU)
         }
@@ -125,24 +128,48 @@ class FunctionGemmaIntentRouter @Inject constructor(
         transcript: String,
     ): VoiceIntent? {
         return pool.consume { session ->
-            val suffix = FunctionGemmaPrompt.requestSuffix(
-                transcript = transcript,
-                history = dialogManager.promptHistory(),
-            )
-            check(!suffix.contains("<start_function_declaration>")) {
-                "FunctionGemma request suffix contains static declarations"
-            }
+            val suffix = buildRequestSuffixSafely(transcript) ?: return@consume null
             session.prefill(suffix)
             val generated = session.decode().trim { it <= ' ' }
-            val call = ToolCall.parse(generated) ?: return@consume null
-            dialogManager.resolve(transcript, generated, call)
+            resolveGeneratedSafely(transcript, generated)
         }.value
+    }
+
+    private fun buildRequestSuffixSafely(transcript: String): String? {
+        return try {
+            FunctionGemmaPrompt.requestSuffix(
+                transcript = transcript,
+                history = dialogManager.promptHistory(),
+            ).also { suffix ->
+                check(!suffix.contains("<start_function_declaration>")) {
+                    "FunctionGemma request suffix contains static declarations"
+                }
+            }
+        } catch (error: Throwable) {
+            error.throwIfFatalOrCancellation()
+            logRuntimeWarning("FunctionGemma request construction failed", error)
+            null
+        }
+    }
+
+    private fun resolveGeneratedSafely(
+        transcript: String,
+        generated: String,
+    ): VoiceIntent? {
+        return try {
+            val call = ToolCall.parse(generated) ?: return null
+            dialogManager.resolve(transcript, generated, call)
+        } catch (error: Throwable) {
+            error.throwIfFatalOrCancellation()
+            logRuntimeWarning("FunctionGemma output resolution failed", error)
+            null
+        }
     }
 
     private suspend fun recoverOnCpuOnce(
         failedGpuState: ActiveState,
         transcript: String,
-        gpuFailure: Exception,
+        gpuFailure: Throwable,
     ): VoiceIntent? = transitionMutex.withLock {
         logRuntimeWarning("FunctionGemma GPU inference failed; retrying on CPU", gpuFailure)
         val current = stateMutex.withLock { activeState }
@@ -160,7 +187,8 @@ class FunctionGemmaIntentRouter @Inject constructor(
                     createPreparedPool(FunctionGemmaBackend.CPU)
                 } catch (error: CancellationException) {
                     throw error
-                } catch (error: Exception) {
+                } catch (error: Throwable) {
+                    error.throwIfFatal()
                     logRuntimeWarning("FunctionGemma CPU fallback initialization failed", error)
                     return@withLock null
                 }
@@ -176,7 +204,8 @@ class FunctionGemmaIntentRouter @Inject constructor(
             consumeAndResolve(cpuState.pool, transcript)
         } catch (error: CancellationException) {
             throw error
-        } catch (error: Exception) {
+        } catch (error: Throwable) {
+            error.throwIfFatal()
             invalidatePool(cpuState)
             logRuntimeWarning("FunctionGemma CPU retry failed", error)
             null
@@ -205,6 +234,15 @@ class FunctionGemmaIntentRouter @Inject constructor(
             error::class.java.simpleName,
             error.message.orEmpty().take(MAX_LOGGED_ERROR_CHARS),
         )
+    }
+
+    private fun Throwable.throwIfFatalOrCancellation() {
+        if (this is CancellationException) throw this
+        throwIfFatal()
+    }
+
+    private fun Throwable.throwIfFatal() {
+        if (this is VirtualMachineError || this is ThreadDeath) throw this
     }
 
     private data class ActiveState(

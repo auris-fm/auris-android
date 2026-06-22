@@ -31,6 +31,10 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
+import org.mockito.kotlin.any
+import org.mockito.kotlin.doThrow
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.whenever
 import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
@@ -54,6 +58,20 @@ class FunctionGemmaIntentRouterTest {
         val factory = FakeRuntimeFactory(
             createFailures = mutableMapOf(
                 FunctionGemmaBackend.GPU to IllegalStateException("unsupported"),
+            ),
+        )
+        val router = createRouter(factory)
+
+        assertTrue(router.ensureReady().isSuccess)
+
+        assertEquals(listOf(FunctionGemmaBackend.GPU, FunctionGemmaBackend.CPU), factory.createdBackends)
+    }
+
+    @Test
+    fun `GPU linkage failure prepares CPU once`() = runTest {
+        val factory = FakeRuntimeFactory(
+            createFailures = mutableMapOf(
+                FunctionGemmaBackend.GPU to UnsatisfiedLinkError("missing GPU native library"),
             ),
         )
         val router = createRouter(factory)
@@ -155,6 +173,37 @@ class FunctionGemmaIntentRouterTest {
     }
 
     @Test
+    fun `parser exception returns null without CPU fallback`() = runTest {
+        val factory = FakeRuntimeFactory(gpuDecodes = queueOf(Result.success(THROWING_PARSE_OUTPUT)))
+        val router = createRouter(factory)
+        router.ensureReady().getOrThrow()
+
+        assertNull(router.recognize("Pause.", RECOGNITION_CONTEXT))
+        advanceUntilIdle()
+
+        assertEquals(listOf(FunctionGemmaBackend.GPU), factory.createdBackends)
+        assertEquals(2, factory.runtimes.single().sessions.size)
+    }
+
+    @Test
+    fun `dialog resolution exception returns null without CPU fallback`() = runTest {
+        val dialogManager = mock<VoiceDialogManager>()
+        whenever(dialogManager.promptHistory()).thenReturn(emptyList())
+        doThrow(IllegalArgumentException("invalid dialog transition"))
+            .whenever(dialogManager)
+            .resolve(any(), any(), any())
+        val factory = FakeRuntimeFactory(gpuDecodes = queueOf(Result.success(PAUSE_CALL)))
+        val router = createRouter(factory, dialogManager = dialogManager)
+        router.ensureReady().getOrThrow()
+
+        assertNull(router.recognize("Pause.", RECOGNITION_CONTEXT))
+        advanceUntilIdle()
+
+        assertEquals(listOf(FunctionGemmaBackend.GPU), factory.createdBackends)
+        assertEquals(2, factory.runtimes.single().sessions.size)
+    }
+
+    @Test
     fun `release change closes old pool and prepares a fresh GPU pool`() = runTest {
         val factory = FakeRuntimeFactory()
         val modelManager = createModelManager("release-1")
@@ -229,9 +278,10 @@ class FunctionGemmaIntentRouterTest {
     private fun kotlinx.coroutines.test.TestScope.createRouter(
         factory: FakeRuntimeFactory,
         modelManager: ModelManager = createModelManager("release-1"),
+        dialogManager: VoiceDialogManager = VoiceDialogManager(ToolCallMapper()),
     ): FunctionGemmaIntentRouter {
         return FunctionGemmaIntentRouter(
-            dialogManager = VoiceDialogManager(ToolCallMapper()),
+            dialogManager = dialogManager,
             modelManager = modelManager,
             runtimeFactory = factory,
             applicationScope = backgroundScope,
@@ -367,6 +417,8 @@ class FunctionGemmaIntentRouterTest {
             "<start_function_call>call:dialog_control{action:<escape>begin</escape>," +
                 "target_tool:<escape>bookmark</escape>,target_action:<escape>rename</escape>}<end_function_call>"
         const val NO_MATCH_CALL = "<start_function_call>call:no_match{}<end_function_call>"
+        const val THROWING_PARSE_OUTPUT =
+            "<start_function_call>call:playback{action:<escape>pause</escape><end_function_call>"
 
         fun queueOf(): ConcurrentLinkedQueue<Result<String>> = ConcurrentLinkedQueue()
 

@@ -3,6 +3,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime
 
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
@@ -106,9 +107,9 @@ class PreparedFunctionGemmaSessionPoolTest {
         val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val pool = PreparedFunctionGemmaSessionPool(runtime, workerScope) { testScheduler.currentTime }
         try {
-            val preparation = async(Dispatchers.Default) { pool.prepare("STATIC") }
+            val preparation = workerScope.async { pool.prepare("STATIC") }
             preparationGate.awaitEntered()
-            val waiter = async { pool.consume { it.decode() } }
+            val waiter = workerScope.async { pool.consume { it.decode() } }
             val closing = async(Dispatchers.Default) { pool.close() }
 
             awaitCondition { waiter.isCompleted }
@@ -119,7 +120,7 @@ class PreparedFunctionGemmaSessionPoolTest {
                 try {
                     preparation.await()
                     fail("Expected closed preparation to be cancelled")
-                } catch (_: CancellationException) {
+                } catch (_: Throwable) {
                     // Expected when close wins publication.
                 }
                 closing.await()
@@ -214,6 +215,256 @@ class PreparedFunctionGemmaSessionPoolTest {
     }
 
     @Test
+    fun `preparation failure fails waiter and rejects repeated prepare`() = runTest {
+        val failure = IllegalStateException("prefill failed")
+        val runtime = FakeRuntime(prefillFailures = mapOf(1 to failure))
+        val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val pool = PreparedFunctionGemmaSessionPool(runtime, workerScope) { testScheduler.currentTime }
+        try {
+            val waiter = workerScope.async { pool.consume { it.decode() } }
+
+            assertSameFailure(failure) { pool.prepare("STATIC") }
+            assertSameFailure(failure) { waiter.await() }
+            assertSameFailure(failure) { pool.prepare("STATIC") }
+
+            pool.close()
+            assertEquals(1, runtime.closeCount)
+        } finally {
+            pool.close()
+            workerScope.cancel()
+        }
+    }
+
+    @Test
+    fun `duplicate prepare does not poison an already prepared session`() = runTest {
+        val runtime = FakeRuntime()
+        val pool = PreparedFunctionGemmaSessionPool(runtime, backgroundScope) { testScheduler.currentTime }
+        pool.prepare("STATIC")
+
+        try {
+            pool.prepare("OTHER")
+            fail("Expected duplicate prepare rejection")
+        } catch (_: IllegalStateException) {
+            // Expected.
+        }
+
+        assertEquals("generated:1", pool.consume { it.decode() }.value)
+        pool.close()
+    }
+
+    @Test
+    fun `cancelled prepare does not start native work and fails readiness`() = runTest {
+        val prepareGate = BlockingGate()
+        val runtime = FakeRuntime()
+        val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val pool = PreparedFunctionGemmaSessionPool(
+            runtime = runtime,
+            scope = workerScope,
+            elapsedRealtimeMs = { testScheduler.currentTime },
+            beforePrepareEngineLock = prepareGate::block,
+        )
+        try {
+            val preparation = workerScope.async { pool.prepare("STATIC") }
+            prepareGate.awaitEntered()
+            preparation.cancel()
+            prepareGate.release()
+            preparation.join()
+
+            assertEquals(0, runtime.createdSessionCount)
+            try {
+                pool.consume { it.decode() }
+                fail("Expected cancelled readiness")
+            } catch (_: CancellationException) {
+                // Expected.
+            }
+        } finally {
+            prepareGate.release()
+            pool.close()
+            workerScope.cancel()
+        }
+    }
+
+    @Test
+    fun `cancelled owner scope closes replacement created by non-preemptible native work`() = runTest {
+        val replacementGate = BlockingGate()
+        val runtime = FakeRuntime(prefillGates = mapOf(2 to replacementGate))
+        val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val pool = PreparedFunctionGemmaSessionPool(runtime, workerScope) { testScheduler.currentTime }
+        try {
+            pool.prepare("STATIC")
+            pool.consume { it.decode() }
+            replacementGate.awaitEntered()
+            val waiter = workerScope.async { pool.consume { it.decode() } }
+
+            workerScope.cancel()
+            replacementGate.release()
+            awaitCondition { 2 in runtime.closedSessionIds }
+
+            try {
+                waiter.await()
+                fail("Expected replacement cancellation")
+            } catch (_: CancellationException) {
+                // Expected.
+            }
+            assertEquals(listOf(1, 2), runtime.closedSessionIds.sorted())
+        } finally {
+            replacementGate.release()
+            pool.close()
+        }
+    }
+
+    @Test
+    fun `already cancelled owner scope fails replacement readiness`() = runTest {
+        val runtime = FakeRuntime()
+        val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val pool = PreparedFunctionGemmaSessionPool(runtime, workerScope) { testScheduler.currentTime }
+        try {
+            pool.prepare("STATIC")
+            pool.consume {
+                workerScope.cancel()
+                it.decode()
+            }
+
+            val failure = withTimeout(5_000) {
+                runCatching { pool.consume { it.decode() } }.exceptionOrNull()
+            }
+            assertTrue(failure is CancellationException)
+        } finally {
+            pool.close()
+        }
+    }
+
+    @Test
+    fun `concurrent close waits for first close to finish`() = runTest {
+        val runtimeCloseGate = BlockingGate()
+        val runtime = FakeRuntime(runtimeCloseGate = runtimeCloseGate)
+        val pool = PreparedFunctionGemmaSessionPool(runtime, backgroundScope) { testScheduler.currentTime }
+        pool.prepare("STATIC")
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val first = executor.submit { pool.close() }
+            runtimeCloseGate.awaitEntered()
+            val second = executor.submit { pool.close() }
+
+            assertFalse(second.isDone)
+            runtimeCloseGate.release()
+            first.get(5, TimeUnit.SECONDS)
+            second.get(5, TimeUnit.SECONDS)
+
+            assertEquals(1, runtime.closeCount)
+        } finally {
+            runtimeCloseGate.release()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `reentrant close is rejected until consumer block unwinds`() = runTest {
+        val runtime = FakeRuntime()
+        val pool = PreparedFunctionGemmaSessionPool(runtime, backgroundScope) { testScheduler.currentTime }
+        pool.prepare("STATIC")
+
+        pool.consume {
+            try {
+                pool.close()
+                fail("Expected reentrant close rejection")
+            } catch (error: IllegalStateException) {
+                assertEquals("Cannot close FunctionGemma session pool from an active consumer", error.message)
+            }
+            assertEquals(0, runtime.closeCount)
+            it.decode()
+        }
+
+        pool.close()
+        assertEquals(1, runtime.closeCount)
+    }
+
+    @Test
+    fun `session wait includes consumer mutex queue and engine handoff`() = runTest {
+        var now = 0L
+        val firstConsumerGate = BlockingGate()
+        val consumerCount = AtomicInteger()
+        val secondConsumerStarted = CountDownLatch(1)
+        val runtime = FakeRuntime()
+        val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val pool = PreparedFunctionGemmaSessionPool(
+            runtime = runtime,
+            scope = workerScope,
+            elapsedRealtimeMs = { now },
+            beforePrepareEngineLock = {},
+            beforeConsumerMutex = {
+                if (consumerCount.incrementAndGet() == 2) {
+                    secondConsumerStarted.countDown()
+                }
+            },
+        )
+        try {
+            pool.prepare("STATIC")
+            val first = workerScope.async {
+                pool.consume {
+                    firstConsumerGate.block()
+                    it.decode()
+                }
+            }
+            firstConsumerGate.awaitEntered()
+
+            now = 100
+            val second = workerScope.async { pool.consume { it.decode() } }
+            check(secondConsumerStarted.await(5, TimeUnit.SECONDS))
+            now = 175
+            firstConsumerGate.release()
+
+            first.await()
+            assertEquals(75, second.await().sessionWaitMs)
+        } finally {
+            firstConsumerGate.release()
+            pool.close()
+            workerScope.cancel()
+        }
+    }
+
+    @Test
+    fun `session close failure fails waiter and preserves primary block failure`() = runTest {
+        val blockFailure = IllegalArgumentException("block failed")
+        val closeFailure = IllegalStateException("close failed")
+        val runtime = FakeRuntime(sessionCloseFailures = mapOf(1 to closeFailure))
+        val consumerGate = BlockingGate()
+        val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val pool = PreparedFunctionGemmaSessionPool(runtime, workerScope) { testScheduler.currentTime }
+        try {
+            pool.prepare("STATIC")
+            val first = workerScope.async<Throwable> {
+                var captured: Throwable? = null
+                try {
+                    pool.consume<Nothing> {
+                        consumerGate.block()
+                        throw blockFailure
+                    }
+                } catch (error: Throwable) {
+                    captured = error
+                }
+                checkNotNull(captured)
+            }
+            consumerGate.awaitEntered()
+            val waiter = workerScope.async { pool.consume { it.decode() } }
+            consumerGate.release()
+
+            val actual = first.await()
+            assertTrue(actual is IllegalArgumentException)
+            assertEquals(blockFailure.message, actual.message)
+            assertEquals(listOf(closeFailure.message), actual.suppressed.map { it.message })
+            assertSameFailure(closeFailure) { waiter.await() }
+
+            pool.close()
+            assertEquals(1, runtime.closeCount)
+        } finally {
+            consumerGate.release()
+            pool.close()
+            workerScope.cancel()
+        }
+    }
+
+    @Test
     fun `close is idempotent and closes prepared session and runtime once`() = runTest {
         val runtime = FakeRuntime()
         val pool = PreparedFunctionGemmaSessionPool(runtime, this) { testScheduler.currentTime }
@@ -231,6 +482,19 @@ class PreparedFunctionGemmaSessionPoolTest {
             while (!condition()) {
                 yield()
             }
+        }
+    }
+
+    private suspend fun assertSameFailure(
+        expected: Throwable,
+        block: suspend () -> Unit,
+    ) {
+        try {
+            block()
+            fail("Expected failure")
+        } catch (actual: Throwable) {
+            assertEquals(expected::class, actual::class)
+            assertEquals(expected.message, actual.message)
         }
     }
 
@@ -267,6 +531,8 @@ class PreparedFunctionGemmaSessionPoolTest {
     private class FakeRuntime(
         private val prefillGates: Map<Int, BlockingGate> = emptyMap(),
         private val prefillFailures: Map<Int, RuntimeException> = emptyMap(),
+        private val sessionCloseFailures: Map<Int, RuntimeException> = emptyMap(),
+        private val runtimeCloseGate: BlockingGate? = null,
     ) : FunctionGemmaRuntime {
         override val backend = FunctionGemmaBackend.GPU
 
@@ -293,6 +559,7 @@ class PreparedFunctionGemmaSessionPoolTest {
         override fun close() {
             closes.incrementAndGet()
             record("runtime-close")
+            runtimeCloseGate?.block()
         }
 
         private fun record(call: String) {
@@ -324,6 +591,7 @@ class PreparedFunctionGemmaSessionPoolTest {
                     closedSessionIds += id
                 }
                 record("close:$id")
+                sessionCloseFailures[id]?.let { throw it }
             }
         }
     }

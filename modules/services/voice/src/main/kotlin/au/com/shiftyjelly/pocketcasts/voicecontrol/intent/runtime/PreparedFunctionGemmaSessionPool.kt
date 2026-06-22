@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime
 
 import android.os.SystemClock
 import java.io.Closeable
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlinx.coroutines.CancellationException
@@ -9,6 +10,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -28,12 +31,13 @@ class PreparedFunctionGemmaSessionPool internal constructor(
     private val scope: CoroutineScope,
     private val elapsedRealtimeMs: () -> Long,
     private val beforePrepareEngineLock: () -> Unit,
+    private val beforeConsumerMutex: () -> Unit = {},
 ) : Closeable {
     constructor(
         runtime: FunctionGemmaRuntime,
         scope: CoroutineScope,
         elapsedRealtimeMs: () -> Long = SystemClock::elapsedRealtime,
-    ) : this(runtime, scope, elapsedRealtimeMs, {})
+    ) : this(runtime, scope, elapsedRealtimeMs, {}, {})
 
     val backend get() = runtime.backend
 
@@ -41,82 +45,172 @@ class PreparedFunctionGemmaSessionPool internal constructor(
     private val engineLock = ReentrantLock()
     private val stateLock = Any()
 
+    private var lifecycle: Lifecycle = Lifecycle.Open
     private var staticPrefix: String? = null
     private var availability = CompletableDeferred<FunctionGemmaSession>()
     private var preparedSession: FunctionGemmaSession? = null
     private var replacementJob: Job? = null
-    private var isClosed = false
+    private var activeConsumerThread: Thread? = null
 
     suspend fun prepare(prefix: String): SessionPreparationMetrics {
-        synchronized(stateLock) {
-            checkOpen()
+        val context = currentCoroutineContext()
+        context.ensureActive()
+        val targetAvailability = synchronized(stateLock) {
+            ensureOpen()
             check(staticPrefix == null) { "FunctionGemma session pool is already prepared" }
             staticPrefix = prefix
+            availability
         }
 
-        beforePrepareEngineLock()
-        return engineLock.withLock {
-            synchronized(stateLock) {
-                checkOpen()
+        return try {
+            beforePrepareEngineLock()
+            engineLock.withLock {
+                context.ensureActive()
+                synchronized(stateLock) {
+                    ensureOpen()
+                }
+                val (session, metrics) = createPreparedSession(prefix)
+                publishPreparedSessionOrClose(session, targetAvailability, context::ensureActive)
+                metrics
             }
-            val (session, metrics) = createPreparedSession(prefix)
-            publishPreparedSession(session, availability)
-            metrics
+        } catch (error: Throwable) {
+            transitionToFailure(error)
+            throw error
         }
     }
 
     suspend fun <T> consume(
         block: (FunctionGemmaSession) -> T,
-    ): PreparedSessionResult<T> = consumerMutex.withLock {
+    ): PreparedSessionResult<T> {
         val waitStart = elapsedRealtimeMs()
-        val signalledSession = availability.await()
-        val sessionWaitMs = elapsedRealtimeMs() - waitStart
-
-        engineLock.withLock {
-            val session = claimPreparedSession(signalledSession)
-            try {
-                PreparedSessionResult(
-                    value = block(session),
-                    sessionWaitMs = sessionWaitMs,
-                )
-            } finally {
-                session.close()
-                scheduleReplacement()
+        beforeConsumerMutex()
+        return consumerMutex.withLock {
+            val signalledSession = availability.await()
+            engineLock.withLock {
+                val session = claimPreparedSession(signalledSession)
+                val sessionWaitMs = elapsedRealtimeMs() - waitStart
+                executeLease(session, sessionWaitMs, block)
             }
         }
     }
 
     override fun close() {
-        val job: Job?
-        val waitingAvailability: CompletableDeferred<FunctionGemmaSession>
+        val closeAction = synchronized(stateLock) {
+            check(activeConsumerThread !== Thread.currentThread()) {
+                "Cannot close FunctionGemma session pool from an active consumer"
+            }
+            when (val state = lifecycle) {
+                Lifecycle.Open,
+                is Lifecycle.Failed,
+                -> {
+                    val completion = CountDownLatch(1)
+                    lifecycle = Lifecycle.Closing(completion)
+                    CloseAction.Perform(
+                        completion = completion,
+                        replacementJob = replacementJob.also { replacementJob = null },
+                        availability = availability,
+                    )
+                }
+
+                is Lifecycle.Closing -> CloseAction.Wait(state.completion)
+
+                Lifecycle.Closed -> CloseAction.None
+            }
+        }
+
+        when (closeAction) {
+            CloseAction.None -> return
+
+            is CloseAction.Wait -> {
+                closeAction.completion.await()
+                return
+            }
+
+            is CloseAction.Perform -> performClose(closeAction)
+        }
+    }
+
+    private fun <T> executeLease(
+        session: FunctionGemmaSession,
+        sessionWaitMs: Long,
+        block: (FunctionGemmaSession) -> T,
+    ): PreparedSessionResult<T> {
         synchronized(stateLock) {
-            if (isClosed) return
-            isClosed = true
-            job = replacementJob
-            replacementJob = null
-            waitingAvailability = availability
-            staticPrefix = null
+            activeConsumerThread = Thread.currentThread()
         }
 
-        job?.cancel()
-        waitingAvailability.cancel(CancellationException("FunctionGemma session pool closed"))
+        var blockFailure: Throwable? = null
+        var value: T? = null
+        try {
+            value = block(session)
+        } catch (error: Throwable) {
+            blockFailure = error
+        }
 
-        engineLock.withLock {
-            val session = synchronized(stateLock) {
-                preparedSession.also { preparedSession = null }
-            }
-            try {
-                session?.close()
-            } finally {
-                runtime.close()
+        var closeFailure: Throwable? = null
+        try {
+            session.close()
+        } catch (error: Throwable) {
+            closeFailure = error
+            transitionToFailure(error)
+        } finally {
+            synchronized(stateLock) {
+                activeConsumerThread = null
             }
         }
+
+        if (closeFailure == null) {
+            scheduleReplacement()
+        }
+        if (blockFailure != null) {
+            closeFailure?.let(blockFailure::addSuppressed)
+            throw blockFailure
+        }
+        if (closeFailure != null) {
+            throw closeFailure
+        }
+
+        @Suppress("UNCHECKED_CAST")
+        return PreparedSessionResult(value as T, sessionWaitMs)
+    }
+
+    private fun performClose(action: CloseAction.Perform) {
+        action.replacementJob?.cancel()
+        action.availability.cancel(CancellationException("FunctionGemma session pool closed"))
+
+        var closeFailure: Throwable? = null
+        try {
+            engineLock.withLock {
+                val session = synchronized(stateLock) {
+                    preparedSession.also {
+                        preparedSession = null
+                        staticPrefix = null
+                    }
+                }
+                try {
+                    session?.close()
+                } catch (error: Throwable) {
+                    closeFailure = error
+                }
+                try {
+                    runtime.close()
+                } catch (error: Throwable) {
+                    closeFailure?.addSuppressed(error) ?: run { closeFailure = error }
+                }
+            }
+        } finally {
+            synchronized(stateLock) {
+                lifecycle = Lifecycle.Closed
+            }
+            action.completion.countDown()
+        }
+        closeFailure?.let { throw it }
     }
 
     private fun claimPreparedSession(
         signalledSession: FunctionGemmaSession,
     ): FunctionGemmaSession = synchronized(stateLock) {
-        checkOpen()
+        ensureOpen()
         check(preparedSession === signalledSession) { "Prepared FunctionGemma session is no longer available" }
         preparedSession = null
         availability = CompletableDeferred()
@@ -127,19 +221,26 @@ class PreparedFunctionGemmaSessionPool internal constructor(
         val targetAvailability: CompletableDeferred<FunctionGemmaSession>
         val prefix: String
         synchronized(stateLock) {
-            if (isClosed) return
+            if (lifecycle !== Lifecycle.Open) return
             prefix = checkNotNull(staticPrefix) { "FunctionGemma session pool has not been prepared" }
             targetAvailability = availability
         }
 
         lateinit var job: Job
         job = scope.launch(start = CoroutineStart.LAZY) {
-            engineLock.withLock {
-                synchronized(stateLock) {
-                    checkOpen()
+            try {
+                val context = currentCoroutineContext()
+                engineLock.withLock {
+                    context.ensureActive()
+                    synchronized(stateLock) {
+                        ensureOpen()
+                    }
+                    val (session) = createPreparedSession(prefix)
+                    publishPreparedSessionOrClose(session, targetAvailability, context::ensureActive)
                 }
-                val (session) = createPreparedSession(prefix)
-                publishPreparedSession(session, targetAvailability)
+            } catch (error: Throwable) {
+                transitionToFailure(error)
+                if (error is CancellationException) throw error
             }
         }
         job.invokeOnCompletion { cause ->
@@ -147,14 +248,12 @@ class PreparedFunctionGemmaSessionPool internal constructor(
                 if (replacementJob === job) {
                     replacementJob = null
                 }
-                if (cause != null && !isClosed && availability === targetAvailability) {
-                    targetAvailability.completeExceptionally(cause)
-                }
             }
+            cause?.let(::transitionToFailure)
         }
 
         val shouldStart = synchronized(stateLock) {
-            if (isClosed) {
+            if (lifecycle !== Lifecycle.Open) {
                 false
             } else {
                 replacementJob = job
@@ -168,6 +267,10 @@ class PreparedFunctionGemmaSessionPool internal constructor(
         }
     }
 
+    /**
+     * LiteRT session creation and prefill are synchronous native calls and cannot be preempted while executing.
+     * Callers must check cancellation immediately before and after this method.
+     */
     private fun createPreparedSession(
         prefix: String,
     ): Pair<FunctionGemmaSession, SessionPreparationMetrics> {
@@ -183,32 +286,81 @@ class PreparedFunctionGemmaSessionPool internal constructor(
                 staticPrefillMs = staticPrefillMs,
             )
         } catch (error: Throwable) {
-            session.close()
+            closeAfterFailure(session, error)
             throw error
         }
     }
 
-    private fun publishPreparedSession(
+    private fun publishPreparedSessionOrClose(
         session: FunctionGemmaSession,
         targetAvailability: CompletableDeferred<FunctionGemmaSession>,
+        ensureActive: () -> Unit,
     ) {
-        val published = synchronized(stateLock) {
-            if (isClosed || availability !== targetAvailability) {
-                false
-            } else {
+        try {
+            ensureActive()
+            synchronized(stateLock) {
+                ensureOpen()
+                check(availability === targetAvailability) { "Prepared FunctionGemma availability changed" }
                 check(preparedSession == null) { "FunctionGemma session pool capacity exceeded" }
                 preparedSession = session
                 targetAvailability.complete(session)
-                true
             }
-        }
-        if (!published) {
-            session.close()
-            throw CancellationException("FunctionGemma session pool closed")
+        } catch (error: Throwable) {
+            closeAfterFailure(session, error)
+            throw error
         }
     }
 
-    private fun checkOpen() {
-        check(!isClosed) { "FunctionGemma session pool is closed" }
+    private fun transitionToFailure(error: Throwable): Boolean {
+        val targetAvailability = synchronized(stateLock) {
+            if (lifecycle !== Lifecycle.Open) return false
+            lifecycle = Lifecycle.Failed(error)
+            staticPrefix = null
+            availability
+        }
+        targetAvailability.completeExceptionally(error)
+        return true
+    }
+
+    private fun closeAfterFailure(
+        session: FunctionGemmaSession,
+        primaryFailure: Throwable,
+    ) {
+        try {
+            session.close()
+        } catch (closeFailure: Throwable) {
+            primaryFailure.addSuppressed(closeFailure)
+        }
+    }
+
+    private fun ensureOpen() {
+        when (val state = lifecycle) {
+            Lifecycle.Open -> Unit
+            is Lifecycle.Failed -> throw state.cause
+            is Lifecycle.Closing -> error("FunctionGemma session pool is closing")
+            Lifecycle.Closed -> error("FunctionGemma session pool is closed")
+        }
+    }
+
+    private sealed interface Lifecycle {
+        data object Open : Lifecycle
+
+        data class Failed(val cause: Throwable) : Lifecycle
+
+        data class Closing(val completion: CountDownLatch) : Lifecycle
+
+        data object Closed : Lifecycle
+    }
+
+    private sealed interface CloseAction {
+        data object None : CloseAction
+
+        data class Wait(val completion: CountDownLatch) : CloseAction
+
+        data class Perform(
+            val completion: CountDownLatch,
+            val replacementJob: Job?,
+            val availability: CompletableDeferred<FunctionGemmaSession>,
+        ) : CloseAction
     }
 }

@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
@@ -103,28 +104,35 @@ class PreparedFunctionGemmaSessionPoolTest {
     @Test
     fun `close during preparation cancels waiter and closes session and runtime`() = runTest {
         val preparationGate = BlockingGate()
+        val waiterStarted = CountDownLatch(1)
         val runtime = FakeRuntime(prefillGates = mapOf(1 to preparationGate))
         val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val pool = PreparedFunctionGemmaSessionPool(runtime, workerScope) { testScheduler.currentTime }
+        val pool = PreparedFunctionGemmaSessionPool(
+            runtime = runtime,
+            scope = workerScope,
+            elapsedRealtimeMs = { testScheduler.currentTime },
+            beforePrepareEngineLock = {},
+            beforeAvailabilityAwait = waiterStarted::countDown,
+        )
+        val executor = Executors.newFixedThreadPool(3)
         try {
-            val preparation = workerScope.async { pool.prepare("STATIC") }
-            preparationGate.awaitEntered()
-            val waiter = workerScope.async { pool.consume { it.decode() } }
-            val closing = async(Dispatchers.Default) { pool.close() }
-
-            awaitCondition { waiter.isCompleted }
-            assertTrue(waiter.isCancelled)
-
-            preparationGate.release()
-            withTimeout(5_000) {
-                try {
-                    preparation.await()
-                    fail("Expected closed preparation to be cancelled")
-                } catch (error: IllegalStateException) {
-                    assertEquals("FunctionGemma session pool is closing", error.message)
-                }
-                closing.await()
+            val preparation = executor.submit<Throwable?> {
+                runCatching { runBlocking { pool.prepare("STATIC") } }.exceptionOrNull()
             }
+            preparationGate.awaitEntered()
+            val waiter = executor.submit<Throwable?> {
+                runCatching { runBlocking { pool.consume { it.decode() } } }.exceptionOrNull()
+            }
+            check(waiterStarted.await(5, TimeUnit.SECONDS))
+            val closing = executor.submit { pool.close() }
+
+            assertTrue(waiter.get(5, TimeUnit.SECONDS) is CancellationException)
+            preparationGate.release()
+
+            val preparationFailure = requireNotNull(preparation.get(5, TimeUnit.SECONDS))
+            assertTrue(preparationFailure is IllegalStateException)
+            assertEquals("FunctionGemma session pool is closing", preparationFailure.message)
+            closing.get(5, TimeUnit.SECONDS)
 
             assertEquals(listOf(1), runtime.closedSessionIdsSnapshot)
             assertEquals(1, runtime.closeCount)
@@ -132,6 +140,7 @@ class PreparedFunctionGemmaSessionPoolTest {
             preparationGate.release()
             pool.close()
             workerScope.cancel()
+            executor.shutdownNow()
         }
     }
 

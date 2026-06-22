@@ -9,9 +9,15 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.media.AudioManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrCapabilities
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
@@ -19,8 +25,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.Mockito.mock
@@ -191,6 +199,46 @@ class VoiceAsrEngineTest {
         verify(backend).release()
     }
 
+    @Test
+    fun `transcription initializes recognizer before matching intent`() = runTest {
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            context = context,
+        )
+        engine.scope = this
+        val handledIntents = mutableListOf<VoiceIntent>()
+
+        engine.start(
+            backend = FakeAsrBackend("pause"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { handledIntents += it },
+        )
+        advanceUntilIdle()
+
+        assertEquals(listOf("ensureReady", "recognize:pause"), recognizer.calls)
+        assertEquals(listOf(VoiceIntent.Playback.Pause), handledIntents)
+
+        engine.stop()
+    }
+
     // ── SCO not reopened for subsequent starts ─────────────────────────
 
     @Test
@@ -257,5 +305,38 @@ class VoiceAsrEngineTest {
         verify(audioManager, times(1)).stopBluetoothSco()
 
         engine.stop()
+    }
+
+    private class RecordingRecognizer(
+        private val intent: VoiceIntent?,
+    ) : VoiceRecognizer {
+        val calls = mutableListOf<String>()
+
+        override suspend fun ensureReady(): Result<Unit> {
+            calls += "ensureReady"
+            return Result.success(Unit)
+        }
+
+        override suspend fun recognize(
+            transcript: String,
+            context: VoiceRecognitionContext,
+        ): VoiceIntent? {
+            calls += "recognize:$transcript"
+            return intent
+        }
+    }
+
+    private class FakeAsrBackend(
+        private val transcript: String,
+    ) : AsrBackend {
+        override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+
+        override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult = AsrResult(transcript)
+
+        override val requiredModel: ModelSpec = ModelSpec(files = emptyList(), targetDir = "")
+
+        override val capabilities: AsrCapabilities = AsrCapabilities(supportedLanguages = setOf("en"))
+
+        override fun release() = Unit
     }
 }

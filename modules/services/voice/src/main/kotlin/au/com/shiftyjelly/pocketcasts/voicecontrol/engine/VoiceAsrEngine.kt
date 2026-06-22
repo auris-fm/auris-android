@@ -192,6 +192,12 @@ class VoiceAsrEngine @Inject constructor(
         val recognizer = intentRecognizer
         val handler = onIntent ?: return
 
+        val ready = recognizer.ensureReady()
+        if (ready.isFailure) {
+            Timber.e(ready.exceptionOrNull(), "Intent recognizer not ready")
+            return
+        }
+
         val t0 = System.currentTimeMillis()
         val ctx = VoiceRecognitionContext(
             listeningMode = currentMode,

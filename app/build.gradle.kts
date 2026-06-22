@@ -36,6 +36,8 @@ android {
     buildTypes {
         named("debug") {
             manifestPlaceholders["appIcon"] = "@mipmap/ic_launcher_radioactive"
+            // Disable JNI check overhead so native inference runs at release speed.
+            isJniDebuggable = false
         }
 
         named("debugProd") {

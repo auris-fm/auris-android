@@ -298,25 +298,38 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_wakeword_WakeWordJni_nativeDete
 
     LOGI("Extracted %d embeddings from %d mel frames", nEmbeddings, nMelFrames);
 
-    // --- Stage 3: Take last 16 embeddings, left-pad with zeros if needed ---
-    float clsInputData[kMaxEmbeddings * kEmbeddingDim] = {};
-    int embToCopy = nEmbeddings;
-    if (embToCopy > kMaxEmbeddings) embToCopy = kMaxEmbeddings;
-    int dstStart = (kMaxEmbeddings - embToCopy) * kEmbeddingDim;  // left-pad
-    int srcStart = (nEmbeddings - embToCopy) * kEmbeddingDim;
-    for (int i = 0; i < embToCopy * kEmbeddingDim; i++) {
-        clsInputData[dstStart + i] = embeddings[srcStart + i];
+    // --- Stage 3: Slide 16-embedding window, take max score ---
+    // The classifier uses only the last 16 embeddings (~1.28s context). For short
+    // segments (<16 embeddings) left-pad with zeros. For longer segments, slide a
+    // 16-embedding window with stride 1 across all embeddings and take the max score,
+    // so the wake word is detected regardless of position within the segment.
+    int numWindows = nEmbeddings - kMaxEmbeddings + 1;
+    if (numWindows < 1) numWindows = 1;
+    int64_t clsInShape[] = {1, kMaxEmbeddings, kEmbeddingDim};
+
+    float maxScore = 0.0f;
+    for (int w = 0; w < numWindows; w++) {
+        float clsInputData[kMaxEmbeddings * kEmbeddingDim] = {};
+        int embStart = (nEmbeddings < kMaxEmbeddings) ? 0 : w;
+        int embCount = (nEmbeddings < kMaxEmbeddings) ? nEmbeddings : kMaxEmbeddings;
+        int dstStart = (kMaxEmbeddings - embCount) * kEmbeddingDim;  // left-pad short segments
+        int srcStart = embStart * kEmbeddingDim;
+        for (int i = 0; i < embCount * kEmbeddingDim; i++) {
+            clsInputData[dstStart + i] = embeddings[srcStart + i];
+        }
+
+        bool clsOk = false;
+        std::vector<float> clsOut = runModel(g_clsSession, "embeddings", "score",
+                                             clsInputData, clsInShape, 3, 1, clsOk);
+        if (!clsOk) {
+            env->ReleaseFloatArrayElements(jSamples, samples, JNI_ABORT);
+            return -1.0f;
+        }
+        if (clsOut[0] > maxScore) maxScore = clsOut[0];
     }
 
-    // --- Stage 4: Classifier ---
-    int64_t clsInShape[] = {1, kMaxEmbeddings, kEmbeddingDim};
-    bool clsOk = false;
-    std::vector<float> clsOut = runModel(g_clsSession, "embeddings", "score",
-                                          clsInputData, clsInShape, 3, 1, clsOk);
-
     env->ReleaseFloatArrayElements(jSamples, samples, JNI_ABORT);
-    if (!clsOk) return -1.0f;
-    return clsOut[0];
+    return maxScore;
 }
 
 JNIEXPORT void JNICALL

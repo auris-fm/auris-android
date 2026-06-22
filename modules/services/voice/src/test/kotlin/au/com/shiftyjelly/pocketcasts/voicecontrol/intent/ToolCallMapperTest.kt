@@ -187,4 +187,57 @@ class ToolCallMapperTest {
         assertEquals("no_match", call!!.name)
         assertNull(mapper.map(call))
     }
+
+    @Test
+    fun `tool call parse from fenced json`() {
+        val response = """
+            ```json
+            {"name": "playback", "action": "pause"}
+            ```
+        """.trimIndent()
+
+        val call = ToolCall.parse(response)
+
+        assertNotNull(call)
+        assertEquals("playback", call!!.name)
+        assertEquals("pause", call.action)
+    }
+
+    @Test
+    fun `tool call parse from response with text prefix`() {
+        val response = """The matching call is {"name": "playback", "action": "resume"}."""
+
+        val call = ToolCall.parse(response)
+
+        assertNotNull(call)
+        assertEquals("playback", call!!.name)
+        assertEquals("resume", call.action)
+    }
+
+    @Test
+    fun `tool call parse from function call sentinel`() {
+        val response = """▎{"name": "volume", "action": "adjust_volume", "parameters": {"delta": 10}}"""
+
+        val call = ToolCall.parse(response)
+
+        assertNotNull(call)
+        assertEquals("volume", call!!.name)
+        assertEquals("adjust_volume", call.action)
+        assertEquals(10, call.intParam("delta"))
+    }
+
+    @Test
+    fun `tool call parse from native FunctionGemma output`() {
+        val response =
+            """
+            <start_function_call>call:sleep{action:<escape>set</escape>,minutes:30}<end_function_call>
+            """.trimIndent()
+
+        val call = ToolCall.parse(response)
+
+        assertNotNull(call)
+        assertEquals("sleep", call!!.name)
+        assertEquals("set", call.action)
+        assertEquals(30, call.intParam("minutes"))
+    }
 }

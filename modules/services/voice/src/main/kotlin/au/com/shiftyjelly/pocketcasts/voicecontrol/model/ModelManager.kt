@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.model
 
 import android.content.Context
+import android.system.Os
 import androidx.annotation.VisibleForTesting
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
@@ -17,7 +18,47 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import timber.log.Timber
+
+internal data class FunctionGemmaAsset(
+    val name: String,
+    val url: String,
+    val bytes: Long,
+    val sha256: String,
+)
+
+internal data class FunctionGemmaRelease(
+    val version: String,
+    val requiredAssets: List<FunctionGemmaAsset>,
+)
+
+internal fun parseFunctionGemmaManifest(json: String): FunctionGemmaRelease {
+    val manifest = JSONObject(json)
+    val version = manifest.getString("version")
+    val assets = manifest.getJSONObject("assets")
+    val requiredNames = assets.keys().asSequence()
+        .filter { it == ModelManager.FUNCTION_GEMMA_MODEL_FILENAME || it.startsWith("model.litertlm.xnnpack_cache_") }
+        .sorted()
+        .toList()
+    require(requiredNames.count { it == ModelManager.FUNCTION_GEMMA_MODEL_FILENAME } == 1) {
+        "FunctionGemma manifest must contain model.litertlm"
+    }
+    require(requiredNames.count { it.startsWith("model.litertlm.xnnpack_cache_") } == 1) {
+        "FunctionGemma manifest must contain exactly one XNNPack cache"
+    }
+    val requiredAssets = requiredNames.map { name ->
+        require(name == File(name).name) { "Invalid FunctionGemma asset name: $name" }
+        val asset = assets.getJSONObject(name)
+        FunctionGemmaAsset(
+            name = name,
+            url = asset.getString("url"),
+            bytes = asset.getLong("bytes"),
+            sha256 = asset.getString("sha256"),
+        )
+    }
+    return FunctionGemmaRelease(version, requiredAssets)
+}
 
 @Singleton
 class ModelManager @Inject constructor(
@@ -54,10 +95,10 @@ class ModelManager @Inject constructor(
             "/intfloat/multilingual-e5-small/resolve/main/tokenizer.json"
         const val TOKENIZER_FILENAME = "tokenizer.json"
 
-        // FunctionGemma finetuned model (~270 MB INT8, LiteRT-LM format)
-        // URL updated once fine-tuning completes (Recognition Pipeline Item 6 Step 6).
-        private const val FUNCTION_GEMMA_BASE_URL = "https://download.moonshine.ai/model/functiongemma"
-        private const val FUNCTION_GEMMA_MODEL_FILENAME = "model.litertlm"
+        internal const val FUNCTION_GEMMA_MODEL_FILENAME = "model.litertlm"
+        private const val FUNCTION_GEMMA_MANIFEST_FILENAME = "manifest.json"
+        private const val FUNCTION_GEMMA_LATEST_URL =
+            "https://download.auris.fm/function-call/latest.json"
     }
 
     @VisibleForTesting
@@ -92,12 +133,25 @@ class ModelManager @Inject constructor(
         }
     }
 
-    // -- FunctionGemma model ------------------------------------------------
+    // -- FunctionGemma model -------------------------------------------------
 
     val functionGemmaDir get() = File(filesDir, "functiongemma-model")
     val functionGemmaModelFile get() = File(functionGemmaDir, FUNCTION_GEMMA_MODEL_FILENAME)
+    private val functionGemmaManifestFile get() = File(functionGemmaDir, FUNCTION_GEMMA_MANIFEST_FILENAME)
 
-    fun isFunctionGemmaModelReady(): Boolean = functionGemmaModelFile.exists()
+    fun isFunctionGemmaModelReady(): Boolean {
+        if (!functionGemmaManifestFile.exists()) return false
+        return try {
+            val release = parseFunctionGemmaManifest(functionGemmaManifestFile.readText())
+            release.requiredAssets.all { asset ->
+                val file = File(functionGemmaDir, asset.name)
+                file.isFile && file.length() == asset.bytes
+            }
+        } catch (e: Exception) {
+            Timber.w(e, "FunctionGemma manifest is invalid")
+            false
+        }
+    }
 
     suspend fun ensureFunctionGemmaModel(): Result<Unit> = withContext(Dispatchers.IO) {
         if (isFunctionGemmaModelReady()) return@withContext Result.success(Unit)
@@ -105,12 +159,19 @@ class ModelManager @Inject constructor(
             if (isFunctionGemmaModelReady()) return@withContext Result.success(Unit)
             try {
                 functionGemmaDir.mkdirs()
-                downloadFile(
-                    "$FUNCTION_GEMMA_BASE_URL/$FUNCTION_GEMMA_MODEL_FILENAME",
-                    functionGemmaModelFile,
-                    "FunctionGemma",
-                    "",
-                )
+                val manifest = downloadText(FUNCTION_GEMMA_LATEST_URL, "FunctionGemma manifest")
+                val release = parseFunctionGemmaManifest(manifest)
+                release.requiredAssets.forEach { asset ->
+                    downloadFile(
+                        urlStr = asset.url,
+                        dest = File(functionGemmaDir, asset.name),
+                        label = "FunctionGemma/${asset.name}",
+                        expectedSha256 = asset.sha256,
+                        expectedBytes = asset.bytes,
+                    )
+                }
+                writeAtomically(functionGemmaManifestFile, manifest.toByteArray())
+                Timber.i("FunctionGemma release %s ready", release.version)
                 Result.success(Unit)
             } catch (e: Exception) {
                 Timber.e(e, "FunctionGemma model download failed")
@@ -174,14 +235,20 @@ class ModelManager @Inject constructor(
         }
     }
 
-    private fun downloadFile(urlStr: String, dest: File, label: String, expectedSha256: String) {
+    private fun downloadFile(
+        urlStr: String,
+        dest: File,
+        label: String,
+        expectedSha256: String,
+        expectedBytes: Long = -1,
+    ) {
         if (dest.exists()) {
-            if (expectedSha256.isEmpty() || sha256Matches(dest, expectedSha256)) {
+            val sizeMatches = expectedBytes < 0 || dest.length() == expectedBytes
+            if (sizeMatches && (expectedSha256.isEmpty() || sha256Matches(dest, expectedSha256))) {
                 Timber.i("$label model already downloaded (SHA256 verified)")
                 return
             }
             Timber.w("$label model file exists but SHA256 mismatch, re-downloading")
-            dest.delete()
         }
         Timber.i("$label model download starting from $urlStr")
         val tmpFile = File(dest.parentFile, "${dest.name}.tmp")
@@ -196,14 +263,19 @@ class ModelManager @Inject constructor(
                 if (offset > 0) connection.setRequestProperty("Range", "bytes=$offset-")
                 val code = connection.responseCode
                 if (code != 200 && code != 206) throw Exception("HTTP $code")
-                val totalBytes = connection.contentLengthLong + offset
+                val append = offset > 0 && code == 206
+                if (!append && offset > 0) {
+                    Timber.w("$label server ignored range request, restarting download")
+                }
+                val downloadedBeforeRequest = if (append) offset else 0L
+                val totalBytes = connection.contentLengthLong + downloadedBeforeRequest
                 Timber.i("$label downloading %d bytes total", totalBytes)
                 val lastProgressLog = mutableListOf(0)
                 connection.inputStream.use { input ->
-                    FileOutputStream(tmpFile, offset > 0).use { output ->
+                    FileOutputStream(tmpFile, append).use { output ->
                         val buffer = ByteArray(65536)
                         var read: Int
-                        var downloaded = offset
+                        var downloaded = downloadedBeforeRequest
                         while (input.read(buffer).also { read = it } != -1) {
                             output.write(buffer, 0, read)
                             downloaded += read
@@ -223,8 +295,11 @@ class ModelManager @Inject constructor(
                     }
                 }
                 connection.disconnect()
+                if (expectedBytes >= 0 && tmpFile.length() != expectedBytes) {
+                    throw Exception("$label size mismatch: got ${tmpFile.length()}, expected $expectedBytes")
+                }
                 if (expectedSha256.isNotEmpty()) verifySha256(tmpFile, expectedSha256, label)
-                tmpFile.renameTo(dest)
+                replaceAtomically(tmpFile, dest)
                 Timber.i("$label model download complete")
                 maxRetries = 0
             } catch (e: Exception) {
@@ -237,6 +312,37 @@ class ModelManager @Inject constructor(
                 Thread.sleep(3000)
             }
         }
+    }
+
+    private fun downloadText(urlStr: String, label: String): String {
+        var lastError: Exception? = null
+        repeat(5) { attempt ->
+            try {
+                val connection = URL(urlStr).openConnection() as HttpURLConnection
+                connection.connectTimeout = 60000
+                connection.readTimeout = 60000
+                val code = connection.responseCode
+                if (code != 200) throw Exception("HTTP $code")
+                return connection.inputStream.bufferedReader().use { it.readText() }
+            } catch (e: Exception) {
+                lastError = e
+                if (attempt < 4) {
+                    Timber.w(e, "$label download interrupted, retrying (%d left)", 4 - attempt)
+                    Thread.sleep(3000)
+                }
+            }
+        }
+        throw lastError ?: IllegalStateException("$label download failed")
+    }
+
+    private fun writeAtomically(dest: File, bytes: ByteArray) {
+        val tmpFile = File(dest.parentFile, "${dest.name}.tmp")
+        tmpFile.outputStream().use { it.write(bytes) }
+        replaceAtomically(tmpFile, dest)
+    }
+
+    private fun replaceAtomically(source: File, dest: File) {
+        Os.rename(source.absolutePath, dest.absolutePath)
     }
 
     private fun computeSha256(file: File): String {

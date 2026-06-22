@@ -14,7 +14,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.LiveConditionMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition
-import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.EmbeddingIntentMatcher
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningModePolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
@@ -44,8 +43,6 @@ class VoiceControlService : Service() {
     @Inject lateinit var notificationManager: VoiceControlNotificationManager
 
     @Inject lateinit var voiceRecognizer: VoiceRecognizer
-
-    @Inject lateinit var embeddingIntentMatcher: EmbeddingIntentMatcher
 
     @Inject lateinit var voicePlaybackIntentExecutor: VoicePlaybackIntentExecutor
 
@@ -142,7 +139,6 @@ class VoiceControlService : Service() {
         Timber.i("Selected ASR backend: %s", backend::class.simpleName)
 
         val needDownload = !modelManager.isModelReady(backend.requiredModel) ||
-            !modelManager.isEmbeddingModelReady() ||
             !modelManager.isFunctionGemmaModelReady()
 
         if (needDownload) {
@@ -162,32 +158,20 @@ class VoiceControlService : Service() {
             return
         }
 
-        if (modelManager.ensureEmbeddingModel().isSuccess) {
-            Timber.i("Embedding model ready, initializing intent matcher")
-            val initOk = embeddingIntentMatcher.initialize(
-                tokenizerPath = modelManager.tokenizerModelFile.absolutePath,
-                modelPath = modelManager.embeddingModelFile.absolutePath,
-            )
-            if (!initOk) {
-                Timber.e("Intent matcher initialization failed")
-            } else {
-                Timber.i("Intent matcher initialized")
-            }
-        } else {
-            Timber.e("Embedding model download failed")
+        if (modelManager.ensureFunctionGemmaModel().isFailure) {
+            Timber.e("FunctionGemma model download failed")
+            serviceScope.launch(Dispatchers.Main) { stopSelf() }
+            return
         }
 
-        if (modelManager.ensureFunctionGemmaModel().isSuccess) {
-            Timber.i("FunctionGemma model ready, initializing intent router")
-            val routerResult = voiceRecognizer.ensureReady()
-            if (routerResult.isFailure) {
-                Timber.e(routerResult.exceptionOrNull(), "Intent router initialization failed")
-            } else {
-                Timber.i("Intent router initialized")
-            }
-        } else {
-            Timber.e("FunctionGemma model download failed")
+        Timber.i("FunctionGemma model ready, initializing intent router")
+        val routerResult = voiceRecognizer.ensureReady()
+        if (routerResult.isFailure) {
+            Timber.e(routerResult.exceptionOrNull(), "Intent router initialization failed")
+            serviceScope.launch(Dispatchers.Main) { stopSelf() }
+            return
         }
+        Timber.i("Intent router initialized")
 
         modelsReadyCondition.update(isReady = true)
         Timber.i("Voice control models ready")

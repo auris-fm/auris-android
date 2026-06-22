@@ -17,8 +17,14 @@ data class ToolCall(
         private const val ACTION_KEY = "action"
 
         fun parse(response: String): ToolCall? {
+            // Gemma function-calling format:
+            // <start_function_call>call:tool{key:<escape>value</escape>}<end_function_call>
+            parseGemmaFunctionCall(response)?.let { return it }
+
+            // Legacy JSON fallback
+            val jsonText = extractJsonObject(response) ?: return null
             val json = try {
-                JSONObject(response.trim())
+                JSONObject(jsonText)
             } catch (_: Exception) {
                 return null
             }
@@ -41,6 +47,108 @@ data class ToolCall(
             }
 
             return ToolCall(name, action, params)
+        }
+
+        private fun parseGemmaFunctionCall(response: String): ToolCall? {
+            val startTag = "<start_function_call>"
+            val endTag = "<end_function_call>"
+            val startIdx = response.indexOf(startTag)
+            if (startIdx == -1) return null
+            val endIdx = response.indexOf(endTag, startIdx)
+            if (endIdx == -1) return null
+
+            val body = response.substring(startIdx + startTag.length, endIdx).trim()
+            if (!body.startsWith("call:")) return null
+
+            val braceIdx = body.indexOf('{')
+            if (braceIdx == -1) return null
+
+            val toolName = body.substring("call:".length, braceIdx).trim()
+            if (toolName == "no_match") return ToolCall("no_match", "", emptyMap())
+
+            val argsStr = body.substring(braceIdx + 1, body.lastIndexOf('}')).trim()
+            if (argsStr.isEmpty()) return ToolCall(toolName, "", emptyMap())
+
+            val params = mutableMapOf<String, Any?>()
+            var action: String? = null
+            var pos = 0
+            while (pos < argsStr.length) {
+                while (pos < argsStr.length && argsStr[pos].isWhitespace()) pos++
+                if (pos >= argsStr.length) break
+
+                val keyEnd = argsStr.indexOf(':', pos)
+                if (keyEnd == -1) break
+                val key = argsStr.substring(pos, keyEnd).trim()
+                pos = keyEnd + 1
+                while (pos < argsStr.length && argsStr[pos].isWhitespace()) pos++
+                if (pos >= argsStr.length) break
+
+                val value: String
+                if (argsStr.startsWith("<escape>", pos)) {
+                    val escapeEnd = argsStr.indexOf("</escape>", pos + "<escape>".length)
+                    if (escapeEnd == -1) break
+                    value = argsStr.substring(pos + "<escape>".length, escapeEnd)
+                    pos = escapeEnd + "</escape>".length
+                } else {
+                    val commaIdx = argsStr.indexOf(',', pos)
+                    val end = if (commaIdx == -1) argsStr.length else commaIdx
+                    value = argsStr.substring(pos, end).trim()
+                    pos = end
+                }
+
+                when (key) {
+                    "action" -> action = value
+                    else -> params[key] = parseParamValue(value)
+                }
+                while (pos < argsStr.length && (argsStr[pos].isWhitespace() || argsStr[pos] == ',')) pos++
+            }
+
+            return ToolCall(toolName, action ?: "", params)
+        }
+
+        private fun parseParamValue(raw: String): Any? {
+            return when {
+                raw.equals("true", ignoreCase = true) -> true
+                raw.equals("false", ignoreCase = true) -> false
+                raw.toIntOrNull() != null -> raw.toInt()
+                raw.toDoubleOrNull() != null -> raw.toDouble()
+                else -> raw
+            }
+        }
+
+        private fun extractJsonObject(response: String): String? {
+            val normalized = response
+                .trim()
+                .removePrefix(TOOL_CALL_START)
+                .trim()
+                .removeSurrounding("```json", "```")
+                .removeSurrounding("```", "```")
+                .trim()
+            if (normalized.startsWith("{") && normalized.endsWith("}")) return normalized
+
+            val start = normalized.indexOf('{')
+            if (start == -1) return null
+            var depth = 0
+            var inString = false
+            var escaped = false
+            for (index in start until normalized.length) {
+                val char = normalized[index]
+                when {
+                    escaped -> escaped = false
+
+                    char == '\\' && inString -> escaped = true
+
+                    char == '"' -> inString = !inString
+
+                    !inString && char == '{' -> depth++
+
+                    !inString && char == '}' -> {
+                        depth--
+                        if (depth == 0) return normalized.substring(start, index + 1)
+                    }
+                }
+            }
+            return null
         }
     }
 }

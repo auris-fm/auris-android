@@ -86,13 +86,12 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_WhisperNative_transcribe(
     wparams.print_progress = false;
     wparams.print_timestamps = false;
     wparams.print_special = false;
-    // Auto-detect spoken language and translate to English so downstream intent
-    // parsing always sees English regardless of input language. Letting
-    // whisper_full do the detection internally reuses its single encoder pass;
-    // detecting separately (whisper_lang_auto_detect) would force a second full
-    // encode of the same audio.
-    wparams.language = "en"; // DIAGNOSTIC: was "auto"; bisecting the decode runaway
+    // Detect the source language inside whisper_full so translation reuses the
+    // encoder pass. A fixed language would decode multilingual audio as that
+    // language instead of translating it correctly.
+    wparams.language = "auto";
     wparams.translate = true;
+    wparams.suppress_nst = true;
     wparams.n_threads = nThreads;
     // DIAGNOSTIC: single_segment/no_timestamps removed to isolate the decode runaway.
     // Scale the audio context to the utterance instead of always encoding a

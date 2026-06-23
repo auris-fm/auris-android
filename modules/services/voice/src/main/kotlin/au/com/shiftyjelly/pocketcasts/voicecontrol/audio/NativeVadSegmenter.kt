@@ -42,10 +42,15 @@ class NativeVadSegmenter @Inject constructor(
     private val contextFrames = ArrayDeque<PcmAudioFrame>()
     private val maxContextFrames = 20 // ~1.28s pre-speech context
 
-    private val postSpeechDrainFrames = 10 // ~640ms
+    // Target ~3.5s total audio for reliable language auto-detection in whisper.
+    // Short utterances need more drain; long ones have enough context already.
+    private val minPostSpeechDrainFrames = 10  // ~640ms — floor for long utterances
+    private val targetTotalFrames = 55         // ~3.5s including pre-speech context
     private var drainRemaining = 0
 
-    private val speechThreshold = 0.1f
+    // Conservative noise rejection; higher values need quiet-speech recordings
+    // to verify that soft-spoken commands are not dropped.
+    private val speechThreshold = 0.2f
 
     private fun ensureInit() {
         if (initialized) return
@@ -151,7 +156,11 @@ class NativeVadSegmenter @Inject constructor(
         if (speechActive) {
             consecutiveSilentFrames++
             if (consecutiveSilentFrames >= silenceTimeoutFrames) {
-                if (drainRemaining <= 0) drainRemaining = postSpeechDrainFrames
+                if (drainRemaining <= 0) {
+                    val totalSoFar = speechFrames + maxContextFrames
+                    val needed = (targetTotalFrames - totalSoFar).coerceIn(minPostSpeechDrainFrames, 40)
+                    drainRemaining = needed
+                }
                 drainRemaining--
                 accumulatedFrames.add(frame)
                 if (drainRemaining > 0) {

@@ -7,6 +7,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
+private val annotationOnlyTranscript = Regex(
+    pattern = """^(?:\s*(?:\[[^\]]+]|(?:\([^)]*\)))\s*)+$""",
+)
+
+internal fun normalizeWhisperTranscript(text: String): String? {
+    val trimmed = text.trim()
+    return trimmed.takeUnless { it.isEmpty() || annotationOnlyTranscript.matches(it) }
+}
+
 @Singleton
 class WhisperCppBackend @Inject constructor() : AsrBackend {
 
@@ -38,12 +47,12 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
         try {
             val text = WhisperNative.transcribe(path, shortSamples, sampleRateHz)
             Timber.i("Whisper ASR: '%s'", text)
-            val trimmed = text.trim()
-            if (trimmed.isEmpty()) {
+            val transcript = normalizeWhisperTranscript(text)
+            if (transcript == null) {
                 AsrResult(text = "", detectedLanguage = null)
             } else {
                 // whisper.cpp translate mode always outputs English
-                AsrResult(text = trimmed, detectedLanguage = "en")
+                AsrResult(text = transcript, detectedLanguage = "en")
             }
         } catch (e: Exception) {
             Timber.e(e, "Whisper transcription failed")

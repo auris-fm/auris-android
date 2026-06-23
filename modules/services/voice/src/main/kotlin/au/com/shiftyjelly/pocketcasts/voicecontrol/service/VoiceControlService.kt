@@ -242,6 +242,7 @@ class VoiceControlService : Service() {
         Timber.i("Stopping voice control service")
         modeJob?.cancel()
         stopEngine()
+        voiceRecognizer.release()
         liveConditionMonitor.stop()
         notificationManager.cancelNotification()
         stopForeground(STOP_FOREGROUND_REMOVE)

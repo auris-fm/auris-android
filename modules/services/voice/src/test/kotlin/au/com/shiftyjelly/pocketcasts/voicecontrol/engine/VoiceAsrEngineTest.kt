@@ -324,6 +324,8 @@ class VoiceAsrEngineTest {
             calls += "recognize:$transcript"
             return intent
         }
+
+        override fun release() = Unit
     }
 
     private class FakeAsrBackend(

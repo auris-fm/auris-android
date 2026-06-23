@@ -122,6 +122,8 @@ class EmbeddingIntentMatcher @Inject constructor(
         assembleIntent(match.intentType, transcript)
     }
 
+    override fun release() = Unit
+
     // -- Intent matching ---------------------------------------------------
 
     /**

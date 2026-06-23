@@ -4,6 +4,7 @@ import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.FunctionGemmaBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.FunctionGemmaRuntimeFactory
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.MonotonicClock
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.PreparedFunctionGemmaSessionPool
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
@@ -14,6 +15,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -25,6 +27,8 @@ class FunctionGemmaIntentRouter @Inject constructor(
     private val modelManager: ModelManager,
     private val runtimeFactory: FunctionGemmaRuntimeFactory,
     @ApplicationScope private val applicationScope: CoroutineScope,
+    private val clock: MonotonicClock,
+    private val metrics: FunctionGemmaMetrics,
 ) : VoiceRecognizer {
     private val transitionMutex = Mutex()
     private val stateMutex = Mutex()
@@ -54,7 +58,7 @@ class FunctionGemmaIntentRouter @Inject constructor(
         val state = stateMutex.withLock { activeState } ?: return@withContext null
 
         try {
-            consumeAndResolve(state.pool, transcript)
+            consumeAndResolve(state, transcript)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
@@ -105,11 +109,11 @@ class FunctionGemmaIntentRouter @Inject constructor(
     private suspend fun executeReadinessTransition(action: ReadinessAction.Prepare) {
         try {
             action.previous?.pool?.close()
-            val prepared = createGpuFirstPool()
+            val prepared = createGpuFirstPool(action.release)
             transitionMutex.withLock {
                 check(transitionInProgress === action.completion)
                 stateMutex.withLock {
-                    activeState = ActiveState(action.release, prepared)
+                    activeState = prepared
                 }
                 transitionInProgress = null
                 action.completion.complete(Unit)
@@ -120,29 +124,52 @@ class FunctionGemmaIntentRouter @Inject constructor(
         }
     }
 
-    private suspend fun createGpuFirstPool(): PreparedFunctionGemmaSessionPool {
+    private suspend fun createGpuFirstPool(release: String): ActiveState {
         return try {
-            createPreparedPool(FunctionGemmaBackend.GPU)
+            ActiveState(
+                release = release,
+                pool = createPreparedPool(FunctionGemmaBackend.GPU, release),
+                fallbackReason = null,
+            )
         } catch (error: CancellationException) {
             throw error
         } catch (gpuFailure: Throwable) {
             gpuFailure.throwIfFatal()
+            metrics.backendFallback(FALLBACK_GPU_INIT, gpuFailure)
             logRuntimeWarning("FunctionGemma GPU initialization failed; using CPU", gpuFailure)
-            createPreparedPool(FunctionGemmaBackend.CPU)
+            ActiveState(
+                release = release,
+                pool = createPreparedPool(FunctionGemmaBackend.CPU, release),
+                fallbackReason = FALLBACK_GPU_INIT,
+            )
         }
     }
 
     private suspend fun createPreparedPool(
         backend: FunctionGemmaBackend,
+        release: String,
     ): PreparedFunctionGemmaSessionPool {
+        val engineStart = clock.elapsedRealtimeMs()
         val runtime = runtimeFactory.create(
             modelPath = modelManager.functionGemmaModelFile.absolutePath,
             cacheDir = modelManager.functionGemmaDir.absolutePath,
             backend = backend,
         )
-        val pool = PreparedFunctionGemmaSessionPool(runtime, applicationScope)
+        val engineInitMs = clock.elapsedRealtimeMs() - engineStart
+        val pool = PreparedFunctionGemmaSessionPool(
+            runtime = runtime,
+            scope = applicationScope,
+            elapsedRealtimeMs = clock::elapsedRealtimeMs,
+        )
         try {
-            pool.prepare(FunctionGemmaPrompt.staticPrefix)
+            val preparation = pool.prepare(FunctionGemmaPrompt.staticPrefix)
+            metrics.prepared(
+                backend = backend,
+                modelRelease = release,
+                engineInitMs = engineInitMs,
+                sessionCreateMs = preparation.sessionCreateMs,
+                staticPrefillMs = preparation.staticPrefillMs,
+            )
             return pool
         } catch (error: Throwable) {
             try {
@@ -155,15 +182,45 @@ class FunctionGemmaIntentRouter @Inject constructor(
     }
 
     private suspend fun consumeAndResolve(
-        pool: PreparedFunctionGemmaSessionPool,
+        state: ActiveState,
         transcript: String,
     ): VoiceIntent? {
-        return pool.consume { session ->
+        val totalStart = clock.elapsedRealtimeMs()
+        var requestPrefillMs = 0L
+        var decodeMs = 0L
+        var parseResolveMs = 0L
+        var inputCharacters = 0
+        var outputCharacters = 0
+        val result = state.pool.consume { session ->
             val suffix = buildRequestSuffixSafely(transcript) ?: return@consume null
+            inputCharacters = suffix.length
+            val prefillStart = clock.elapsedRealtimeMs()
             session.prefill(suffix)
+            requestPrefillMs = clock.elapsedRealtimeMs() - prefillStart
+            val decodeStart = clock.elapsedRealtimeMs()
             val generated = session.decode().trim { it <= ' ' }
-            resolveGeneratedSafely(transcript, generated)
-        }.value
+            decodeMs = clock.elapsedRealtimeMs() - decodeStart
+            outputCharacters = generated.length
+            val parseStart = clock.elapsedRealtimeMs()
+            resolveGeneratedSafely(transcript, generated).also {
+                parseResolveMs = clock.elapsedRealtimeMs() - parseStart
+            }
+        }
+        metrics.inference(
+            FunctionGemmaInferenceMetrics(
+                backend = state.pool.backend,
+                modelRelease = state.release,
+                sessionWaitMs = result.sessionWaitMs,
+                requestPrefillMs = requestPrefillMs,
+                decodeMs = decodeMs,
+                parseResolveMs = parseResolveMs,
+                totalMs = clock.elapsedRealtimeMs() - totalStart,
+                inputCharacters = inputCharacters,
+                outputCharacters = outputCharacters,
+                fallbackReason = state.fallbackReason,
+            ),
+        )
+        return result.value
     }
 
     private fun buildRequestSuffixSafely(transcript: String): String? {
@@ -202,11 +259,12 @@ class FunctionGemmaIntentRouter @Inject constructor(
         transcript: String,
         gpuFailure: Throwable,
     ): VoiceIntent? {
+        metrics.backendFallback(FALLBACK_GPU_INFERENCE, gpuFailure)
         logRuntimeWarning("FunctionGemma GPU inference failed; retrying on CPU", gpuFailure)
         val cpuState = replaceFailedGpuWithCpu(failedGpuState) ?: return null
 
         return try {
-            consumeAndResolve(cpuState.pool, transcript)
+            consumeAndResolve(cpuState, transcript)
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
@@ -247,8 +305,12 @@ class FunctionGemmaIntentRouter @Inject constructor(
     private suspend fun executeGpuFallback(action: GpuFallbackAction.Replace): ActiveState? {
         return try {
             action.failed.pool.close()
-            val cpuPool = createPreparedPool(FunctionGemmaBackend.CPU)
-            val replacement = ActiveState(action.failed.release, cpuPool)
+            val cpuPool = createPreparedPool(FunctionGemmaBackend.CPU, action.failed.release)
+            val replacement = ActiveState(
+                release = action.failed.release,
+                pool = cpuPool,
+                fallbackReason = FALLBACK_GPU_INFERENCE,
+            )
             transitionMutex.withLock {
                 check(transitionInProgress === action.completion)
                 stateMutex.withLock {
@@ -330,9 +392,31 @@ class FunctionGemmaIntentRouter @Inject constructor(
         if (this is VirtualMachineError || this is ThreadDeath) throw this
     }
 
+    override fun release() {
+        val pool = runBlocking {
+            while (true) {
+                val transition = transitionMutex.withLock {
+                    transitionInProgress
+                }
+                if (transition == null) {
+                    return@runBlocking transitionMutex.withLock {
+                        stateMutex.withLock {
+                            activeState.also { activeState = null }
+                        }?.pool
+                    }
+                }
+                runCatching { transition.await() }
+            }
+            @Suppress("UNREACHABLE_CODE")
+            null
+        }
+        pool?.close()
+    }
+
     private data class ActiveState(
         val release: String,
         val pool: PreparedFunctionGemmaSessionPool,
+        val fallbackReason: String?,
     )
 
     private sealed interface ReadinessAction {
@@ -370,5 +454,7 @@ class FunctionGemmaIntentRouter @Inject constructor(
 
     private companion object {
         const val MAX_LOGGED_ERROR_CHARS = 200
+        const val FALLBACK_GPU_INIT = "gpu_init"
+        const val FALLBACK_GPU_INFERENCE = "gpu_inference"
     }
 }

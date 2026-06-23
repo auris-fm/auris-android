@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.di
 
 import android.content.Context
 import android.os.PowerManager
+import android.os.SystemClock
 import android.telephony.TelephonyManager
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
@@ -21,6 +22,8 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotOnCallCond
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.EmbeddingIntentMatcher
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.EntityExtractor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.FunctionGemmaIntentRouter
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.FunctionGemmaMetrics
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.TimberFunctionGemmaMetrics
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.BpeTokenizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.EmbeddingEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.JniEmbeddingEngine
@@ -28,6 +31,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.TextTokenize
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.entity.GrammarEntityExtractor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.FunctionGemmaRuntimeFactory
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.LiteRtFunctionGemmaRuntimeFactory
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.MonotonicClock
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.AudioManagerVolumeSink
@@ -82,6 +86,10 @@ abstract class VoiceControlModule {
         impl: LiteRtFunctionGemmaRuntimeFactory,
     ): FunctionGemmaRuntimeFactory
 
+    @Binds abstract fun bindFunctionGemmaMetrics(
+        impl: TimberFunctionGemmaMetrics,
+    ): FunctionGemmaMetrics
+
     @Binds abstract fun bindVoicePlaybackSink(impl: PlaybackManagerPlaybackSink): VoicePlaybackSink
 
     @Binds abstract fun bindVoiceEffectsSink(impl: PlaybackManagerEffectsSink): VoiceEffectsSink
@@ -115,6 +123,10 @@ abstract class VoiceControlModule {
     @Binds abstract fun bindWakeWordDetector(impl: OpenWakeWordDetector): WakeWordDetector
 
     companion object {
+        @Provides
+        @Singleton
+        fun provideMonotonicClock(): MonotonicClock = MonotonicClock(SystemClock::elapsedRealtime)
+
         @Provides @Singleton
         @Named("embeddingModel")
         fun provideEmbeddingModelFile(manager: ModelManager): File = manager.embeddingModelFile

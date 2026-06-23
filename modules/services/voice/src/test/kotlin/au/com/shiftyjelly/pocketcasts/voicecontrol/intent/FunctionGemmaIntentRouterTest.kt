@@ -7,6 +7,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.FunctionGemmaB
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.FunctionGemmaRuntime
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.FunctionGemmaRuntimeFactory
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.FunctionGemmaSession
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime.MonotonicClock
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
@@ -16,6 +17,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -279,6 +281,58 @@ class FunctionGemmaIntentRouterTest {
     }
 
     @Test
+    fun `successful inference records preparation and separated request timings`() = runTest {
+        val metrics = RecordingFunctionGemmaMetrics()
+        val factory = FakeRuntimeFactory(gpuDecodes = queueOf(Result.success(PAUSE_CALL)))
+        val router = createRouter(factory, metrics = metrics)
+        router.ensureReady().getOrThrow()
+
+        assertEquals(VoiceIntent.Playback.Pause, router.recognize("Pause.", RECOGNITION_CONTEXT))
+
+        assertEquals(1, metrics.preparations.size)
+        assertEquals(FunctionGemmaBackend.GPU, metrics.preparations.single().backend)
+        assertEquals("release-1", metrics.preparations.single().modelRelease)
+        assertEquals(1, metrics.inferences.size)
+        val inference = metrics.inferences.single()
+        assertEquals(FunctionGemmaBackend.GPU, inference.backend)
+        assertEquals("release-1", inference.modelRelease)
+        assertEquals(FunctionGemmaPrompt.requestSuffix("Pause.", emptyList()).length, inference.inputCharacters)
+        assertEquals(PAUSE_CALL.length, inference.outputCharacters)
+        assertEquals(null, inference.fallbackReason)
+    }
+
+    @Test
+    fun `GPU inference fallback is recorded on CPU retry`() = runTest {
+        val metrics = RecordingFunctionGemmaMetrics()
+        val factory = FakeRuntimeFactory(
+            gpuDecodes = queueOf(Result.failure(IllegalStateException("gpu decode failed"))),
+            cpuDecodes = queueOf(Result.success(PAUSE_CALL)),
+        )
+        val router = createRouter(factory, metrics = metrics)
+        router.ensureReady().getOrThrow()
+
+        assertEquals(VoiceIntent.Playback.Pause, router.recognize("Pause.", RECOGNITION_CONTEXT))
+
+        assertEquals(listOf("gpu_inference"), metrics.fallbacks)
+        assertEquals("gpu_inference", metrics.inferences.single().fallbackReason)
+        assertEquals(FunctionGemmaBackend.CPU, metrics.inferences.single().backend)
+    }
+
+    @Test
+    fun `release closes active pool and later readiness prepares a fresh pool`() = runTest {
+        val factory = FakeRuntimeFactory()
+        val router = createRouter(factory)
+        router.ensureReady().getOrThrow()
+
+        router.release()
+        router.ensureReady().getOrThrow()
+
+        assertEquals(2, factory.runtimes.size)
+        assertEquals(1, factory.runtimes.first().closeCount)
+        assertEquals(FunctionGemmaPrompt.staticPrefix, factory.runtimes.last().sessions.single().prefills.single())
+    }
+
+    @Test
     fun `concurrent recognition builds second suffix after first dialog resolution`() = runTest {
         val firstDecodeStarted = CountDownLatch(1)
         val releaseFirstDecode = CountDownLatch(1)
@@ -315,12 +369,16 @@ class FunctionGemmaIntentRouterTest {
         factory: FakeRuntimeFactory,
         modelManager: ModelManager = createModelManager("release-1"),
         dialogManager: VoiceDialogManager = VoiceDialogManager(ToolCallMapper()),
+        metrics: FunctionGemmaMetrics = RecordingFunctionGemmaMetrics(),
     ): FunctionGemmaIntentRouter {
+        val elapsed = AtomicLong()
         return FunctionGemmaIntentRouter(
             dialogManager = dialogManager,
             modelManager = modelManager,
             runtimeFactory = factory,
             applicationScope = backgroundScope,
+            clock = MonotonicClock { elapsed.getAndIncrement() },
+            metrics = metrics,
         )
     }
 

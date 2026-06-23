@@ -125,18 +125,15 @@ class FunctionGemmaIntentRouter @Inject constructor(
     }
 
     private suspend fun createGpuFirstPool(release: String): ActiveState {
-        return try {
+        return runCatching {
             ActiveState(
                 release = release,
                 pool = createPreparedPool(FunctionGemmaBackend.GPU, release),
                 fallbackReason = null,
             )
-        } catch (error: CancellationException) {
-            throw error
-        } catch (gpuFailure: Throwable) {
-            gpuFailure.throwIfFatal()
-            metrics.backendFallback(FALLBACK_GPU_INIT, gpuFailure)
-            logRuntimeWarning("FunctionGemma GPU initialization failed; using CPU", gpuFailure)
+        }.getOrElse { gpuError ->
+            metrics.backendFallback(FALLBACK_GPU_INIT, gpuError)
+            logRuntimeWarning("FunctionGemma GPU initialization failed; using CPU", gpuError)
             ActiveState(
                 release = release,
                 pool = createPreparedPool(FunctionGemmaBackend.CPU, release),

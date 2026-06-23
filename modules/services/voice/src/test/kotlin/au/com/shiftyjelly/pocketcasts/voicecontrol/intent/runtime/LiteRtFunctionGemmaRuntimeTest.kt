@@ -18,7 +18,12 @@ class LiteRtFunctionGemmaRuntimeTest {
         val benchmarkFlags = FakeLiteRtBenchmarkFlags(enabled = false)
         val engine = FakeLiteRtEngine(isBenchmarkEnabled = { benchmarkFlags.enabled })
         val engineFactory = CapturingLiteRtEngineFactory(engine)
-        val factory = LiteRtFunctionGemmaRuntimeFactory(engineFactory, benchmarkFlags)
+        val conversation = FakeLiteRtConversation()
+        val factory = LiteRtFunctionGemmaRuntimeFactory(
+            engineFactory,
+            benchmarkFlags,
+            FakeConversationFactory(conversation),
+        )
 
         val runtime = factory.create(
             modelPath = "/models/function-gemma.litertlm",
@@ -31,21 +36,28 @@ class LiteRtFunctionGemmaRuntimeTest {
         assertEquals("/models/cache", engineFactory.config?.cacheDir)
         assertEquals(2048, engineFactory.config?.maxNumTokens)
         assertEquals(LiteRtBackend.GPU, engineFactory.config?.backend)
+        assertEquals(LiteRtActivationDataType.FP32, engineFactory.config?.activationDataType)
         assertTrue(engine.benchmarkEnabledDuringInitialize)
         assertFalse(benchmarkFlags.enabled)
+        assertTrue(
+            "system instruction must contain developer turn",
+            conversation.systemInstruction.contains("<start_of_turn>developer"),
+        )
     }
 
     @Test
-    fun `factory maps CPU backend`() {
+    fun `factory maps CPU backend without activation override`() {
         val engineFactory = CapturingLiteRtEngineFactory(FakeLiteRtEngine())
         val factory = LiteRtFunctionGemmaRuntimeFactory(
             engineFactory = engineFactory,
             benchmarkFlags = FakeLiteRtBenchmarkFlags(),
+            conversationFactory = FakeConversationFactory(FakeLiteRtConversation()),
         )
 
         factory.create("model", "cache", FunctionGemmaBackend.CPU)
 
         assertEquals(LiteRtBackend.CPU, engineFactory.config?.backend)
+        assertEquals(null, engineFactory.config?.activationDataType)
     }
 
     @Test
@@ -58,6 +70,7 @@ class LiteRtFunctionGemmaRuntimeTest {
         val factory = LiteRtFunctionGemmaRuntimeFactory(
             engineFactory = CapturingLiteRtEngineFactory(engine),
             benchmarkFlags = benchmarkFlags,
+            conversationFactory = FakeConversationFactory(FakeLiteRtConversation()),
         )
 
         try {
@@ -70,53 +83,95 @@ class LiteRtFunctionGemmaRuntimeTest {
     }
 
     @Test
-    fun `session uses deterministic sampler and delegates prefill and decode`() {
-        val nativeSession = FakeLiteRtSession(decodeResult = "decoded")
-        val engine = FakeLiteRtEngine(session = nativeSession)
-        val runtime = LiteRtFunctionGemmaRuntimeFactory(
-            engineFactory = CapturingLiteRtEngineFactory(engine),
+    fun `session extracts user transcript from formatted suffix and delegates to conversation`() {
+        val conversation = FakeLiteRtConversation(response = "<start_function_call>call:playback{action:<escape>pause</escape>}<end_function_call>")
+        val factory = LiteRtFunctionGemmaRuntimeFactory(
+            engineFactory = CapturingLiteRtEngineFactory(FakeLiteRtEngine()),
             benchmarkFlags = FakeLiteRtBenchmarkFlags(),
-        ).create("model", "cache", FunctionGemmaBackend.CPU)
+            conversationFactory = FakeConversationFactory(conversation),
+        )
+        val runtime = factory.create("model", "cache", FunctionGemmaBackend.GPU)
 
         val session = runtime.createSession()
-        session.prefill("prompt")
+        // This is what FunctionGemmaPrompt.requestSuffix produces for "Pause." with no history
+        session.prefill("\n<start_of_turn>user\nPause.<end_of_turn>\n<start_of_turn>model\n")
 
-        assertEquals("decoded", session.decode())
-        assertEquals("prompt", nativeSession.prefilledText)
-        assertEquals(1, engine.sessionConfig?.topK)
-        assertEquals(1.0, engine.sessionConfig?.topP)
-        assertEquals(0.0, engine.sessionConfig?.temperature)
-        assertEquals(0, engine.sessionConfig?.seed)
+        assertEquals(
+            "<start_function_call>call:playback{action:<escape>pause</escape>}<end_function_call>",
+            session.decode(),
+        )
+        // Verify the conversation received just the transcript, not the formatted suffix
+        assertEquals("Pause.", conversation.lastUserText)
+        assertEquals(1, conversation.sendMessageCount)
+    }
+
+    @Test
+    fun `session handles prefill without user turn tags as fallback`() {
+        val conversation = FakeLiteRtConversation(response = "fallback_response")
+        val factory = LiteRtFunctionGemmaRuntimeFactory(
+            engineFactory = CapturingLiteRtEngineFactory(FakeLiteRtEngine()),
+            benchmarkFlags = FakeLiteRtBenchmarkFlags(),
+            conversationFactory = FakeConversationFactory(conversation),
+        )
+        val runtime = factory.create("model", "cache", FunctionGemmaBackend.CPU)
+
+        val session = runtime.createSession()
+        session.prefill("plain text without turn markers")
+
+        assertEquals("fallback_response", session.decode())
+        assertEquals("plain text without turn markers", conversation.lastUserText)
+    }
+
+    @Test
+    fun `decode throws when prefill not called`() {
+        val factory = LiteRtFunctionGemmaRuntimeFactory(
+            engineFactory = CapturingLiteRtEngineFactory(FakeLiteRtEngine()),
+            benchmarkFlags = FakeLiteRtBenchmarkFlags(),
+            conversationFactory = FakeConversationFactory(FakeLiteRtConversation()),
+        )
+        val runtime = factory.create("model", "cache", FunctionGemmaBackend.CPU)
+        val session = runtime.createSession()
+
+        try {
+            session.decode()
+            fail("Expected IllegalStateException")
+        } catch (_: IllegalStateException) {
+            // expected
+        }
     }
 
     @Test
     fun `runtime close is idempotent`() {
         val engine = FakeLiteRtEngine()
+        val conversation = FakeLiteRtConversation()
         val runtime = LiteRtFunctionGemmaRuntimeFactory(
             engineFactory = CapturingLiteRtEngineFactory(engine),
             benchmarkFlags = FakeLiteRtBenchmarkFlags(),
+            conversationFactory = FakeConversationFactory(conversation),
         ).create("model", "cache", FunctionGemmaBackend.CPU)
 
         runtime.close()
         runtime.close()
 
         assertEquals(1, engine.closeCount)
+        assertEquals(1, conversation.closeCount)
     }
 
     @Test
     fun `session close is idempotent`() {
-        val nativeSession = FakeLiteRtSession()
         val runtime = LiteRtFunctionGemmaRuntimeFactory(
-            engineFactory = CapturingLiteRtEngineFactory(FakeLiteRtEngine(session = nativeSession)),
+            engineFactory = CapturingLiteRtEngineFactory(FakeLiteRtEngine()),
             benchmarkFlags = FakeLiteRtBenchmarkFlags(),
+            conversationFactory = FakeConversationFactory(FakeLiteRtConversation()),
         ).create("model", "cache", FunctionGemmaBackend.CPU)
 
         val session = runtime.createSession()
         session.close()
         session.close()
-
-        assertEquals(1, nativeSession.closeCount)
+        // no native session close — just verifying no crash
     }
+
+    // -- Fakes --
 
     private class CapturingLiteRtEngineFactory(
         private val engine: FakeLiteRtEngine,
@@ -132,6 +187,15 @@ class LiteRtFunctionGemmaRuntimeTest {
     private class FakeLiteRtBenchmarkFlags(
         override var enabled: Boolean = false,
     ) : LiteRtBenchmarkFlags
+
+    private class FakeConversationFactory(
+        private val conversation: FakeLiteRtConversation,
+    ) : LiteRtConversationFactory {
+        override fun create(engine: LiteRtEngine, systemInstruction: String): LiteRtConversation {
+            conversation.systemInstruction = systemInstruction
+            return conversation
+        }
+    }
 
     private class FakeLiteRtEngine(
         private val session: FakeLiteRtSession = FakeLiteRtSession(),
@@ -168,6 +232,25 @@ class LiteRtFunctionGemmaRuntimeTest {
         }
 
         override fun decode(): String = decodeResult
+
+        override fun close() {
+            closeCount++
+        }
+    }
+
+    private class FakeLiteRtConversation(
+        private val response: String = "",
+    ) : LiteRtConversation {
+        var systemInstruction: String = ""
+        var lastUserText: String? = null
+        var sendMessageCount = 0
+        var closeCount = 0
+
+        override fun sendMessage(userText: String): String {
+            lastUserText = userText
+            sendMessageCount++
+            return response
+        }
 
         override fun close() {
             closeCount++

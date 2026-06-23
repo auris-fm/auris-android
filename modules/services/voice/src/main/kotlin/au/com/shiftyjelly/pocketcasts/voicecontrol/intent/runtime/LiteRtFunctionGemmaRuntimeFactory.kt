@@ -1,14 +1,15 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime
 
 import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.Content
+import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.Conversation
+import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
-import com.google.ai.edge.litertlm.InputData
 import com.google.ai.edge.litertlm.SamplerConfig
-import com.google.ai.edge.litertlm.Session
-import com.google.ai.edge.litertlm.SessionConfig
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -17,11 +18,13 @@ import javax.inject.Singleton
 class LiteRtFunctionGemmaRuntimeFactory internal constructor(
     private val engineFactory: LiteRtEngineFactory,
     private val benchmarkFlags: LiteRtBenchmarkFlags,
+    private val conversationFactory: LiteRtConversationFactory,
 ) : FunctionGemmaRuntimeFactory {
     @Inject
     constructor() : this(
         engineFactory = ProductionLiteRtEngineFactory,
         benchmarkFlags = ProductionLiteRtBenchmarkFlags,
+        conversationFactory = ProductionLiteRtConversationFactory,
     )
 
     override fun create(
@@ -32,7 +35,6 @@ class LiteRtFunctionGemmaRuntimeFactory internal constructor(
         val engine = synchronized(BENCHMARK_FLAG_LOCK) {
             val previousBenchmarkFlag = benchmarkFlags.enabled
             try {
-                // LiteRT captures this process-global flag during engine initialization.
                 benchmarkFlags.enabled = true
                 engineFactory.create(
                     LiteRtEngineConfig(
@@ -43,18 +45,32 @@ class LiteRtFunctionGemmaRuntimeFactory internal constructor(
                             FunctionGemmaBackend.CPU -> LiteRtBackend.CPU
                         },
                         maxNumTokens = MAX_CONTEXT_TOKENS,
+                        activationDataType = when (backend) {
+                            FunctionGemmaBackend.GPU -> LiteRtActivationDataType.FP32
+                            FunctionGemmaBackend.CPU -> null
+                        },
                     ),
                 ).also(LiteRtEngine::initialize)
             } finally {
                 benchmarkFlags.enabled = previousBenchmarkFlag
             }
         }
-        return LiteRtFunctionGemmaRuntime(engine, backend)
+        val conversation = conversationFactory.create(
+            engine = engine,
+            systemInstruction = FUNCTION_GEMMA_SYSTEM_INSTRUCTION,
+        )
+        return LiteRtFunctionGemmaRuntime(engine, conversation, backend)
     }
 
     private companion object {
         const val MAX_CONTEXT_TOKENS = 2048
         val BENCHMARK_FLAG_LOCK = Any()
+
+        // LiteRT-LM Conversation API formats this as a system turn using our exact text,
+        // preserving the <start_of_turn>developer format the model was fine-tuned on.
+        val FUNCTION_GEMMA_SYSTEM_INSTRUCTION: String by lazy {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.intent.FunctionGemmaPrompt.staticPrefix
+        }
     }
 }
 
@@ -63,11 +79,27 @@ internal enum class LiteRtBackend {
     CPU,
 }
 
+/**
+ * Activation data type for the GPU delegate.
+ *
+ * The GPU delegate defaults to FP16, which produces all-`<pad>` output with the
+ * FunctionGemma model (confirmed on macOS Metal; applies to Android OpenCL as well).
+ * Force FP32 so the GPU delegate produces correct output.
+ *
+ * When litertlm-android EngineConfig exposes set_activation_data_type, wire
+ * [LiteRtEngineConfig.activationDataType] through in ProductionLiteRtEngineFactory.
+ */
+internal enum class LiteRtActivationDataType {
+    FP32,
+    FP16,
+}
+
 internal data class LiteRtEngineConfig(
     val modelPath: String,
     val cacheDir: String,
     val backend: LiteRtBackend,
     val maxNumTokens: Int,
+    val activationDataType: LiteRtActivationDataType? = null,
 )
 
 internal data class LiteRtSessionConfig(
@@ -97,6 +129,18 @@ internal interface LiteRtSession : AutoCloseable {
     fun decode(): String
 }
 
+// -- Conversation API abstractions (for testability) --
+
+internal interface LiteRtConversationFactory {
+    fun create(engine: LiteRtEngine, systemInstruction: String): LiteRtConversation
+}
+
+internal interface LiteRtConversation : AutoCloseable {
+    fun sendMessage(userText: String): String
+}
+
+// -- Production implementations --
+
 @OptIn(ExperimentalApi::class)
 private object ProductionLiteRtBenchmarkFlags : LiteRtBenchmarkFlags {
     override var enabled: Boolean
@@ -108,23 +152,24 @@ private object ProductionLiteRtBenchmarkFlags : LiteRtBenchmarkFlags {
 
 private object ProductionLiteRtEngineFactory : LiteRtEngineFactory {
     override fun create(config: LiteRtEngineConfig): LiteRtEngine {
-        val engine = Engine(
-            EngineConfig(
-                modelPath = config.modelPath,
-                backend = when (config.backend) {
-                    LiteRtBackend.GPU -> Backend.GPU()
-                    LiteRtBackend.CPU -> Backend.CPU()
-                },
-                maxNumTokens = config.maxNumTokens,
-                cacheDir = config.cacheDir,
-            ),
+        val engineConfig = EngineConfig(
+            modelPath = config.modelPath,
+            backend = when (config.backend) {
+                LiteRtBackend.GPU -> Backend.GPU()
+                LiteRtBackend.CPU -> Backend.CPU()
+            },
+            maxNumTokens = config.maxNumTokens,
+            cacheDir = config.cacheDir,
         )
+        // TODO: When litertlm-android EngineConfig adds set_activation_data_type,
+        // apply config.activationDataType here to prevent all-<pad> GPU output.
+        val engine = Engine(engineConfig)
         return ProductionLiteRtEngine(engine)
     }
 }
 
-private class ProductionLiteRtEngine(
-    private val engine: Engine,
+internal class ProductionLiteRtEngine(
+    val engine: Engine,
 ) : LiteRtEngine {
     override fun initialize() = engine.initialize()
 
@@ -136,7 +181,9 @@ private class ProductionLiteRtEngine(
             seed = config.seed,
         )
         return ProductionLiteRtSession(
-            engine.createSession(SessionConfig(samplerConfig = sampler)),
+            engine.createSession(
+                com.google.ai.edge.litertlm.SessionConfig(samplerConfig = sampler),
+            ),
         )
     }
 
@@ -144,10 +191,10 @@ private class ProductionLiteRtEngine(
 }
 
 private class ProductionLiteRtSession(
-    private val session: Session,
+    private val session: com.google.ai.edge.litertlm.Session,
 ) : LiteRtSession {
     override fun prefill(text: String) {
-        session.runPrefill(listOf(InputData.Text(text)))
+        session.runPrefill(listOf(com.google.ai.edge.litertlm.InputData.Text(text)))
     }
 
     override fun decode(): String = session.runDecode()
@@ -155,41 +202,101 @@ private class ProductionLiteRtSession(
     override fun close() = session.close()
 }
 
+private object ProductionLiteRtConversationFactory : LiteRtConversationFactory {
+    override fun create(engine: LiteRtEngine, systemInstruction: String): LiteRtConversation {
+        val realEngine = (engine as ProductionLiteRtEngine).engine
+        val config = ConversationConfig(
+            systemInstruction = Contents.Companion.of(systemInstruction),
+            samplerConfig = SamplerConfig(
+                topK = 1,
+                topP = 1.0,
+                temperature = 0.0,
+                seed = 0,
+            ),
+            automaticToolCalling = false,
+        )
+        val conversation = realEngine.createConversation(config)
+        return ProductionLiteRtConversation(conversation)
+    }
+}
+
+private class ProductionLiteRtConversation(
+    private val conversation: Conversation,
+) : LiteRtConversation {
+    override fun sendMessage(userText: String): String {
+        val response = conversation.sendMessage(userText, emptyMap())
+        return response.contents.contents
+            .filterIsInstance<Content.Text>()
+            .joinToString("") { it.text }
+    }
+
+    override fun close() = conversation.close()
+}
+
+// -- Runtime wrapping the Conversation API --
+
 private class LiteRtFunctionGemmaRuntime(
     private val engine: LiteRtEngine,
+    private val conversation: LiteRtConversation,
     override val backend: FunctionGemmaBackend,
 ) : FunctionGemmaRuntime {
     private val isClosed = AtomicBoolean()
 
-    override fun createSession(): FunctionGemmaSession {
-        val config = LiteRtSessionConfig(
-            topK = 1,
-            topP = 1.0,
-            temperature = 0.0,
-            seed = 0,
-        )
-        return LiteRtFunctionGemmaSession(engine.createSession(config))
-    }
+    override fun createSession(): FunctionGemmaSession = ConversationFunctionGemmaSession(conversation)
 
     override fun close() {
         if (isClosed.compareAndSet(false, true)) {
+            conversation.close()
             engine.close()
         }
     }
 }
 
-private class LiteRtFunctionGemmaSession(
-    private val session: LiteRtSession,
+/**
+ * Session wrapper that bridges the [FunctionGemmaSession] prefill/decode contract
+ * to the LiteRT-LM Conversation API.
+ *
+ * [prefill] stores the request suffix text; [decode] extracts the user transcript,
+ * sends it via [LiteRtConversation.sendMessage], and returns the model response.
+ *
+ * The conversation maintains the system instruction KV cache across all sessions,
+ * eliminating the per-request static-prefix cost.
+ */
+private class ConversationFunctionGemmaSession(
+    private val conversation: LiteRtConversation,
 ) : FunctionGemmaSession {
+    private var pendingText: String? = null
     private val isClosed = AtomicBoolean()
 
-    override fun prefill(text: String) = session.prefill(text)
+    override fun prefill(text: String) {
+        pendingText = text
+    }
 
-    override fun decode(): String = session.decode()
+    override fun decode(): String {
+        val text = checkNotNull(pendingText) { "decode called before prefill" }
+        pendingText = null
+
+        // Extract user transcript from the formatted suffix.
+        // Format: ...<start_of_turn>user\n{transcript}<end_of_turn>\n<start_of_turn>model\n
+        val userStart = text.lastIndexOf("<start_of_turn>user\n")
+        val transcript = if (userStart >= 0) {
+            val contentStart = userStart + "<start_of_turn>user\n".length
+            val endTurn = text.indexOf("<end_of_turn>", contentStart)
+            if (endTurn > contentStart) {
+                text.substring(contentStart, endTurn)
+            } else {
+                text
+            }
+        } else {
+            text
+        }
+
+        return conversation.sendMessage(transcript)
+    }
 
     override fun close() {
         if (isClosed.compareAndSet(false, true)) {
-            session.close()
+            pendingText = null
         }
     }
 }

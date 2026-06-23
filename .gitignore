@@ -73,3 +73,4 @@ developer.properties
 
 # Claude Code local settings
 .claude/
+.functiongemma-model/

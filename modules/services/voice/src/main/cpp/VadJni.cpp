@@ -52,6 +52,11 @@ static constexpr size_t     kStateSize     = 2 * 1 * 64; // 128 floats
 static float                g_hState[kStateSize] = {}; // hidden state, zero-init
 static float                g_cState[kStateSize] = {}; // cell state, zero-init
 
+void sileroVadResetState() {
+    std::memset(g_hState, 0, sizeof(g_hState));
+    std::memset(g_cState, 0, sizeof(g_cState));
+}
+
 static void cleanupOrt() {
     if (g_session)  { g_ort->ReleaseSession(g_session); g_session = nullptr; }
     if (g_memInfo)  { g_ort->ReleaseMemoryInfo(g_memInfo); g_memInfo = nullptr; }

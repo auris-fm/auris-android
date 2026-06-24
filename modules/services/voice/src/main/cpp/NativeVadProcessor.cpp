@@ -12,6 +12,7 @@
 
 // Reusable Silero VAD inference, implemented in VadJni.cpp
 extern float sileroVadPredict(const int16_t* samples, int32_t count);
+extern void sileroVadResetState();
 
 using Clock = std::chrono::steady_clock;
 
@@ -33,6 +34,10 @@ bool NativeVadProcessor::start() {
     if (mActive.load(std::memory_order_acquire)) {
         return true; // already running
     }
+
+    // Reset Silero VAD LSTM state so a new session starts fresh
+    // rather than carrying over hidden/cell state from the prior run.
+    sileroVadResetState();
 
     mActive.store(true, std::memory_order_release);
     mThread = std::make_unique<std::thread>(&NativeVadProcessor::runLoop, this);

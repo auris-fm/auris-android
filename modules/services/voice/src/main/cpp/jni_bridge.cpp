@@ -153,11 +153,15 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeWaitForV
     jclass /*clazz*/,
     jint timeoutMs)
 {
-    std::lock_guard<std::mutex> lock(gCaptureMutex);
-    if (gVadProcessor == nullptr) {
+    NativeVadProcessor* processor = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(gCaptureMutex);
+        processor = gVadProcessor;
+    }
+    if (processor == nullptr) {
         return -1;
     }
-    return gVadProcessor->waitForEvent(static_cast<int32_t>(timeoutMs));
+    return processor->waitForEvent(static_cast<int32_t>(timeoutMs));
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -166,8 +170,12 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
     jclass /*clazz*/,
     jshortArray jBuffer)
 {
-    std::lock_guard<std::mutex> lock(gCaptureMutex);
-    if (gVadProcessor == nullptr) {
+    NativeVadProcessor* processor = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(gCaptureMutex);
+        processor = gVadProcessor;
+    }
+    if (processor == nullptr) {
         return 0;
     }
 
@@ -177,7 +185,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
         return 0;
     }
 
-    int32_t copied = gVadProcessor->getSpeechPcm(
+    int32_t copied = processor->getSpeechPcm(
         reinterpret_cast<int16_t*>(elements),
         static_cast<int32_t>(capacity));
 
@@ -190,9 +198,13 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
     JNIEnv* /*env*/,
     jclass /*clazz*/)
 {
-    std::lock_guard<std::mutex> lock(gCaptureMutex);
-    if (gVadProcessor == nullptr) {
+    NativeVadProcessor* processor = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(gCaptureMutex);
+        processor = gVadProcessor;
+    }
+    if (processor == nullptr) {
         return 0;
     }
-    return gVadProcessor->getSpeechPcmSize();
+    return processor->getSpeechPcmSize();
 }

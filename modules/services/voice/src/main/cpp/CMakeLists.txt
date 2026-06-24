@@ -53,6 +53,7 @@ target_compile_options(ggml PRIVATE -O2)
 add_library(pocketcasts_voice_capture SHARED
     OboeAudioCapture.cpp
     jni_bridge.cpp
+    NativeVadProcessor.cpp
     VadJni.cpp
     EmbeddingJni.cpp
     WhisperJni.cpp

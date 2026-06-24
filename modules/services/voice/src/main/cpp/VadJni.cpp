@@ -101,43 +101,16 @@ static bool initOrt(JNIEnv* env, jobject assetManager) {
 }
 
 // ---------------------------------------------------------------------------
-// JNI
+// Core VAD inference — reusable by NativeVadProcessor (no JNI dependency)
 // ---------------------------------------------------------------------------
-
-extern "C" {
-
-JNIEXPORT jboolean JNICALL
-Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_NativeVad_nativeInit(
-    JNIEnv* env, jclass /*clazz*/, jobject assetManager)
-{
-    std::call_once(g_initFlag, [&]() {
-        initOrt(env, assetManager);
-    });
-    if (!g_session) {
-        LOGE("VAD init failed: %s", g_errorMsg.c_str());
-        return JNI_FALSE;
-    }
-    return JNI_TRUE;
-}
-
-JNIEXPORT jfloat JNICALL
-Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_NativeVad_nativeIsSpeech(
-    JNIEnv* env, jclass /*clazz*/, jshortArray jSamples)
-{
-    if (!g_session) return 0.0f;
-
-    jsize len = env->GetArrayLength(jSamples);
-    if (len < kInputSize) return 0.0f;
-
-    jshort* samples = env->GetShortArrayElements(jSamples, nullptr);
-    if (!samples) return 0.0f;
+float sileroVadPredict(const int16_t* samples, int32_t count) {
+    if (!g_session || count < static_cast<int32_t>(kInputSize)) return 0.0f;
 
     // Build float input tensor [1, 1024].
     std::vector<float> inputData(kInputSize);
     for (size_t i = 0; i < kInputSize; i++) {
-        inputData[i] = (float)samples[i] / 32768.0f;
+        inputData[i] = static_cast<float>(samples[i]) / 32768.0f;
     }
-    env->ReleaseShortArrayElements(jSamples, samples, JNI_ABORT);
 
     // Create input tensor.
     OrtValue* inputTensor = nullptr;
@@ -230,6 +203,44 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_NativeVad_nativeIsSpeech(
 
     for (int i = 0; i < 3; i++) if (outputs[i]) g_ort->ReleaseValue(outputs[i]);
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// JNI
+// ---------------------------------------------------------------------------
+
+extern "C" {
+
+JNIEXPORT jboolean JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_NativeVad_nativeInit(
+    JNIEnv* env, jclass /*clazz*/, jobject assetManager)
+{
+    std::call_once(g_initFlag, [&]() {
+        initOrt(env, assetManager);
+    });
+    if (!g_session) {
+        LOGE("VAD init failed: %s", g_errorMsg.c_str());
+        return JNI_FALSE;
+    }
+    return JNI_TRUE;
+}
+
+JNIEXPORT jfloat JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_NativeVad_nativeIsSpeech(
+    JNIEnv* env, jclass /*clazz*/, jshortArray jSamples)
+{
+    if (!g_session) return 0.0f;
+
+    jsize len = env->GetArrayLength(jSamples);
+    if (len < static_cast<jsize>(kInputSize)) return 0.0f;
+
+    jshort* samples = env->GetShortArrayElements(jSamples, nullptr);
+    if (!samples) return 0.0f;
+
+    float result = sileroVadPredict(reinterpret_cast<const int16_t*>(samples), static_cast<int32_t>(len));
+
+    env->ReleaseShortArrayElements(jSamples, samples, JNI_ABORT);
+    return static_cast<jfloat>(result);
 }
 
 JNIEXPORT void JNICALL

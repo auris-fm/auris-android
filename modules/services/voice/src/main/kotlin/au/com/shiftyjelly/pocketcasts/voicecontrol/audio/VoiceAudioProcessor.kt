@@ -2,20 +2,21 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.audio
 
 import android.Manifest
 import androidx.annotation.RequiresPermission
-import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture
-import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame
-import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioSegmenter
-import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.map
 import timber.log.Timber
 
+/**
+ * Relays VAD events from the C++ processing thread to downstream consumers.
+ *
+ * VAD is performed natively by [OboeCaptureEngine] via Silero VAD ONNX inference.
+ * The Kotlin coroutine blocks on event signals rather than polling per-frame,
+ * allowing the CPU to enter deep idle states during silence.
+ */
 @Singleton
 class VoiceAudioProcessor @Inject constructor(
     private val microphoneCapture: MicrophoneCapture,
-    private val voiceSegmenter: VoiceAudioSegmenter,
 ) {
     /**
      * Start processing audio from the microphone and emit voice segmenter results.
@@ -25,31 +26,6 @@ class VoiceAudioProcessor @Inject constructor(
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun startProcessing(): Flow<VoiceSegmenterResult> {
         return microphoneCapture.startCapture()
-            .map { frame ->
-                val result = voiceSegmenter.process(frame)
-                when (result) {
-                    is VoiceSegmenterResult.SpeechStarted -> {
-                        Timber.i("Speech started detected")
-                    }
-
-                    is VoiceSegmenterResult.SpeechContinuing -> {
-                        // Continue processing speech
-                    }
-
-                    is VoiceSegmenterResult.SpeechEnded -> {
-                        Timber.i("Speech ended detected with ${result.frames.size} frames")
-                    }
-
-                    is VoiceSegmenterResult.Rejected -> {
-                        Timber.w("Speech rejected: ${result.reason}")
-                    }
-
-                    VoiceSegmenterResult.Silence -> {
-                        // Silence detected
-                    }
-                }
-                result
-            }
     }
 
     /**

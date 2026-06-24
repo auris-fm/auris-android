@@ -7,8 +7,6 @@ import android.telephony.TelephonyManager
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.repositories.chromecast.CastManager
-import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.NativeVadSegmenter
-import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioSegmenter
 import au.com.shiftyjelly.pocketcasts.voicecontrol.foreground.ForegroundStateMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.EnabledByUserCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
@@ -77,8 +75,6 @@ import kotlinx.coroutines.CoroutineScope
 @Module
 @InstallIn(SingletonComponent::class)
 abstract class VoiceControlModule {
-
-    @Binds abstract fun bindVoiceAudioSegmenter(impl: NativeVadSegmenter): VoiceAudioSegmenter
 
     @Binds abstract fun bindVoiceRecognizer(impl: FunctionGemmaIntentRouter): VoiceRecognizer
 

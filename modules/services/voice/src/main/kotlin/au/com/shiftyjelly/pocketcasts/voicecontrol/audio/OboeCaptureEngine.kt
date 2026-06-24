@@ -2,7 +2,6 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.audio
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -22,24 +21,33 @@ internal object OboeNative {
 
     external fun nativeStartCapture(sampleRate: Int, channels: Int): Boolean
     external fun nativeReadAudioData(buffer: ShortArray): Int
+    external fun nativeAudioWaitForData(timeoutMs: Int): Boolean
     external fun nativeStopCapture()
     external fun nativeCloseCapture()
     external fun nativeIsCapturing(): Boolean
+
+    // VAD processor lifecycle
+    external fun nativeStartVadProcessor(): Boolean
+    external fun nativeStopVadProcessor()
+    external fun nativeWaitForVadEvent(timeoutMs: Int): Int
+    external fun nativeGetSpeechPcm(buffer: ShortArray): Int
+    external fun nativeGetSpeechPcmSize(): Int
 }
 
-/** Configuration constants shared between Kotlin polling loop and native code. */
+/** Configuration constants shared between Kotlin capture loop and native code. */
 internal object OboeConfig {
     const val SAMPLE_RATE_HZ = 16_000
     const val CHANNELS = 1
     const val FRAMES_PER_POLL = 1024 // 64ms at 16kHz
-    const val POLL_INTERVAL_MS = 10L
 }
 
 /**
  * Capture engine using Oboe native library via JNI.
  *
  * The Oboe audio callback writes samples into a native lock-free ring buffer.
- * A Kotlin coroutine polls this buffer and emits [Flow]<[PcmAudioFrame]>.
+ * A C++ VAD processing thread consumes that buffer, runs Silero VAD inference,
+ * and signals speech events. A Kotlin coroutine blocks on these events and
+ * emits [VoiceSegmenterResult] to downstream consumers.
  *
  * All JNI calls are made from the single collector coroutine context.
  */
@@ -48,25 +56,55 @@ internal class OboeCaptureEngine {
     @Volatile
     private var disposed = false
 
-    fun startCapture(): Flow<PcmAudioFrame> = flow {
+    fun startCapture(): Flow<VoiceSegmenterResult> = flow {
         if (!OboeNative.nativeStartCapture(OboeConfig.SAMPLE_RATE_HZ, OboeConfig.CHANNELS)) {
             throw MicrophoneCaptureException.InitializationFailed("Oboe stream creation failed")
         }
 
-        val buffer = ShortArray(OboeConfig.FRAMES_PER_POLL * OboeConfig.CHANNELS)
-        val channels = OboeConfig.CHANNELS
+        if (!OboeNative.nativeStartVadProcessor()) {
+            OboeNative.nativeStopCapture()
+            OboeNative.nativeCloseCapture()
+            throw MicrophoneCaptureException.InitializationFailed("VAD processor failed to start")
+        }
 
         try {
-            while (currentCoroutineContext().isActive && OboeNative.nativeIsCapturing() && !disposed) {
-                val framesRead = OboeNative.nativeReadAudioData(buffer)
-                if (framesRead > 0) {
-                    val samples = buffer.copyOf(framesRead * channels)
-                    emit(PcmAudioFrame(samples, OboeConfig.SAMPLE_RATE_HZ))
-                } else {
-                    delay(OboeConfig.POLL_INTERVAL_MS)
+            while (currentCoroutineContext().isActive && !disposed) {
+                when (val event = OboeNative.nativeWaitForVadEvent(500)) {
+                    1 -> {
+                        Timber.i("VAD: speech started")
+                        emit(VoiceSegmenterResult.SpeechStarted)
+                    }
+
+                    2 -> {
+                        val totalSamples = OboeNative.nativeGetSpeechPcmSize()
+                        if (totalSamples > 0) {
+                            val buffer = ShortArray(totalSamples)
+                            val copied = OboeNative.nativeGetSpeechPcm(buffer)
+                            if (copied > 0) {
+                                val frames = mutableListOf<PcmAudioFrame>()
+                                var offset = 0
+                                while (offset < copied) {
+                                    val frameSize = minOf(OboeConfig.FRAMES_PER_POLL, copied - offset)
+                                    val frameSamples = buffer.copyOfRange(offset, offset + frameSize)
+                                    frames.add(PcmAudioFrame(frameSamples, OboeConfig.SAMPLE_RATE_HZ))
+                                    offset += frameSize
+                                }
+                                Timber.i("VAD: speech ended (%d frames, %d samples)", frames.size, copied)
+                                emit(VoiceSegmenterResult.SpeechEnded(frames))
+                            }
+                        }
+                    }
+
+                    0 -> { /* timeout — no event, continue waiting */ }
+
+                    -1 -> {
+                        Timber.i("VAD: processor stopped")
+                        break
+                    }
                 }
             }
         } finally {
+            OboeNative.nativeStopVadProcessor()
             OboeNative.nativeStopCapture()
             OboeNative.nativeCloseCapture()
             disposed = true

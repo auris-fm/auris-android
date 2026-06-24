@@ -2,6 +2,7 @@
 #define POCKETCASTS_OBOE_AUDIO_CAPTURE_H
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <oboe/Oboe.h>
@@ -68,6 +69,15 @@ public:
     // Returns the number of frames actually written to outBuffer.
     int32_t readData(int16_t* outBuffer, int32_t maxFrames);
 
+    // Block until data is available in the ring buffer or the stream stops.
+    // Returns true if data is available to read, false on timeout or inactive.
+    bool waitForData(int32_t timeoutMs);
+
+    // Block until data is available, then read from the ring buffer.
+    // This is the sole consumer path for the VAD processing thread.
+    // Returns number of samples read, 0 on timeout, -1 if stream is not active.
+    int32_t readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs);
+
     // Stop the stream.
     void stop();
 
@@ -100,6 +110,8 @@ private:
     std::atomic<bool> mActive{false};
     std::atomic<bool> mClosed{false};
     std::mutex mStreamMutex;
+    std::mutex mWaitMutex;
+    std::condition_variable mDataCv;
 
     oboe::AudioStreamBuilder buildStreamBuilder();
 };

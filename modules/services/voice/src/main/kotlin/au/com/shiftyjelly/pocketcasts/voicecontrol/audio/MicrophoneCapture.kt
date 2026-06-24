@@ -11,7 +11,8 @@ import timber.log.Timber
  * Microphone capture using Oboe (native C++ via JNI) with callback mode
  * to avoid the AAudio releaseBuffer assertion (Oboe issue #535).
  *
- * Emits [Flow]<[PcmAudioFrame]> at 16kHz / 16-bit PCM / mono.
+ * Emits [Flow]<[VoiceSegmenterResult]> — VAD is now performed in C++
+ * and events are signaled directly from the native processing thread.
  */
 @Singleton
 class MicrophoneCapture @Inject constructor() {
@@ -25,11 +26,12 @@ class MicrophoneCapture @Inject constructor() {
 
     /**
      * Start capturing audio using Oboe native capture engine.
+     * VAD is performed in C++ and emitted as VoiceSegmenterResult events.
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    fun startCapture(): Flow<PcmAudioFrame> {
+    fun startCapture(): Flow<VoiceSegmenterResult> {
         val engine = OboeCaptureEngine()
-        Timber.i("Using OboeCaptureEngine")
+        Timber.i("Using OboeCaptureEngine (event-driven VAD)")
         activeEngine = engine
         return engine.startCapture()
     }

@@ -245,11 +245,19 @@ class LiteRtFunctionGemmaRuntimeTest {
         var lastUserText: String? = null
         var sendMessageCount = 0
         var closeCount = 0
+        var cancelProcessCount = 0
 
         override fun sendMessage(userText: String): String {
             lastUserText = userText
             sendMessageCount++
             return response
+        }
+
+        override val tokenCount: Int
+            get() = sendMessageCount * 100
+
+        override fun cancelProcess() {
+            cancelProcessCount++
         }
 
         override fun close() {

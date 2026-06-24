@@ -28,6 +28,10 @@ class FunctionGemmaMetricsTest {
                 inputCharacters = 55,
                 outputCharacters = 76,
                 fallbackReason = null,
+                conversationReused = true,
+                reuseCount = 1,
+                conversationRotated = false,
+                rotationCause = null,
             ),
         )
 

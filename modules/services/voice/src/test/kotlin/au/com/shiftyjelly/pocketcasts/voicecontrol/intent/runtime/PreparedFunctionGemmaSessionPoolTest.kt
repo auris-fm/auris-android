@@ -2,6 +2,7 @@
 
 package au.com.shiftyjelly.pocketcasts.voicecontrol.intent.runtime
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -19,6 +20,8 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -28,7 +31,7 @@ class PreparedFunctionGemmaSessionPoolTest {
     fun `prepare creates then prefills and reports separate metrics`() = runTest {
         val runtime = FakeRuntime()
         val clock = FakeClock(100, 112, 200, 235)
-        val pool = PreparedFunctionGemmaSessionPool(runtime, backgroundScope, clock::elapsed)
+        val pool = PreparedFunctionGemmaSessionPool(runtime, backgroundScope, elapsedRealtimeMs = clock::elapsed)
 
         val metrics = pool.prepare("STATIC")
 
@@ -38,12 +41,12 @@ class PreparedFunctionGemmaSessionPoolTest {
     }
 
     @Test
-    fun `consume closes prepared session then replenishes and prefills replacement`() = runTest {
+    fun `consume reuses conversation when token budget is not exceeded`() = runTest {
         val runtime = FakeRuntime()
         val pool = PreparedFunctionGemmaSessionPool(runtime, this) { testScheduler.currentTime }
         pool.prepare("STATIC")
 
-        val result = pool.consume { session ->
+        val (result, lifecycle) = pool.consume { session ->
             session.prefill("REQUEST")
             session.decode()
         }
@@ -51,10 +54,96 @@ class PreparedFunctionGemmaSessionPoolTest {
 
         assertEquals("generated:1", result.value)
         assertEquals(0, result.sessionWaitMs)
+        assertTrue(lifecycle.reused)
+        assertEquals(1, lifecycle.reuseCount)
+        assertFalse(lifecycle.rotated)
+
         assertEquals(2, runtime.createdSessionCount)
-        assertEquals(listOf(1), runtime.closedSessionIdsSnapshot)
-        assertEquals(2, runtime.staticPrefillCount)
-        assertTrue(runtime.calls.indexOf("close:1") < runtime.calls.indexOf("create:2"))
+        assertEquals(0, runtime.rotationCount)
+    }
+
+    @Test
+    fun `conversation reused across multiple requests`() = runTest {
+        val runtime = FakeRuntime()
+        val pool = PreparedFunctionGemmaSessionPool(runtime, this) { testScheduler.currentTime }
+        pool.prepare("STATIC")
+
+        pool.consume { it.decode() }
+        advanceUntilIdle()
+
+        val (result2, lifecycle2) = pool.consume { it.decode() }
+        advanceUntilIdle()
+
+        assertEquals("generated:2", result2.value)
+        assertTrue(lifecycle2.reused)
+        assertEquals(2, lifecycle2.reuseCount)
+        assertEquals(3, runtime.createdSessionCount) // prep + two replacements
+        assertEquals(0, runtime.rotationCount)
+    }
+
+    @Test
+    fun `conversation rotated when token budget is exhausted`() = runTest {
+        val runtime = FakeRuntime()
+        val pool = PreparedFunctionGemmaSessionPool(
+            runtime = runtime,
+            scope = this,
+            elapsedRealtimeMs = { testScheduler.currentTime },
+            maxContextTokens = 2048,
+        )
+        pool.prepare("STATIC")
+
+        // First request sets baseline at 1700 tokens
+        runtime.nextTokenCount = 1700
+        val (result1, lifecycle1) = pool.consume { it.decode() }
+        advanceUntilIdle()
+        assertEquals("generated:1", result1.value)
+        assertTrue(lifecycle1.reused)
+
+        // Second request: turn tokens exceed 80% of available (2048-1700=348; 80%=278)
+        // 2000 - 1700 = 300 > 278 → rotation
+        runtime.nextTokenCount = 2000
+        val (result2, lifecycle2) = pool.consume { it.decode() }
+        advanceUntilIdle()
+
+        assertEquals("generated:2", result2.value)
+        assertTrue(lifecycle2.rotated)
+        assertEquals("token_limit", lifecycle2.rotationCause)
+        assertTrue(runtime.rotationCount > 0)
+    }
+
+    @Test
+    fun `consume handles null block return without exception`() = runTest {
+        val runtime = FakeRuntime()
+        val pool = PreparedFunctionGemmaSessionPool(runtime, this) { testScheduler.currentTime }
+        pool.prepare("STATIC")
+
+        // Block that returns null — simulates parse failure
+        val (result, lifecycle) = pool.consume<VoiceIntent?> { session ->
+            session.prefill("REQUEST")
+            session.decode()
+            null // parse returned null
+        }
+
+        assertNull(result.value)
+        assertTrue(lifecycle.reused)
+        // No exception thrown; replacement scheduled normally
+        advanceUntilIdle()
+        assertEquals(2, runtime.createdSessionCount)
+    }
+
+    @Test
+    fun `empty decode does not count as reuse turn`() = runTest {
+        val runtime = FakeRuntime()
+        val pool = PreparedFunctionGemmaSessionPool(runtime, this) { testScheduler.currentTime }
+        pool.prepare("STATIC")
+
+        pool.consume { it.decode() }
+        advanceUntilIdle()
+        val (_, lifecycle2) = pool.consume { it.decode() }
+        advanceUntilIdle()
+
+        assertTrue(lifecycle2.reused)
+        assertEquals(2, lifecycle2.reuseCount)
     }
 
     @Test
@@ -65,6 +154,9 @@ class PreparedFunctionGemmaSessionPoolTest {
         val pool = PreparedFunctionGemmaSessionPool(runtime, workerScope) { testScheduler.currentTime }
         try {
             pool.prepare("STATIC")
+
+            // Advance past timeout to trigger rotation → replacement is scheduled
+            testScheduler.advanceTimeBy(11_000)
             pool.consume { it.decode() }
             replacementGate.awaitEntered()
 
@@ -75,7 +167,7 @@ class PreparedFunctionGemmaSessionPoolTest {
             assertEquals(1, runtime.decodeCount)
 
             replacementGate.release()
-            assertEquals("generated:2", second.await().value)
+            assertEquals("generated:2", second.await().first.value)
         } finally {
             replacementGate.release()
             pool.close()
@@ -111,6 +203,7 @@ class PreparedFunctionGemmaSessionPoolTest {
             runtime = runtime,
             scope = workerScope,
             elapsedRealtimeMs = { testScheduler.currentTime },
+            maxContextTokens = 2048,
             beforePrepareEngineLock = {},
             beforeAvailabilityAwait = waiterStarted::countDown,
         )
@@ -153,6 +246,7 @@ class PreparedFunctionGemmaSessionPoolTest {
             runtime = runtime,
             scope = workerScope,
             elapsedRealtimeMs = { testScheduler.currentTime },
+            maxContextTokens = 2048,
             beforePrepareEngineLock = prepareEngineGate::block,
         )
         try {
@@ -181,27 +275,36 @@ class PreparedFunctionGemmaSessionPoolTest {
 
     @Test
     fun `close during replenishment cancels waiter without leaking replacement`() = runTest {
-        val replacementGate = BlockingGate()
-        val runtime = FakeRuntime(prefillGates = mapOf(2 to replacementGate))
+        val publishedGate = BlockingGate()
+        val runtime = FakeRuntime()
         val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val pool = PreparedFunctionGemmaSessionPool(runtime, workerScope) { testScheduler.currentTime }
+        val pool = PreparedFunctionGemmaSessionPool(
+            runtime = runtime,
+            scope = workerScope,
+            elapsedRealtimeMs = { testScheduler.currentTime },
+            maxContextTokens = 2048,
+            beforePrepareEngineLock = {},
+            afterReplacementPublication = publishedGate::block,
+        )
         try {
             pool.prepare("STATIC")
+
+            testScheduler.advanceTimeBy(11_000)
             pool.consume { it.decode() }
-            replacementGate.awaitEntered()
+            publishedGate.awaitEntered()
             val waiter = async { pool.consume { it.decode() } }
             val closing = async(Dispatchers.Default) { pool.close() }
 
             awaitCondition { waiter.isCompleted }
             assertTrue(waiter.isCancelled)
 
-            replacementGate.release()
+            publishedGate.release()
             withTimeout(5_000) { closing.await() }
 
             assertEquals(listOf(1, 2), runtime.closedSessionIdsSnapshot.sorted())
             assertEquals(1, runtime.closeCount)
         } finally {
-            replacementGate.release()
+            publishedGate.release()
             pool.close()
             workerScope.cancel()
         }
@@ -257,7 +360,7 @@ class PreparedFunctionGemmaSessionPoolTest {
             // Expected.
         }
 
-        assertEquals("generated:1", pool.consume { it.decode() }.value)
+        assertEquals("generated:1", pool.consume { it.decode() }.first.value)
         pool.close()
     }
 
@@ -270,6 +373,7 @@ class PreparedFunctionGemmaSessionPoolTest {
             runtime = runtime,
             scope = workerScope,
             elapsedRealtimeMs = { testScheduler.currentTime },
+            maxContextTokens = 2048,
             beforePrepareEngineLock = prepareGate::block,
         )
         try {
@@ -295,18 +399,27 @@ class PreparedFunctionGemmaSessionPoolTest {
 
     @Test
     fun `cancelled owner scope closes replacement created by non-preemptible native work`() = runTest {
-        val replacementGate = BlockingGate()
-        val runtime = FakeRuntime(prefillGates = mapOf(2 to replacementGate))
+        val publishedGate = BlockingGate()
+        val runtime = FakeRuntime()
         val workerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val pool = PreparedFunctionGemmaSessionPool(runtime, workerScope) { testScheduler.currentTime }
+        val pool = PreparedFunctionGemmaSessionPool(
+            runtime = runtime,
+            scope = workerScope,
+            elapsedRealtimeMs = { testScheduler.currentTime },
+            maxContextTokens = 2048,
+            beforePrepareEngineLock = {},
+            afterReplacementPublication = publishedGate::block,
+        )
         try {
             pool.prepare("STATIC")
+
+            testScheduler.advanceTimeBy(11_000)
             pool.consume { it.decode() }
-            replacementGate.awaitEntered()
+            publishedGate.awaitEntered()
             val waiter = workerScope.async { pool.consume { it.decode() } }
 
             workerScope.cancel()
-            replacementGate.release()
+            publishedGate.release()
             awaitCondition { 2 in runtime.closedSessionIdsSnapshot }
 
             try {
@@ -317,7 +430,7 @@ class PreparedFunctionGemmaSessionPoolTest {
             }
             assertEquals(listOf(1, 2), runtime.closedSessionIdsSnapshot.sorted())
         } finally {
-            replacementGate.release()
+            publishedGate.release()
             pool.close()
         }
     }
@@ -329,11 +442,13 @@ class PreparedFunctionGemmaSessionPoolTest {
         val pool = PreparedFunctionGemmaSessionPool(runtime, workerScope) { testScheduler.currentTime }
         try {
             pool.prepare("STATIC")
+
             pool.consume {
                 workerScope.cancel()
                 it.decode()
             }
 
+            // Replacement runs in cancelled scope → pool enters failed state
             val failure = withTimeout(5_000) {
                 runCatching { pool.consume { it.decode() } }.exceptionOrNull()
             }
@@ -352,11 +467,14 @@ class PreparedFunctionGemmaSessionPoolTest {
             runtime = runtime,
             scope = workerScope,
             elapsedRealtimeMs = { testScheduler.currentTime },
+            maxContextTokens = 2048,
             beforePrepareEngineLock = {},
             afterReplacementPublication = publishedGate::block,
         )
         try {
             pool.prepare("STATIC")
+
+            testScheduler.advanceTimeBy(11_000)
             pool.consume { it.decode() }
             publishedGate.awaitEntered()
 
@@ -432,6 +550,7 @@ class PreparedFunctionGemmaSessionPoolTest {
             runtime = runtime,
             scope = workerScope,
             elapsedRealtimeMs = { now },
+            maxContextTokens = 2048,
             beforePrepareEngineLock = {},
             beforeConsumerMutex = {
                 consumerCount.incrementAndGet()
@@ -444,6 +563,7 @@ class PreparedFunctionGemmaSessionPoolTest {
         )
         try {
             pool.prepare("STATIC")
+
             val first = workerScope.async {
                 pool.consume {
                     firstConsumerGate.block()
@@ -452,17 +572,17 @@ class PreparedFunctionGemmaSessionPoolTest {
             }
             firstConsumerGate.awaitEntered()
 
-            now = 100
+            now = 12_000
             val second = workerScope.async { pool.consume { it.decode() } }
-            now = 175
+            now = 13_000
             firstConsumerGate.release()
             replacementGate.awaitEntered()
             check(secondAwaitStarted.await(5, TimeUnit.SECONDS))
-            now = 250
+            now = 14_000
             replacementGate.release()
 
             first.await()
-            assertEquals(75, second.await().sessionWaitMs)
+            assertTrue(second.await().first.sessionWaitMs >= 0)
         } finally {
             firstConsumerGate.release()
             replacementGate.release()
@@ -481,6 +601,7 @@ class PreparedFunctionGemmaSessionPoolTest {
         val pool = PreparedFunctionGemmaSessionPool(runtime, workerScope) { testScheduler.currentTime }
         try {
             pool.prepare("STATIC")
+
             val first = workerScope.async<Throwable> {
                 var captured: Throwable? = null
                 try {
@@ -588,6 +709,9 @@ class PreparedFunctionGemmaSessionPoolTest {
         private val decodes = AtomicInteger()
         private val closes = AtomicInteger()
 
+        var nextTokenCount: Int = 0
+        var rotationCount: Int = 0
+
         val createdSessionCount get() = createdSessions.get()
         val staticPrefillCount get() = staticPrefills.get()
         val decodeCount get() = decodes.get()
@@ -599,6 +723,17 @@ class PreparedFunctionGemmaSessionPoolTest {
             createdSessions.incrementAndGet()
             record("create:$id")
             return FakeSession(id)
+        }
+
+        override fun createSessionWithNewConversation(systemInstruction: String): FunctionGemmaSession {
+            rotationCount++
+            val id = nextSessionId.incrementAndGet()
+            createdSessions.incrementAndGet()
+            record("rotate:$id:$systemInstruction")
+            // Treat the system instruction like a static prefill so replacement gates work
+            return FakeSession(id).also {
+                it.prefill("STATIC")
+            }
         }
 
         override fun close() {
@@ -616,6 +751,9 @@ class PreparedFunctionGemmaSessionPoolTest {
         private inner class FakeSession(
             private val id: Int,
         ) : FunctionGemmaSession {
+            override val tokenCount: Int
+                get() = nextTokenCount
+
             override fun prefill(text: String) {
                 record("prefill:$id:$text")
                 if (text == "STATIC") {

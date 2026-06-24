@@ -10,9 +10,14 @@ import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.SamplerConfig
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 import javax.inject.Singleton
+import timber.log.Timber
 
 @Singleton
 class LiteRtFunctionGemmaRuntimeFactory internal constructor(
@@ -59,10 +64,11 @@ class LiteRtFunctionGemmaRuntimeFactory internal constructor(
             engine = engine,
             systemInstruction = FUNCTION_GEMMA_SYSTEM_INSTRUCTION,
         )
-        return LiteRtFunctionGemmaRuntime(engine, conversation, backend)
+        return LiteRtFunctionGemmaRuntime(engine, conversationFactory, conversation, backend)
     }
 
     private companion object {
+        // Matches training config.yaml max_seq_length_cap.
         const val MAX_CONTEXT_TOKENS = 2048
         val BENCHMARK_FLAG_LOCK = Any()
 
@@ -137,6 +143,8 @@ internal interface LiteRtConversationFactory {
 
 internal interface LiteRtConversation : AutoCloseable {
     fun sendMessage(userText: String): String
+    val tokenCount: Int
+    fun cancelProcess()
 }
 
 // -- Production implementations --
@@ -202,9 +210,16 @@ private class ProductionLiteRtSession(
     override fun close() = session.close()
 }
 
+@OptIn(ExperimentalApi::class)
 private object ProductionLiteRtConversationFactory : LiteRtConversationFactory {
     override fun create(engine: LiteRtEngine, systemInstruction: String): LiteRtConversation {
         val realEngine = (engine as ProductionLiteRtEngine).engine
+
+        // Enable automatic context-window management so the conversation evicts old
+        // turns instead of growing unbounded and eventually hanging the GPU backend.
+        ExperimentalFlags.enableConversationConstrainedDecoding = true
+        ExperimentalFlags.filterChannelContentFromKvCache = true
+
         val config = ConversationConfig(
             systemInstruction = Contents.Companion.of(systemInstruction),
             samplerConfig = SamplerConfig(
@@ -230,6 +245,11 @@ private class ProductionLiteRtConversation(
             .joinToString("") { it.text }
     }
 
+    override val tokenCount: Int
+        get() = conversation.getTokenCount()
+
+    override fun cancelProcess() = conversation.cancelProcess()
+
     override fun close() = conversation.close()
 }
 
@@ -237,12 +257,19 @@ private class ProductionLiteRtConversation(
 
 private class LiteRtFunctionGemmaRuntime(
     private val engine: LiteRtEngine,
-    private val conversation: LiteRtConversation,
+    private val conversationFactory: LiteRtConversationFactory,
+    private var conversation: LiteRtConversation,
     override val backend: FunctionGemmaBackend,
 ) : FunctionGemmaRuntime {
     private val isClosed = AtomicBoolean()
 
     override fun createSession(): FunctionGemmaSession = ConversationFunctionGemmaSession(conversation)
+
+    override fun createSessionWithNewConversation(systemInstruction: String): FunctionGemmaSession {
+        conversation.close()
+        conversation = conversationFactory.create(engine, systemInstruction)
+        return ConversationFunctionGemmaSession(conversation)
+    }
 
     override fun close() {
         if (isClosed.compareAndSet(false, true)) {
@@ -291,7 +318,28 @@ private class ConversationFunctionGemmaSession(
             text
         }
 
-        return conversation.sendMessage(transcript)
+        val tokenCountBefore = conversation.tokenCount
+        val sendMessageTask = SEND_MESSAGE_EXECUTOR.submit<String> {
+            conversation.sendMessage(transcript)
+        }
+        try {
+            return sendMessageTask.get(SEND_MESSAGE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                .also { result ->
+                    val tokenCountAfter = conversation.tokenCount
+                    Timber.d("FunctionGemma sendMessage done: tokenCount=$tokenCountBefore→$tokenCountAfter delta=${tokenCountAfter - tokenCountBefore} outputLen=${result.length}")
+                }
+        } catch (e: TimeoutException) {
+            val tokenCountAfter = runCatching { conversation.tokenCount }.getOrDefault(-1)
+            Timber.w(e, "FunctionGemma sendMessage timed out; tokenCount=$tokenCountBefore→$tokenCountAfter")
+            Thread { runCatching { conversation.cancelProcess() } }.start()
+            sendMessageTask.cancel(true)
+            throw SendMessageTimeoutException(
+                "sendMessage timed out after ${SEND_MESSAGE_TIMEOUT_MS}ms (tokens: $tokenCountBefore→$tokenCountAfter)",
+            )
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw IllegalStateException("sendMessage interrupted", e)
+        }
     }
 
     override fun close() {
@@ -299,4 +347,17 @@ private class ConversationFunctionGemmaSession(
             pendingText = null
         }
     }
+
+    override val tokenCount: Int
+        get() = conversation.tokenCount
+
+    private companion object {
+        private val SEND_MESSAGE_EXECUTOR = Executors.newCachedThreadPool { runnable ->
+            Thread(runnable, "fg-send-message").apply { isDaemon = true }
+        }
+
+        const val SEND_MESSAGE_TIMEOUT_MS = 30_000L
+    }
 }
+
+internal class SendMessageTimeoutException(message: String) : IllegalStateException(message)

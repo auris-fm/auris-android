@@ -26,10 +26,18 @@ data class PreparedSessionResult<T>(
     val sessionWaitMs: Long,
 )
 
+data class SessionLifecycle(
+    val reused: Boolean,
+    val reuseCount: Int,
+    val rotated: Boolean,
+    val rotationCause: String?,
+)
+
 class PreparedFunctionGemmaSessionPool internal constructor(
     private val runtime: FunctionGemmaRuntime,
     private val scope: CoroutineScope,
     private val elapsedRealtimeMs: () -> Long,
+    private val maxContextTokens: Int,
     private val beforePrepareEngineLock: () -> Unit,
     private val beforeConsumerMutex: () -> Unit = {},
     private val beforeAvailabilityAwait: () -> Unit = {},
@@ -38,8 +46,9 @@ class PreparedFunctionGemmaSessionPool internal constructor(
     constructor(
         runtime: FunctionGemmaRuntime,
         scope: CoroutineScope,
+        maxContextTokens: Int = 2048,
         elapsedRealtimeMs: () -> Long = SystemClock::elapsedRealtime,
-    ) : this(runtime, scope, elapsedRealtimeMs, {}, {}, {}, {})
+    ) : this(runtime, scope, elapsedRealtimeMs, maxContextTokens, {}, {}, {}, {})
 
     val backend get() = runtime.backend
 
@@ -54,6 +63,9 @@ class PreparedFunctionGemmaSessionPool internal constructor(
     private var preparedSessionOwner: Job? = null
     private var replacementJob: Job? = null
     private var activeConsumerThread: Thread? = null
+
+    private var reuseCount: Int = 0
+    private var baselineTokenCount: Int = -1
 
     suspend fun prepare(prefix: String): SessionPreparationMetrics {
         val context = currentCoroutineContext()
@@ -72,7 +84,7 @@ class PreparedFunctionGemmaSessionPool internal constructor(
                 synchronized(stateLock) {
                     ensureOpen()
                 }
-                val (session, metrics) = createPreparedSession(prefix)
+                val (session, metrics) = createPreparedSession(prefix, rotate = false)
                 publishPreparedSessionOrClose(session, targetAvailability, owner = null, context::ensureActive)
                 metrics
             }
@@ -84,7 +96,7 @@ class PreparedFunctionGemmaSessionPool internal constructor(
 
     suspend fun <T> consume(
         block: (FunctionGemmaSession) -> T,
-    ): PreparedSessionResult<T> {
+    ): Pair<PreparedSessionResult<T>, SessionLifecycle> {
         beforeConsumerMutex()
         return consumerMutex.withLock {
             val waitStart = elapsedRealtimeMs()
@@ -93,7 +105,11 @@ class PreparedFunctionGemmaSessionPool internal constructor(
             val sessionWaitMs = elapsedRealtimeMs() - waitStart
             engineLock.withLock {
                 val session = claimPreparedSession(signalledSession)
-                executeLease(session, sessionWaitMs, block)
+
+                val (value, lifecycle) = executeLease(session, sessionWaitMs, block)
+
+                @Suppress("UNCHECKED_CAST")
+                return Pair(PreparedSessionResult(value, sessionWaitMs), lifecycle)
             }
         }
     }
@@ -138,7 +154,7 @@ class PreparedFunctionGemmaSessionPool internal constructor(
         session: FunctionGemmaSession,
         sessionWaitMs: Long,
         block: (FunctionGemmaSession) -> T,
-    ): PreparedSessionResult<T> {
+    ): Pair<T, SessionLifecycle> {
         synchronized(stateLock) {
             activeConsumerThread = Thread.currentThread()
         }
@@ -149,6 +165,36 @@ class PreparedFunctionGemmaSessionPool internal constructor(
             value = block(session)
         } catch (error: Throwable) {
             blockFailure = error
+        }
+
+        // Rotation decision based purely on token budget: if accumulated turns
+        // would overflow the context window, close this conversation and let the
+        // replacement create a fresh one. The system-instruction baseline is
+        // excluded so only conversation turns count against the limit.
+        val shouldRotate = if (blockFailure != null || session.tokenCount <= 0) {
+            false
+        } else if (baselineTokenCount < 0) {
+            baselineTokenCount = session.tokenCount
+            false
+        } else {
+            val turnTokens = session.tokenCount - baselineTokenCount
+            val available = maxContextTokens - baselineTokenCount
+            available > 0 && turnTokens > available * 0.8f
+        }
+
+        val lifecycle = if (blockFailure != null) {
+            SessionLifecycle(reused = false, reuseCount = reuseCount, rotated = false, rotationCause = null)
+        } else if (shouldRotate) {
+            SessionLifecycle(reused = false, reuseCount = reuseCount, rotated = true, rotationCause = "token_limit")
+        } else {
+            SessionLifecycle(reused = true, reuseCount = reuseCount + 1, rotated = false, rotationCause = null)
+        }
+
+        if (shouldRotate) {
+            reuseCount = 0
+            baselineTokenCount = -1 // reset for the new conversation
+        } else if (blockFailure == null) {
+            reuseCount++
         }
 
         var closeFailure: Throwable? = null
@@ -163,19 +209,24 @@ class PreparedFunctionGemmaSessionPool internal constructor(
             }
         }
 
-        if (closeFailure == null) {
-            scheduleReplacement()
-        }
         if (blockFailure != null) {
-            closeFailure?.let(blockFailure::addSuppressed)
+            if (closeFailure == null) {
+                scheduleReplacement()
+            } else {
+                closeFailure.let(blockFailure::addSuppressed)
+            }
             throw blockFailure
         }
-        if (closeFailure != null) {
-            throw closeFailure
+
+        if (closeFailure == null) {
+            scheduleReplacement(rotate = shouldRotate)
         }
 
+        // value is non-null here because blockFailure was null (block didn't throw).
+        // When T is nullable (e.g., VoiceIntent?), value may be null legitimately.
         @Suppress("UNCHECKED_CAST")
-        return PreparedSessionResult(value as T, sessionWaitMs)
+        val result = value as T
+        return Pair(result, lifecycle)
     }
 
     private fun performClose(action: CloseAction.Perform) {
@@ -223,7 +274,7 @@ class PreparedFunctionGemmaSessionPool internal constructor(
         signalledSession
     }
 
-    private fun scheduleReplacement() {
+    private fun scheduleReplacement(rotate: Boolean = false) {
         val targetAvailability: CompletableDeferred<FunctionGemmaSession>
         val prefix: String
         synchronized(stateLock) {
@@ -242,7 +293,7 @@ class PreparedFunctionGemmaSessionPool internal constructor(
                     synchronized(stateLock) {
                         ensureOpen()
                     }
-                    val (session) = createPreparedSession(prefix)
+                    val (session) = createPreparedSession(prefix, rotate)
                     publishPreparedSessionOrClose(session, targetAvailability, job, context::ensureActive)
                     afterReplacementPublication()
                     context.ensureActive()
@@ -286,18 +337,30 @@ class PreparedFunctionGemmaSessionPool internal constructor(
      */
     private fun createPreparedSession(
         prefix: String,
+        rotate: Boolean,
     ): Pair<FunctionGemmaSession, SessionPreparationMetrics> {
         val createStart = elapsedRealtimeMs()
-        val session = runtime.createSession()
+        val session = if (rotate) {
+            runtime.createSessionWithNewConversation(prefix)
+        } else {
+            runtime.createSession()
+        }
         val sessionCreateMs = elapsedRealtimeMs() - createStart
         return try {
-            val prefillStart = elapsedRealtimeMs()
-            session.prefill(prefix)
-            val staticPrefillMs = elapsedRealtimeMs() - prefillStart
-            session to SessionPreparationMetrics(
-                sessionCreateMs = sessionCreateMs,
-                staticPrefillMs = staticPrefillMs,
-            )
+            if (!rotate) {
+                val prefillStart = elapsedRealtimeMs()
+                session.prefill(prefix)
+                val staticPrefillMs = elapsedRealtimeMs() - prefillStart
+                session to SessionPreparationMetrics(
+                    sessionCreateMs = sessionCreateMs,
+                    staticPrefillMs = staticPrefillMs,
+                )
+            } else {
+                session to SessionPreparationMetrics(
+                    sessionCreateMs = sessionCreateMs,
+                    staticPrefillMs = sessionCreateMs,
+                )
+            }
         } catch (error: Throwable) {
             closeAfterFailure(session, error)
             throw error

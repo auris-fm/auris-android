@@ -188,7 +188,7 @@ class FunctionGemmaIntentRouter @Inject constructor(
         var parseResolveMs = 0L
         var inputCharacters = 0
         var outputCharacters = 0
-        val result = state.pool.consume { session ->
+        val (result, lifecycle) = state.pool.consume { session ->
             val suffix = buildRequestSuffixSafely(transcript) ?: return@consume null
             inputCharacters = suffix.length
             val prefillStart = clock.elapsedRealtimeMs()
@@ -215,6 +215,10 @@ class FunctionGemmaIntentRouter @Inject constructor(
                 inputCharacters = inputCharacters,
                 outputCharacters = outputCharacters,
                 fallbackReason = state.fallbackReason,
+                conversationReused = lifecycle.reused,
+                reuseCount = lifecycle.reuseCount,
+                conversationRotated = lifecycle.rotated,
+                rotationCause = lifecycle.rotationCause,
             ),
         )
         return result.value

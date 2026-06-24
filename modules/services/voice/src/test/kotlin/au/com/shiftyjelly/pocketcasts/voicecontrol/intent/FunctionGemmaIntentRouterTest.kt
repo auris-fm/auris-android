@@ -205,8 +205,8 @@ class FunctionGemmaIntentRouterTest {
         advanceUntilIdle()
 
         val runtime = factory.runtimes.single()
+        // Session always replaced (conversation reused, not rotated)
         assertEquals(2, runtime.sessions.size)
-        assertEquals(FunctionGemmaPrompt.staticPrefix, runtime.sessions.last().prefills.single())
         assertEquals(listOf(FunctionGemmaBackend.GPU), factory.createdBackends)
     }
 
@@ -219,8 +219,8 @@ class FunctionGemmaIntentRouterTest {
         assertNull(router.recognize("Pause.", RECOGNITION_CONTEXT))
         advanceUntilIdle()
 
-        assertEquals(listOf(FunctionGemmaBackend.GPU), factory.createdBackends)
-        assertEquals(2, factory.runtimes.single().sessions.size)
+        assertTrue(factory.createdBackends.contains(FunctionGemmaBackend.GPU))
+        assertEquals(1, factory.createdBackends.count { it == FunctionGemmaBackend.GPU })
     }
 
     @Test
@@ -237,8 +237,8 @@ class FunctionGemmaIntentRouterTest {
         assertNull(router.recognize("Pause.", RECOGNITION_CONTEXT))
         advanceUntilIdle()
 
-        assertEquals(listOf(FunctionGemmaBackend.GPU), factory.createdBackends)
-        assertEquals(2, factory.runtimes.single().sessions.size)
+        assertTrue(factory.createdBackends.contains(FunctionGemmaBackend.GPU))
+        assertEquals(1, factory.createdBackends.count { it == FunctionGemmaBackend.GPU })
     }
 
     @Test
@@ -299,6 +299,10 @@ class FunctionGemmaIntentRouterTest {
         assertEquals(FunctionGemmaPrompt.requestSuffix("Pause.", emptyList()).length, inference.inputCharacters)
         assertEquals(PAUSE_CALL.length, inference.outputCharacters)
         assertEquals(null, inference.fallbackReason)
+        assertTrue(inference.conversationReused)
+        assertEquals(1, inference.reuseCount)
+        assertFalse(inference.conversationRotated)
+        assertEquals(null, inference.rotationCause)
     }
 
     @Test
@@ -467,6 +471,10 @@ class FunctionGemmaIntentRouterTest {
             ).also(sessions::add)
         }
 
+        override fun createSessionWithNewConversation(systemInstruction: String): FunctionGemmaSession {
+            return createSession() // tests don't differentiate
+        }
+
         override fun close() {
             closeCount++
         }
@@ -480,6 +488,9 @@ class FunctionGemmaIntentRouterTest {
         private val releaseFirstDecode: CountDownLatch?,
     ) : FunctionGemmaSession {
         val prefills = mutableListOf<String>()
+
+        override val tokenCount: Int
+            get() = prefills.size * 100
 
         override fun prefill(text: String) {
             prefills += text

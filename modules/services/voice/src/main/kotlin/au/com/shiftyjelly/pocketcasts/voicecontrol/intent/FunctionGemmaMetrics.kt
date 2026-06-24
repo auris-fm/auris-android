@@ -17,6 +17,10 @@ data class FunctionGemmaInferenceMetrics(
     val inputCharacters: Int,
     val outputCharacters: Int,
     val fallbackReason: String?,
+    val conversationReused: Boolean,
+    val reuseCount: Int,
+    val conversationRotated: Boolean,
+    val rotationCause: String?,
 )
 
 interface FunctionGemmaMetrics {
@@ -55,7 +59,26 @@ class TimberFunctionGemmaMetrics @Inject constructor() : FunctionGemmaMetrics {
     }
 
     override fun inference(metrics: FunctionGemmaInferenceMetrics) {
-        Timber.i("FunctionGemma inference metrics=%s", metrics)
+        Timber.i(
+            "FunctionGemma inference backend=%s model=%s runtime=%s wait=%d pref=%d dec=%d " +
+                "parse=%d total=%d inCh=%d outCh=%d fallback=%s reused=%s reuseCt=%d " +
+                "rotated=%s rotCause=%s",
+            metrics.backend,
+            metrics.modelRelease,
+            BuildConfig.LITERTLM_VERSION,
+            metrics.sessionWaitMs,
+            metrics.requestPrefillMs,
+            metrics.decodeMs,
+            metrics.parseResolveMs,
+            metrics.totalMs,
+            metrics.inputCharacters,
+            metrics.outputCharacters,
+            metrics.fallbackReason,
+            metrics.conversationReused,
+            metrics.reuseCount,
+            metrics.conversationRotated,
+            metrics.rotationCause,
+        )
     }
 
     override fun backendFallback(reason: String, error: Throwable) {

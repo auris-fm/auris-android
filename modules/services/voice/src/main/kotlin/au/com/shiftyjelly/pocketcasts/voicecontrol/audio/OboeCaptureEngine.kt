@@ -19,16 +19,13 @@ internal object OboeNative {
         Timber.i("Oboe native library loaded")
     }
 
-    external fun nativeStartCapture(sampleRate: Int, channels: Int): Boolean
-    external fun nativeReadAudioData(buffer: ShortArray): Int
-    external fun nativeAudioWaitForData(timeoutMs: Int): Boolean
-    external fun nativeStopCapture()
-    external fun nativeCloseCapture()
-    external fun nativeIsCapturing(): Boolean
+    // Atomic capture + VAD start (single mutex scope — prevents race with close)
+    external fun nativeStartCaptureAndVad(sampleRate: Int, channels: Int): Boolean
 
-    // VAD processor lifecycle
-    external fun nativeStartVadProcessor(): Boolean
-    external fun nativeStopVadProcessor()
+    // Atomic capture + VAD stop
+    external fun nativeStopCaptureAndVad()
+
+    external fun nativeIsCapturing(): Boolean
     external fun nativeWaitForVadEvent(timeoutMs: Int): Int
     external fun nativeGetSpeechPcm(buffer: ShortArray): Int
     external fun nativeGetSpeechPcmSize(): Int
@@ -57,14 +54,8 @@ internal class OboeCaptureEngine {
     private var disposed = false
 
     fun startCapture(): Flow<VoiceSegmenterResult> = flow {
-        if (!OboeNative.nativeStartCapture(OboeConfig.SAMPLE_RATE_HZ, OboeConfig.CHANNELS)) {
+        if (!OboeNative.nativeStartCaptureAndVad(OboeConfig.SAMPLE_RATE_HZ, OboeConfig.CHANNELS)) {
             throw MicrophoneCaptureException.InitializationFailed("Oboe stream creation failed")
-        }
-
-        if (!OboeNative.nativeStartVadProcessor()) {
-            OboeNative.nativeStopCapture()
-            OboeNative.nativeCloseCapture()
-            throw MicrophoneCaptureException.InitializationFailed("VAD processor failed to start")
         }
 
         try {
@@ -104,9 +95,7 @@ internal class OboeCaptureEngine {
                 }
             }
         } finally {
-            OboeNative.nativeStopVadProcessor()
-            OboeNative.nativeStopCapture()
-            OboeNative.nativeCloseCapture()
+            OboeNative.nativeStopCaptureAndVad()
             disposed = true
         }
     }.flowOn(Dispatchers.IO)

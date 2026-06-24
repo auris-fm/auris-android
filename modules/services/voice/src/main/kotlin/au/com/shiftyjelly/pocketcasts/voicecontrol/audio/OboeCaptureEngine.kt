@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.audio
 
+import android.content.res.AssetManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
@@ -19,8 +20,9 @@ internal object OboeNative {
         Timber.i("Oboe native library loaded")
     }
 
-    // Atomic capture + VAD start (single mutex scope — prevents race with close)
-    external fun nativeStartCaptureAndVad(sampleRate: Int, channels: Int): Boolean
+    // Atomic capture + VAD start (single mutex scope — prevents race with close).
+    // Passes AssetManager so the Silero VAD ONNX session can be initialized.
+    external fun nativeStartCaptureAndVad(sampleRate: Int, channels: Int, assetManager: AssetManager): Boolean
 
     // Atomic capture + VAD stop
     external fun nativeStopCaptureAndVad()
@@ -48,13 +50,15 @@ internal object OboeConfig {
  *
  * All JNI calls are made from the single collector coroutine context.
  */
-internal class OboeCaptureEngine {
+internal class OboeCaptureEngine(
+    private val assetManager: AssetManager,
+) {
 
     @Volatile
     private var disposed = false
 
     fun startCapture(): Flow<VoiceSegmenterResult> = flow {
-        if (!OboeNative.nativeStartCaptureAndVad(OboeConfig.SAMPLE_RATE_HZ, OboeConfig.CHANNELS)) {
+        if (!OboeNative.nativeStartCaptureAndVad(OboeConfig.SAMPLE_RATE_HZ, OboeConfig.CHANNELS, assetManager)) {
             throw MicrophoneCaptureException.InitializationFailed("Oboe stream creation failed")
         }
 

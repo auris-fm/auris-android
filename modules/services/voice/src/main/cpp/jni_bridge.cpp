@@ -25,13 +25,22 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeIsCaptur
 // between route-change restarts and foreground transitions.
 // ---------------------------------------------------------------------------
 
+extern "C" bool vadEnsureInitialized(JNIEnv* env, jobject assetManager);
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartCaptureAndVad(
-    JNIEnv* /*env*/,
+    JNIEnv* env,
     jclass /*clazz*/,
     jint sampleRate,
-    jint channels)
+    jint channels,
+    jobject assetManager)
 {
+    // Initialize the Silero VAD ONNX session before starting the VAD processor.
+    // Uses std::call_once internally — repeated calls are cheap.
+    if (!vadEnsureInitialized(env, assetManager)) {
+        return JNI_FALSE;
+    }
+
     std::lock_guard<std::mutex> lock(gCaptureMutex);
 
     // Clean up any previous instances

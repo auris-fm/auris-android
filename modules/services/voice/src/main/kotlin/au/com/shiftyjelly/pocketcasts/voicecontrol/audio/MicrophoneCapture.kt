@@ -1,7 +1,9 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.audio
 
 import android.Manifest
+import android.content.Context
 import androidx.annotation.RequiresPermission
+import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
@@ -15,7 +17,9 @@ import timber.log.Timber
  * and events are signaled directly from the native processing thread.
  */
 @Singleton
-class MicrophoneCapture @Inject constructor() {
+class MicrophoneCapture @Inject constructor(
+    @ApplicationContext private val context: Context,
+) {
     companion object {
         internal const val SAMPLE_RATE_HZ = 16_000
         internal const val CHANNELS = 1
@@ -30,7 +34,7 @@ class MicrophoneCapture @Inject constructor() {
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun startCapture(): Flow<VoiceSegmenterResult> {
-        val engine = OboeCaptureEngine()
+        val engine = OboeCaptureEngine(context.assets)
         Timber.i("Using OboeCaptureEngine (event-driven VAD)")
         activeEngine = engine
         return engine.startCapture()

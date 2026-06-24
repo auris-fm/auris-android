@@ -255,4 +255,14 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_NativeVad_nativeClose(
     cleanupOrt();
 }
 
+// Called from jni_bridge.cpp's nativeStartCaptureAndVad to ensure the
+// Silero VAD ONNX session is initialized before the VAD processor starts.
+// Uses std::call_once so repeated calls are safe.
+bool vadEnsureInitialized(JNIEnv* env, jobject assetManager) {
+    std::call_once(g_initFlag, [&]() {
+        initOrt(env, assetManager);
+    });
+    return g_session != nullptr;
+}
+
 } // extern "C"

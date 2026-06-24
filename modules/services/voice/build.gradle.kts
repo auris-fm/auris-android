@@ -76,3 +76,14 @@ dependencies {
     testImplementation(libs.turbine)
     testImplementation(projects.modules.services.sharedtest)
 }
+
+// Ensure Gradle tracks native source file changes for build-cache invalidation.
+// android_gradle_build.json only tracks CMakeLists.txt, so .cpp/.h changes would
+// otherwise let the build cache (org.gradle.caching=true) serve stale .so outputs.
+tasks.configureEach {
+    if (name.matches(Regex("buildCMake(RelWithDebInfo|Release|Debug)\\[.+]"))) {
+        inputs.dir(layout.projectDirectory.dir("src/main/cpp"))
+            .withPropertyName("nativeSources")
+            .withPathSensitivity(PathSensitivity.RELATIVE)
+    }
+}

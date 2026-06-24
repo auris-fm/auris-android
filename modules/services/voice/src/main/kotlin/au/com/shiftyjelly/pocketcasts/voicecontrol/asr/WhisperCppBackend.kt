@@ -23,10 +23,17 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
 
     override suspend fun ensureReady(): Result<Unit> = withContext(Dispatchers.IO) {
         val file = modelFile
-        if (file != null && file.exists() && file.length() > 0) {
-            Result.success(Unit)
-        } else {
-            Result.failure(IllegalStateException("Whisper model not found or empty"))
+        if (file == null || !file.exists() || file.length() <= 0) {
+            return@withContext Result.failure(IllegalStateException("Whisper model not found or empty"))
+        }
+        try {
+            if (WhisperNative.init(file.absolutePath)) {
+                Result.success(Unit)
+            } else {
+                Result.failure(IllegalStateException("Whisper model init failed"))
+            }
+        } catch (e: UnsatisfiedLinkError) {
+            Result.failure(IllegalStateException("Whisper native library not available", e))
         }
     }
 

@@ -55,7 +55,11 @@ class FunctionGemmaIntentRouter @Inject constructor(
         context: VoiceRecognitionContext,
     ): VoiceIntent? = withContext(Dispatchers.IO) {
         if (transcript.isBlank()) return@withContext null
-        val state = stateMutex.withLock { activeState } ?: return@withContext null
+        val state = stateMutex.withLock { activeState }
+        if (state == null) {
+            Timber.w("FunctionGemma pool not ready — ensureReady() was not called before recognize()")
+            return@withContext null
+        }
 
         try {
             consumeAndResolve(state, transcript)

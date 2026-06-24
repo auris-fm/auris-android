@@ -57,6 +57,19 @@ static bool ensureModel(const std::string& path) {
 
 extern "C" {
 
+JNIEXPORT jboolean JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_WhisperNative_init(
+    JNIEnv* env, jclass, jstring j_model_path
+) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    ggml_log_set(whisperGgmlLog, nullptr);
+    whisper_log_set(whisperGgmlLog, nullptr);
+    initVulkanEnv();
+
+    std::string modelPath = jstringToString(env, j_model_path);
+    return ensureModel(modelPath) ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT jstring JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_WhisperNative_transcribe(
     JNIEnv* env, jclass, jstring j_model_path, jshortArray j_pcm_data, jint j_sample_rate

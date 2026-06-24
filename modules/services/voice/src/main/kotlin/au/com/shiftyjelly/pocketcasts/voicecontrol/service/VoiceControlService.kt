@@ -110,24 +110,28 @@ class VoiceControlService : Service() {
         // Start monitoring transient conflict conditions
         liveConditionMonitor.start()
 
-        // Observe listening mode + audio route: restart engine on any change
-        modeJob = kotlinx.coroutines.flow.combine(
-            listeningModePolicy.mode,
-            audioRouteMonitor.route,
-        ) { mode, _ -> mode }.onEach { mode ->
-            when (mode) {
-                ListeningMode.Off -> stopEngine()
+        // Handle models first: defer mode observation until readiness completes.
+        // This avoids lazy init on first utterance — both whisper and the
+        // FunctionGemma inference runtime are fully prepared before audio capture.
+        serviceScope.launch(Dispatchers.IO) {
+            ensureModelsReady()
+            launch(Dispatchers.Main) {
+                modeJob = kotlinx.coroutines.flow.combine(
+                    listeningModePolicy.mode,
+                    audioRouteMonitor.route,
+                ) { mode, _ -> mode }.onEach { mode ->
+                    when (mode) {
+                        ListeningMode.Off -> stopEngine()
 
-                ListeningMode.Continuous, ListeningMode.WakeWord -> {
-                    if (engineStarted) stopEngine()
-                    @Suppress("MissingPermission") // permission checked in hasRequiredPermissions() above
-                    startEngine(mode)
-                }
+                        ListeningMode.Continuous, ListeningMode.WakeWord -> {
+                            if (engineStarted) stopEngine()
+                            @Suppress("MissingPermission") // permission checked in hasRequiredPermissions() above
+                            startEngine(mode)
+                        }
+                    }
+                }.launchIn(serviceScope)
             }
-        }.launchIn(serviceScope)
-
-        // Handle models
-        serviceScope.launch(Dispatchers.IO) { ensureModelsReady() }
+        }
 
         Timber.i("Voice control service started, observing listening mode")
     }

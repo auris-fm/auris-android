@@ -44,8 +44,8 @@ class NativeVadSegmenter @Inject constructor(
 
     // Target ~3.5s total audio for reliable language auto-detection in whisper.
     // Short utterances need more drain; long ones have enough context already.
-    private val minPostSpeechDrainFrames = 10  // ~640ms — floor for long utterances
-    private val targetTotalFrames = 55         // ~3.5s including pre-speech context
+    private val minPostSpeechDrainFrames = 10 // ~640ms — floor for long utterances
+    private val targetTotalFrames = 55 // ~3.5s including pre-speech context
     private var drainRemaining = 0
 
     // Conservative noise rejection; higher values need quiet-speech recordings

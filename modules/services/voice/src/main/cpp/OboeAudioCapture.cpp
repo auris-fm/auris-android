@@ -194,13 +194,13 @@ bool OboeAudioCapture::waitForData(int32_t timeoutMs) {
 int32_t OboeAudioCapture::readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs) {
     std::unique_lock<std::mutex> lock(mWaitMutex);
     bool ready = mDataCv.wait_for(lock, std::chrono::milliseconds(timeoutMs),
-        [this]{ return mRingBuffer.available() > 0 || !isActive(); });
+        [this, maxSamples]{ return mRingBuffer.available() >= maxSamples || !isActive(); });
 
     if (!isActive()) {
         return -1;
     }
 
-    if (!ready || mRingBuffer.available() <= 0) {
+    if (!ready || mRingBuffer.available() < maxSamples) {
         return 0;
     }
 
@@ -218,7 +218,6 @@ oboe::DataCallbackResult OboeAudioCapture::onAudioReady(
     mRingBuffer.write(inputData, numSamples);
     mDataCv.notify_one();
 
-    // Keep the stream running
     return oboe::DataCallbackResult::Continue;
 }
 

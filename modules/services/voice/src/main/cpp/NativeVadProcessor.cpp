@@ -177,17 +177,17 @@ static void addToContext(
 void NativeVadProcessor::runLoop() {
     LOGI("VAD runLoop started");
 
-    // Stack-allocated frame buffer — avoids heap allocation per iteration.
     int16_t chunk[kVadFrameSize];
 
     while (mActive.load(std::memory_order_acquire)) {
-        // 1. Block on ring buffer for one VAD frame.
+        // 1. Block on ring buffer for one full VAD frame.
+        // readRingBuffer waits for >=1024 samples to accumulate.
         int32_t read = mCapture->readRingBuffer(chunk, kVadFrameSize, 500);
         if (read < 0) {
             break; // stream inactive
         }
         if (read < kVadFrameSize) {
-            continue; // timeout or partial read — retry
+            continue; // timeout — retry
         }
 
         // 2. Cooldown gate — discard frames while cooldown is active.

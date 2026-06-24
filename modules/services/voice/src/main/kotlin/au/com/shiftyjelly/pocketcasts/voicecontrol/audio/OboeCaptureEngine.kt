@@ -65,10 +65,7 @@ internal class OboeCaptureEngine(
         try {
             while (currentCoroutineContext().isActive && !disposed) {
                 when (val event = OboeNative.nativeWaitForVadEvent(500)) {
-                    1 -> {
-                        Timber.i("VAD: speech started")
-                        emit(VoiceSegmenterResult.SpeechStarted)
-                    }
+                    1 -> emit(VoiceSegmenterResult.SpeechStarted)
 
                     2 -> {
                         val totalSamples = OboeNative.nativeGetSpeechPcmSize()
@@ -84,18 +81,14 @@ internal class OboeCaptureEngine(
                                     frames.add(PcmAudioFrame(frameSamples, OboeConfig.SAMPLE_RATE_HZ))
                                     offset += frameSize
                                 }
-                                Timber.i("VAD: speech ended (%d frames, %d samples)", frames.size, copied)
                                 emit(VoiceSegmenterResult.SpeechEnded(frames))
                             }
                         }
                     }
 
-                    0 -> { /* timeout — no event, continue waiting */ }
+                    0 -> { /* timeout */ }
 
-                    -1 -> {
-                        Timber.i("VAD: processor stopped")
-                        break
-                    }
+                    -1 -> break
                 }
             }
         } finally {

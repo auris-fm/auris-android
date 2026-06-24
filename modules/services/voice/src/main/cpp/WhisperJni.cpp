@@ -14,9 +14,8 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 static void whisperGgmlLog(enum ggml_log_level level, const char * text, void * /*user_data*/) {
-    int prio = ANDROID_LOG_INFO;
+    int prio = ANDROID_LOG_WARN;
     if (level == GGML_LOG_LEVEL_ERROR) prio = ANDROID_LOG_ERROR;
-    else if (level == GGML_LOG_LEVEL_WARN) prio = ANDROID_LOG_WARN;
     __android_log_write(prio, "whisper.cpp", text);
 }
 
@@ -37,10 +36,6 @@ static void initVulkanEnv() {
 static std::mutex g_mutex;
 static whisper_context* g_ctx = nullptr;
 static std::string g_model_path;
-
-static void whisperProgress(struct whisper_context*, struct whisper_state*, int progress, void*) {
-    LOGI("whisper progress: %d%%", progress);
-}
 
 static bool ensureModel(const std::string& path) {
     if (g_ctx && g_model_path == path) return true;
@@ -120,21 +115,15 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_asr_WhisperNative_transcribe(
     // DIAGNOSTIC: disable temperature fallback so the decode is a single greedy
     // pass (no 6-step retry ladder). Measures the whisper-small CPU floor.
     wparams.temperature_inc = 0.0f;
-    wparams.progress_callback = whisperProgress;
-
-    LOGI("whisper_full START: %d samples (%dms), audio_ctx=%d, lang=%s, translate=%d, temp_inc=%.2f",
-         (int)pcmF32.size(), (int)(pcmF32.size() * 1000 / 16000), audioCtx,
-         wparams.language ? wparams.language : "(null)", wparams.translate, wparams.temperature_inc);
+    wparams.progress_callback = nullptr;
 
     whisper_reset_timings(g_ctx);
     auto t0 = std::chrono::steady_clock::now();
     int decodeResult = whisper_full(g_ctx, wparams, pcmF32.data(), (int)pcmF32.size());
     auto t1 = std::chrono::steady_clock::now();
     auto inferMs = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
-    LOGI("whisper_full: %lldms, %d threads, audio_ctx=%d, %d samples (%dms audio)",
-         (long long)inferMs, nThreads, audioCtx, (int)pcmF32.size(), (int)(pcmF32.size() * 1000 / 16000));
-    // DIAGNOSTIC: prints encode/decode/sample ms + token count to tag "whisper.cpp"
-    whisper_print_timings(g_ctx);
+    LOGI("whisper: %lldms, %d samples (%dms audio)",
+         (long long)inferMs, (int)pcmF32.size(), (int)(pcmF32.size() * 1000 / 16000));
 
     if (decodeResult != 0)
         return stringToJstring(env, "");

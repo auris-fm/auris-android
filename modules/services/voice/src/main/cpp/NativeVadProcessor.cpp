@@ -257,8 +257,7 @@ void NativeVadProcessor::runLoop() {
                 mEventReady = true;
                 mEventCv.notify_one();
 
-                LOGI("VAD: speech started (context=%d frames flushed)",
-                    (mSpeechFrames > 0 ? mSpeechFrames : 0));
+                LOGI("VAD: speech started");
             }
 
             // Accumulate current frame.
@@ -293,7 +292,6 @@ void NativeVadProcessor::runLoop() {
                         needed = 40;
                     }
                     mDrainRemaining = needed;
-                    LOGI("VAD: drain phase started, %d frames remaining", mDrainRemaining);
                 }
 
                 mDrainRemaining--;

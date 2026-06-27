@@ -1,0 +1,88 @@
+--- ggml/src/ggml-vulkan/ggml-vulkan.cpp.orig	2026-06-25 04:27:54
++++ ggml/src/ggml-vulkan/ggml-vulkan.cpp	2026-06-25 09:15:33
+@@ -22,6 +22,7 @@
+ #include <vulkan/vulkan.hpp>
+ 
+ #include <algorithm>
++#include <cstdio>
+ #include <cmath>
+ #include <iomanip>
+ #include <iostream>
+@@ -218,6 +219,9 @@
+ // sharing the same vk::Queue.
+ static std::mutex queue_mutex;
+ 
++// Pipeline cache file path, set via GGML_VULKAN_PIPELINE_CACHE_PATH env var
++static std::string g_pipeline_cache_path;
++
+ struct vk_queue {
+     uint32_t queue_family_index;
+     vk::Queue queue;
+@@ -595,6 +599,7 @@
+     bool pipeline_robustness;
+     bool memory_priority;
+     vk::Device device;
++    vk::PipelineCache pipeline_cache;
+     uint32_t vendor_id;
+     vk::DriverId driver_id;
+     vk_device_architecture architecture;
+@@ -2190,7 +2195,9 @@
+ #endif
+ 
+     try {
+-        pipeline->pipeline = device->device.createComputePipeline(VK_NULL_HANDLE, compute_pipeline_create_info).value;
++        pipeline->pipeline = device->device.createComputePipeline(
++            device->pipeline_cache ? device->pipeline_cache : VK_NULL_HANDLE,
++            compute_pipeline_create_info).value;
+     } catch (const vk::SystemError& e) {
+         std::cerr << "ggml_vulkan: Compute pipeline creation failed for " << pipeline->name << std::endl;
+         std::cerr << "ggml_vulkan: " << e.what() << std::endl;
+@@ -5375,6 +5382,29 @@
+         };
+         device_create_info.setPNext(&device_features2);
+         device->device = device->physical_device.createDevice(device_create_info);
++
++        // Pipeline cache — load from disk if path set via env var
++        {
++            const char* cache_path = getenv("GGML_VULKAN_PIPELINE_CACHE_PATH");
++            if (cache_path && cache_path[0] != '\0') {
++                g_pipeline_cache_path = cache_path;
++                FILE* f = fopen(cache_path, "rb");
++                if (f) {
++                    fseek(f, 0, SEEK_END);
++                    size_t sz = ftell(f);
++                    fseek(f, 0, SEEK_SET);
++                    std::vector<char> data(sz);
++                    fread(data.data(), 1, sz, f);
++                    fclose(f);
++                    vk::PipelineCacheCreateInfo ci;
++                    ci.initialDataSize = sz;
++                    ci.pInitialData = data.data();
++                    device->pipeline_cache = device->device.createPipelineCache(ci);
++                } else {
++                    device->pipeline_cache = device->device.createPipelineCache({});
++                }
++            }
++        }
+ 
+         // Queues
+         ggml_vk_create_queue(device, device->compute_queue, compute_queue_family_index, 0, { vk::PipelineStageFlagBits::eComputeShader | vk::PipelineStageFlagBits::eTransfer }, false);
+@@ -13591,6 +13621,18 @@
+     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
+     VK_LOG_DEBUG("ggml_backend_vk_free(" << ctx->name << ")");
+ 
++    // Save pipeline cache before cleanup (deterministic, unlike destructor)
++    if (ctx->device->pipeline_cache && !g_pipeline_cache_path.empty()) {
++        auto cache_data = ctx->device->device.getPipelineCacheData(ctx->device->pipeline_cache);
++        FILE* f = fopen(g_pipeline_cache_path.c_str(), "wb");
++        if (f) {
++            fwrite(cache_data.data(), 1, cache_data.size(), f);
++            fclose(f);
++        }
++        ctx->device->device.destroyPipelineCache(ctx->device->pipeline_cache);
++        ctx->device->pipeline_cache = VK_NULL_HANDLE;
++    }
++
+     ggml_vk_cleanup(ctx);
+ 
+     delete ctx;

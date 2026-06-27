@@ -11,6 +11,10 @@ endif()
 
 include(FetchContent)
 
+# NDK provides vulkan.h but not vulkan.hpp (C++ bindings). The ggml Vulkan
+# backend requires vulkan.hpp. We ship matching v1.3.275 headers in vulkan_hpp/.
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/vulkan_hpp)
+
 # Build Oboe from source (statically linked) to get proper 16KB segment alignment.
 FetchContent_Declare(
     oboe
@@ -20,17 +24,12 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(oboe)
 
-# Build whisper.cpp from source for on-device ASR.
-# Disable GPU backends (Android NDK lacks glslc, Metal is Apple-only).
-#
-# Optimization notes:
-#   - ggml matmul at -O0 (debug default) runs 20-50x slower; -O2 is forced below.
-#   - flash_attn is a GPU-only feature; ggml-cpu ignores it, so don't bother.
-#   - GGML_CPU_ALL_VERSIONS is redundant with -march=armv8.2-a+dotprod above.
-#   - -march=armv8.2-a+dotprod + -O2 is the optimal CPU config for Pixel 8.
-set(WHISPER_VULKAN OFF CACHE BOOL "" FORCE)
+# Build whisper.cpp from source for on-device ASR with Vulkan GPU backend.
+# ggml compiles GLSL shaders to SPIR-V via glslc (from Vulkan SDK, via Homebrew).
+set(WHISPER_VULKAN ON CACHE BOOL "" FORCE)
 set(WHISPER_SDL2 OFF CACHE BOOL "" FORCE)
-set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+set(GGML_VULKAN_DEBUG ON CACHE BOOL "" FORCE)
 set(GGML_METAL OFF CACHE BOOL "" FORCE)
 set(GGML_CUDA OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
@@ -39,9 +38,25 @@ FetchContent_Declare(
     GIT_TAG v1.8.4
     GIT_SHALLOW TRUE
 )
+
+FetchContent_GetProperties(whispercpp)
+if(NOT whispercpp_POPULATED)
+    FetchContent_Populate(whispercpp)
+endif()
+find_program(PATCH_EXECUTABLE patch REQUIRED)
+execute_process(
+    COMMAND ${PATCH_EXECUTABLE} -p0 -N -i ${CMAKE_CURRENT_SOURCE_DIR}/ggml-vulkan-pipeline-cache.patch
+    WORKING_DIRECTORY ${whispercpp_SOURCE_DIR}
+    RESULT_VARIABLE _patch_result
+    ERROR_VARIABLE _patch_error
+)
+if(NOT _patch_result EQUAL 0)
+    message(WARNING "pipeline cache patch failed (exit ${_patch_result}): ${_patch_error}")
+endif()
+
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(WHISPER_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(whispercpp)
+add_subdirectory(${whispercpp_SOURCE_DIR} ${whispercpp_BINARY_DIR})
 
 # Force -O2 on ggml targets even in debug builds — without this, ggml matmul at -O0
 # takes 12–24s per encode pass on a Pixel 8 instead of well under a second.

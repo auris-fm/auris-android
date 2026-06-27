@@ -20,6 +20,7 @@ internal fun normalizeWhisperTranscript(text: String): String? {
 class WhisperCppBackend @Inject constructor() : AsrBackend {
 
     private var modelFile: File? = null
+    var useGpu: Boolean = false
 
     override suspend fun ensureReady(): Result<Unit> = withContext(Dispatchers.IO) {
         val file = modelFile
@@ -27,7 +28,11 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
             return@withContext Result.failure(IllegalStateException("Whisper model not found or empty"))
         }
         try {
-            if (WhisperNative.init(file.absolutePath)) {
+            if (useGpu) {
+                val cacheFile = java.io.File(file.parentFile, "vulkan_pipeline_cache.bin")
+                WhisperNative.setPipelineCachePath(cacheFile.absolutePath)
+            }
+            if (WhisperNative.init(file.absolutePath, useGpu)) {
                 Result.success(Unit)
             } else {
                 Result.failure(IllegalStateException("Whisper model init failed"))
@@ -39,7 +44,6 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
 
     /**
      * Sets the model file path. Must be called before [ensureReady].
-     * Called by [au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager] after download.
      */
     fun setModelFile(file: File) {
         modelFile = file
@@ -52,13 +56,12 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
             (samples[i] * 32768f).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
         }
         try {
-            val text = WhisperNative.transcribe(path, shortSamples, sampleRateHz)
+            val text = WhisperNative.transcribe(path, shortSamples, sampleRateHz, useGpu)
             Timber.i("Whisper ASR: '%s'", text)
             val transcript = normalizeWhisperTranscript(text)
             if (transcript == null) {
                 AsrResult(text = "", detectedLanguage = null)
             } else {
-                // whisper.cpp translate mode always outputs English
                 AsrResult(text = transcript, detectedLanguage = "en")
             }
         } catch (e: Exception) {
@@ -79,12 +82,12 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
     )
 
     override val capabilities: AsrCapabilities = AsrCapabilities(
-        supportedLanguages = emptySet(), // All languages via translate-to-English
+        supportedLanguages = emptySet(),
         canTranslateToEnglish = true,
         requiresSnapdragon = false,
     )
 
     override fun release() {
-        // Model file persists; only native resources (if any) should be released here.
+        WhisperNative.freeModel()
     }
 }

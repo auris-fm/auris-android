@@ -1,0 +1,1 @@
+{"model":"3dspeaker_speech_eres2net_sv_en_voxceleb_16k","architecture":"ERes2Net","source":"3D-Speaker","embedding_dim":192,"sample_rate":16000,"optimal_threshold":0.591,"eer":0.0,"benchmark_speakers":2,"benchmark_phrases":10}

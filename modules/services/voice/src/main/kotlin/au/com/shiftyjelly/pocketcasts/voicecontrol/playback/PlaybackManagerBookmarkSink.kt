@@ -46,7 +46,7 @@ class PlaybackManagerBookmarkSink @Inject constructor(
 
     override fun deleteAll(): VoiceResponse {
         // TODO: delete all bookmarks for current episode
-        return VoiceResponse.Earcon(EarconId.SUCCESS)
+        return VoiceResponse.Earcon(EarconId.CONFIRM_REQUIRED)
     }
 
     override fun queryList(): VoiceResponse.Spoken {

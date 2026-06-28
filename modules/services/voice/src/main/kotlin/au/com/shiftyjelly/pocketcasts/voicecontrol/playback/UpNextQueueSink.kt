@@ -34,7 +34,7 @@ class UpNextQueueSink @Inject constructor(
 
     override fun clear(): VoiceResponse {
         playbackManager.clearUpNextAsync()
-        return VoiceResponse.Earcon(EarconId.SUCCESS)
+        return VoiceResponse.Earcon(EarconId.CONFIRM_REQUIRED)
     }
 
     override suspend fun removeByPodcast(podcast: String): VoiceResponse {

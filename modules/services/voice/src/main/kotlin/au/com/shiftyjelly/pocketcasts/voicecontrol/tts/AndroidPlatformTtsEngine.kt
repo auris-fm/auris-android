@@ -3,7 +3,9 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.tts
 import android.content.Context
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.Locale
+import javax.inject.Inject
 import kotlin.coroutines.resume
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -11,7 +13,9 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
-class AndroidPlatformTtsEngine(context: Context) : TtsEngine {
+class AndroidPlatformTtsEngine @Inject constructor(
+    @ApplicationContext context: Context,
+) : TtsEngine {
     private var tts: TextToSpeech? = null
     private var initialized = false
     private var released = false

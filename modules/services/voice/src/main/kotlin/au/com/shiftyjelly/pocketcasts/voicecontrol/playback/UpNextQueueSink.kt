@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
 import au.com.shiftyjelly.pocketcasts.analytics.SourceView
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -12,36 +13,36 @@ class UpNextQueueSink @Inject constructor(
 ) : VoiceQueueSink {
     override suspend fun addTop(episode: String?): VoiceResponse {
         // Episode resolution by title/ref would be handled by fuzzy search
-        return VoiceResponse.Earcon("queue")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override suspend fun addBottom(episode: String?): VoiceResponse {
-        return VoiceResponse.Earcon("queue")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override suspend fun remove(episode: String): VoiceResponse {
-        return VoiceResponse.Earcon("queue")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override suspend fun moveToTop(episode: String): VoiceResponse {
-        return VoiceResponse.Earcon("queue")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override suspend fun moveToBottom(episode: String): VoiceResponse {
-        return VoiceResponse.Earcon("queue")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override fun clear(): VoiceResponse {
         playbackManager.clearUpNextAsync()
-        return VoiceResponse.Earcon("queue")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override suspend fun removeByPodcast(podcast: String): VoiceResponse {
-        return VoiceResponse.Earcon("queue")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override fun sort(sortOrder: String): VoiceResponse {
-        return VoiceResponse.Earcon("queue")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override fun queryContents(): VoiceResponse.Spoken {

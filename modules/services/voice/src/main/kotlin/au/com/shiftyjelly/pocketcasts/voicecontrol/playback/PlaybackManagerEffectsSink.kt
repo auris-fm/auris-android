@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -15,7 +16,7 @@ class PlaybackManagerEffectsSink @Inject constructor(
     override fun setSpeed(speed: Double): VoiceResponse {
         val clamped = speed.coerceIn(0.5, 5.0)
         applySpeed(clamped)
-        return VoiceResponse.Earcon("speed")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override fun adjustSpeed(delta: Double): VoiceResponse {
@@ -23,7 +24,7 @@ class PlaybackManagerEffectsSink @Inject constructor(
         val clamped = (current + delta).coerceIn(0.5, 5.0)
         val rounded = (clamped * 10).roundToInt() / 10.0
         applySpeed(rounded)
-        return VoiceResponse.Earcon("speed")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override fun setTrimMode(mode: String): VoiceResponse {
@@ -34,7 +35,7 @@ class PlaybackManagerEffectsSink @Inject constructor(
         effects.trimMode = trimMode
         settings.globalPlaybackEffects.set(effects, updateModifiedAt = true)
         playbackManager.updatePlayerEffects(effects = effects)
-        return VoiceResponse.Earcon("trim")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override fun setVolumeBoost(enabled: Boolean): VoiceResponse {
@@ -42,7 +43,7 @@ class PlaybackManagerEffectsSink @Inject constructor(
         effects.isVolumeBoosted = enabled
         settings.globalPlaybackEffects.set(effects, updateModifiedAt = true)
         playbackManager.updatePlayerEffects(effects = effects)
-        return VoiceResponse.Earcon("volume_boost")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override fun queryEffects(): VoiceResponse.Spoken {

@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
 import android.content.Context
 import android.media.AudioManager
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -18,7 +19,7 @@ class AudioManagerVolumeSink @Inject constructor(
         val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
         val scaled = (volume * max / 100).coerceIn(0, max)
         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, scaled, 0)
-        return VoiceResponse.Earcon("volume")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override fun adjustVolume(delta: Int): VoiceResponse {
@@ -26,7 +27,7 @@ class AudioManagerVolumeSink @Inject constructor(
         val current = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
         val target = (current + delta * max / 100).coerceIn(0, max)
         audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
-        return VoiceResponse.Earcon("volume")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override fun query(): VoiceResponse.Spoken {

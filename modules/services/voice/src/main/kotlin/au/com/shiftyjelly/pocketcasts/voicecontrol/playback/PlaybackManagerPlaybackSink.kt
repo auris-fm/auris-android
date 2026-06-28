@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
 import au.com.shiftyjelly.pocketcasts.analytics.SourceView
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -12,7 +13,7 @@ class PlaybackManagerPlaybackSink @Inject constructor(
 ) : VoicePlaybackSink {
     override suspend fun pause(): VoiceResponse {
         playbackManager.pauseSuspend(sourceView = SourceView.VOICE_COMMANDS)
-        return VoiceResponse.Earcon("pause")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override suspend fun resume(): VoiceResponse {
@@ -37,6 +38,6 @@ class PlaybackManagerPlaybackSink @Inject constructor(
 
     override fun nextEpisode(): VoiceResponse {
         playbackManager.playNextInQueue(sourceView = SourceView.VOICE_COMMANDS)
-        return VoiceResponse.Earcon("next_episode")
+        return VoiceResponse.Earcon(EarconId.NEXT_EPISODE)
     }
 }

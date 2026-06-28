@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -27,7 +28,7 @@ class PlaybackManagerChapterSink @Inject constructor(
 
     override fun openLink(index: Int): VoiceResponse {
         playbackManager.skipToChapter(index)
-        return VoiceResponse.Earcon("chapter_link")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override fun queryList(): VoiceResponse.Spoken {

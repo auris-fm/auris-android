@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
 import au.com.shiftyjelly.pocketcasts.repositories.playback.SleepTimer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -12,27 +13,27 @@ class SleepTimerSink @Inject constructor(
 ) : VoiceSleepSink {
     override fun set(minutes: Int): VoiceResponse {
         sleepTimer.sleepAfter(minutes.minutes)
-        return VoiceResponse.Earcon("sleep")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override fun endOfEpisode(): VoiceResponse {
         sleepTimer.updateSleepTimerStatus(sleepTimeRunning = true, sleepAfterEpisodes = 1)
-        return VoiceResponse.Earcon("sleep")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override fun endOfChapter(): VoiceResponse {
         sleepTimer.updateSleepTimerStatus(sleepTimeRunning = true, sleepAfterChapters = 1)
-        return VoiceResponse.Earcon("sleep")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override fun addTime(minutes: Int): VoiceResponse {
         sleepTimer.addExtraTime(minutes.minutes)
-        return VoiceResponse.Earcon("sleep")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override fun cancel(): VoiceResponse {
         sleepTimer.cancelTimer()
-        return VoiceResponse.Earcon("sleep")
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override fun query(): VoiceResponse.Spoken {

@@ -17,6 +17,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.speaker.SpeakerVerificationGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.CommandWindow
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -26,6 +27,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import timber.log.Timber
@@ -36,6 +38,7 @@ class VoiceAsrEngine @Inject constructor(
     private val utteranceFilter: UtteranceFilter,
     private val intentRecognizer: VoiceRecognizer,
     private val wakeWordDetector: WakeWordDetector,
+    private val speakerVerificationGate: SpeakerVerificationGate,
     @ApplicationContext private val context: Context,
 ) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -124,12 +127,28 @@ class VoiceAsrEngine @Inject constructor(
 
         val mode = currentMode
         return when (mode) {
-            ListeningMode.Continuous -> floatSamples
+            ListeningMode.Continuous -> {
+                if (speakerVerificationGate.verify(floatSamples)) floatSamples else null
+            }
 
             ListeningMode.WakeWord -> {
-                val wwResult = runCatching {
-                    wakeWordDetector.detect(floatSamples, segment.frames.firstOrNull()?.sampleRateHz ?: 16000)
-                }.getOrElse { e ->
+                // Run wake word and speaker verification in parallel
+                val wwDeferred = scope.async {
+                    runCatching {
+                        wakeWordDetector.detect(floatSamples, segment.frames.firstOrNull()?.sampleRateHz ?: 16000)
+                    }
+                }
+                val svDeferred = scope.async {
+                    speakerVerificationGate.verify(floatSamples)
+                }
+
+                val svPassed = svDeferred.await()
+                if (!svPassed) {
+                    wwDeferred.cancel()
+                    return null
+                }
+
+                val wwResult = wwDeferred.await().getOrElse { e ->
                     Timber.w(e, "Wake word detection failed, dropping segment")
                     return null
                 }

@@ -25,6 +25,8 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentE
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.speaker.SpeakerEmbedder
+import au.com.shiftyjelly.pocketcasts.voicecontrol.speaker.SpeakerVerificationGate
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
@@ -67,6 +69,10 @@ class VoiceControlService : Service() {
     @Inject lateinit var modelsReadyCondition: ModelsReadyCondition
 
     @Inject lateinit var audioFeedbackRenderer: AudioFeedbackRenderer
+
+    @Inject lateinit var speakerEmbedder: SpeakerEmbedder
+
+    @Inject lateinit var speakerVerificationGate: SpeakerVerificationGate
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var modeJob: Job? = null
@@ -180,6 +186,26 @@ class VoiceControlService : Service() {
             return
         }
         Timber.i("Intent router initialized")
+
+        // Load speaker embedding model from bundled assets
+        try {
+            val modelBytes = assets.open("speaker_embed.ort").readBytes()
+            val configJson = assets.open("speaker_embed.json").bufferedReader().readText()
+            if (!speakerEmbedder.load(modelBytes, configJson)) {
+                Timber.e("Speaker embedder failed to load")
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "Speaker embedder model not available, voice control blocked")
+            modelsReadyCondition.update(isReady = false, failed = true)
+            return
+        }
+
+        // Enrollment required before voice control activates
+        if (!speakerVerificationGate.isReady) {
+            Timber.w("Speaker enrollment required")
+            modelsReadyCondition.update(isReady = false, failed = false)
+            return
+        }
 
         modelsReadyCondition.update(isReady = true)
         Timber.i("Voice control models ready")

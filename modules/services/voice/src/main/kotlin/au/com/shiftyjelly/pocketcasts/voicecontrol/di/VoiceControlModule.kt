@@ -7,6 +7,8 @@ import android.telephony.TelephonyManager
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.repositories.chromecast.CastManager
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.foreground.ForegroundStateMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.EnabledByUserCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
@@ -59,6 +61,8 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceVolumeSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoutePolicyRule
+import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.AndroidPlatformTtsEngine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.OpenWakeWordDetector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import dagger.Binds
@@ -117,6 +121,8 @@ abstract class VoiceControlModule {
     @Binds abstract fun bindEntityExtractor(impl: GrammarEntityExtractor): EntityExtractor
 
     @Binds abstract fun bindWakeWordDetector(impl: OpenWakeWordDetector): WakeWordDetector
+
+    @Binds abstract fun bindTtsEngine(impl: AndroidPlatformTtsEngine): TtsEngine
 
     companion object {
         @Provides
@@ -201,5 +207,16 @@ abstract class VoiceControlModule {
             )
             return VoiceControlGate(rules = rules, scope = scope)
         }
+
+        @Provides
+        @Singleton
+        fun provideEarconPlayer(@ApplicationContext context: Context): EarconPlayer = EarconPlayer(context)
+
+        @Provides
+        @Singleton
+        fun provideAudioFeedbackRenderer(
+            earconPlayer: EarconPlayer,
+            ttsEngine: TtsEngine,
+        ): AudioFeedbackRenderer = AudioFeedbackRenderer(earconPlayer, ttsEngine)
     }
 }

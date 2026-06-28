@@ -11,6 +11,8 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.SenseVoiceBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.WhisperCppBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.LiveConditionMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition
@@ -63,6 +65,8 @@ class VoiceControlService : Service() {
     @Inject lateinit var modelManager: au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 
     @Inject lateinit var modelsReadyCondition: ModelsReadyCondition
+
+    @Inject lateinit var audioFeedbackRenderer: AudioFeedbackRenderer
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var modeJob: Job? = null
@@ -211,6 +215,10 @@ class VoiceControlService : Service() {
             )
             engineStarted = true
 
+            if (mode == ListeningMode.WakeWord) {
+                audioFeedbackRenderer.playEarcon(EarconId.LISTENING_START)
+            }
+
             val notification = notificationManager.createListeningNotification()
             notificationManager.notify(notification)
             Timber.i("Engine started in %s mode", mode)
@@ -239,7 +247,10 @@ class VoiceControlService : Service() {
         lastCommandTime = now
 
         Timber.i("Executing: $intent")
-        serviceScope.launch(Dispatchers.IO) { voicePlaybackIntentExecutor.execute(intent) }
+        serviceScope.launch(Dispatchers.IO) {
+            val response = voicePlaybackIntentExecutor.execute(intent)
+            audioFeedbackRenderer.render(response)
+        }
     }
 
     private fun stopVoiceControl() {
@@ -248,6 +259,7 @@ class VoiceControlService : Service() {
         stopEngine()
         voiceRecognizer.release()
         liveConditionMonitor.stop()
+        audioFeedbackRenderer.release()
         notificationManager.cancelNotification()
         stopForeground(STOP_FOREGROUND_REMOVE)
         serviceScope.cancel()

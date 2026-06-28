@@ -65,6 +65,19 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeReadAudi
     return static_cast<jint>(framesRead);
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeAudioWaitForData(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/,
+    jint timeoutMs)
+{
+    std::lock_guard<std::mutex> lock(gCaptureMutex);
+    if (gCapture == nullptr) {
+        return JNI_FALSE;
+    }
+    return gCapture->waitForData(static_cast<int32_t>(timeoutMs)) ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStopCapture(
     JNIEnv* /*env*/,

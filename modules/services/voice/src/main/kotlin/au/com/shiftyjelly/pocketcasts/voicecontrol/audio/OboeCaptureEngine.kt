@@ -2,7 +2,6 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.audio
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -22,6 +21,7 @@ internal object OboeNative {
 
     external fun nativeStartCapture(sampleRate: Int, channels: Int): Boolean
     external fun nativeReadAudioData(buffer: ShortArray): Int
+    external fun nativeAudioWaitForData(timeoutMs: Int): Boolean
     external fun nativeStopCapture()
     external fun nativeCloseCapture()
     external fun nativeIsCapturing(): Boolean
@@ -32,7 +32,6 @@ internal object OboeConfig {
     const val SAMPLE_RATE_HZ = 16_000
     const val CHANNELS = 1
     const val FRAMES_PER_POLL = 1024 // 64ms at 16kHz
-    const val POLL_INTERVAL_MS = 10L
 }
 
 /**
@@ -57,13 +56,15 @@ internal class OboeCaptureEngine {
         val channels = OboeConfig.CHANNELS
 
         try {
-            while (currentCoroutineContext().isActive && OboeNative.nativeIsCapturing() && !disposed) {
-                val framesRead = OboeNative.nativeReadAudioData(buffer)
-                if (framesRead > 0) {
-                    val samples = buffer.copyOf(framesRead * channels)
-                    emit(PcmAudioFrame(samples, OboeConfig.SAMPLE_RATE_HZ))
-                } else {
-                    delay(OboeConfig.POLL_INTERVAL_MS)
+            while (currentCoroutineContext().isActive && !disposed) {
+                if (OboeNative.nativeAudioWaitForData(100)) {
+                    val framesRead = OboeNative.nativeReadAudioData(buffer)
+                    if (framesRead > 0) {
+                        val samples = buffer.copyOf(framesRead * channels)
+                        emit(PcmAudioFrame(samples, OboeConfig.SAMPLE_RATE_HZ))
+                    }
+                } else if (!OboeNative.nativeIsCapturing()) {
+                    break
                 }
             }
         } finally {

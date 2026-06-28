@@ -76,7 +76,7 @@ class VoiceControlService : Service() {
             return START_NOT_STICKY
         }
         startVoiceControl()
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun startVoiceControl() {

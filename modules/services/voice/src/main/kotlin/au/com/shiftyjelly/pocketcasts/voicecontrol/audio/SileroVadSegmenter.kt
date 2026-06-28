@@ -72,7 +72,8 @@ class SileroVadSegmenter @Inject constructor(
             for (i in 0 until vadFrameSize) {
                 chunk[i] = pending.removeFirst()
             }
-            if (vad.isSpeech(chunk)) {
+            val rms = kotlin.math.sqrt(chunk.map { (it * it).toDouble() }.average())
+            if (rms >= 500.0 && vad.isSpeech(chunk)) {
                 currentSpeech = true
             }
         }

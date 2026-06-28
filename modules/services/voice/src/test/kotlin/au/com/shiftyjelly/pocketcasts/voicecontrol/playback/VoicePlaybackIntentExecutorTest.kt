@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
@@ -15,7 +16,7 @@ class VoicePlaybackIntentExecutorTest {
 
         val response = executor.execute(VoiceIntent.Playback.Pause)
 
-        assertEquals(VoiceResponse.Earcon("pause"), response)
+        assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         assertEquals(listOf("pause"), sinks.playback.calls)
     }
 
@@ -81,7 +82,7 @@ class VoicePlaybackIntentExecutorTest {
 
         val response = executor.execute(VoiceIntent.Playback.NextEpisode)
 
-        assertEquals(VoiceResponse.Earcon("next_episode"), response)
+        assertEquals(VoiceResponse.Earcon(EarconId.NEXT_EPISODE), response)
         assertEquals(listOf("nextEpisode"), sinks.playback.calls)
     }
 
@@ -136,7 +137,7 @@ class VoicePlaybackIntentExecutorTest {
 
         val response = executor.execute(VoiceIntent.Effects.SetSpeed(1.25))
 
-        assertEquals(VoiceResponse.Earcon("speed"), response)
+        assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         assertEquals(listOf("setSpeed:1.25"), sinks.effects.calls)
     }
 
@@ -147,7 +148,7 @@ class VoicePlaybackIntentExecutorTest {
 
         val response = executor.execute(VoiceIntent.Volume.SetVolume(50))
 
-        assertEquals(VoiceResponse.Earcon("volume"), response)
+        assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         assertEquals(listOf("setVolume:50"), sinks.volume.calls)
     }
 
@@ -158,7 +159,7 @@ class VoicePlaybackIntentExecutorTest {
 
         val response = executor.execute(VoiceIntent.Sleep.Set(30))
 
-        assertEquals(VoiceResponse.Earcon("sleep"), response)
+        assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         assertEquals(listOf("set:30"), sinks.sleep.calls)
     }
 
@@ -169,7 +170,7 @@ class VoicePlaybackIntentExecutorTest {
 
         val response = executor.execute(VoiceIntent.Bookmark.Add("my bookmark"))
 
-        assertEquals(VoiceResponse.Earcon("bookmark"), response)
+        assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         assertEquals(listOf("add:my bookmark"), sinks.bookmark.calls)
     }
 
@@ -209,7 +210,7 @@ class VoicePlaybackIntentExecutorTest {
 
         val response = executor.execute(VoiceIntent.Queue.Clear)
 
-        assertEquals(VoiceResponse.Earcon("queue"), response)
+        assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         assertEquals(listOf("clear"), sinks.queue.calls)
     }
 
@@ -255,7 +256,7 @@ class VoicePlaybackIntentExecutorTest {
         val calls = mutableListOf<String>()
         override suspend fun pause(): VoiceResponse {
             calls += "pause"
-            return VoiceResponse.Earcon("pause")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override suspend fun resume(): VoiceResponse {
             calls += "resume"
@@ -275,7 +276,7 @@ class VoicePlaybackIntentExecutorTest {
         }
         override fun nextEpisode(): VoiceResponse {
             calls += "nextEpisode"
-            return VoiceResponse.Earcon("next_episode")
+            return VoiceResponse.Earcon(EarconId.NEXT_EPISODE)
         }
     }
 
@@ -283,19 +284,19 @@ class VoicePlaybackIntentExecutorTest {
         val calls = mutableListOf<String>()
         override fun setSpeed(speed: Double): VoiceResponse {
             calls += "setSpeed:$speed"
-            return VoiceResponse.Earcon("speed")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun adjustSpeed(delta: Double): VoiceResponse {
             calls += "adjustSpeed:$delta"
-            return VoiceResponse.Earcon("speed")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun setTrimMode(mode: String): VoiceResponse {
             calls += "setTrimMode:$mode"
-            return VoiceResponse.Earcon("trim")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun setVolumeBoost(enabled: Boolean): VoiceResponse {
             calls += "setVolumeBoost:$enabled"
-            return VoiceResponse.Earcon("volume_boost")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun queryEffects(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
     }
@@ -304,11 +305,11 @@ class VoicePlaybackIntentExecutorTest {
         val calls = mutableListOf<String>()
         override fun setVolume(volume: Int): VoiceResponse {
             calls += "setVolume:$volume"
-            return VoiceResponse.Earcon("volume")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun adjustVolume(delta: Int): VoiceResponse {
             calls += "adjustVolume:$delta"
-            return VoiceResponse.Earcon("volume")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun query(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
     }
@@ -317,23 +318,23 @@ class VoicePlaybackIntentExecutorTest {
         val calls = mutableListOf<String>()
         override fun set(minutes: Int): VoiceResponse {
             calls += "set:$minutes"
-            return VoiceResponse.Earcon("sleep")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun endOfEpisode(): VoiceResponse {
             calls += "endOfEpisode"
-            return VoiceResponse.Earcon("sleep")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun endOfChapter(): VoiceResponse {
             calls += "endOfChapter"
-            return VoiceResponse.Earcon("sleep")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun addTime(minutes: Int): VoiceResponse {
             calls += "addTime:$minutes"
-            return VoiceResponse.Earcon("sleep")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun cancel(): VoiceResponse {
             calls += "cancel"
-            return VoiceResponse.Earcon("sleep")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun query(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
     }
@@ -354,7 +355,7 @@ class VoicePlaybackIntentExecutorTest {
         }
         override fun openLink(index: Int): VoiceResponse {
             calls += "openLink:$index"
-            return VoiceResponse.Earcon("chapter_link")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun queryList(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
         override fun queryCurrent(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
@@ -366,11 +367,11 @@ class VoicePlaybackIntentExecutorTest {
         val calls = mutableListOf<String>()
         override suspend fun add(title: String?): VoiceResponse {
             calls += "add:$title"
-            return VoiceResponse.Earcon("bookmark")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun rename(ref: String, title: String): VoiceResponse {
             calls += "rename:$ref:$title"
-            return VoiceResponse.Earcon("bookmark")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun play(ref: String): VoiceResponse {
             calls += "play:$ref"
@@ -378,11 +379,11 @@ class VoicePlaybackIntentExecutorTest {
         }
         override fun delete(ref: String): VoiceResponse {
             calls += "delete:$ref"
-            return VoiceResponse.Earcon("bookmark")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun deleteAll(): VoiceResponse {
             calls += "deleteAll"
-            return VoiceResponse.Earcon("bookmark")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun queryList(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
         override fun queryCount(): VoiceResponse.Spoken = VoiceResponse.Spoken("query")
@@ -409,35 +410,35 @@ class VoicePlaybackIntentExecutorTest {
         val calls = mutableListOf<String>()
         override suspend fun addTop(episode: String?): VoiceResponse {
             calls += "addTop:$episode"
-            return VoiceResponse.Earcon("queue")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override suspend fun addBottom(episode: String?): VoiceResponse {
             calls += "addBottom:$episode"
-            return VoiceResponse.Earcon("queue")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override suspend fun remove(episode: String): VoiceResponse {
             calls += "remove:$episode"
-            return VoiceResponse.Earcon("queue")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override suspend fun moveToTop(episode: String): VoiceResponse {
             calls += "moveToTop:$episode"
-            return VoiceResponse.Earcon("queue")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override suspend fun moveToBottom(episode: String): VoiceResponse {
             calls += "moveToBottom:$episode"
-            return VoiceResponse.Earcon("queue")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun clear(): VoiceResponse {
             calls += "clear"
-            return VoiceResponse.Earcon("queue")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override suspend fun removeByPodcast(podcast: String): VoiceResponse {
             calls += "removeByPodcast:$podcast"
-            return VoiceResponse.Earcon("queue")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun sort(sortOrder: String): VoiceResponse {
             calls += "sort:$sortOrder"
-            return VoiceResponse.Earcon("queue")
+            return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override fun queryContents(): VoiceResponse.Spoken {
             calls += "queryContents"

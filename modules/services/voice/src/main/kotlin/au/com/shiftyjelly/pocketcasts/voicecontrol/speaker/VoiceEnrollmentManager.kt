@@ -17,12 +17,12 @@ sealed class EnrollmentState {
 }
 
 /**
- * State machine for speaker enrollment.
+ * State machine for speaker enrollment. Exactly 3 phrases:
+ *   - Monolingual: all 3 in one language.
+ *   - Bilingual: 2 primary + 1 secondary.
+ *   - Trilingual: 1 in each of the 3 languages.
  *
- * For bilingual users: 3 phrases from primary language + 1 phrase per
- * additional language (typically 4-5 total). For monolingual: 3 phrases.
- *
- * The voiceprint averages all enrollment embeddings — including samples
+ * The voiceprint averages all 3 enrollment embeddings — including samples
  * from multiple languages produces a language-robust voiceprint.
  */
 @Singleton
@@ -42,19 +42,26 @@ class VoiceEnrollmentManager @Inject constructor(
     fun isEnrolled(): Boolean = store.isEnrolled()
 
     /**
-     * Start enrollment with per-language phrase counts.
+     * Start enrollment with exactly 3 phrases across the given languages.
      *
-     * @param languageCounts Pairs of (languageTag, phraseCount). The first
-     *   language is the primary and gets 3 phrases; each additional gets 1.
-     *   Example: [("en", 3), ("zh", 1)] for a bilingual EN+ZH user.
+     * @param languages Non-empty list of language tags. Splits are:
+     *   1 language → [3], 2 languages → [2, 1], 3+ languages → [1, 1, 1].
+     *   Example: ["en", "zh"] for a bilingual EN+ZH user → 2 en + 1 zh.
      */
-    fun startEnrollment(languageCounts: List<Pair<String, Int>>) {
+    fun startEnrollment(languages: List<String> = listOf("")) {
         pending.clear()
 
-        // Build the phrase sequence: 3 from primary + 1 from each additional
+        val nLangs = languages.size
+        val counts = when {
+            nLangs == 1 -> listOf(3)
+            nLangs == 2 -> listOf(2, 1)
+            else -> List(minOf(3, nLangs)) { 1 }
+        }
+
         val sequence = mutableListOf<String?>()
-        for ((lang, count) in languageCounts) {
-            repeat(count) { sequence.add(lang) }
+        for (i in languages.indices) {
+            val count = counts.getOrElse(i) { 0 }
+            repeat(count) { sequence.add(if (languages[i].isEmpty()) null else languages[i]) }
         }
         languageSequence = sequence
         _state.value = EnrollmentState.Enrolling(
@@ -62,12 +69,12 @@ class VoiceEnrollmentManager @Inject constructor(
             total = sequence.size,
             languageHint = sequence.firstOrNull(),
         )
-        Timber.i("Enrollment started: %d phrases across %d languages", sequence.size, languageCounts.size)
-    }
-
-    /** Convenience: monolingual enrollment with 3 phrases. */
-    fun startEnrollment() {
-        startEnrollment(listOf(null to 3))
+        Timber.i(
+            "Enrollment started: %d phrases across %d languages (split: %s)",
+            sequence.size,
+            nLangs,
+            counts.joinToString(","),
+        )
     }
 
     fun submitUtterance(audio: FloatArray): Result<Unit> {

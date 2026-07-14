@@ -12,13 +12,9 @@ import timber.log.Timber
 /**
  * Wake word detector using an openWakeWord Conv-Attention classifier trained via livekit-wakeword.
  *
- * The deployment threshold is loaded from [assets/oww/auris_eval.json] (optimal_threshold),
- * falling back to a hardcoded default if the file is missing or unreadable.
- *
- * Known limitation: the model was trained on synthetic TTS audio augmented with room impulse
- * responses and background noise. Scores on real voice captured through the phone microphone
- * are significantly lower than on synthetic training clips (~0.05 vs ~0.95). Improving
- * real-voice detection requires fine-tuning with phone-recorded wake word examples.
+ * The deployment threshold is loaded from [assets/oww/auris_eval.json] (balanced_threshold),
+ * which is the elbow of the recall-vs-FPPH curve — no hardcoded FPPH ceiling. Falls back
+ * to a hardcoded default if the file is missing or unreadable.
  */
 @Singleton
 class OpenWakeWordDetector @Inject constructor(
@@ -91,12 +87,12 @@ class OpenWakeWordDetector @Inject constructor(
     private fun loadThreshold(): Float {
         return try {
             val json = context.assets.open("oww/auris_eval.json").use { it.readBytes() }
-            val threshold = JSONObject(String(json)).optDouble("optimal_threshold", -1.0)
+            val threshold = JSONObject(String(json)).optDouble("balanced_threshold", -1.0)
             if (threshold > 0.0) {
                 Timber.i("Loaded wake word threshold from auris_eval.json: %.3f", threshold)
                 threshold.toFloat()
             } else {
-                Timber.w("auris_eval.json missing optimal_threshold, using default")
+                Timber.w("auris_eval.json missing balanced_threshold, using default")
                 DEFAULT_THRESHOLD
             }
         } catch (e: Exception) {

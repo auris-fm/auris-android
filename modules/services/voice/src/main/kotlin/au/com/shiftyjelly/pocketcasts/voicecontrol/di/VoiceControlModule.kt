@@ -17,11 +17,12 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRule
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.AppInForegroundCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.BatteryOkCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.DeviceSupportedCondition
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.GracePeriodActiveCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotCastingCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotOnCallCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.OtherAppPlayingCondition
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.AttendedSignal
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.EmbeddingIntentMatcher
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.EntityExtractor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.FunctionGemmaIntentRouter
@@ -141,9 +142,6 @@ abstract class VoiceControlModule {
         fun provideEmbeddingTokenizerFile(manager: ModelManager): File = manager.tokenizerModelFile
 
         @Provides @Singleton
-        fun provideAttendedSignal(): AttendedSignal = AttendedSignal(timeoutMs = 30_000L)
-
-        @Provides @Singleton
         fun provideDeviceProbe(): au.com.shiftyjelly.pocketcasts.voicecontrol.asr.DeviceProbe = au.com.shiftyjelly.pocketcasts.voicecontrol.asr.DeviceProbe()
 
         @Provides @Singleton
@@ -199,6 +197,7 @@ abstract class VoiceControlModule {
         fun provideVoiceControlGate(
             playbackContextMonitor: PlaybackContextMonitor,
             audioRouteMonitor: AudioRouteMonitor,
+            gracePeriodSignal: GracePeriodSignal,
             settings: Settings,
             deviceSupported: DeviceSupportedCondition,
             modelsReady: ModelsReadyCondition,
@@ -223,6 +222,7 @@ abstract class VoiceControlModule {
                 // Context group
                 appInForeground,
                 PlaybackContextActiveCondition(playbackContextMonitor.context, scope),
+                GracePeriodActiveCondition(gracePeriodSignal, scope),
             )
             return VoiceControlGate(rules = rules, scope = scope)
         }

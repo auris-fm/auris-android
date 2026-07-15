@@ -146,30 +146,35 @@ class VoiceControlService : Service() {
                         ListeningMode.Off -> {
                             if (engineStarted) {
                                 // Active capture was ongoing, now stopping
-                                val blockedRules = gate.state.value.rules
+                                val gateState = gate.state.value
+                                val blockedRules = gateState.rules
                                     .filter { it.value !is VoiceControlRuleState.Allowed }
                                 val reasons = blockedRules.entries
                                     .joinToString(";") { "${it.key}=${it.value}" }
                                 val isUserRequested = blockedRules.keys.any {
                                     it == "voice_control_user_enabled"
                                 }
-                                val msg = "mic_capture_stopped: reasons=%s micExposure=%s route=%s mode=%s priorCaptureActive=true"
+                                val msg = "mic_capture_stopped: reasons=%s setup=%b conflicts=%b context=%b micExposure=%s route=%s mode=%s priorCaptureActive=true"
                                 if (isUserRequested) {
-                                    Timber.i(msg, reasons, micExposure, route, mode)
+                                    Timber.i(msg, reasons, gateState.setupPassed, gateState.conflictsPassed, gateState.contextPassed, micExposure, route, mode)
                                 } else {
-                                    Timber.e(msg, reasons, micExposure, route, mode)
+                                    Timber.e(msg, reasons, gateState.setupPassed, gateState.conflictsPassed, gateState.contextPassed, micExposure, route, mode)
                                 }
                                 stopEngine()
                             } else if (!captureWasEverActive && !acquisitionLogged) {
                                 // Capture never started — log once, not on every recomputation
                                 acquisitionLogged = true
-                                val blockedRules = gate.state.value.rules
+                                val gateState = gate.state.value
+                                val blockedRules = gateState.rules
                                     .filter { it.value !is VoiceControlRuleState.Allowed }
                                 val reasons = blockedRules.entries
                                     .joinToString(";") { "${it.key}=${it.value}" }
                                 Timber.i(
-                                    "mic_acquisition_skipped: reasons=%s micExposure=%s route=%s mode=%s priorCaptureActive=false",
+                                    "mic_acquisition_skipped: reasons=%s setup=%b conflicts=%b context=%b micExposure=%s route=%s mode=%s priorCaptureActive=false",
                                     reasons,
+                                    gateState.setupPassed,
+                                    gateState.conflictsPassed,
+                                    gateState.contextPassed,
                                     micExposure,
                                     route,
                                     mode,
@@ -183,7 +188,14 @@ class VoiceControlService : Service() {
                         ListeningMode.Continuous, ListeningMode.WakeWord -> {
                             captureWasEverActive = true
                             if (engineStarted) {
-                                voiceAsrEngine.get().updateListeningMode(mode)
+                                if (mode != currentMode) {
+                                    voiceAsrEngine.get().updateListeningMode(mode)
+                                    // Keep the wake-word hint accurate as grace opens/expires
+                                    val notification = notificationManager.createListeningNotification(
+                                        wakeWordRequired = mode == ListeningMode.WakeWord,
+                                    )
+                                    notificationManager.notify(notification)
+                                }
                             } else {
                                 @Suppress("MissingPermission") // permission checked in hasRequiredPermissions() above
                                 startEngine(mode)

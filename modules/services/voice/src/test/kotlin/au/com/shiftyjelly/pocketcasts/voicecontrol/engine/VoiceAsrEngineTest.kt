@@ -15,6 +15,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
@@ -22,6 +23,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
+import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -329,6 +331,128 @@ class VoiceAsrEngineTest {
 
         verify(audioManager, times(1)).startBluetoothSco()
         verify(audioManager, times(1)).stopBluetoothSco()
+
+        engine.stop()
+    }
+
+    // ── Wake-word detection paths ──────────────────────────────────────
+
+    private fun CoroutineScope.createEngineWithSpeech(
+        recognizer: VoiceRecognizer,
+        wakeWordResult: WakeWordResult,
+    ) {
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        kotlinx.coroutines.runBlocking {
+            `when`(wakeWordDetector.detect(any(), any())).thenReturn(wakeWordResult)
+        }
+
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            context = context,
+        )
+        engine.scope = this
+    }
+
+    @Test
+    fun `wake word detection opens grace plays earcon and forwards remainder to ASR`() = runTest {
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        createEngineWithSpeech(
+            recognizer = recognizer,
+            wakeWordResult = WakeWordResult(
+                detected = true,
+                confidence = 0.9f,
+                remainderSamples = floatArrayOf(0.1f, 0.2f, 0.3f),
+            ),
+        )
+        val handledIntents = mutableListOf<VoiceIntent>()
+
+        engine.start(
+            backend = FakeAsrBackend("pause"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.WakeWord,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { handledIntents += it },
+        )
+        advanceUntilIdle()
+
+        verify(gracePeriodSignal).onWakeWordDetected()
+        verify(audioFeedbackRenderer).playEarcon(EarconId.WAKE_WORD)
+        assertEquals(listOf("ensureReady", "recognize:pause"), recognizer.calls)
+        assertEquals(listOf(VoiceIntent.Playback.Pause), handledIntents)
+
+        engine.stop()
+    }
+
+    @Test
+    fun `wake-only detection opens grace plays error earcon and skips ASR`() = runTest {
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        createEngineWithSpeech(
+            recognizer = recognizer,
+            wakeWordResult = WakeWordResult(
+                detected = true,
+                confidence = 0.9f,
+                remainderSamples = null,
+            ),
+        )
+
+        engine.start(
+            backend = FakeAsrBackend("pause"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.WakeWord,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        advanceUntilIdle()
+
+        verify(gracePeriodSignal).onWakeWordDetected()
+        verify(audioFeedbackRenderer).playEarcon(EarconId.WAKE_WORD)
+        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+        assertTrue("Expected no ASR calls, got ${recognizer.calls}", recognizer.calls.isEmpty())
+
+        engine.stop()
+    }
+
+    @Test
+    fun `negative detection in WakeWord mode drops segment`() = runTest {
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        createEngineWithSpeech(
+            recognizer = recognizer,
+            wakeWordResult = WakeWordResult(
+                detected = false,
+                confidence = 0f,
+                remainderSamples = null,
+            ),
+        )
+
+        engine.start(
+            backend = FakeAsrBackend("pause"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.WakeWord,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        advanceUntilIdle()
+
+        verify(gracePeriodSignal, never()).onWakeWordDetected()
+        verify(audioFeedbackRenderer, never()).playEarcon(any())
+        assertTrue("Expected no ASR calls, got ${recognizer.calls}", recognizer.calls.isEmpty())
 
         engine.stop()
     }

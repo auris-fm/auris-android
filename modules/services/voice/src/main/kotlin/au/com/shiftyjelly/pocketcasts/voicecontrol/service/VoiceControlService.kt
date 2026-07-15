@@ -81,6 +81,7 @@ class VoiceControlService : Service() {
     private var lastCommandTime: Long = 0L
     private var engineStarted = false
     private var captureWasEverActive = false
+    private var acquisitionLogged = false
     private var mediaSession: MediaSession? = null
     private var currentMode: ListeningMode = ListeningMode.Off
 
@@ -159,17 +160,19 @@ class VoiceControlService : Service() {
                                     Timber.e(msg, reasons, micExposure, route, mode)
                                 }
                                 stopEngine()
-                            } else if (!captureWasEverActive) {
-                                // Capture never started — log once
+                            } else if (!captureWasEverActive && !acquisitionLogged) {
+                                // Capture never started — log once, not on every recomputation
+                                acquisitionLogged = true
                                 val blockedRules = gate.state.value.rules
                                     .filter { it.value !is VoiceControlRuleState.Allowed }
                                 val reasons = blockedRules.entries
                                     .joinToString(";") { "${it.key}=${it.value}" }
                                 Timber.i(
-                                    "mic_acquisition_skipped: reasons=%s micExposure=%s route=%s priorCaptureActive=false",
+                                    "mic_acquisition_skipped: reasons=%s micExposure=%s route=%s mode=%s priorCaptureActive=false",
                                     reasons,
                                     micExposure,
                                     route,
+                                    mode,
                                 )
                             }
                             // else: was Off before, still Off — skip (reactive recomputation)

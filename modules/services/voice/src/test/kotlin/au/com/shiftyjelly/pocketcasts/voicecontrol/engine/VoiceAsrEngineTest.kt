@@ -46,6 +46,8 @@ class VoiceAsrEngineTest {
     private val utteranceFilter = mock<UtteranceFilter>()
     private val intentRecognizer = mock<VoiceRecognizer>()
     private val wakeWordDetector = mock<WakeWordDetector>()
+    private val gracePeriodSignal = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal>()
+    private val audioFeedbackRenderer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer>()
     private val backend = mock<AsrBackend>()
 
     private var capturedReceiver: BroadcastReceiver? = null
@@ -58,6 +60,17 @@ class VoiceAsrEngineTest {
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(captureFlow)
+
+        // Default: wake word not detected (allows segments through during grace)
+        kotlinx.coroutines.runBlocking {
+            `when`(wakeWordDetector.detect(any(), any())).thenReturn(
+                au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                    detected = false,
+                    confidence = 0f,
+                    remainderSamples = null,
+                ),
+            )
+        }
 
         `when`(
             context.registerReceiver(
@@ -74,6 +87,8 @@ class VoiceAsrEngineTest {
             utteranceFilter = utteranceFilter,
             intentRecognizer = intentRecognizer,
             wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
             context = context,
         )
         engine.scope = this
@@ -213,11 +228,22 @@ class VoiceAsrEngineTest {
         )
         `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
 
+        // Wake word not detected: full segment flows through during grace
+        `when`(wakeWordDetector.detect(any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = false,
+                confidence = 0f,
+                remainderSamples = null,
+            ),
+        )
+
         engine = VoiceAsrEngine(
             voiceAudioProcessor = voiceAudioProcessor,
             utteranceFilter = utteranceFilter,
             intentRecognizer = recognizer,
             wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
             context = context,
         )
         engine.scope = this

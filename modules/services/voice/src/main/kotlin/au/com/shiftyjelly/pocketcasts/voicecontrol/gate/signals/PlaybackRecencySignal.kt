@@ -2,8 +2,6 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
-import javax.inject.Inject
-import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -13,20 +11,15 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
 /**
- * Tracks whether playback has been active within a recency window.
- *
- * The headset mic cannot hear playback, and audio is playing or was paused/stopped
- * within the last [timeoutMs] milliseconds. After the window expires without
- * playback resuming, the signal flips to false.
- *
- * Spec: Isolated + playback active or recent -> Continuous.
+ * @deprecated Removed per spec: grace is the only wake-word waiver.
+ * Playback recency no longer selects the listening mode.
  */
-@Singleton
+@Deprecated("Removed per spec update")
 class PlaybackRecencySignal internal constructor(
     private val playbackContextSource: StateFlow<PlaybackContext>,
     private val timeoutMs: Long,
 ) {
-    @Inject
+    @Deprecated("Removed per spec update")
     constructor(playbackContextMonitor: PlaybackContextMonitor) : this(
         playbackContextSource = playbackContextMonitor.context,
         timeoutMs = RECENCY_TIMEOUT_MS,

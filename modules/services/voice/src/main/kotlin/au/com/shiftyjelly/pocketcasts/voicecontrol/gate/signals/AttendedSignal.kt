@@ -1,7 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals
 
-import javax.inject.Inject
-import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -10,8 +8,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
-@Singleton
-class AttendedSignal @Inject constructor(
+/** @deprecated Removed per spec: grace is the only wake-word waiver. */
+class AttendedSignal
+@Deprecated("Removed per spec update")
+constructor(
     private val timeoutMs: Long,
 ) {
     private val _isAttended = MutableStateFlow(false)

@@ -16,4 +16,6 @@ data class WakeWordResult(
     val confidence: Float = 0f,
     /** If wake word was at start of segment, remaining audio after the keyword. */
     val remainderSamples: FloatArray? = null,
+    /** True when scoring failed (native error, unready detector, unsupported rate). */
+    val error: Boolean = false,
 )

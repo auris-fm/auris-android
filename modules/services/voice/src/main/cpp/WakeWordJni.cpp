@@ -358,6 +358,82 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_wakeword_WakeWordJni_nativeDete
     return maxScore;
 }
 
+// Debug-only: return the log-Mel matrix for a segment as a flat float array
+// of shape (time_frames * kMelBins), same transform as nativeDetect
+// (v/10 + 2). Used to render a per-segment log-Mel spectrogram PNG for
+// diagnosing wake-word false activations. Returns null on error.
+JNIEXPORT jfloatArray JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_wakeword_WakeWordJni_nativeGetLogMel(
+    JNIEnv* env, jclass /*clazz*/, jfloatArray jSamples, jint sampleRateHz)
+{
+    if (!g_initialized) return nullptr;
+    if (sampleRateHz != kSampleRateHz) return nullptr;
+
+    jsize numSamples = env->GetArrayLength(jSamples);
+    if (numSamples < kMelWindowSamples) return nullptr;
+
+    jfloat* samples = env->GetFloatArrayElements(jSamples, nullptr);
+    if (!samples) return nullptr;
+
+    std::vector<float> audioIn(numSamples);
+    for (int i = 0; i < numSamples; i++) {
+        audioIn[i] = samples[i];
+    }
+    env->ReleaseFloatArrayElements(jSamples, samples, JNI_ABORT);
+
+    // --- Run mel model on full audio, mirroring nativeDetect ---
+    int64_t melInShape[] = {1, (int64_t)numSamples};
+    OrtValue* melInputTensor = nullptr;
+    OrtStatus* st = g_ort->CreateTensorWithDataAsOrtValue(
+        g_memInfo, audioIn.data(), numSamples * sizeof(float),
+        melInShape, 2, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &melInputTensor);
+    if (st) { g_ort->ReleaseStatus(st); return nullptr; }
+
+    const char* melInputName = "input";
+    const char* melOutputName = "output";
+    OrtValue* melOutputTensor = nullptr;
+    st = g_ort->Run(g_melSession, nullptr, &melInputName, &melInputTensor, 1,
+                    &melOutputName, 1, &melOutputTensor);
+    g_ort->ReleaseValue(melInputTensor);
+    if (st) { g_ort->ReleaseStatus(st); return nullptr; }
+
+    float* melData = nullptr;
+    st = g_ort->GetTensorMutableData(melOutputTensor, (void**)&melData);
+    if (st) {
+        g_ort->ReleaseStatus(st);
+        g_ort->ReleaseValue(melOutputTensor);
+        return nullptr;
+    }
+
+    // Apply the same log-Mel transform as nativeDetect: mel = mel/10 + 2.
+    OrtTensorTypeAndShapeInfo* melInfo = nullptr;
+    size_t melNumElements = 0;
+    if (OrtStatus* infoSt = g_ort->GetTensorTypeAndShape(melOutputTensor, &melInfo)) {
+        g_ort->ReleaseStatus(infoSt);
+        g_ort->ReleaseValue(melOutputTensor);
+        return nullptr;
+    }
+    if (OrtStatus* countSt = g_ort->GetTensorShapeElementCount(melInfo, &melNumElements)) {
+        g_ort->ReleaseStatus(countSt);
+        g_ort->ReleaseTensorTypeAndShapeInfo(melInfo);
+        g_ort->ReleaseValue(melOutputTensor);
+        return nullptr;
+    }
+    g_ort->ReleaseTensorTypeAndShapeInfo(melInfo);
+
+    jfloatArray result = env->NewFloatArray((jsize)melNumElements);
+    if (result) {
+        // Copy with the transform applied.
+        std::vector<jfloat> transformed(melNumElements);
+        for (size_t i = 0; i < melNumElements; i++) {
+            transformed[i] = melData[i] / 10.0f + 2.0f;
+        }
+        env->SetFloatArrayRegion(result, 0, (jsize)melNumElements, transformed.data());
+    }
+    g_ort->ReleaseValue(melOutputTensor);
+    return result;
+}
+
 JNIEXPORT void JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_wakeword_WakeWordJni_nativeRelease(
     JNIEnv* /*env*/, jclass /*clazz*/)

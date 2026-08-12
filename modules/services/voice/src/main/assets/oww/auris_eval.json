@@ -1,16 +1,10 @@
 {
-  "aut": 0.01657261111111111,
-  "fpph": 10.971428571428572,
-  "recall": 0.8641333333333333,
-  "accuracy": 0.9290190476190476,
-  "threshold": 0.5,
-  "optimal_threshold": 0.9400000000000001,
-  "optimal_recall": 0.6730666666666667,
-  "optimal_fpph": 0.942857142857143,
-  "n_positive": 15000,
-  "n_negative": 21000,
-  "validation_hours": 11.67,
-  "balanced_threshold": 0.54,
-  "balanced_recall": 0.8599,
-  "balanced_fpph": 10.03
+  "deployment_threshold": 0.999,
+  "balanced_threshold": 0.999,
+  "validation_recall": 0.98304,
+  "negative_metrics": {
+    "fpph": 6.34,
+    "total_false_accepts": 58,
+    "validation_hours": 9.15
+  }
 }

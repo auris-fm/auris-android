@@ -21,6 +21,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
+import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordSegmentCapture
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -145,6 +146,15 @@ class VoiceAsrEngine @Inject constructor(
             Timber.w(e, "Wake word detection failed, dropping segment")
             return null
         }
+
+        // Debug instrumentation: behind WAKE_WORD_DEBUG_CAPTURE, dump every
+        // VAD segment (raw WAV + log-Mel PNG) named by timestamp + score.
+        WakeWordSegmentCapture.capture(
+            context,
+            floatSamples,
+            segment.frames.firstOrNull()?.sampleRateHz ?: 16000,
+            wwResult.confidence,
+        )
 
         val mode = currentMode
 

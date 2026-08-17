@@ -73,6 +73,9 @@ class FingerprintTimingManager @Inject constructor(
     private val settings: Settings,
     private val dataSourceFactory: Lazy<ExoPlayerDataSourceFactory>,
     private val pcmTap: FingerprintPcmTap,
+    private val cloudIdentity: CloudIdentity,
+    private val cloudConfig: SharedPreferencesCloudConfig,
+    private val cloudFetcher: CloudFingerprintReferenceFetcher,
 ) {
 
     /** Who asked for preparation; decides whether streaming over a metered network is acceptable. */
@@ -171,6 +174,11 @@ class FingerprintTimingManager @Inject constructor(
     private var currentReferenceFilePath: String? = null
     private var currentReference: ReferenceFingerprint? = null
     private var currentMatcher: CheckpointMatcher? = null
+    // Cloud-alignment path: reference data served by the Auris cloud
+    // (/api/v1/episodes/{id}/fingerprints) matched with CloudReferenceMatcher.
+    // Independent of the transcript-sync Rust matcher above.
+    private var cloudMatcher: CloudReferenceMatcher? = null
+    private var cloudFingerprinter: CloudFingerprinter? = null
     private var hasReachedActive = false
     private var hasTrackedFailure = false
 
@@ -700,6 +708,8 @@ class FingerprintTimingManager @Inject constructor(
         currentReference = null
         currentMatcher?.close()
         currentMatcher = null
+        cloudMatcher = null
+        cloudFingerprinter = null
         activeEpisodeUuid = null
         hasReachedActive = false
         hasTrackedFailure = false
@@ -785,6 +795,22 @@ class FingerprintTimingManager @Inject constructor(
             ),
         )
 
+        // Cloud-alignment reference data (Auris cloud fingerprints), fetched
+        // independently of the transcript-sync reference below.
+        cloudMatcher = null
+        val cloudBaseUrl = cloudConfig.baseUrl()
+        if (cloudBaseUrl.isNotBlank()) {
+            // Touch identity so the stable user id exists before the first fetch.
+            cloudIdentity.userId()
+            val fetched = cloudFetcher.fetchReference(cloudBaseUrl, episodeUuid)
+            if (fetched != null) {
+                cloudMatcher = fetched
+                Timber.d("FingerprintTimingManager: cloud reference loaded (${fetched.count} checkpoints) for $episodeUuid")
+            } else {
+                Timber.d("FingerprintTimingManager: cloud reference unavailable for $episodeUuid")
+            }
+        }
+
         // Try loading cached reference from disk. A reference cached while streaming is still valid
         // after a download; adopt it into the sidecar instead of refetching.
         val cachedData = if (isDownloaded) {
@@ -813,8 +839,13 @@ class FingerprintTimingManager @Inject constructor(
             is FingerprintReferenceRetriever.FetchResult.Success -> fetchResult.data
 
             is FingerprintReferenceRetriever.FetchResult.NotFound -> {
-                markUnavailable(reason = "no_reference", isStreaming = !isDownloaded, episodeUuid = episodeUuid)
-                Timber.d("FingerprintTimingManager: no reference available for $episodeUuid")
+                if (cloudMatcher == null) {
+                    markUnavailable(reason = "no_reference", isStreaming = !isDownloaded, episodeUuid = episodeUuid)
+                    Timber.d("FingerprintTimingManager: no reference available for $episodeUuid")
+                    return
+                }
+                Timber.d("FingerprintTimingManager: transcript reference missing; cloud-only alignment for $episodeUuid")
+                startCloudOnly(gen, audioSource, episodeUuid)
                 return
             }
 
@@ -829,8 +860,13 @@ class FingerprintTimingManager @Inject constructor(
 
         val reference = ReferenceFingerprint.decode(referenceData)
         if (reference == null) {
-            markUnavailable(reason = "reference_decode_failed", isStreaming = !isDownloaded, episodeUuid = episodeUuid)
-            Timber.d("FingerprintTimingManager: failed to decode reference for $episodeUuid")
+            if (cloudMatcher == null) {
+                markUnavailable(reason = "reference_decode_failed", isStreaming = !isDownloaded, episodeUuid = episodeUuid)
+                Timber.d("FingerprintTimingManager: failed to decode reference for $episodeUuid")
+                return
+            }
+            Timber.d("FingerprintTimingManager: transcript reference undecodable; cloud-only alignment for $episodeUuid")
+            startCloudOnly(gen, audioSource, episodeUuid)
             return
         }
 
@@ -851,8 +887,13 @@ class FingerprintTimingManager @Inject constructor(
     ) {
         val matcher = buildMatcher(reference)
         if (matcher == null) {
-            markUnavailable(reason = "no_checkpoints", isStreaming = currentIsStreaming, episodeUuid = episodeUuid)
-            Timber.d("FingerprintTimingManager: no usable checkpoints for $episodeUuid")
+            if (cloudMatcher == null) {
+                markUnavailable(reason = "no_checkpoints", isStreaming = currentIsStreaming, episodeUuid = episodeUuid)
+                Timber.d("FingerprintTimingManager: no usable checkpoints for $episodeUuid")
+                return
+            }
+            Timber.d("FingerprintTimingManager: transcript reference has no checkpoints; cloud-only alignment for $episodeUuid")
+            startCloudOnly(gen, audioFilePath, episodeUuid, reference)
             return
         }
 
@@ -899,9 +940,31 @@ class FingerprintTimingManager @Inject constructor(
         }
     }
 
+    /**
+     * Starts mapping when only the cloud reference is available (no usable
+     * transcript reference). Uses the PCM tap path; the Rust matcher stays null.
+     */
+    private fun startCloudOnly(
+        gen: Long,
+        audioFilePath: String,
+        episodeUuid: String,
+        reference: ReferenceFingerprint? = null,
+    ) {
+        mutex.withLock {
+            if (gen != generation) return
+            currentReferenceData = null
+            currentReferenceFilePath = null
+            currentReference = reference
+            currentMatcher = null
+            _stateFlow.value = State.Preparing
+            startTapCollection(gen, null)
+        }
+    }
+
     /** Must be called under [mutex]. */
     private fun startEagerLocalDecode(gen: Long, audioFilePath: String, matcher: CheckpointMatcher, episodeUuid: String) {
         generationJob?.cancel()
+        cloudFingerprinter = if (cloudMatcher != null) CloudFingerprinter() else null
         generationJob = scope.launch(decodeDispatcher) {
             try {
                 streamFingerprint(gen, audioFilePath, matcher, episodeUuid, startingAt = 0.0)
@@ -920,8 +983,9 @@ class FingerprintTimingManager @Inject constructor(
     }
 
     /** Must be called under [mutex]. */
-    private fun startTapCollection(gen: Long, matcher: CheckpointMatcher) {
+    private fun startTapCollection(gen: Long, matcher: CheckpointMatcher?) {
         generationJob?.cancel()
+        cloudFingerprinter = if (cloudMatcher != null) CloudFingerprinter() else null
         generationJob = scope.launch(decodeDispatcher) {
             var streamer: StreamingWindowedFingerprinter? = null
             var streamStartSec = 0.0
@@ -933,31 +997,56 @@ class FingerprintTimingManager @Inject constructor(
                     if (gen != generation) throw CancellationException("Fingerprint tap superseded")
                     val frames = chunkFrames(chunk)
                     if (frames == 0) return@collect
-                    val isContinuous = streamer != null &&
+                    val isContinuous = (streamer != null || (matcher == null && cloudFingerprinter != null)) &&
                         chunk.sampleRate == sampleRate &&
                         chunk.channelCount == channelCount &&
                         abs(chunk.positionSec - expectedNextSec) <= FingerprintConstants.TAP_CONTINUITY_TOLERANCE_SECONDS
                     if (!isContinuous) {
                         streamer?.let { finishTapStreamer(gen, it, matcher, streamStartSec) }
+                        cloudFingerprinter = if (cloudMatcher != null) CloudFingerprinter() else null
                         Timber.d("FingerprintTimingManager: tap stream started at %.1fs", chunk.positionSec)
-                        streamer = StreamingWindowedFingerprinter(
-                            chunk.sampleRate.toUInt(),
-                            chunk.channelCount.toUShort(),
-                            FingerprintConstants.WINDOW_DURATION_MS.toUInt(),
-                            FingerprintConstants.WINDOW_INTERVAL_MS.toUInt(),
-                        )
+                        streamer = if (matcher != null) {
+                            StreamingWindowedFingerprinter(
+                                chunk.sampleRate.toUInt(),
+                                chunk.channelCount.toUShort(),
+                                FingerprintConstants.WINDOW_DURATION_MS.toUInt(),
+                                FingerprintConstants.WINDOW_INTERVAL_MS.toUInt(),
+                            )
+                        } else {
+                            null
+                        }
                         streamStartSec = chunk.positionSec
                         sampleRate = chunk.sampleRate
                         channelCount = chunk.channelCount
                         tapFrontierSec = Double.NaN
-                        maybeStartCatchUpResolve(gen, chunk.positionSec)
+                        if (matcher != null) {
+                            maybeStartCatchUpResolve(gen, chunk.positionSec)
+                        }
                     }
-                    val windows = streamer.pushSamplesF32(chunkToFloatSamples(chunk), chunk.channelCount.toUShort())
-                    if (windows.isNotEmpty()) {
-                        tapFrontierSec = streamStartSec + windows.last().timestampMs.toDouble() / 1000.0
-                        mutex.withLock {
-                            if (gen != generation) throw CancellationException("Fingerprint tap superseded")
-                            processMatches(windows, matcher, streamStartSec)
+                    val samples = chunkToFloatSamples(chunk)
+                    val activeStreamer = streamer
+                    if (activeStreamer != null && matcher != null) {
+                        val windows = activeStreamer.pushSamplesF32(samples, chunk.channelCount.toUShort())
+                        if (windows.isNotEmpty()) {
+                            tapFrontierSec = streamStartSec + windows.last().timestampMs.toDouble() / 1000.0
+                            mutex.withLock {
+                                if (gen != generation) throw CancellationException("Fingerprint tap superseded")
+                                processMatches(windows, matcher, streamStartSec)
+                            }
+                        }
+                    } else if (samples.isNotEmpty()) {
+                        tapFrontierSec = chunk.positionSec + frames.toDouble() / chunk.sampleRate
+                    }
+                    cloudFingerprinter?.let { cloudFp ->
+                        if (samples.isNotEmpty()) {
+                            cloudFp.pushSamples(samples.toFloatArray(), chunk.channelCount, chunk.sampleRate)
+                            val cloudWindows = cloudFp.drainWindows()
+                            if (cloudWindows.isNotEmpty()) {
+                                mutex.withLock {
+                                    if (gen != generation) throw CancellationException("Fingerprint tap superseded")
+                                    processCloudMatches(cloudWindows, streamStartSec)
+                                }
+                            }
                         }
                     }
                     expectedNextSec = chunk.positionSec + frames.toDouble() / chunk.sampleRate
@@ -1049,15 +1138,24 @@ class FingerprintTimingManager @Inject constructor(
     private suspend fun finishTapStreamer(
         gen: Long,
         streamer: StreamingWindowedFingerprinter,
-        matcher: CheckpointMatcher,
+        matcher: CheckpointMatcher?,
         streamStartSec: Double,
     ) {
         try {
             val tail = streamer.flush()
-            if (tail.isNotEmpty()) {
+            if (tail.isNotEmpty() && matcher != null) {
                 mutex.withLock {
                     if (gen != generation) throw CancellationException("Fingerprint tap superseded")
                     processMatches(tail, matcher, streamStartSec)
+                }
+            }
+            cloudFingerprinter?.let { cloudFp ->
+                val cloudTail = cloudFp.finish()
+                if (cloudTail.isNotEmpty()) {
+                    mutex.withLock {
+                        if (gen != generation) throw CancellationException("Fingerprint tap superseded")
+                        processCloudMatches(cloudTail, streamStartSec)
+                    }
                 }
             }
         } finally {
@@ -1371,6 +1469,16 @@ class FingerprintTimingManager @Inject constructor(
                                 stopRequested = true
                             }
                         }
+                        cloudFingerprinter?.let { cloudFp ->
+                            cloudFp.pushSamples(samples.toFloatArray(), stream.channelCount, stream.sampleRate)
+                            val cloudWindows = cloudFp.drainWindows()
+                            if (cloudWindows.isNotEmpty()) {
+                                mutex.withLock {
+                                    if (gen != generation) throw CancellationException("Fingerprint stream superseded")
+                                    processCloudMatches(cloudWindows, startOffset)
+                                }
+                            }
+                        }
                     }
                     if (isEos || stopRequested) break
                     if (endingAt != null && startOffset + streamer.durationMs().toDouble() / 1000.0 >= endingAt) break
@@ -1420,6 +1528,51 @@ class FingerprintTimingManager @Inject constructor(
             }
         } finally {
             buffer.order(byteOrder)
+        }
+    }
+
+    /**
+     * Matches cloud-fingerprinter windows against the cloud reference and
+     * feeds candidates through the same drift filter as the transcript path.
+     */
+    private fun processCloudMatches(windows: List<CloudFingerprinter.Window>, startOffset: Double) {
+        val cloudMatcher = cloudMatcher ?: return
+        val isDebug = debugTrackingEnabled || FeatureFlag.isEnabled(Feature.SYNCED_TRANSCRIPT_DEBUG)
+
+        for (window in windows) {
+            val absolutePlaybackTime = startOffset + window.timestampSec.toDouble()
+            val matches = cloudMatcher.findTopMatches(window.hashes, 2)
+            val best = matches.firstOrNull()
+
+            if (best == null || best.score < FingerprintConstants.MATCH_SCORE_THRESHOLD) {
+                continue
+            }
+
+            val runnerUpScore = matches.getOrNull(1)?.score ?: 0f
+            val dominance = best.score - runnerUpScore
+
+            if (best.score < FingerprintConstants.DRIFT_ANCHOR_SCORE_THRESHOLD ||
+                dominance < FingerprintConstants.DRIFT_SCORE_DOMINANCE_GAP
+            ) {
+                if (isDebug) recordDebugRejection(absolutePlaybackTime, best.score)
+                continue
+            }
+
+            val candidate = TimeMappingEntry(
+                playbackTime = absolutePlaybackTime,
+                referenceTime = best.timestampSeconds.toDouble(),
+                score = best.score,
+            )
+            consider(candidate, isDebug)
+        }
+
+        publishSnapshot()
+        val coverage = snapshotPlaybackToReference.size
+        if (coverage >= FingerprintConstants.MINIMUM_COVERAGE_FOR_ACTIVE) {
+            markActive(coverage)
+        }
+        if (isDebug) {
+            debugRejectionsSnapshot = debugRejections.toList()
         }
     }
 

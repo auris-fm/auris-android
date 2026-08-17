@@ -36,6 +36,9 @@ class DriftFilterTest {
             settings = mock(Settings::class.java),
             dataSourceFactory = Lazy { mock(ExoPlayerDataSourceFactory::class.java) },
             pcmTap = FingerprintPcmTap(),
+            cloudIdentity = mock(CloudIdentity::class.java),
+            cloudConfig = mock(SharedPreferencesCloudConfig::class.java),
+            cloudFetcher = mock(CloudFingerprintReferenceFetcher::class.java),
         )
         manager.debugTrackingEnabled = true
     }

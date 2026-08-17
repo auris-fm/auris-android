@@ -63,6 +63,7 @@ class CloudFingerprinter {
     }
 
     private val windows = mutableListOf<Window>()
+    private var consumedWindows = 0
     private var nextWindowStartSec = 0
     private var finished = false
 
@@ -96,6 +97,17 @@ class CloudFingerprinter {
 
     /** Windows emitted so far (a window is only emitted once its tail lookahead is available). */
     fun windowsSoFar(): List<Window> = windows
+
+    /**
+     * Returns the windows emitted since the last call to this method. The
+     * caller feeds PCM in chunks and drains windows after each push; finished
+     * windows are tracked so the same window is not returned twice.
+     */
+    fun drainWindows(): List<Window> {
+        val emitted = windows.drop(consumedWindows)
+        consumedWindows = windows.size
+        return emitted
+    }
 
     private fun appendDownmixed(samples: FloatArray, channels: Int) {
         if (channels <= 1) {

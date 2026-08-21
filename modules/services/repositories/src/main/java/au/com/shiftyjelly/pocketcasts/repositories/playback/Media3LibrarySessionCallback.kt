@@ -67,7 +67,7 @@ internal class Media3LibrarySessionCallback(
             )
             return MediaSession.ConnectionResult.accept(SessionCommands.EMPTY, TRANSPORT_PLAYER_COMMANDS)
         }
-        if (!controller.packageName.contains("au.com.shiftyjelly.pocketcasts")) {
+        if (!controller.packageName.contains("fm.auris")) {
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Client: ${controller.packageName} connected to media session")
             val context = contextProvider()
             if (Util.isAutomotive(context) && !settings.automotiveConnectedToMediaSession()) {

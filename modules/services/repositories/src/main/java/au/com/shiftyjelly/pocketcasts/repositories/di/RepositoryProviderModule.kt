@@ -59,7 +59,7 @@ class RepositoryProviderModule {
         @ApplicationContext context: Context,
         listeners: Set<@JvmSuppressWildcards PaymentClient.Listener>,
     ): PaymentDataSource {
-        return if (context.packageName == "au.com.shiftyjelly.pocketcasts") {
+        return if (context.packageName == "fm.auris") {
             PaymentDataSource.billing(context, listeners)
         } else {
             PaymentDataSource.fake()

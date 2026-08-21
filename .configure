@@ -27,21 +27,6 @@
       "file": "android/pocket-casts/google-services.json",
       "destination": "tv/google-services.json",
       "encrypt": true
-    },
-    {
-      "file": "android/pocket-casts/google-upload-credentials.json",
-      "destination": "google-upload-credentials.json",
-      "encrypt": true
-    },
-    {
-      "file": "android/pocket-casts/firebase.secrets.json",
-      "destination": ".configure-files/firebase.secrets.json",
-      "encrypt": true
-    },
-    {
-      "file": "android/pocket-casts/android.keystore",
-      "destination": "release.keystore",
-      "encrypt": true
     }
   ],
   "file_dependencies": []

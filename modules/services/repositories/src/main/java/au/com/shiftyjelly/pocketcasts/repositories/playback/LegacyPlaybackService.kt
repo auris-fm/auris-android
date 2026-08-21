@@ -143,7 +143,7 @@ open class LegacyPlaybackService :
             return null
         }
 
-        if (!clientPackageName.contains("au.com.shiftyjelly.pocketcasts")) {
+        if (!clientPackageName.contains("fm.auris")) {
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Client: $clientPackageName connected to legacy media session")
             if (Util.isAutomotive(this) && !settings.automotiveConnectedToMediaSession()) {
                 launch {

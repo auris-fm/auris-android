@@ -39,6 +39,7 @@ import org.mockito.Mockito.times
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
 import org.mockito.kotlin.any
+import org.mockito.kotlin.eq
 
 class VoiceAsrEngineTest {
 
@@ -65,7 +66,7 @@ class VoiceAsrEngineTest {
 
         // Default: wake word not detected (allows segments through during grace)
         kotlinx.coroutines.runBlocking {
-            `when`(wakeWordDetector.detect(any(), any())).thenReturn(
+            `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
                 au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                     detected = false,
                     confidence = 0f,
@@ -225,13 +226,14 @@ class VoiceAsrEngineTest {
             flowOf(
                 VoiceSegmenterResult.SpeechEnded(
                     listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
                 ),
             ),
         )
         `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
 
         // Wake word not detected: full segment flows through during grace
-        `when`(wakeWordDetector.detect(any(), any())).thenReturn(
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,
                 confidence = 0f,
@@ -263,6 +265,7 @@ class VoiceAsrEngineTest {
 
         assertEquals(listOf("ensureReady", "recognize:pause"), recognizer.calls)
         assertEquals(listOf(VoiceIntent.Playback.Pause), handledIntents)
+        verify(wakeWordDetector).detect(any(), eq(16000), eq(2))
 
         engine.stop()
     }
@@ -352,7 +355,7 @@ class VoiceAsrEngineTest {
         )
         `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
         kotlinx.coroutines.runBlocking {
-            `when`(wakeWordDetector.detect(any(), any())).thenReturn(wakeWordResult)
+            `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(wakeWordResult)
         }
 
         engine = VoiceAsrEngine(

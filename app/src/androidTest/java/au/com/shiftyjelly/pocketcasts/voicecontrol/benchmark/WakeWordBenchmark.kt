@@ -20,8 +20,9 @@ import org.junit.runner.RunWith
 /**
  * On-device wake word benchmark harness — see core repo
  * docs/specs/wakeword-device-benchmark.md. Driven by
- * training/wakeword/device_benchmark.py, which stages manifest.json plus
- * clips into filesDir/wakeword_bench/ and pulls device_result.json back.
+ * training/wakeword/device_benchmark.py, which stages benchmark_manifest.json,
+ * its SHA-256 sidecar, and clips into filesDir/wakeword_bench/ before pulling
+ * device_result.json back.
  */
 @RunWith(AndroidJUnit4::class)
 class WakeWordBenchmark {
@@ -29,57 +30,87 @@ class WakeWordBenchmark {
     private lateinit var context: Context
     private lateinit var detector: OpenWakeWordDetector
     private lateinit var benchDir: File
+    private lateinit var manifestSha256: String
 
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
         benchDir = File(context.filesDir, "wakeword_bench")
+        val manifestFile = File(benchDir, "benchmark_manifest.json")
+        val sidecarFile = File(benchDir, "benchmark_manifest.sha256")
         assertTrue(
-            "manifest.json not staged — run device_benchmark.py from training/wakeword",
-            File(benchDir, "manifest.json").exists(),
+            "benchmark manifest and sidecar not staged — run device_benchmark.py",
+            manifestFile.isFile && sidecarFile.isFile,
         )
+        manifestSha256 = sidecarFile.readText().trim()
+        require(manifestSha256.matches(Regex("[0-9a-f]{64}"))) {
+            "invalid benchmark_manifest.sha256"
+        }
+        require(sha256(manifestFile.readBytes()) == manifestSha256) {
+            "benchmark manifest SHA-256 mismatch"
+        }
         detector = OpenWakeWordDetector(context)
         assertTrue("wake word detector failed to initialize", detector.isReady)
     }
 
     @Test
     fun runBenchmark() {
-        val manifest = JSONObject(File(benchDir, "manifest.json").readText())
+        val manifest = JSONObject(File(benchDir, "benchmark_manifest.json").readText())
+        require(manifest.getInt("version") == 3) { "unsupported benchmark manifest version" }
         val clips = manifest.getJSONArray("clips")
         Log.i(TAG, "Scoring ${clips.length()} clips (threshold=${detector.detectionThreshold})")
 
         val results = JSONArray()
         for (i in 0 until clips.length()) {
-            val id = clips.getJSONObject(i).getString("id")
-            val result = JSONObject().put("id", id)
+            val entry = clips.getJSONObject(i)
+            val id = entry.getString("id")
+            val clipFile = File(benchDir, id)
+            require(sha256OfFile(clipFile) == entry.getString("audio_sha256")) {
+                "staged clip SHA-256 mismatch: $id"
+            }
+            val result = JSONObject()
+                .put("id", id)
+                .put("role", entry.getString("role"))
+                .put("slice", entry.getString("slice"))
+            val startNs = SystemClock.elapsedRealtimeNanos()
             try {
-                val samples = readWavMono16k(File(benchDir, "clips/$id"))
-                val startNs = SystemClock.elapsedRealtimeNanos()
-                val detection = runBlocking { detector.detect(samples, 16000) }
+                val samples = readWavMono16k(clipFile)
+                val detection = runBlocking {
+                    detector.detect(
+                        samples,
+                        sampleRateHz = 16000,
+                        speechOnsetSample = entry.getInt("speech_onset_sample"),
+                    )
+                }
                 val detectMs = (SystemClock.elapsedRealtimeNanos() - startNs) / 1e6
-                result.put("score", detection.confidence.toDouble())
-                    .put("detected", detection.detected)
-                    .put("detect_ms", detectMs)
-                    .put("error", detection.error)
+                result.put("detect_ms", detectMs)
+                if (detection.error) {
+                    result.put("status", "error").put("error_code", "detector_error")
+                } else {
+                    result.put("status", if (detection.detected) "detected" else "not_detected")
+                        .put("score", detection.confidence.toDouble())
+                }
             } catch (e: Exception) {
                 Log.w(TAG, "Clip $id failed", e)
-                result.put("score", 0.0)
-                    .put("detected", false)
-                    .put("detect_ms", 0.0)
-                    .put("error", true)
+                result.put(
+                    "detect_ms",
+                    (SystemClock.elapsedRealtimeNanos() - startNs) / 1e6,
+                ).put("status", "error")
+                    .put("error_code", "harness_exception")
             }
             results.put(result)
             if ((i + 1) % 200 == 0) Log.i(TAG, "Scored ${i + 1}/${clips.length()}")
         }
 
         val output = JSONObject()
-            .put("version", 1)
+            .put("version", 2)
             .put(
                 "device",
                 JSONObject()
+                    .put("platform", "android")
                     .put("model", Build.MODEL)
-                    .put("sdk", Build.VERSION.SDK_INT)
-                    .put("abi", Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown")
+                    .put("os_version", Build.VERSION.RELEASE)
+                    .put("architecture", Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown")
                     .put(
                         "app_version",
                         context.packageManager.getPackageInfo(context.packageName, 0)
@@ -93,6 +124,8 @@ class WakeWordBenchmark {
                     for (asset in OWW_ASSETS) put(asset, sha256OfAsset("oww/$asset"))
                 },
             )
+            .put("dataset_fingerprint", manifest.getString("dataset_fingerprint"))
+            .put("benchmark_manifest_sha256", manifestSha256)
             .put("results", results)
 
         File(benchDir, "device_result.json").writeText(output.toString())
@@ -111,6 +144,12 @@ class WakeWordBenchmark {
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
+
+    private fun sha256OfFile(file: File): String = sha256(file.readBytes())
+
+    private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
+        .digest(bytes)
+        .joinToString("") { "%02x".format(it) }
 
     /** Minimal RIFF/WAVE reader for the benchmark corpus: 16-bit PCM mono 16 kHz. */
     private fun readWavMono16k(file: File): FloatArray {

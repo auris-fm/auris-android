@@ -2,7 +2,11 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword
 
 interface WakeWordDetector {
     /** Process a VAD segment and return true if wake word was detected. */
-    suspend fun detect(segment: FloatArray, sampleRateHz: Int = 16000): WakeWordResult
+    suspend fun detect(
+        segment: FloatArray,
+        sampleRateHz: Int = 16000,
+        speechOnsetSample: Int = 0,
+    ): WakeWordResult
 
     /** Whether this detector is ready (model loaded, template enrolled, etc.). */
     val isReady: Boolean

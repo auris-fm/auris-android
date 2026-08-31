@@ -141,7 +141,11 @@ class VoiceAsrEngine @Inject constructor(
         // every utterance so wake-word audio is always stripped and every
         // detection is acknowledged.
         val wwResult = runCatching {
-            wakeWordDetector.detect(floatSamples, segment.frames.firstOrNull()?.sampleRateHz ?: 16000)
+            wakeWordDetector.detect(
+                segment = floatSamples,
+                sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000,
+                speechOnsetSample = segment.speechOnsetSample,
+            )
         }.getOrElse { e ->
             Timber.w(e, "Wake word detection failed, dropping segment")
             return null

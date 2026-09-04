@@ -2,14 +2,15 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.asr
 
 import dagger.Lazy
 import java.util.Locale
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
 class AsrBackendSelectorTest {
 
-    private lateinit var whisperCppBackend: WhisperCppBackend
     private lateinit var senseVoiceBackend: SenseVoiceBackend
     private lateinit var canaryFlashBackend: CanaryFlashBackend
     private lateinit var selector: AsrBackendSelector
@@ -19,7 +20,6 @@ class AsrBackendSelectorTest {
     }
 
     private fun buildSelector(locale: Locale = locale("en")): AsrBackendSelector = AsrBackendSelector(
-        whisperCppBackend = lazyOf(whisperCppBackend),
         senseVoiceBackend = lazyOf(senseVoiceBackend),
         canaryFlashBackend = lazyOf(canaryFlashBackend),
         currentLocale = { locale },
@@ -29,7 +29,6 @@ class AsrBackendSelectorTest {
 
     @Before
     fun setUp() {
-        whisperCppBackend = WhisperCppBackend()
         senseVoiceBackend = SenseVoiceBackend()
         canaryFlashBackend = CanaryFlashBackend(currentLocale = { Locale.getDefault() })
         selector = buildSelector()
@@ -42,8 +41,10 @@ class AsrBackendSelectorTest {
 
     @Test
     fun `cjk locale selects senseVoiceBackend`() {
-        selector = buildSelector(locale("zh"))
-        assertSame(senseVoiceBackend, selector.select())
+        for (lang in listOf("zh", "ja", "ko", "yue")) {
+            selector = buildSelector(locale(lang))
+            assertSame(senseVoiceBackend, selector.select())
+        }
     }
 
     @Test
@@ -61,9 +62,25 @@ class AsrBackendSelectorTest {
     }
 
     @Test
-    fun `unsupported locale selects whisperCppBackend fallback`() {
-        selector = buildSelector(locale("ar"))
-        assertSame(whisperCppBackend, selector.select())
+    fun `unsupported locale returns null without selecting Whisper`() {
+        for (lang in listOf("ar", "ru", "pt")) {
+            selector = buildSelector(locale(lang))
+            assertNull("Locale $lang should surface unsupported", selector.select())
+        }
+    }
+
+    @Test
+    fun `product matrix never selects WhisperCppBackend`() {
+        for (lang in listOf("en", "zh", "de", "ar", "ru")) {
+            selector = buildSelector(locale(lang))
+            val backend = selector.select()
+            if (backend != null) {
+                assertTrue(
+                    "Locale $lang must not select Whisper",
+                    backend !is WhisperCppBackend,
+                )
+            }
+        }
     }
 
     @Test
@@ -73,27 +90,17 @@ class AsrBackendSelectorTest {
     }
 
     @Test
-    fun `manual override to whisper-cpp selects whisperCppBackend`() {
-        selector.manualOverride = "whisper-cpp"
-        assertSame(whisperCppBackend, selector.select())
-    }
-
-    @Test
-    fun `manual override to whisper-cpp is case-insensitive`() {
-        selector.manualOverride = "WHISPER-CPP"
-        assertSame(whisperCppBackend, selector.select())
-    }
-
-    @Test
-    fun `manual override takes priority over matrix selection`() {
-        selector.manualOverride = "whisper-cpp"
-        assertSame(whisperCppBackend, selector.select())
-    }
-
-    @Test
     fun `manual override to sensevoice selects senseVoiceBackend`() {
         selector.manualOverride = "sensevoice"
         assertSame(senseVoiceBackend, selector.select())
+    }
+
+    @Test
+    fun `manual override to whisper-cpp is rejected`() {
+        selector.manualOverride = "whisper-cpp"
+        assertThrows("Unknown backend override", IllegalStateException::class.java) {
+            selector.select()
+        }
     }
 
     @Test

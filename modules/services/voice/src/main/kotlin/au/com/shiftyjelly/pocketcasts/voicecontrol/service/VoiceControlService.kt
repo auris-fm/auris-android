@@ -216,6 +216,14 @@ class VoiceControlService : Service() {
         Timber.i("Ensuring models")
 
         val backend = asrBackendSelector.select()
+        if (backend == null) {
+            Timber.w(
+                "[VoicePipeline] ASR locale unsupported (lang=%s) — no Whisper product route; stopping",
+                java.util.Locale.getDefault().language,
+            )
+            serviceScope.launch(Dispatchers.Main) { stopSelf() }
+            return
+        }
         Timber.i("Selected ASR backend: %s", backend::class.simpleName)
 
         val needDownload = !modelManager.isModelReady(backend.requiredModel) ||
@@ -278,6 +286,12 @@ class VoiceControlService : Service() {
     private fun startEngine(mode: ListeningMode) {
         if (engineStarted) return
         val backend = asrBackendSelector.select()
+        if (backend == null) {
+            Timber.w(
+                "[VoicePipeline] ASR locale unsupported — refusing to start engine",
+            )
+            return
+        }
 
         try {
             voiceAsrEngine.get().start(

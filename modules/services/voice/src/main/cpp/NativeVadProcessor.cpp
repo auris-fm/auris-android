@@ -6,9 +6,9 @@
 #include <cmath>
 #include <cstring>
 
-#define LOG_TAG "NativeVadProc"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOG_TAG "VoicePipeline"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "[VoicePipeline] " __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "[VoicePipeline] " __VA_ARGS__)
 
 // Reusable Silero VAD inference, implemented in VadJni.cpp
 extern float sileroVadPredict(const int16_t* samples, int32_t count);
@@ -267,9 +267,6 @@ void NativeVadProcessor::runLoop() {
                 mPendingEvent = 1; // speech started
                 mEventReady = true;
                 mEventCv.notify_one();
-
-                LOGI("VAD: speech started (pre-speech context=%d samples)",
-                    mSpeechOnsetSample);
             }
 
             // Accumulate current frame.
@@ -312,7 +309,6 @@ void NativeVadProcessor::runLoop() {
 
                 if (mDrainRemaining <= 0) {
                     // Drain complete — finalize the utterance.
-                    LOGI("VAD: speech ended (%d frames total)", mSpeechFrames);
 
                     {
                         std::lock_guard<std::mutex> lock(mSpeechMutex);

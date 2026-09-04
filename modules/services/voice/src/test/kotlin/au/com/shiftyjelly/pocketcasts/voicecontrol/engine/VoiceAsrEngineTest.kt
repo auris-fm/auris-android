@@ -13,6 +13,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrCapabilities
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
@@ -29,7 +30,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -53,6 +56,7 @@ class VoiceAsrEngineTest {
     private val gracePeriodSignal = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal>()
     private val audioFeedbackRenderer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer>()
     private val backend = mock<AsrBackend>()
+    private val translationStage = mock<TranslationStage>()
 
     private var capturedReceiver: BroadcastReceiver? = null
 
@@ -93,6 +97,7 @@ class VoiceAsrEngineTest {
             wakeWordDetector = wakeWordDetector,
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
             context = context,
         )
         engine.scope = this
@@ -152,7 +157,8 @@ class VoiceAsrEngineTest {
     fun `start with BluetoothA2dpOnly awaits SCO connected before capture`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
+        // Do not advanceUntilIdle — that would fire the SCO timeout.
+        runCurrent()
 
         verify(audioManager).startBluetoothSco()
         verify(voiceAudioProcessor, never()).startProcessing()
@@ -170,12 +176,29 @@ class VoiceAsrEngineTest {
     fun `start with BluetoothA2dpOnly starts capture even when SCO disconnects`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
+        runCurrent()
 
         verify(audioManager).startBluetoothSco()
         verify(voiceAudioProcessor, never()).startProcessing()
 
         simulateScoState(AudioManager.SCO_AUDIO_STATE_DISCONNECTED)
+        advanceUntilIdle()
+
+        verify(voiceAudioProcessor).startProcessing()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `start with BluetoothA2dpOnly falls back after SCO timeout`() = runTest {
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+
+        verify(audioManager).startBluetoothSco()
+        verify(voiceAudioProcessor, never()).startProcessing()
+
+        advanceTimeBy(3_001)
         advanceUntilIdle()
 
         verify(voiceAudioProcessor).startProcessing()
@@ -189,7 +212,7 @@ class VoiceAsrEngineTest {
     fun `stop during SCO await cancels wait and unregisters receiver`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
+        runCurrent()
 
         verify(audioManager).startBluetoothSco()
         assertTrue("Expected receiver registered", capturedReceiver != null)
@@ -205,7 +228,7 @@ class VoiceAsrEngineTest {
     fun `stop after capture started closes SCO and releases backend`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
+        runCurrent()
 
         simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
         advanceUntilIdle()
@@ -249,6 +272,7 @@ class VoiceAsrEngineTest {
             wakeWordDetector = wakeWordDetector,
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
             context = context,
         )
         engine.scope = this
@@ -271,13 +295,255 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
+    // ── Translation stage wiring ───────────────────────────────────────
+
+    @Test
+    fun `non-English transcript translated by stage before intent routing when backend cannot translate`() = runTest {
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = false,
+                confidence = 0f,
+            ),
+        )
+        `when`(translationStage.ensureReady("zh")).thenReturn(Result.success(Unit))
+        `when`(translationStage.translate("你好", "zh")).thenReturn(Result.success("hello"))
+
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+
+        engine.start(
+            backend = ResultBackend(AsrResult(text = "你好", detectedLanguage = "zh")),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        advanceUntilIdle()
+
+        verify(translationStage).ensureReady("zh")
+        verify(translationStage).translate("你好", "zh")
+        assertTrue("Expected translated 'hello' to reach recognizer", recognizer.calls.contains("recognize:hello"))
+
+        engine.stop()
+    }
+
+    @Test
+    fun `asr log keeps source lang and text with english only in translate note`() = runTest {
+        // Merlin's Pixel line was confusing because post-translate fields were printed first:
+        //   lang=en 'Play.' translate=yue→en '播放。'
+        // Desired left-to-right story: ASR first, English result in the translate note.
+        val logs = mutableListOf<String>()
+        val tree = object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                logs += message
+            }
+        }
+        timber.log.Timber.plant(tree)
+        try {
+            val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+            `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+            `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+            `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+                flowOf(
+                    VoiceSegmenterResult.SpeechEnded(
+                        listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                        speechOnsetSample = 2,
+                    ),
+                ),
+            )
+            `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+            `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+                WakeWordResult(detected = false, confidence = 0f),
+            )
+            `when`(translationStage.ensureReady("yue")).thenReturn(Result.success(Unit))
+            `when`(translationStage.translate("播放。", "yue")).thenReturn(Result.success("Play."))
+
+            engine = VoiceAsrEngine(
+                voiceAudioProcessor = voiceAudioProcessor,
+                utteranceFilter = utteranceFilter,
+                intentRecognizer = recognizer,
+                wakeWordDetector = wakeWordDetector,
+                gracePeriodSignal = gracePeriodSignal,
+                audioFeedbackRenderer = audioFeedbackRenderer,
+                translationStage = translationStage,
+                context = context,
+            )
+            engine.scope = this
+
+            engine.start(
+                backend = ResultBackend(AsrResult(text = "播放。", detectedLanguage = "yue")),
+                audioRoute = AudioRoute.Speaker,
+                listeningMode = ListeningMode.Continuous,
+                playbackBufferProvider = { FloatArray(0) },
+                micExposureProvider = { MicExposure.Exposed },
+                onIntent = {},
+            )
+            advanceUntilIdle()
+
+            val asrLog = logs.single {
+                it.startsWith("[VoicePipeline] asr ") && !it.contains("→ drop")
+            }
+            assertTrue(
+                "Expected source-first log, got: $asrLog",
+                asrLog.matches(
+                    Regex("""\[VoicePipeline\] asr ResultBackend \d+ms lang=yue '播放。' translate=yue→en 'Play\.'"""),
+                ),
+            )
+            assertTrue(recognizer.calls.contains("recognize:Play."))
+
+            engine.stop()
+        } finally {
+            timber.log.Timber.uproot(tree)
+        }
+    }
+
+    @Test
+    fun `translate fail blank and noop drop with ERROR earcon and skip intent`() = runTest {
+        data class Case(
+            val label: String,
+            val ensureReady: Result<Unit>,
+            val translateResult: Result<String>?,
+        )
+        val cases = listOf(
+            Case("fail-ready", Result.failure(IllegalStateException("no model")), null),
+            Case("fail-translate", Result.success(Unit), Result.failure(IllegalStateException("mlkit"))),
+            Case("blank", Result.success(Unit), Result.success("")),
+            Case("noop", Result.success(Unit), Result.success("你好")),
+        )
+
+        for (case in cases) {
+            val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+            val localTranslation = mock<TranslationStage>()
+            `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+            `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+            `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+                flowOf(
+                    VoiceSegmenterResult.SpeechEnded(
+                        listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                        speechOnsetSample = 2,
+                    ),
+                ),
+            )
+            `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+            `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+                WakeWordResult(detected = false, confidence = 0f),
+            )
+            `when`(localTranslation.ensureReady("zh")).thenReturn(case.ensureReady)
+            if (case.translateResult != null) {
+                `when`(localTranslation.translate("你好", "zh")).thenReturn(case.translateResult)
+            }
+
+            engine = VoiceAsrEngine(
+                voiceAudioProcessor = voiceAudioProcessor,
+                utteranceFilter = utteranceFilter,
+                intentRecognizer = recognizer,
+                wakeWordDetector = wakeWordDetector,
+                gracePeriodSignal = gracePeriodSignal,
+                audioFeedbackRenderer = audioFeedbackRenderer,
+                translationStage = localTranslation,
+                context = context,
+            )
+            engine.scope = this
+
+            engine.start(
+                backend = ResultBackend(AsrResult(text = "你好", detectedLanguage = "zh")),
+                audioRoute = AudioRoute.Speaker,
+                listeningMode = ListeningMode.Continuous,
+                playbackBufferProvider = { FloatArray(0) },
+                micExposureProvider = { MicExposure.Exposed },
+                onIntent = {},
+            )
+            advanceUntilIdle()
+
+            assertTrue(
+                "${case.label}: expected no intent routing, got ${recognizer.calls}",
+                recognizer.calls.isEmpty(),
+            )
+            verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+
+            engine.stop()
+            org.mockito.Mockito.reset(audioFeedbackRenderer)
+        }
+    }
+
+    @Test
+    fun `english transcript bypasses translation stage`() = runTest {
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = false,
+                confidence = 0f,
+            ),
+        )
+
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+
+        engine.start(
+            backend = ResultBackend(AsrResult(text = "pause", detectedLanguage = "en")),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        advanceUntilIdle()
+
+        verify(translationStage, never()).translate(any(), any())
+        assertTrue("Expected native 'pause' to reach recognizer", recognizer.calls.contains("recognize:pause"))
+
+        engine.stop()
+    }
+
     // ── SCO not reopened for subsequent starts ─────────────────────────
 
     @Test
     fun `stop then restart on Bluetooth re-opens SCO`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
+        runCurrent()
 
         simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
         advanceUntilIdle()
@@ -287,10 +553,14 @@ class VoiceAsrEngineTest {
         verify(audioManager).stopBluetoothSco()
 
         // Restart — stop cleared scoStarted, so SCO must be re-opened
+        capturedReceiver = null
         startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
         advanceUntilIdle()
 
         verify(audioManager, times(2)).startBluetoothSco()
+        verify(voiceAudioProcessor, times(2)).startProcessing()
 
         engine.stop()
     }
@@ -320,7 +590,7 @@ class VoiceAsrEngineTest {
     fun `restart from Bluetooth to Speaker closes SCO`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
+        runCurrent()
 
         simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
         advanceUntilIdle()
@@ -337,6 +607,64 @@ class VoiceAsrEngineTest {
         verify(audioManager, times(1)).stopBluetoothSco()
 
         engine.stop()
+    }
+
+    @Test
+    fun `Bluetooth SCO setup exception falls back to phone mic capture`() = runTest {
+        createEngine()
+        `when`(
+            context.registerReceiver(
+                any<BroadcastReceiver>(),
+                any<IntentFilter>(),
+            ),
+        ).thenThrow(RuntimeException("registerReceiver failed"))
+
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        advanceUntilIdle()
+
+        verify(voiceAudioProcessor).startProcessing()
+        verify(audioManager, never()).startBluetoothSco()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `Bluetooth SCO startBluetoothSco exception unregisters receiver and restores audio mode`() = runTest {
+        createEngine()
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_IN_COMMUNICATION)
+        org.mockito.Mockito.doThrow(RuntimeException("startBluetoothSco failed"))
+            .`when`(audioManager).startBluetoothSco()
+
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        advanceUntilIdle()
+
+        verify(voiceAudioProcessor).startProcessing()
+        assertTrue("Expected receiver to have been registered", capturedReceiver != null)
+        verify(context).unregisterReceiver(capturedReceiver!!)
+        verify(audioManager).setMode(AudioManager.MODE_IN_COMMUNICATION)
+        // Fallback path must not leave scoStarted set — stop should not call stopBluetoothSco.
+        engine.stop()
+        verify(audioManager, never()).stopBluetoothSco()
+    }
+
+    @Test
+    fun `Bluetooth SCO CancellationException after register rolls back receiver and mode`() = runTest {
+        createEngine()
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_IN_COMMUNICATION)
+        org.mockito.Mockito.doThrow(kotlinx.coroutines.CancellationException("sco cancelled"))
+            .`when`(audioManager).startBluetoothSco()
+
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        advanceUntilIdle()
+
+        // Cancellation aborts the processing job before capture; rollback must still run.
+        verify(voiceAudioProcessor, never()).startProcessing()
+        assertTrue("Expected receiver to have been registered", capturedReceiver != null)
+        verify(context).unregisterReceiver(capturedReceiver!!)
+        verify(audioManager).setMode(AudioManager.MODE_IN_COMMUNICATION)
+
+        engine.stop()
+        verify(audioManager, never()).stopBluetoothSco()
     }
 
     // ── Wake-word detection paths ──────────────────────────────────────
@@ -366,6 +694,7 @@ class VoiceAsrEngineTest {
             wakeWordDetector = wakeWordDetector,
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
             context = context,
         )
         engine.scope = this
@@ -503,6 +832,23 @@ class VoiceAsrEngineTest {
         override val requiredModel: ModelSpec = ModelSpec(files = emptyList(), targetDir = "")
 
         override val capabilities: AsrCapabilities = AsrCapabilities(supportedLanguages = setOf("en"))
+
+        override fun release() = Unit
+    }
+
+    private class ResultBackend(
+        private val result: AsrResult,
+    ) : AsrBackend {
+        override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+
+        override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult = result
+
+        override val requiredModel: ModelSpec = ModelSpec(files = emptyList(), targetDir = "")
+
+        override val capabilities: AsrCapabilities = AsrCapabilities(
+            supportedLanguages = setOf("zh", "en"),
+            canTranslateToEnglish = false,
+        )
 
         override fun release() = Unit
     }

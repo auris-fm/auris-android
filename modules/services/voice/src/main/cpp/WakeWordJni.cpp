@@ -23,9 +23,9 @@
 
 #include "onnxruntime_c_api.h"
 
-#define LOG_TAG "NativeWakeWord"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOG_TAG "VoicePipeline"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "[VoicePipeline] " __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "[VoicePipeline] " __VA_ARGS__)
 
 // --- ORT function pointer types ---
 typedef const OrtApiBase* (*FnOrtGetApiBase)(void);
@@ -279,9 +279,6 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_wakeword_WakeWordJni_nativeDete
     for (float& v : melFrames) { v = v / 10.0f + 2.0f; }
     g_ort->ReleaseValue(melOutputTensor);
 
-    LOGI("Mel: %d frames, %zu dims, %zu elements from %zu detector samples",
-         nMelFrames, melNumDims, melNumElements, audioIn.size());
-
     // --- Stage 2: Extract embeddings with stride 8, 76-frame window ---
     int nEmbeddings =
         (nMelFrames - kEmbeddingWindowFrames) / kEmbeddingStrideFrames + 1;
@@ -309,8 +306,6 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_wakeword_WakeWordJni_nativeDete
         if (!embedOk) { env->ReleaseFloatArrayElements(jSamples, samples, JNI_ABORT); return -1.0f; }
         embeddings.insert(embeddings.end(), embedOut.begin(), embedOut.end());
     }
-
-    LOGI("Extracted %d embeddings from %d mel frames", nEmbeddings, nMelFrames);
 
     // --- Stage 3: score dense windows whose endpoints remain inside the onset gate ---
     // For classifier window start w, the final embedding index is w+15 and its
@@ -372,14 +367,6 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_wakeword_WakeWordJni_nativeDete
             env->ReleaseFloatArrayElements(jOutOffset, outOffset, 0);
         }
     }
-
-    LOGI("Scored %d/%d onset-eligible classifier windows (bestW=%d endpoint=%d)",
-         numWindows, totalWindows, bestWindow,
-         bestWindow >= 0
-             ? kEmbeddingEndpointOffsetSamples +
-                   (bestWindow + kMaxEmbeddings - 1) * kEmbeddingStrideSamples -
-                   kVirtualContextSamples
-             : -1);
 
     env->ReleaseFloatArrayElements(jSamples, samples, JNI_ABORT);
     return maxScore;

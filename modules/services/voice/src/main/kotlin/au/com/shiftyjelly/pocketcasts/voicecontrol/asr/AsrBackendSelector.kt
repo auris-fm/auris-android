@@ -7,15 +7,22 @@ import javax.inject.Singleton
 
 @Singleton
 class AsrBackendSelector @Inject constructor(
-    private val deviceProbe: DeviceProbe,
-    private val whisperCppBackend: Lazy<WhisperCppBackend>,
     private val senseVoiceBackend: Lazy<SenseVoiceBackend>,
+    private val canaryFlashBackend: Lazy<CanaryFlashBackend>,
+    private val currentLocale: () -> Locale,
 ) {
 
-    /** Manual override: force a specific backend. Set to "whisper-cpp", "sensevoice", or "npu". */
+    /**
+     * Manual override: force a product backend. Set to "sensevoice" or "canary-flash".
+     * Whisper is legacy-only and is not a product route (override or matrix).
+     */
     var manualOverride: String? = null
 
-    fun select(): AsrBackend {
+    /**
+     * Selects the ASR backend for the current OS locale, or `null` when the locale is
+     * outside the product language set (unsupported — no Whisper fallback).
+     */
+    fun select(): AsrBackend? {
         val override = manualOverride
         if (override != null) {
             return selectByOverride(override)
@@ -23,28 +30,31 @@ class AsrBackendSelector @Inject constructor(
         return selectByMatrix()
     }
 
-    private fun selectByOverride(override: String): AsrBackend {
+    private fun selectByOverride(override: String): AsrBackend? {
         return when (override.lowercase()) {
-            "whisper-cpp" -> whisperCppBackend.get()
             "sensevoice" -> senseVoiceBackend.get()
-            "npu" -> error("NPU backend is not yet implemented (Phase 3)")
+            "canary-flash" -> canaryFlashBackend.get()
             else -> error("Unknown backend override: $override")
         }
     }
 
-    private fun selectByMatrix(): AsrBackend {
-        // Matrix:
-        // 1. Snapdragon + NPU available + NPU backend shipped -> WhisperNpuBackend (Phase 3)
-        // 2. SenseVoice: OS language in {zh, ja, ko, yue} -> SenseVoiceBackend
-        // 3. Default -> WhisperCppBackend
-        val osLang = Locale.getDefault().language
-        if (osLang in SENSEVOICE_LANGS) {
-            return senseVoiceBackend.get()
+    private fun selectByMatrix(): AsrBackend? {
+        // Product matrix (by OS locale):
+        // 1. zh/ja/ko/yue -> SenseVoiceBackend (native text -> ML Kit translation)
+        // 2. de/es/fr      -> CanaryFlashBackend (native translate to English)
+        // 3. en            -> SenseVoiceBackend (fast non-autoregressive path; no translation)
+        // 4. otherwise     -> unsupported (null; Whisper may remain in-tree but unselected)
+        val osLang = currentLocale().language
+        return when (osLang) {
+            in SENSEVOICE_LANGS -> senseVoiceBackend.get()
+            in CANARY_LANGS -> canaryFlashBackend.get()
+            "en" -> senseVoiceBackend.get()
+            else -> null
         }
-        return whisperCppBackend.get()
     }
 
     companion object {
         private val SENSEVOICE_LANGS = setOf("zh", "ja", "ko", "yue")
+        private val CANARY_LANGS = setOf("de", "es", "fr")
     }
 }

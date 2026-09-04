@@ -7,6 +7,8 @@ import android.telephony.TelephonyManager
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.repositories.chromecast.CastManager
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.GoogleMlKitTranslator
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.foreground.ForegroundStateMonitor
@@ -69,6 +71,7 @@ import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import java.io.File
+import java.util.Locale
 import javax.inject.Named
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -113,6 +116,8 @@ abstract class VoiceControlModule {
 
     @Binds abstract fun bindTtsEngine(impl: AndroidPlatformTtsEngine): TtsEngine
 
+    @Binds abstract fun bindTranslationStage(impl: GoogleMlKitTranslator): TranslationStage
+
     companion object {
         @Provides @Singleton
         @Named("embeddingModel")
@@ -124,6 +129,9 @@ abstract class VoiceControlModule {
 
         @Provides @Singleton
         fun provideDeviceProbe(): au.com.shiftyjelly.pocketcasts.voicecontrol.asr.DeviceProbe = au.com.shiftyjelly.pocketcasts.voicecontrol.asr.DeviceProbe()
+
+        @Provides @Singleton
+        fun provideCurrentLocale(): () -> Locale = { Locale.getDefault() }
 
         @Provides @Singleton
         fun provideDeviceSupportedCondition(): DeviceSupportedCondition = DeviceSupportedCondition()

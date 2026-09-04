@@ -9,6 +9,7 @@ import android.media.AudioManager
 import androidx.annotation.RequiresPermission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
@@ -26,12 +27,14 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordSegmentCaptu
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 
 @Singleton
@@ -42,6 +45,7 @@ class VoiceAsrEngine @Inject constructor(
     private val wakeWordDetector: WakeWordDetector,
     private val gracePeriodSignal: GracePeriodSignal,
     private val audioFeedbackRenderer: AudioFeedbackRenderer,
+    private val translationStage: TranslationStage,
     @ApplicationContext private val context: Context,
 ) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -75,6 +79,7 @@ class VoiceAsrEngine @Inject constructor(
         utteranceFilter.reset()
 
         processingJob = scope.launch {
+            Timber.i("[VoicePipeline] start route=%s sco=%b", audioRoute, audioRoute is AudioRoute.BluetoothA2dpOnly)
             if (audioRoute is AudioRoute.BluetoothA2dpOnly) {
                 awaitBluetoothSco()
             }
@@ -88,7 +93,7 @@ class VoiceAsrEngine @Inject constructor(
                         is VoiceSegmenterResult.SpeechEnded -> {
                             val totalSamples = result.frames.sumOf { it.samples.size }
                             val durationMs = totalSamples * 1000L / 16000
-                            Timber.i("VAD: speech ended (%d samples, ~%dms)", totalSamples, durationMs)
+                            Timber.i("[VoicePipeline] vad ~%dms (%d samples)", durationMs, totalSamples)
 
                             val request = shouldTranscribe(result)
                             if (request != null) {
@@ -97,21 +102,21 @@ class VoiceAsrEngine @Inject constructor(
                         }
 
                         is VoiceSegmenterResult.Rejected ->
-                            Timber.w("VAD: rejected - %s", result.reason)
+                            Timber.w("[VoicePipeline] vad rejected - %s", result.reason)
 
                         VoiceSegmenterResult.Silence -> { /* no speech */ }
                     }
                 }
             } catch (e: Exception) {
-                Timber.e(e, "Voice audio processing failed")
+                Timber.e(e, "[VoicePipeline] audio processing failed")
             }
         }
-        Timber.i("VoiceAsrEngine started (backend=%s, mode=%s)", backend::class.simpleName, listeningMode)
+        Timber.i("[VoicePipeline] engine started backend=%s mode=%s", backend::class.simpleName, listeningMode)
     }
 
     fun updateListeningMode(mode: ListeningMode) {
         currentMode = mode
-        Timber.i("VoiceAsrEngine mode updated to %s", mode)
+        Timber.i("[VoicePipeline] mode updated to %s", mode)
     }
 
     /**
@@ -153,7 +158,7 @@ class VoiceAsrEngine @Inject constructor(
                 speechOnsetSample = segment.speechOnsetSample,
             )
         }.getOrElse { e ->
-            Timber.w(e, "Wake word detection failed, dropping segment")
+            Timber.w(e, "[VoicePipeline] wake detection failed, dropping segment")
             return null
         }
 
@@ -167,10 +172,13 @@ class VoiceAsrEngine @Inject constructor(
         )
 
         val mode = currentMode
+        val wakeCmp = when {
+            wwResult.threshold.isNaN() -> if (wwResult.detected) "hit" else "miss"
+            wwResult.detected -> "%.3f >= %.3f".format(wwResult.confidence, wwResult.threshold)
+            else -> "%.3f < %.3f".format(wwResult.confidence, wwResult.threshold)
+        }
 
         if (wwResult.detected) {
-            Timber.i("Wake word detected (confidence=%.2f)", wwResult.confidence)
-
             // Open or reset the conversation grace period. This causes
             // ListeningModePolicy to switch to Continuous for subsequent utterances.
             gracePeriodSignal.onWakeWordDetected()
@@ -178,6 +186,7 @@ class VoiceAsrEngine @Inject constructor(
             // Always acknowledge detection with the WAKE_WORD earcon
             audioFeedbackRenderer.playEarcon(EarconId.WAKE_WORD)
 
+            Timber.i("[VoicePipeline] wake %s → ASR (hit, mode=%s)", wakeCmp, mode)
             return TranscribeRequest(
                 samples = floatSamples,
                 wakePositive = true,
@@ -188,11 +197,13 @@ class VoiceAsrEngine @Inject constructor(
         // Negative detection
         return when (mode) {
             ListeningMode.Continuous -> {
+                Timber.i("[VoicePipeline] wake %s → ASR (grace/continuous)", wakeCmp)
                 TranscribeRequest(samples = floatSamples, wakePositive = false)
             }
 
             ListeningMode.WakeWord -> {
                 // Outside grace: drop — wake word is required
+                Timber.i("[VoicePipeline] wake %s → drop (no grace)", wakeCmp)
                 null
             }
 
@@ -211,12 +222,14 @@ class VoiceAsrEngine @Inject constructor(
         // Filter out playback bleed before transcribing
         val playbackBuffer = playbackBufferProvider?.invoke() ?: FloatArray(0)
         if (!utteranceFilter.shouldProcess(floatSamples, false, 0, playbackBuffer)) {
-            Timber.i("Utterance rejected by bleed filter")
+            Timber.i("[VoicePipeline] → drop (bleed filter)")
             return
         }
 
         // ASR
+        val asrStartedAt = System.currentTimeMillis()
         val asrResult = b.transcribe(floatSamples, sampleRateHz)
+        val asrMs = System.currentTimeMillis() - asrStartedAt
         val durationMs = (floatSamples.size * 1000L / sampleRateHz).toInt()
         val transcript = WakeTranscriptTrimmer.commandText(
             result = asrResult,
@@ -225,16 +238,51 @@ class VoiceAsrEngine @Inject constructor(
             sampleRateHz = sampleRateHz,
             utteranceDurationMs = durationMs,
         )
+        val trimNote = when {
+            !request.wakePositive -> null
+            asrResult.text != transcript -> "trim '${asrResult.text}' → '$transcript'"
+            else -> null
+        }
         if (transcript.isBlank()) {
+            Timber.i(
+                "[VoicePipeline] asr %s %dms lang=%s '%s'%s → drop (%s)",
+                b::class.simpleName,
+                asrMs,
+                asrResult.detectedLanguage ?: "?",
+                asrResult.text,
+                trimNote?.let { " $it" } ?: "",
+                if (request.wakePositive) "wake-only" else "empty",
+            )
             if (request.wakePositive) {
-                Timber.i("Wake-only utterance — no command remainder after ASR")
                 audioFeedbackRenderer.playEarcon(EarconId.ERROR)
-            } else {
-                Timber.i("ASR returned empty transcript")
             }
             return
         }
-        processUtterance(asrResult.copy(text = transcript))
+        // Translate to English when the ASR backend did not already translate and
+        // the detected language is not English (the SenseVoice CJK path).
+        // Use the wake-trimmed transcript from LFM's WakeTranscriptTrimmer.
+        val trimmedResult = asrResult.copy(text = transcript)
+        val (finalResult, translateNote) = maybeTranslate(trimmedResult, b)
+        // Source-first: lang + first quote are ASR; translate note carries the English result.
+        // Printing post-translate fields first made lines like
+        //   lang=en 'Play.' translate=yue→en '播放。'
+        // read as English ASR that somehow translated into Chinese.
+        Timber.i(
+            "[VoicePipeline] asr %s %dms lang=%s '%s'%s%s",
+            b::class.simpleName,
+            asrMs,
+            trimmedResult.detectedLanguage ?: "?",
+            trimmedResult.text,
+            trimNote?.let { " $it" } ?: "",
+            translateNote?.let { " $it" } ?: "",
+        )
+        if (isNonEnglishTranslateFailure(translateNote)) {
+            // Don't feed untranslated CJK into the English-only intent model.
+            Timber.i("[VoicePipeline] → drop (%s)", translateNote)
+            audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+            return
+        }
+        processUtterance(finalResult)
     }
 
     private suspend fun processUtterance(result: AsrResult) {
@@ -243,7 +291,7 @@ class VoiceAsrEngine @Inject constructor(
 
         val ready = recognizer.ensureReady()
         if (ready.isFailure) {
-            Timber.e(ready.exceptionOrNull(), "Intent recognizer not ready")
+            Timber.e(ready.exceptionOrNull(), "[VoicePipeline] intent not ready")
             return
         }
 
@@ -256,11 +304,48 @@ class VoiceAsrEngine @Inject constructor(
         val elapsedMs = System.currentTimeMillis() - t0
 
         if (intent != null) {
-            Timber.i("Intent: %s (%dms)", intent::class.simpleName, elapsedMs)
+            Timber.i("[VoicePipeline] intent %s %dms ← '%s'", intent, elapsedMs, result.text)
             handler(intent)
         } else {
-            Timber.i("No intent (%dms)", elapsedMs)
+            Timber.i("[VoicePipeline] intent none %dms ← '%s'", elapsedMs, result.text)
         }
+    }
+
+    private suspend fun maybeTranslate(result: AsrResult, backend: AsrBackend): Pair<AsrResult, String?> {
+        val detected = result.detectedLanguage?.lowercase()
+        if (detected == null) {
+            return result to "translate=skip(no lang)"
+        }
+        if (detected == "en") {
+            return result to null
+        }
+        if (backend.capabilities.canTranslateToEnglish) {
+            return result to "translate=skip(backend)"
+        }
+
+        val ready = translationStage.ensureReady(detected)
+        if (ready.isFailure) {
+            return result to "translate=fail($detected)"
+        }
+        val translated = translationStage.translate(result.text, detected).getOrElse {
+            return result to "translate=fail($detected)"
+        }
+        if (translated.isBlank()) {
+            return result to "translate=blank($detected)"
+        }
+        // Reject no-op "translations" that would mislabel CJK as English.
+        if (translated == result.text) {
+            return result to "translate=noop($detected)"
+        }
+        return result.copy(text = translated, detectedLanguage = "en") to
+            "translate=$detected→en '$translated'"
+    }
+
+    private fun isNonEnglishTranslateFailure(translateNote: String?): Boolean {
+        if (translateNote == null) return false
+        return translateNote.startsWith("translate=fail(") ||
+            translateNote.startsWith("translate=blank(") ||
+            translateNote.startsWith("translate=noop(")
     }
 
     fun stop() {
@@ -269,44 +354,84 @@ class VoiceAsrEngine @Inject constructor(
         backend?.release()
         backend = null
         closeBluetoothSco()
-        Timber.i("VoiceAsrEngine stopped")
+        Timber.i("[VoicePipeline] engine stopped")
     }
 
     @Suppress("DEPRECATION") // startBluetoothSco + SCO broadcast deprecated in API 33; no replacement
     private suspend fun awaitBluetoothSco() {
         if (scoStarted) return
-        suspendCancellableCoroutine { cont ->
-            val receiver = object : BroadcastReceiver() {
-                override fun onReceive(ctx: Context, intent: Intent) {
-                    val state = intent.getIntExtra(
-                        AudioManager.EXTRA_SCO_AUDIO_STATE,
-                        AudioManager.SCO_AUDIO_STATE_ERROR,
+        var registeredReceiver: BroadcastReceiver? = null
+        var modeCaptured = false
+        try {
+            val connected = withTimeoutOrNull(SCO_CONNECT_TIMEOUT_MS) {
+                suspendCancellableCoroutine { cont ->
+                    val receiver = object : BroadcastReceiver() {
+                        override fun onReceive(ctx: Context, intent: Intent) {
+                            val state = intent.getIntExtra(
+                                AudioManager.EXTRA_SCO_AUDIO_STATE,
+                                AudioManager.SCO_AUDIO_STATE_ERROR,
+                            )
+                            Timber.i("[VoicePipeline] sco state=%d", state)
+                            if (state == AudioManager.SCO_AUDIO_STATE_CONNECTED ||
+                                state == AudioManager.SCO_AUDIO_STATE_DISCONNECTED
+                            ) {
+                                context.unregisterReceiver(this)
+                                if (cont.isActive) cont.resumeWith(Result.success(state == AudioManager.SCO_AUDIO_STATE_CONNECTED))
+                            }
+                        }
+                    }
+                    context.registerReceiver(
+                        receiver,
+                        IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED),
                     )
-                    Timber.i("SCO state: %d", state)
-                    if (state == AudioManager.SCO_AUDIO_STATE_CONNECTED ||
-                        state == AudioManager.SCO_AUDIO_STATE_DISCONNECTED
-                    ) {
-                        context.unregisterReceiver(this)
-                        if (cont.isActive) cont.resumeWith(Result.success(Unit))
+                    registeredReceiver = receiver
+                    savedAudioMode = audioManager.mode
+                    modeCaptured = true
+                    audioManager.mode = AudioManager.MODE_NORMAL
+                    audioManager.startBluetoothSco()
+                    scoStarted = true
+                    Timber.i("[VoicePipeline] sco requested, waiting")
+
+                    cont.invokeOnCancellation {
+                        try {
+                            context.unregisterReceiver(receiver)
+                        } catch (_: Exception) {
+                        }
+                        registeredReceiver = null
                     }
                 }
             }
-            context.registerReceiver(
-                receiver,
-                IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED),
-            )
-            savedAudioMode = audioManager.mode
-            audioManager.mode = AudioManager.MODE_NORMAL
-            audioManager.startBluetoothSco()
-            scoStarted = true
-            Timber.i("SCO requested, waiting for connection")
+            if (connected != true) {
+                Timber.w("[VoicePipeline] sco timeout/fallback — proceeding without confirmed SCO")
+                // Leave scoStarted as set if startBluetoothSco was issued; closeBluetoothSco
+                // still cleans up on stop. Capture continues on the best available input.
+            }
+        } catch (e: CancellationException) {
+            // Cancellation can land after register/mode change but before scoStarted —
+            // rollback restores mode / clears savedAudioMode (unregister is idempotent).
+            rollbackFailedScoSetup(registeredReceiver, modeCaptured)
+            throw e
+        } catch (e: Exception) {
+            Timber.w(e, "[VoicePipeline] sco setup failed — falling back to phone mic")
+            rollbackFailedScoSetup(registeredReceiver, modeCaptured)
+        }
+    }
 
-            cont.invokeOnCancellation {
-                try {
-                    context.unregisterReceiver(receiver)
-                } catch (_: Exception) {}
+    private fun rollbackFailedScoSetup(receiver: BroadcastReceiver?, modeCaptured: Boolean) {
+        if (receiver != null) {
+            try {
+                context.unregisterReceiver(receiver)
+            } catch (_: Exception) {
             }
         }
+        if (modeCaptured) {
+            try {
+                savedAudioMode?.let { audioManager.mode = it }
+            } catch (_: Exception) {
+            }
+            savedAudioMode = null
+        }
+        scoStarted = false
     }
 
     @Suppress("DEPRECATION") // stopBluetoothSco deprecated in API 33; no replacement
@@ -320,5 +445,9 @@ class VoiceAsrEngine @Inject constructor(
         } finally {
             scoStarted = false
         }
+    }
+
+    companion object {
+        private const val SCO_CONNECT_TIMEOUT_MS = 3_000L
     }
 }

@@ -14,7 +14,6 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
-import timber.log.Timber
 
 @Singleton
 class ListeningModePolicy @Inject constructor(
@@ -50,20 +49,16 @@ internal fun resolve(
     isGracePeriodActive: Boolean,
 ): ListeningMode {
     if (!gateState.allowed) {
-        Timber.d("Mode: Off (gate blocked)")
         return ListeningMode.Off
     }
     if (micExposure == MicExposure.NoMic) {
-        Timber.d("Mode: Off (no mic)")
         return ListeningMode.Off
     }
 
     // Grace period is the ONLY wake-word waiver
     if (isGracePeriodActive) {
-        Timber.d("Mode: Continuous (grace period)")
         return ListeningMode.Continuous
     }
 
-    Timber.d("Mode: WakeWord")
     return ListeningMode.WakeWord
 }

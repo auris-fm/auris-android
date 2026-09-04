@@ -38,11 +38,15 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
                     provider = "cpu",
                 ),
             )
-            recognizer?.release()
-            recognizer = OfflineRecognizer(config = config)
+            val previous = recognizer
+            recognizer = null
+            previous?.release()
+            val created = OfflineRecognizer(config = config)
+            recognizer = created
             Timber.i("SenseVoiceBackend ready")
             Result.success(Unit)
         } catch (e: Exception) {
+            recognizer = null
             Timber.e(e, "SenseVoice initialization failed")
             Result.failure(e)
         }
@@ -63,8 +67,7 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
                 if (trimmed.isEmpty()) {
                     AsrResult(text = "", detectedLanguage = null)
                 } else {
-                    // SenseVoice auto-LID prefixes text like "<|zh|>...", strip and detect
-                    val lang = detectLanguage(trimmed)
+                    val lang = resolveDetectedLanguage(result.lang, trimmed)
                     val cleanText = stripLanguageTag(trimmed)
                     AsrResult(text = cleanText, detectedLanguage = lang)
                 }
@@ -119,6 +122,13 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
         private const val SENSEVOICE_TOKENS_FILENAME = "tokens.txt"
 
         private val LANG_PATTERN = Regex("^<\\|(\\w+)\\|>")
+
+        /** Prefer structured LID; fall back to legacy text-tag parsing. */
+        internal fun resolveDetectedLanguage(structuredLang: String?, text: String): String? {
+            val fromField = structuredLang?.trim()?.takeIf { it.isNotEmpty() }
+            if (fromField != null) return fromField
+            return detectLanguage(text)
+        }
 
         private fun detectLanguage(text: String): String? {
             return LANG_PATTERN.find(text)?.groupValues?.get(1)

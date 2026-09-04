@@ -30,7 +30,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -155,7 +157,8 @@ class VoiceAsrEngineTest {
     fun `start with BluetoothA2dpOnly awaits SCO connected before capture`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
+        // Do not advanceUntilIdle — that would fire the SCO timeout.
+        runCurrent()
 
         verify(audioManager).startBluetoothSco()
         verify(voiceAudioProcessor, never()).startProcessing()
@@ -173,12 +176,29 @@ class VoiceAsrEngineTest {
     fun `start with BluetoothA2dpOnly starts capture even when SCO disconnects`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
+        runCurrent()
 
         verify(audioManager).startBluetoothSco()
         verify(voiceAudioProcessor, never()).startProcessing()
 
         simulateScoState(AudioManager.SCO_AUDIO_STATE_DISCONNECTED)
+        advanceUntilIdle()
+
+        verify(voiceAudioProcessor).startProcessing()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `start with BluetoothA2dpOnly falls back after SCO timeout`() = runTest {
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+
+        verify(audioManager).startBluetoothSco()
+        verify(voiceAudioProcessor, never()).startProcessing()
+
+        advanceTimeBy(3_001)
         advanceUntilIdle()
 
         verify(voiceAudioProcessor).startProcessing()
@@ -192,7 +212,7 @@ class VoiceAsrEngineTest {
     fun `stop during SCO await cancels wait and unregisters receiver`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
+        runCurrent()
 
         verify(audioManager).startBluetoothSco()
         assertTrue("Expected receiver registered", capturedReceiver != null)
@@ -298,7 +318,7 @@ class VoiceAsrEngineTest {
             ),
         )
         `when`(translationStage.ensureReady("zh")).thenReturn(Result.success(Unit))
-        `when`(translationStage.translate("你好", "zh")).thenReturn("hello")
+        `when`(translationStage.translate("你好", "zh")).thenReturn(Result.success("hello"))
 
         engine = VoiceAsrEngine(
             voiceAudioProcessor = voiceAudioProcessor,

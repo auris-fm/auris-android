@@ -43,16 +43,20 @@ class GoogleMlKitTranslator @Inject constructor() : TranslationStage {
         }
     }
 
-    override suspend fun translate(text: String, sourceLanguage: String): String {
+    override suspend fun translate(text: String, sourceLanguage: String): Result<String> {
         val mlKitLang = mapLanguage(sourceLanguage)
-            ?: return text // No ML Kit language mapping: pass through unchanged.
+            ?: return Result.failure(IllegalArgumentException("Unsupported ML Kit source language: $sourceLanguage"))
         return try {
             val translator = translatorFor(mlKitLang)
-            awaitTask(translator.translate(text))
+            val translated = awaitTask(translator.translate(text))
+            if (translated.isBlank()) {
+                Result.failure(IllegalStateException("ML Kit returned blank translation for $sourceLanguage"))
+            } else {
+                Result.success(translated)
+            }
         } catch (e: Exception) {
             Timber.e(e, "ML Kit translation failed for %s: '%s'", sourceLanguage, text)
-            // Graceful degradation: fall back to the untranslated text.
-            text
+            Result.failure(e)
         }
     }
 
@@ -69,7 +73,7 @@ class GoogleMlKitTranslator @Inject constructor() : TranslationStage {
      * Maps an ISO-639-1 (or SenseVoice LID) language code to the ML Kit translate
      * language constant. Returns null if there is no ML Kit equivalent.
      */
-    private fun mapLanguage(language: String): String? {
+    internal fun mapLanguage(language: String): String? {
         return when (language.lowercase(Locale.ROOT)) {
             "zh", "yue" -> "zh"
 

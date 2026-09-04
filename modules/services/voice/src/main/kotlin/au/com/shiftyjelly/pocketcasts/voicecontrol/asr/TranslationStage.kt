@@ -11,5 +11,5 @@ interface TranslationStage {
     suspend fun ensureReady(sourceLanguage: String): Result<Unit>
 
     /** Translate UTF-8 text from [sourceLanguage] to English. */
-    suspend fun translate(text: String, sourceLanguage: String): String
+    suspend fun translate(text: String, sourceLanguage: String): Result<String>
 }

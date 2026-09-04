@@ -64,11 +64,15 @@ class CanaryFlashBackend @Inject constructor(
                     provider = "cpu",
                 ),
             )
-            recognizer?.release()
-            recognizer = OfflineRecognizer(config = config)
+            val previous = recognizer
+            recognizer = null
+            previous?.release()
+            val created = OfflineRecognizer(config = config)
+            recognizer = created
             Timber.i("CanaryFlashBackend ready (src=%s, tgt=en)", srcLang)
             Result.success(Unit)
         } catch (e: Exception) {
+            recognizer = null
             Timber.e(e, "Canary Flash initialization failed")
             Result.failure(e)
         }

@@ -33,6 +33,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 
 @Singleton
@@ -265,7 +266,7 @@ class VoiceAsrEngine @Inject constructor(
             "[VoicePipeline] asr %s %dms lang=%s '%s'%s%s",
             b::class.simpleName,
             asrMs,
-            asrResult.detectedLanguage ?: "?",
+            finalResult.detectedLanguage ?: "?",
             finalResult.text,
             trimNote?.let { " $it" } ?: "",
             translateNote?.let { " $it" } ?: "",
@@ -315,9 +316,15 @@ class VoiceAsrEngine @Inject constructor(
         if (ready.isFailure) {
             return result to "translate=fail($detected)"
         }
-        val translated = translationStage.translate(result.text, detected)
+        val translated = translationStage.translate(result.text, detected).getOrElse {
+            return result to "translate=fail($detected)"
+        }
         if (translated.isBlank()) {
             return result to "translate=blank($detected)"
+        }
+        // Reject no-op "translations" that would mislabel CJK as English.
+        if (translated == result.text) {
+            return result to "translate=noop($detected)"
         }
         return result.copy(text = translated, detectedLanguage = "en") to
             "translate=$detected→en '${result.text}'"
@@ -335,37 +342,44 @@ class VoiceAsrEngine @Inject constructor(
     @Suppress("DEPRECATION") // startBluetoothSco + SCO broadcast deprecated in API 33; no replacement
     private suspend fun awaitBluetoothSco() {
         if (scoStarted) return
-        suspendCancellableCoroutine { cont ->
-            val receiver = object : BroadcastReceiver() {
-                override fun onReceive(ctx: Context, intent: Intent) {
-                    val state = intent.getIntExtra(
-                        AudioManager.EXTRA_SCO_AUDIO_STATE,
-                        AudioManager.SCO_AUDIO_STATE_ERROR,
-                    )
-                    Timber.i("[VoicePipeline] sco state=%d", state)
-                    if (state == AudioManager.SCO_AUDIO_STATE_CONNECTED ||
-                        state == AudioManager.SCO_AUDIO_STATE_DISCONNECTED
-                    ) {
-                        context.unregisterReceiver(this)
-                        if (cont.isActive) cont.resumeWith(Result.success(Unit))
+        val connected = withTimeoutOrNull(SCO_CONNECT_TIMEOUT_MS) {
+            suspendCancellableCoroutine { cont ->
+                val receiver = object : BroadcastReceiver() {
+                    override fun onReceive(ctx: Context, intent: Intent) {
+                        val state = intent.getIntExtra(
+                            AudioManager.EXTRA_SCO_AUDIO_STATE,
+                            AudioManager.SCO_AUDIO_STATE_ERROR,
+                        )
+                        Timber.i("[VoicePipeline] sco state=%d", state)
+                        if (state == AudioManager.SCO_AUDIO_STATE_CONNECTED ||
+                            state == AudioManager.SCO_AUDIO_STATE_DISCONNECTED
+                        ) {
+                            context.unregisterReceiver(this)
+                            if (cont.isActive) cont.resumeWith(Result.success(state == AudioManager.SCO_AUDIO_STATE_CONNECTED))
+                        }
                     }
                 }
-            }
-            context.registerReceiver(
-                receiver,
-                IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED),
-            )
-            savedAudioMode = audioManager.mode
-            audioManager.mode = AudioManager.MODE_NORMAL
-            audioManager.startBluetoothSco()
-            scoStarted = true
-            Timber.i("[VoicePipeline] sco requested, waiting")
+                context.registerReceiver(
+                    receiver,
+                    IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED),
+                )
+                savedAudioMode = audioManager.mode
+                audioManager.mode = AudioManager.MODE_NORMAL
+                audioManager.startBluetoothSco()
+                scoStarted = true
+                Timber.i("[VoicePipeline] sco requested, waiting")
 
-            cont.invokeOnCancellation {
-                try {
-                    context.unregisterReceiver(receiver)
-                } catch (_: Exception) {}
+                cont.invokeOnCancellation {
+                    try {
+                        context.unregisterReceiver(receiver)
+                    } catch (_: Exception) {}
+                }
             }
+        }
+        if (connected != true) {
+            Timber.w("[VoicePipeline] sco timeout/fallback — proceeding without confirmed SCO")
+            // Leave scoStarted as set if startBluetoothSco was issued; closeBluetoothSco
+            // still cleans up on stop. Capture continues on the best available input.
         }
     }
 
@@ -380,5 +394,9 @@ class VoiceAsrEngine @Inject constructor(
         } finally {
             scoStarted = false
         }
+    }
+
+    companion object {
+        private const val SCO_CONNECT_TIMEOUT_MS = 3_000L
     }
 }

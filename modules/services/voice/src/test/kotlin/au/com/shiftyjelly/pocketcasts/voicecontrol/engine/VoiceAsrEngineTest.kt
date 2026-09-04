@@ -228,7 +228,7 @@ class VoiceAsrEngineTest {
     fun `stop after capture started closes SCO and releases backend`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
+        runCurrent()
 
         simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
         advanceUntilIdle()
@@ -420,6 +420,75 @@ class VoiceAsrEngineTest {
     }
 
     @Test
+    fun `translate fail blank and noop drop with ERROR earcon and skip intent`() = runTest {
+        data class Case(
+            val label: String,
+            val ensureReady: Result<Unit>,
+            val translateResult: Result<String>?,
+        )
+        val cases = listOf(
+            Case("fail-ready", Result.failure(IllegalStateException("no model")), null),
+            Case("fail-translate", Result.success(Unit), Result.failure(IllegalStateException("mlkit"))),
+            Case("blank", Result.success(Unit), Result.success("")),
+            Case("noop", Result.success(Unit), Result.success("你好")),
+        )
+
+        for (case in cases) {
+            val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+            val localTranslation = mock<TranslationStage>()
+            `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+            `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+            `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+                flowOf(
+                    VoiceSegmenterResult.SpeechEnded(
+                        listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                        speechOnsetSample = 2,
+                    ),
+                ),
+            )
+            `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+            `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+                WakeWordResult(detected = false, confidence = 0f),
+            )
+            `when`(localTranslation.ensureReady("zh")).thenReturn(case.ensureReady)
+            if (case.translateResult != null) {
+                `when`(localTranslation.translate("你好", "zh")).thenReturn(case.translateResult)
+            }
+
+            engine = VoiceAsrEngine(
+                voiceAudioProcessor = voiceAudioProcessor,
+                utteranceFilter = utteranceFilter,
+                intentRecognizer = recognizer,
+                wakeWordDetector = wakeWordDetector,
+                gracePeriodSignal = gracePeriodSignal,
+                audioFeedbackRenderer = audioFeedbackRenderer,
+                translationStage = localTranslation,
+                context = context,
+            )
+            engine.scope = this
+
+            engine.start(
+                backend = ResultBackend(AsrResult(text = "你好", detectedLanguage = "zh")),
+                audioRoute = AudioRoute.Speaker,
+                listeningMode = ListeningMode.Continuous,
+                playbackBufferProvider = { FloatArray(0) },
+                micExposureProvider = { MicExposure.Exposed },
+                onIntent = {},
+            )
+            advanceUntilIdle()
+
+            assertTrue(
+                "${case.label}: expected no intent routing, got ${recognizer.calls}",
+                recognizer.calls.isEmpty(),
+            )
+            verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+
+            engine.stop()
+            org.mockito.Mockito.reset(audioFeedbackRenderer)
+        }
+    }
+
+    @Test
     fun `english transcript bypasses translation stage`() = runTest {
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
@@ -474,7 +543,7 @@ class VoiceAsrEngineTest {
     fun `stop then restart on Bluetooth re-opens SCO`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
+        runCurrent()
 
         simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
         advanceUntilIdle()
@@ -484,10 +553,14 @@ class VoiceAsrEngineTest {
         verify(audioManager).stopBluetoothSco()
 
         // Restart — stop cleared scoStarted, so SCO must be re-opened
+        capturedReceiver = null
         startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
         advanceUntilIdle()
 
         verify(audioManager, times(2)).startBluetoothSco()
+        verify(voiceAudioProcessor, times(2)).startProcessing()
 
         engine.stop()
     }
@@ -517,7 +590,7 @@ class VoiceAsrEngineTest {
     fun `restart from Bluetooth to Speaker closes SCO`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
+        runCurrent()
 
         simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
         advanceUntilIdle()
@@ -532,6 +605,25 @@ class VoiceAsrEngineTest {
 
         verify(audioManager, times(1)).startBluetoothSco()
         verify(audioManager, times(1)).stopBluetoothSco()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `Bluetooth SCO setup exception falls back to phone mic capture`() = runTest {
+        createEngine()
+        `when`(
+            context.registerReceiver(
+                any<BroadcastReceiver>(),
+                any<IntentFilter>(),
+            ),
+        ).thenThrow(RuntimeException("registerReceiver failed"))
+
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        advanceUntilIdle()
+
+        verify(voiceAudioProcessor).startProcessing()
+        verify(audioManager, never()).startBluetoothSco()
 
         engine.stop()
     }

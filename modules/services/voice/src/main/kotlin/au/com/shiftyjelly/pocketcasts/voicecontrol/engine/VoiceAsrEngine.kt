@@ -407,6 +407,9 @@ class VoiceAsrEngine @Inject constructor(
                 // still cleans up on stop. Capture continues on the best available input.
             }
         } catch (e: CancellationException) {
+            // Cancellation can land after register/mode change but before scoStarted —
+            // rollback restores mode / clears savedAudioMode (unregister is idempotent).
+            rollbackFailedScoSetup(registeredReceiver, modeCaptured)
             throw e
         } catch (e: Exception) {
             Timber.w(e, "[VoicePipeline] sco setup failed — falling back to phone mic")

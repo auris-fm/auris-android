@@ -647,6 +647,26 @@ class VoiceAsrEngineTest {
         verify(audioManager, never()).stopBluetoothSco()
     }
 
+    @Test
+    fun `Bluetooth SCO CancellationException after register rolls back receiver and mode`() = runTest {
+        createEngine()
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_IN_COMMUNICATION)
+        org.mockito.Mockito.doThrow(kotlinx.coroutines.CancellationException("sco cancelled"))
+            .`when`(audioManager).startBluetoothSco()
+
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        advanceUntilIdle()
+
+        // Cancellation aborts the processing job before capture; rollback must still run.
+        verify(voiceAudioProcessor, never()).startProcessing()
+        assertTrue("Expected receiver to have been registered", capturedReceiver != null)
+        verify(context).unregisterReceiver(capturedReceiver!!)
+        verify(audioManager).setMode(AudioManager.MODE_IN_COMMUNICATION)
+
+        engine.stop()
+        verify(audioManager, never()).stopBluetoothSco()
+    }
+
     // ── Wake-word detection paths ──────────────────────────────────────
 
     private fun CoroutineScope.createEngineWithSpeech(

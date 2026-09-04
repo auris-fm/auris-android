@@ -121,21 +121,37 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
         private const val SENSEVOICE_MODEL_FILENAME = "model.int8.onnx"
         private const val SENSEVOICE_TOKENS_FILENAME = "tokens.txt"
 
-        private val LANG_PATTERN = Regex("^<\\|(\\w+)\\|>")
+        // SenseVoice emits tags like <|zh|> / <|zh/en|>; structured `result.lang` is the same form.
+        private val LANG_TAG = Regex("^<\\|([a-zA-Z0-9]+)(?:/[a-zA-Z0-9]+)?\\|>")
+        private val PLAIN_LANG = Regex("^[a-zA-Z]{2,8}$")
+        private val SUPPORTED_LANGS = setOf("zh", "en", "ja", "ko", "yue")
 
-        /** Prefer structured LID; fall back to legacy text-tag parsing. */
+        /**
+         * Prefer structured LID; fall back to a leading text tag.
+         * Always returns a bare code (`zh`, `en`, …) so ML Kit can consume it —
+         * never the raw `<|zh|>` token that sherpa puts in `result.lang`.
+         */
         internal fun resolveDetectedLanguage(structuredLang: String?, text: String): String? {
-            val fromField = structuredLang?.trim()?.takeIf { it.isNotEmpty() }
-            if (fromField != null) return fromField
+            normalizeLanguageCode(structuredLang)?.let { return it }
             return detectLanguage(text)
         }
 
+        /** Maps `<|zh|>` / `<|zh/en|>` / `zh` → `zh`; unrecognized / unsupported → null. */
+        internal fun normalizeLanguageCode(raw: String?): String? {
+            val trimmed = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            val code = LANG_TAG.matchEntire(trimmed)?.groupValues?.get(1)?.lowercase()
+                ?: trimmed.takeIf { PLAIN_LANG.matches(it) }?.lowercase()
+                ?: return null
+            return code.takeIf { it in SUPPORTED_LANGS }
+        }
+
         private fun detectLanguage(text: String): String? {
-            return LANG_PATTERN.find(text)?.groupValues?.get(1)
+            val code = LANG_TAG.find(text)?.groupValues?.get(1)?.lowercase() ?: return null
+            return code.takeIf { it in SUPPORTED_LANGS }
         }
 
         private fun stripLanguageTag(text: String): String {
-            return text.replace(LANG_PATTERN, "").trim()
+            return text.replace(LANG_TAG, "").trim()
         }
     }
 }

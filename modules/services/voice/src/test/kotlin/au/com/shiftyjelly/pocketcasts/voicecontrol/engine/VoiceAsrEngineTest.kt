@@ -350,6 +350,76 @@ class VoiceAsrEngineTest {
     }
 
     @Test
+    fun `asr log keeps source lang and text with english only in translate note`() = runTest {
+        // Merlin's Pixel line was confusing because post-translate fields were printed first:
+        //   lang=en 'Play.' translate=yue→en '播放。'
+        // Desired left-to-right story: ASR first, English result in the translate note.
+        val logs = mutableListOf<String>()
+        val tree = object : timber.log.Timber.Tree() {
+            override fun log(priority: Int, tag: String?, message: String, t: Throwable?) {
+                logs += message
+            }
+        }
+        timber.log.Timber.plant(tree)
+        try {
+            val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+            `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+            `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+            `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+                flowOf(
+                    VoiceSegmenterResult.SpeechEnded(
+                        listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                        speechOnsetSample = 2,
+                    ),
+                ),
+            )
+            `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+            `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+                WakeWordResult(detected = false, confidence = 0f),
+            )
+            `when`(translationStage.ensureReady("yue")).thenReturn(Result.success(Unit))
+            `when`(translationStage.translate("播放。", "yue")).thenReturn(Result.success("Play."))
+
+            engine = VoiceAsrEngine(
+                voiceAudioProcessor = voiceAudioProcessor,
+                utteranceFilter = utteranceFilter,
+                intentRecognizer = recognizer,
+                wakeWordDetector = wakeWordDetector,
+                gracePeriodSignal = gracePeriodSignal,
+                audioFeedbackRenderer = audioFeedbackRenderer,
+                translationStage = translationStage,
+                context = context,
+            )
+            engine.scope = this
+
+            engine.start(
+                backend = ResultBackend(AsrResult(text = "播放。", detectedLanguage = "yue")),
+                audioRoute = AudioRoute.Speaker,
+                listeningMode = ListeningMode.Continuous,
+                playbackBufferProvider = { FloatArray(0) },
+                micExposureProvider = { MicExposure.Exposed },
+                onIntent = {},
+            )
+            advanceUntilIdle()
+
+            val asrLog = logs.single {
+                it.startsWith("[VoicePipeline] asr ") && !it.contains("→ drop")
+            }
+            assertTrue(
+                "Expected source-first log, got: $asrLog",
+                asrLog.matches(
+                    Regex("""\[VoicePipeline\] asr ResultBackend \d+ms lang=yue '播放。' translate=yue→en 'Play\.'"""),
+                ),
+            )
+            assertTrue(recognizer.calls.contains("recognize:Play."))
+
+            engine.stop()
+        } finally {
+            timber.log.Timber.uproot(tree)
+        }
+    }
+
+    @Test
     fun `english transcript bypasses translation stage`() = runTest {
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)

@@ -262,12 +262,16 @@ class VoiceAsrEngine @Inject constructor(
         // Use the wake-trimmed transcript from LFM's WakeTranscriptTrimmer.
         val trimmedResult = asrResult.copy(text = transcript)
         val (finalResult, translateNote) = maybeTranslate(trimmedResult, b)
+        // Source-first: lang + first quote are ASR; translate note carries the English result.
+        // Printing post-translate fields first made lines like
+        //   lang=en 'Play.' translate=yue→en '播放。'
+        // read as English ASR that somehow translated into Chinese.
         Timber.i(
             "[VoicePipeline] asr %s %dms lang=%s '%s'%s%s",
             b::class.simpleName,
             asrMs,
-            finalResult.detectedLanguage ?: "?",
-            finalResult.text,
+            trimmedResult.detectedLanguage ?: "?",
+            trimmedResult.text,
             trimNote?.let { " $it" } ?: "",
             translateNote?.let { " $it" } ?: "",
         )
@@ -327,7 +331,7 @@ class VoiceAsrEngine @Inject constructor(
             return result to "translate=noop($detected)"
         }
         return result.copy(text = translated, detectedLanguage = "en") to
-            "translate=$detected→en '${result.text}'"
+            "translate=$detected→en '$translated'"
     }
 
     fun stop() {

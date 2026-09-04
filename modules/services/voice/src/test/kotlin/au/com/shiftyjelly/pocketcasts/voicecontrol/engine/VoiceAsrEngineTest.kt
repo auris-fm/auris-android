@@ -628,6 +628,25 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
+    @Test
+    fun `Bluetooth SCO startBluetoothSco exception unregisters receiver and restores audio mode`() = runTest {
+        createEngine()
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_IN_COMMUNICATION)
+        org.mockito.Mockito.doThrow(RuntimeException("startBluetoothSco failed"))
+            .`when`(audioManager).startBluetoothSco()
+
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        advanceUntilIdle()
+
+        verify(voiceAudioProcessor).startProcessing()
+        assertTrue("Expected receiver to have been registered", capturedReceiver != null)
+        verify(context).unregisterReceiver(capturedReceiver!!)
+        verify(audioManager).setMode(AudioManager.MODE_IN_COMMUNICATION)
+        // Fallback path must not leave scoStarted set — stop should not call stopBluetoothSco.
+        engine.stop()
+        verify(audioManager, never()).stopBluetoothSco()
+    }
+
     // ── Wake-word detection paths ──────────────────────────────────────
 
     private fun CoroutineScope.createEngineWithSpeech(

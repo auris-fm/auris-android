@@ -360,6 +360,8 @@ class VoiceAsrEngine @Inject constructor(
     @Suppress("DEPRECATION") // startBluetoothSco + SCO broadcast deprecated in API 33; no replacement
     private suspend fun awaitBluetoothSco() {
         if (scoStarted) return
+        var registeredReceiver: BroadcastReceiver? = null
+        var modeCaptured = false
         try {
             val connected = withTimeoutOrNull(SCO_CONNECT_TIMEOUT_MS) {
                 suspendCancellableCoroutine { cont ->
@@ -382,7 +384,9 @@ class VoiceAsrEngine @Inject constructor(
                         receiver,
                         IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED),
                     )
+                    registeredReceiver = receiver
                     savedAudioMode = audioManager.mode
+                    modeCaptured = true
                     audioManager.mode = AudioManager.MODE_NORMAL
                     audioManager.startBluetoothSco()
                     scoStarted = true
@@ -391,7 +395,9 @@ class VoiceAsrEngine @Inject constructor(
                     cont.invokeOnCancellation {
                         try {
                             context.unregisterReceiver(receiver)
-                        } catch (_: Exception) {}
+                        } catch (_: Exception) {
+                        }
+                        registeredReceiver = null
                     }
                 }
             }
@@ -404,8 +410,25 @@ class VoiceAsrEngine @Inject constructor(
             throw e
         } catch (e: Exception) {
             Timber.w(e, "[VoicePipeline] sco setup failed — falling back to phone mic")
-            scoStarted = false
+            rollbackFailedScoSetup(registeredReceiver, modeCaptured)
         }
+    }
+
+    private fun rollbackFailedScoSetup(receiver: BroadcastReceiver?, modeCaptured: Boolean) {
+        if (receiver != null) {
+            try {
+                context.unregisterReceiver(receiver)
+            } catch (_: Exception) {
+            }
+        }
+        if (modeCaptured) {
+            try {
+                savedAudioMode?.let { audioManager.mode = it }
+            } catch (_: Exception) {
+            }
+            savedAudioMode = null
+        }
+        scoStarted = false
     }
 
     @Suppress("DEPRECATION") // stopBluetoothSco deprecated in API 33; no replacement

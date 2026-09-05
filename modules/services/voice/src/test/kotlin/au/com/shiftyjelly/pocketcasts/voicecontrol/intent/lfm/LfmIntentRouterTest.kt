@@ -231,6 +231,65 @@ class LfmIntentRouterTest {
     }
 
     @Test
+    fun successPath_recordsDeterministicPerStageAndTotalLatency() = runTest {
+        var now = 1_000L
+        val inference = FakeLfmInference(onStep = { now += it }).apply {
+            classifyLabel = "playback:pause"
+            generateResult =
+                "<|tool_call_start|>[playback(action='pause')]<|tool_call_end|>"
+        }
+        val diagnostics = mutableListOf<RouterStageDiagnostic>()
+        val router = createRouter(inference, monoMs = { now }).also {
+            it.diagnosticSink = { diagnostics += it }
+        }
+
+        router.ensureReady().getOrThrow()
+        now = 2_000L
+        assertEquals(
+            VoiceIntent.Playback.Pause,
+            router.recognize(english("pause"), RECOGNITION_CONTEXT).intent,
+        )
+        val diagnostic = diagnostics.single()
+        assertEquals(
+            mapOf(
+                RouterStageDiagnostic.STAGE_TOKENIZE to 20L, // two tokenize calls @10
+                RouterStageDiagnostic.STAGE_CLASSIFY to 5L,
+                RouterStageDiagnostic.STAGE_GENERATE to 7L,
+                RouterStageDiagnostic.STAGE_PARSE_REPAIR to 0L,
+                RouterStageDiagnostic.STAGE_MAPPER_DIALOG to 0L,
+            ),
+            diagnostic.stageLatencyMs,
+        )
+        assertTrue(diagnostic.stageLatencyMs.keys.all { it in RouterStageDiagnostic.STAGE_LATENCY_KEYS })
+        assertEquals(32L, diagnostic.totalLatencyMs)
+    }
+
+    @Test
+    fun noMatch_recordsOnlyTokenizeAndClassifyLatency() = runTest {
+        var now = 100L
+        val inference = FakeLfmInference(onStep = { now += it }).apply {
+            classifyLabel = "no_match:"
+        }
+        val diagnostics = mutableListOf<RouterStageDiagnostic>()
+        val router = createRouter(inference, monoMs = { now }).also {
+            it.diagnosticSink = { diagnostics += it }
+        }
+
+        router.ensureReady().getOrThrow()
+        now = 500L
+        assertNull(router.recognize(english("hello"), RECOGNITION_CONTEXT).intent)
+        val diagnostic = diagnostics.single()
+        assertEquals(
+            mapOf(
+                RouterStageDiagnostic.STAGE_TOKENIZE to 20L,
+                RouterStageDiagnostic.STAGE_CLASSIFY to 5L,
+            ),
+            diagnostic.stageLatencyMs,
+        )
+        assertEquals(25L, diagnostic.totalLatencyMs)
+    }
+
+    @Test
     fun pauseCommand_mapsToPlaybackPause() = runTest {
         val inference = FakeLfmInference().apply {
             classifyLabel = "playback:pause"
@@ -266,6 +325,7 @@ class LfmIntentRouterTest {
         inference: FakeLfmInference,
         routerInputFormat: String? = null,
         includeFormatField: Boolean = true,
+        monoMs: () -> Long = { System.currentTimeMillis() },
     ): LfmIntentRouter {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val manager = ModelManager(context).apply {
@@ -280,6 +340,7 @@ class LfmIntentRouterTest {
             dialogManager = VoiceDialogManager(ToolCallMapper()),
             modelManager = manager,
             inference = inference,
+            monoMs = monoMs,
         )
     }
 
@@ -341,7 +402,9 @@ class LfmIntentRouterTest {
     }
 }
 
-internal class FakeLfmInference : LfmInference {
+internal class FakeLfmInference(
+    private val onStep: (Long) -> Unit = {},
+) : LfmInference {
     var loadResult = true
     var lastErrorMessage = ""
     var classifyLabel: String? = "playback:pause"
@@ -365,6 +428,7 @@ internal class FakeLfmInference : LfmInference {
 
     override fun tokenize(text: String, addBos: Boolean): IntArray? {
         tokenizedTexts += text
+        onStep(10)
         tokenizeThrows?.let { throw it }
         return when {
             text == "pause" || text == "go back a minute" || text == "Go back to 3 minutes." ||
@@ -375,11 +439,13 @@ internal class FakeLfmInference : LfmInference {
     }
 
     override fun classify(promptTokenIds: IntArray, poolStart: Int, poolEnd: Int): String? {
+        onStep(5)
         classifyCount++
         return classifyLabel
     }
 
     override fun generate(prefill: String, nPredict: Int): String? {
+        onStep(7)
         generateThrows?.let { throw it }
         return generateResult
     }

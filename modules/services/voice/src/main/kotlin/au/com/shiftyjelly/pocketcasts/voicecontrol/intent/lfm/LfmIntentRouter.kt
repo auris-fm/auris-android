@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm
 
+import android.os.SystemClock
 import au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.LfmPrompt
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.SlotRepair
@@ -24,6 +25,7 @@ class LfmIntentRouter internal constructor(
     private val dialogManager: VoiceDialogManager,
     private val modelManager: ModelManager,
     private val inference: LfmInference,
+    private val monoMs: () -> Long = { SystemClock.elapsedRealtime() },
 ) : VoiceRecognizer {
     @Inject constructor(
         dialogManager: VoiceDialogManager,
@@ -84,9 +86,10 @@ class LfmIntentRouter internal constructor(
         // Hold one lock across tokenize→classify→generate so KV-cache continuity
         // cannot be poisoned by a concurrent recognize/ensureReady caller.
         mutex.withLock {
-            val startedAt = System.currentTimeMillis()
+            val startedAt = monoMs()
             val release = modelManager.lfmRelease()
             val format = release?.routerInputFormat ?: loadedFormat
+            val stageLatencyMs = linkedMapOf<String, Long>()
             val base = DiagnosticBuilder(
                 modelRelease = release?.version ?: loadedRelease,
                 quant = release?.quant,
@@ -94,6 +97,8 @@ class LfmIntentRouter internal constructor(
                 sourceLanguage = input.sourceLanguage,
                 translationKind = input.translationKind.wireName,
                 startedAt = startedAt,
+                stageLatencyMs = stageLatencyMs,
+                monoMs = monoMs,
             )
 
             if (input.routerTranscript.isBlank()) {
@@ -127,28 +132,31 @@ class LfmIntentRouter internal constructor(
                     transcript = routerText,
                     history = dialogManager.promptHistory(),
                 )
-                val promptTokenIds = inference.tokenize(prompt, addBos = false)
-                    ?: return@withContext finish(
-                        base.fail(
-                            stage = RouterStageDiagnostic.STAGE_TOKENIZE,
-                            reason = RouterStageDiagnostic.REASON_TOKENIZE_FAILED,
-                        ),
+                val tokenized = base.timed(RouterStageDiagnostic.STAGE_TOKENIZE) {
+                    val promptIds = inference.tokenize(prompt, addBos = false)
+                        ?: return@timed null
+                    val userIds = inference.tokenize(routerText, addBos = false)
+                        ?: return@timed null
+                    val span = LfmTokenSpan.lastUserTokenSpan(promptIds, userIds)
+                    TokenizedPrompt(promptIds, userIds, span.first, span.second)
+                } ?: return@withContext finish(
+                    base.fail(
+                        stage = RouterStageDiagnostic.STAGE_TOKENIZE,
+                        reason = RouterStageDiagnostic.REASON_TOKENIZE_FAILED,
+                    ),
+                )
+                val label = base.timed(RouterStageDiagnostic.STAGE_CLASSIFY) {
+                    inference.classify(
+                        tokenized.promptTokenIds,
+                        tokenized.poolStart,
+                        tokenized.poolEnd,
                     )
-                val userTokenIds = inference.tokenize(routerText, addBos = false)
-                    ?: return@withContext finish(
-                        base.fail(
-                            stage = RouterStageDiagnostic.STAGE_TOKENIZE,
-                            reason = RouterStageDiagnostic.REASON_TOKENIZE_FAILED,
-                        ),
-                    )
-                val (poolStart, poolEnd) = LfmTokenSpan.lastUserTokenSpan(promptTokenIds, userTokenIds)
-                val label = inference.classify(promptTokenIds, poolStart, poolEnd)
-                    ?: return@withContext finish(
-                        base.fail(
-                            stage = RouterStageDiagnostic.STAGE_CLASSIFY,
-                            reason = RouterStageDiagnostic.REASON_CLASSIFY_FAILED,
-                        ),
-                    )
+                } ?: return@withContext finish(
+                    base.fail(
+                        stage = RouterStageDiagnostic.STAGE_CLASSIFY,
+                        reason = RouterStageDiagnostic.REASON_CLASSIFY_FAILED,
+                    ),
+                )
                 classifierLabel = label
                 val (tool, action) = LfmLabel.parse(label)
                 if (tool == "no_match") {
@@ -162,20 +170,23 @@ class LfmIntentRouter internal constructor(
                 }
 
                 val prefill = LfmCallPrefill.render(tool, action)
-                val generated = inference.generate(prefill)
-                    ?: return@withContext finish(
-                        base.fail(
-                            stage = RouterStageDiagnostic.STAGE_GENERATE,
-                            reason = RouterStageDiagnostic.REASON_GENERATE_FAILED,
-                            classifierLabel = label,
-                        ),
+                val generated = base.timed(RouterStageDiagnostic.STAGE_GENERATE) {
+                    inference.generate(prefill)
+                } ?: return@withContext finish(
+                    base.fail(
+                        stage = RouterStageDiagnostic.STAGE_GENERATE,
+                        reason = RouterStageDiagnostic.REASON_GENERATE_FAILED,
+                        classifierLabel = label,
+                    ),
+                )
+                val repaired = base.timed(RouterStageDiagnostic.STAGE_PARSE_REPAIR) {
+                    SlotRepair.repair(
+                        raw = generated,
+                        utterance = routerText,
+                        tool = tool,
+                        action = action,
                     )
-                val repaired = SlotRepair.repair(
-                    raw = generated,
-                    utterance = routerText,
-                    tool = tool,
-                    action = action,
-                ) ?: return@withContext finish(
+                } ?: return@withContext finish(
                     base.fail(
                         stage = RouterStageDiagnostic.STAGE_PARSE_REPAIR,
                         reason = RouterStageDiagnostic.REASON_PARSE_OR_REPAIR_FAILED,
@@ -183,14 +194,16 @@ class LfmIntentRouter internal constructor(
                     ),
                 )
 
-                val intent: VoiceIntent? = if (repaired.name == "dialog_control") {
-                    dialogManager.resolve(
-                        transcript = routerText,
-                        generated = generated,
-                        call = repaired,
-                    )
-                } else {
-                    dialogManager.resolve(repaired)
+                val intent: VoiceIntent? = base.timed(RouterStageDiagnostic.STAGE_MAPPER_DIALOG) {
+                    if (repaired.name == "dialog_control") {
+                        dialogManager.resolve(
+                            transcript = routerText,
+                            generated = generated,
+                            call = repaired,
+                        )
+                    } else {
+                        dialogManager.resolve(repaired)
+                    }
                 }
                 if (intent == null) {
                     return@withContext finish(
@@ -243,7 +256,7 @@ class LfmIntentRouter internal constructor(
             }
             try {
                 Timber.i(
-                    "[LfmRouter] stage=%s outcome=%s reason=%s label=%s format=%s lang=%s kind=%s release=%s quant=%s %dms",
+                    "[LfmRouter] stage=%s outcome=%s reason=%s label=%s format=%s lang=%s kind=%s release=%s quant=%s stages=%s %dms",
                     diagnostic.failedStage ?: "ok",
                     diagnostic.finalOutcome,
                     diagnostic.reason ?: "-",
@@ -253,6 +266,8 @@ class LfmIntentRouter internal constructor(
                     diagnostic.translationKind,
                     diagnostic.modelRelease ?: "-",
                     diagnostic.quant ?: "-",
+                    diagnostic.stageLatencyMs.entries.joinToString(",") { "${it.key}=${it.value}" }
+                        .ifEmpty { "-" },
                     diagnostic.totalLatencyMs,
                 )
             } catch (logError: Throwable) {
@@ -269,7 +284,19 @@ class LfmIntentRouter internal constructor(
         private val sourceLanguage: String?,
         private val translationKind: String,
         private val startedAt: Long,
+        private val stageLatencyMs: MutableMap<String, Long>,
+        private val monoMs: () -> Long,
     ) {
+        fun <T> timed(stage: String, block: () -> T): T {
+            val t0 = monoMs()
+            try {
+                return block()
+            } finally {
+                val elapsed = (monoMs() - t0).coerceAtLeast(0L)
+                stageLatencyMs[stage] = (stageLatencyMs[stage] ?: 0L) + elapsed
+            }
+        }
+
         fun fail(
             stage: String,
             reason: String,
@@ -286,7 +313,8 @@ class LfmIntentRouter internal constructor(
                 finalOutcome = RouterStageDiagnostic.OUTCOME_NO_INTENT,
                 failedStage = stage,
                 reason = reason,
-                totalLatencyMs = System.currentTimeMillis() - startedAt,
+                stageLatencyMs = stageLatencyMs.toMap(),
+                totalLatencyMs = (monoMs() - startedAt).coerceAtLeast(0L),
             ),
         )
 
@@ -305,8 +333,16 @@ class LfmIntentRouter internal constructor(
                 finalOutcome = RouterStageDiagnostic.OUTCOME_INTENT,
                 failedStage = null,
                 reason = null,
-                totalLatencyMs = System.currentTimeMillis() - startedAt,
+                stageLatencyMs = stageLatencyMs.toMap(),
+                totalLatencyMs = (monoMs() - startedAt).coerceAtLeast(0L),
             ),
         )
     }
+
+    private data class TokenizedPrompt(
+        val promptTokenIds: IntArray,
+        val userTokenIds: IntArray,
+        val poolStart: Int,
+        val poolEnd: Int,
+    )
 }

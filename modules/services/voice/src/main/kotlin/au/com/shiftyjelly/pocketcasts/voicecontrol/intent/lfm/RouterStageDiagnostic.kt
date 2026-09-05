@@ -14,6 +14,8 @@ data class RouterStageDiagnostic(
     val finalOutcome: String,
     val failedStage: String?,
     val reason: String?,
+    /** Allowlisted stage durations in ms (only stages that ran). */
+    val stageLatencyMs: Map<String, Long>,
     val totalLatencyMs: Long,
 ) {
     companion object {
@@ -41,5 +43,14 @@ data class RouterStageDiagnostic(
         const val REASON_MAPPER_OR_DIALOG_FAILED = "mapper_or_dialog_failed"
         const val REASON_INFERENCE_EXCEPTION = "inference_exception"
         const val REASON_UNSUPPORTED_INPUT_FORMAT = "unsupported_input_format"
+
+        /** Allowlisted keys for [stageLatencyMs]. */
+        val STAGE_LATENCY_KEYS = setOf(
+            STAGE_TOKENIZE,
+            STAGE_CLASSIFY,
+            STAGE_GENERATE,
+            STAGE_PARSE_REPAIR,
+            STAGE_MAPPER_DIALOG,
+        )
     }
 }

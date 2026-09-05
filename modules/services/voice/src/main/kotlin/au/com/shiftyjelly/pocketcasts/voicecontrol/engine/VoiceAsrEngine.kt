@@ -17,6 +17,8 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.IntentRoutingInput
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.TranslationKind
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
@@ -262,7 +264,7 @@ class VoiceAsrEngine @Inject constructor(
         // the detected language is not English (the SenseVoice CJK path).
         // Use the wake-trimmed transcript from LFM's WakeTranscriptTrimmer.
         val trimmedResult = asrResult.copy(text = transcript)
-        val (finalResult, translateNote) = maybeTranslate(trimmedResult, b)
+        val routePrep = prepareRoutingInput(trimmedResult, b)
         // Source-first: lang + first quote are ASR; translate note carries the English result.
         // Printing post-translate fields first made lines like
         //   lang=en 'Play.' translate=yue→en '播放。'
@@ -274,18 +276,18 @@ class VoiceAsrEngine @Inject constructor(
             trimmedResult.detectedLanguage ?: "?",
             trimmedResult.text,
             trimNote?.let { " $it" } ?: "",
-            translateNote?.let { " $it" } ?: "",
+            routePrep.translateNote?.let { " $it" } ?: "",
         )
-        if (isNonEnglishTranslateFailure(translateNote)) {
+        if (routePrep.dropWithError) {
             // Don't feed untranslated CJK into the English-only intent model.
-            Timber.i("[VoicePipeline] → drop (%s)", translateNote)
+            Timber.i("[VoicePipeline] → drop (%s)", routePrep.translateNote)
             audioFeedbackRenderer.playEarcon(EarconId.ERROR)
             return
         }
-        processUtterance(finalResult)
+        processUtterance(routePrep.input!!)
     }
 
-    private suspend fun processUtterance(result: AsrResult) {
+    private suspend fun processUtterance(input: IntentRoutingInput) {
         val recognizer = intentRecognizer
         val handler = onIntent ?: return
 
@@ -300,53 +302,126 @@ class VoiceAsrEngine @Inject constructor(
             listeningMode = currentMode,
             micExposure = micExposureProvider?.invoke() ?: MicExposure.Exposed,
         )
-        val intent = recognizer.recognize(result.text, ctx)
+        val outcome = recognizer.recognize(input, ctx)
         val elapsedMs = System.currentTimeMillis() - t0
+        val intent = outcome.intent
+        val diagnostic = outcome.diagnostic
 
         if (intent != null) {
-            Timber.i("[VoicePipeline] intent %s %dms ← '%s'", intent, elapsedMs, result.text)
+            Timber.i(
+                "[VoicePipeline] intent %s %dms ← '%s'",
+                intent,
+                elapsedMs,
+                input.routerTranscript,
+            )
             handler(intent)
         } else {
-            Timber.i("[VoicePipeline] intent none %dms ← '%s'", elapsedMs, result.text)
+            val stage = diagnostic?.failedStage ?: "unknown"
+            val reason = diagnostic?.reason ?: "none"
+            Timber.i(
+                "[VoicePipeline] intent none %dms stage=%s reason=%s ← '%s'",
+                elapsedMs,
+                stage,
+                reason,
+                input.routerTranscript,
+            )
         }
     }
 
-    private suspend fun maybeTranslate(result: AsrResult, backend: AsrBackend): Pair<AsrResult, String?> {
-        val detected = result.detectedLanguage?.lowercase()
+    /**
+     * Build [IntentRoutingInput] from the wake-trimmed ASR result.
+     * Translation never overwrites source evidence; failures drop before routing.
+     */
+    private suspend fun prepareRoutingInput(
+        trimmed: AsrResult,
+        backend: AsrBackend,
+    ): RoutePrep {
+        val detected = trimmed.detectedLanguage?.lowercase()
         if (detected == null) {
-            return result to "translate=skip(no lang)"
+            return RoutePrep(
+                input = IntentRoutingInput(
+                    sourceTranscript = trimmed.text,
+                    sourceLanguage = null,
+                    routerTranscript = trimmed.text,
+                    translationKind = TranslationKind.NONE,
+                ),
+                translateNote = "translate=skip(no lang)",
+                dropWithError = false,
+            )
         }
         if (detected == "en") {
-            return result to null
+            return RoutePrep(
+                input = IntentRoutingInput(
+                    sourceTranscript = trimmed.text,
+                    sourceLanguage = "en",
+                    routerTranscript = trimmed.text,
+                    translationKind = TranslationKind.NONE,
+                ),
+                translateNote = null,
+                dropWithError = false,
+            )
         }
         if (backend.capabilities.canTranslateToEnglish) {
-            return result to "translate=skip(backend)"
+            // Backend already produced English (e.g. Canary); native source may be unavailable.
+            return RoutePrep(
+                input = IntentRoutingInput(
+                    sourceTranscript = null,
+                    sourceLanguage = detected,
+                    routerTranscript = trimmed.text,
+                    translationKind = TranslationKind.BACKEND,
+                ),
+                translateNote = "translate=skip(backend)",
+                dropWithError = false,
+            )
         }
 
         val ready = translationStage.ensureReady(detected)
         if (ready.isFailure) {
-            return result to "translate=fail($detected)"
+            return RoutePrep(
+                input = null,
+                translateNote = "translate=fail($detected)",
+                dropWithError = true,
+            )
         }
-        val translated = translationStage.translate(result.text, detected).getOrElse {
-            return result to "translate=fail($detected)"
+        val translated = translationStage.translate(trimmed.text, detected).getOrElse {
+            return RoutePrep(
+                input = null,
+                translateNote = "translate=fail($detected)",
+                dropWithError = true,
+            )
         }
         if (translated.isBlank()) {
-            return result to "translate=blank($detected)"
+            return RoutePrep(
+                input = null,
+                translateNote = "translate=blank($detected)",
+                dropWithError = true,
+            )
         }
         // Reject no-op "translations" that would mislabel CJK as English.
-        if (translated == result.text) {
-            return result to "translate=noop($detected)"
+        if (translated == trimmed.text) {
+            return RoutePrep(
+                input = null,
+                translateNote = "translate=noop($detected)",
+                dropWithError = true,
+            )
         }
-        return result.copy(text = translated, detectedLanguage = "en") to
-            "translate=$detected→en '$translated'"
+        return RoutePrep(
+            input = IntentRoutingInput(
+                sourceTranscript = trimmed.text,
+                sourceLanguage = detected,
+                routerTranscript = translated,
+                translationKind = TranslationKind.PLATFORM,
+            ),
+            translateNote = "translate=$detected→en '$translated'",
+            dropWithError = false,
+        )
     }
 
-    private fun isNonEnglishTranslateFailure(translateNote: String?): Boolean {
-        if (translateNote == null) return false
-        return translateNote.startsWith("translate=fail(") ||
-            translateNote.startsWith("translate=blank(") ||
-            translateNote.startsWith("translate=noop(")
-    }
+    private data class RoutePrep(
+        val input: IntentRoutingInput?,
+        val translateNote: String?,
+        val dropWithError: Boolean,
+    )
 
     fun stop() {
         processingJob?.cancel()

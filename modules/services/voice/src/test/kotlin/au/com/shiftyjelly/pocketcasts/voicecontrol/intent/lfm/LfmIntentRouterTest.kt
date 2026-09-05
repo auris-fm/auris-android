@@ -6,7 +6,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCallMapper
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.IntentRoutingInput
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.RouterInputFormat
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.TranslationKind
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import java.io.File
@@ -31,11 +34,15 @@ class LfmIntentRouterTest {
         val inference = FakeLfmInference().apply {
             classifyLabel = "no_match:"
         }
-        val router = createRouter(inference)
+        val diagnostics = mutableListOf<RouterStageDiagnostic>()
+        val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
 
         router.ensureReady().getOrThrow()
-        assertNull(router.recognize("hello", RECOGNITION_CONTEXT))
+        assertNull(router.recognize(english("hello"), RECOGNITION_CONTEXT).intent)
         assertEquals(1, inference.resetCount)
+        assertEquals(RouterStageDiagnostic.STAGE_NO_MATCH, diagnostics.single().failedStage)
+        assertEquals(RouterInputFormat.EnglishV1.wireName, diagnostics.single().inputFormat)
+        assertEquals(TranslationKind.NONE.wireName, diagnostics.single().translationKind)
     }
 
     @Test
@@ -45,10 +52,12 @@ class LfmIntentRouterTest {
             generateResult =
                 "<|tool_call_start|>[dialog_control(action='begin', target_tool='bookmark', target_action='rename')]<|tool_call_end|>"
         }
-        val router = createRouter(inference)
+        val diagnostics = mutableListOf<RouterStageDiagnostic>()
+        val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
 
         router.ensureReady().getOrThrow()
-        assertNull(router.recognize("rename my bookmark", RECOGNITION_CONTEXT))
+        assertNull(router.recognize(english("rename my bookmark"), RECOGNITION_CONTEXT).intent)
+        assertEquals(RouterStageDiagnostic.STAGE_MAPPER_DIALOG, diagnostics.single().failedStage)
     }
 
     @Test
@@ -56,11 +65,14 @@ class LfmIntentRouterTest {
         val inference = FakeLfmInference().apply {
             tokenizeThrows = IllegalArgumentException("user utterance tokens not found in prompt")
         }
-        val router = createRouter(inference)
+        val diagnostics = mutableListOf<RouterStageDiagnostic>()
+        val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
 
         router.ensureReady().getOrThrow()
-        assertNull(router.recognize("pause", RECOGNITION_CONTEXT))
+        assertNull(router.recognize(english("pause"), RECOGNITION_CONTEXT).intent)
         assertEquals(0, inference.classifyCount)
+        assertEquals(RouterStageDiagnostic.STAGE_EXCEPTION, diagnostics.single().failedStage)
+        assertEquals(1, inference.resetCount)
     }
 
     @Test
@@ -69,10 +81,35 @@ class LfmIntentRouterTest {
             classifyLabel = "playback:pause"
             generateResult = null
         }
-        val router = createRouter(inference)
+        val diagnostics = mutableListOf<RouterStageDiagnostic>()
+        val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
 
         router.ensureReady().getOrThrow()
-        assertNull(router.recognize("pause", RECOGNITION_CONTEXT))
+        assertNull(router.recognize(english("pause"), RECOGNITION_CONTEXT).intent)
+        assertEquals(RouterStageDiagnostic.STAGE_GENERATE, diagnostics.single().failedStage)
+        assertEquals("playback:pause", diagnostics.single().classifierLabel)
+    }
+
+    @Test
+    fun blankTranscript_emitsBlankStageDiagnostic() = runTest {
+        val inference = FakeLfmInference()
+        val diagnostics = mutableListOf<RouterStageDiagnostic>()
+        val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
+
+        router.ensureReady().getOrThrow()
+        assertNull(router.recognize(english("   "), RECOGNITION_CONTEXT).intent)
+        assertEquals(RouterStageDiagnostic.STAGE_BLANK, diagnostics.single().failedStage)
+        assertEquals(0, inference.resetCount)
+    }
+
+    @Test
+    fun notReady_emitsNotReadyDiagnostic() = runTest {
+        val inference = FakeLfmInference()
+        val diagnostics = mutableListOf<RouterStageDiagnostic>()
+        val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
+
+        assertNull(router.recognize(english("pause"), RECOGNITION_CONTEXT).intent)
+        assertEquals(RouterStageDiagnostic.STAGE_NOT_READY, diagnostics.single().failedStage)
     }
 
     @Test
@@ -87,6 +124,51 @@ class LfmIntentRouterTest {
     }
 
     @Test
+    fun ensureReady_failsClosedOnUnknownInputFormat() = runTest {
+        val inference = FakeLfmInference()
+        val router = createRouter(inference, routerInputFormat = "future_v9")
+
+        assertFalse(router.ensureReady().isSuccess)
+        val manager = ModelManager(ApplicationProvider.getApplicationContext()).apply {
+            filesDir = tempDir.root
+        }
+        assertFalse(manager.isLfmModelReady())
+    }
+
+    @Test
+    fun englishV1_promptUsesRouterTranscriptOnly() = runTest {
+        val inference = FakeLfmInference().apply {
+            classifyLabel = "playback:pause"
+            generateResult =
+                "<|tool_call_start|>[playback(action='pause')]<|tool_call_end|>"
+        }
+        val diagnostics = mutableListOf<RouterStageDiagnostic>()
+        val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
+
+        router.ensureReady().getOrThrow()
+        val input = IntentRoutingInput(
+            sourceTranscript = "倒回去3分钟。",
+            sourceLanguage = "zh",
+            routerTranscript = "Go back to 3 minutes.",
+            translationKind = TranslationKind.PLATFORM,
+        )
+        assertEquals(
+            VoiceIntent.Playback.Pause,
+            router.recognize(input, RECOGNITION_CONTEXT).intent,
+        )
+        assertTrue(inference.tokenizedTexts.any { it == "Go back to 3 minutes." })
+        assertFalse(inference.tokenizedTexts.any { it.contains("倒回去") })
+        val diagnostic = diagnostics.single()
+        assertEquals(RouterStageDiagnostic.OUTCOME_INTENT, diagnostic.finalOutcome)
+        assertNull(diagnostic.failedStage)
+        assertEquals("zh", diagnostic.sourceLanguage)
+        assertEquals(TranslationKind.PLATFORM.wireName, diagnostic.translationKind)
+        assertEquals(RouterInputFormat.EnglishV1.wireName, diagnostic.inputFormat)
+        assertEquals("playback:pause", diagnostic.classifierLabel)
+        assertEquals("q8_0", diagnostic.quant)
+    }
+
+    @Test
     fun pauseCommand_mapsToPlaybackPause() = runTest {
         val inference = FakeLfmInference().apply {
             classifyLabel = "playback:pause"
@@ -96,7 +178,10 @@ class LfmIntentRouterTest {
         val router = createRouter(inference)
 
         router.ensureReady().getOrThrow()
-        assertEquals(VoiceIntent.Playback.Pause, router.recognize("pause", RECOGNITION_CONTEXT))
+        assertEquals(
+            VoiceIntent.Playback.Pause,
+            router.recognize(english("pause"), RECOGNITION_CONTEXT).intent,
+        )
     }
 
     @Test
@@ -111,16 +196,24 @@ class LfmIntentRouterTest {
         router.ensureReady().getOrThrow()
         assertEquals(
             VoiceIntent.Playback.SeekRelative(-60_000),
-            router.recognize("go back a minute", RECOGNITION_CONTEXT),
+            router.recognize(english("go back a minute"), RECOGNITION_CONTEXT).intent,
         )
     }
 
-    private fun createRouter(inference: FakeLfmInference): LfmIntentRouter {
+    private fun createRouter(
+        inference: FakeLfmInference,
+        routerInputFormat: String? = null,
+        includeFormatField: Boolean = true,
+    ): LfmIntentRouter {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val manager = ModelManager(context).apply {
             filesDir = tempDir.root
         }
-        seedLfmAssets(manager)
+        seedLfmAssets(
+            manager,
+            routerInputFormat = routerInputFormat,
+            includeFormatField = includeFormatField,
+        )
         return LfmIntentRouter(
             dialogManager = VoiceDialogManager(ToolCallMapper()),
             modelManager = manager,
@@ -128,15 +221,28 @@ class LfmIntentRouterTest {
         )
     }
 
-    private fun seedLfmAssets(manager: ModelManager) {
+    private fun seedLfmAssets(
+        manager: ModelManager,
+        routerInputFormat: String? = null,
+        includeFormatField: Boolean = true,
+        quant: String? = "q8_0",
+    ) {
         val modelDir = File(manager.filesDir, "function-call").apply { mkdirs() }
         File(modelDir, "model.gguf").writeText("gguf")
         File(modelDir, "classifier.bin").writeText("cls")
         File(modelDir, "label_map.json").writeText("""{"labels":["playback:pause"]}""")
+        val formatLine = when {
+            !includeFormatField -> ""
+            routerInputFormat == null -> """"router_input_format": "english_v1","""
+            else -> """"router_input_format": "$routerInputFormat","""
+        }
+        val quantLine = quant?.let { """"quant": "$it",""" } ?: ""
         File(modelDir, "manifest.json").writeText(
             """
             {
               "version": "2026-06-21-143005",
+              $quantLine
+              $formatLine
               "assets": {
                 "model.gguf": {
                   "bytes": 4,
@@ -163,6 +269,8 @@ class LfmIntentRouterTest {
         .digest(value.toByteArray())
         .joinToString("") { "%02x".format(it) }
 
+    private fun english(transcript: String) = IntentRoutingInput.english(transcript)
+
     private companion object {
         val RECOGNITION_CONTEXT = VoiceRecognitionContext(
             listeningMode = ListeningMode.Continuous,
@@ -180,6 +288,7 @@ internal class FakeLfmInference : LfmInference {
     var tokenizeThrows: Throwable? = null
     var classifyCount = 0
     var resetCount = 0
+    val tokenizedTexts = mutableListOf<String>()
 
     override fun lastError(): String = lastErrorMessage
 
@@ -191,9 +300,12 @@ internal class FakeLfmInference : LfmInference {
     ): Boolean = loadResult
 
     override fun tokenize(text: String, addBos: Boolean): IntArray? {
+        tokenizedTexts += text
         tokenizeThrows?.let { throw it }
-        return when (text) {
-            "pause", "go back a minute" -> intArrayOf(10)
+        return when {
+            text == "pause" || text == "go back a minute" || text == "Go back to 3 minutes." ||
+                text == "hello" || text == "rename my bookmark" -> intArrayOf(10)
+
             else -> intArrayOf(1, 10, 2)
         }
     }

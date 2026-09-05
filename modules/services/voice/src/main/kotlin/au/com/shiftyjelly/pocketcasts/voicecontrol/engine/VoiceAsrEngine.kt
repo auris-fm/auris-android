@@ -349,6 +349,20 @@ class VoiceAsrEngine @Inject constructor(
                 dropWithError = false,
             )
         }
+        // Backend-native English (Canary de/es/fr→en) before the native-English branch:
+        // Canary reports configured source language with English text.
+        if (backend.capabilities.canTranslateToEnglish) {
+            return RoutePrep(
+                input = IntentRoutingInput(
+                    sourceTranscript = null,
+                    sourceLanguage = detected,
+                    routerTranscript = trimmed.text,
+                    translationKind = TranslationKind.BACKEND,
+                ),
+                translateNote = "translate=skip(backend)",
+                dropWithError = false,
+            )
+        }
         if (detected == "en") {
             return RoutePrep(
                 input = IntentRoutingInput(
@@ -358,19 +372,6 @@ class VoiceAsrEngine @Inject constructor(
                     translationKind = TranslationKind.NONE,
                 ),
                 translateNote = null,
-                dropWithError = false,
-            )
-        }
-        if (backend.capabilities.canTranslateToEnglish) {
-            // Backend already produced English (e.g. Canary); native source may be unavailable.
-            return RoutePrep(
-                input = IntentRoutingInput(
-                    sourceTranscript = null,
-                    sourceLanguage = detected,
-                    routerTranscript = trimmed.text,
-                    translationKind = TranslationKind.BACKEND,
-                ),
-                translateNote = "translate=skip(backend)",
                 dropWithError = false,
             )
         }

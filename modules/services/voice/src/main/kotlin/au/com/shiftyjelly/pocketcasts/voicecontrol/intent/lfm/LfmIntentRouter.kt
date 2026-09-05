@@ -121,6 +121,7 @@ class LfmIntentRouter internal constructor(
 
             // english_v1 only: prompt/token span/slot repair use routerTranscript exclusively.
             val routerText = input.routerTranscript
+            var classifierLabel: String? = null
             try {
                 val prompt = LfmPrompt.render(
                     transcript = routerText,
@@ -148,6 +149,7 @@ class LfmIntentRouter internal constructor(
                             reason = RouterStageDiagnostic.REASON_CLASSIFY_FAILED,
                         ),
                     )
+                classifierLabel = label
                 val (tool, action) = LfmLabel.parse(label)
                 if (tool == "no_match") {
                     return@withContext finish(
@@ -208,10 +210,15 @@ class LfmIntentRouter internal constructor(
                     base.fail(
                         stage = RouterStageDiagnostic.STAGE_EXCEPTION,
                         reason = RouterStageDiagnostic.REASON_INFERENCE_EXCEPTION,
+                        classifierLabel = classifierLabel,
                     ),
                 )
             } finally {
-                inference.reset()
+                try {
+                    inference.reset()
+                } catch (resetError: Throwable) {
+                    Timber.w(resetError, "LFM reset failed after recognize")
+                }
             }
         }
     }
@@ -229,20 +236,28 @@ class LfmIntentRouter internal constructor(
 
     private fun finish(result: VoiceRecognizeResult): VoiceRecognizeResult {
         result.diagnostic?.let { diagnostic ->
-            diagnosticSink?.invoke(diagnostic)
-            Timber.i(
-                "[LfmRouter] stage=%s outcome=%s reason=%s label=%s format=%s lang=%s kind=%s release=%s quant=%s %dms",
-                diagnostic.failedStage ?: "ok",
-                diagnostic.finalOutcome,
-                diagnostic.reason ?: "-",
-                diagnostic.classifierLabel ?: "-",
-                diagnostic.inputFormat ?: "-",
-                diagnostic.sourceLanguage ?: "-",
-                diagnostic.translationKind,
-                diagnostic.modelRelease ?: "-",
-                diagnostic.quant ?: "-",
-                diagnostic.totalLatencyMs,
-            )
+            try {
+                diagnosticSink?.invoke(diagnostic)
+            } catch (sinkError: Throwable) {
+                Timber.w(sinkError, "Router diagnostic sink failed")
+            }
+            try {
+                Timber.i(
+                    "[LfmRouter] stage=%s outcome=%s reason=%s label=%s format=%s lang=%s kind=%s release=%s quant=%s %dms",
+                    diagnostic.failedStage ?: "ok",
+                    diagnostic.finalOutcome,
+                    diagnostic.reason ?: "-",
+                    diagnostic.classifierLabel ?: "-",
+                    diagnostic.inputFormat ?: "-",
+                    diagnostic.sourceLanguage ?: "-",
+                    diagnostic.translationKind,
+                    diagnostic.modelRelease ?: "-",
+                    diagnostic.quant ?: "-",
+                    diagnostic.totalLatencyMs,
+                )
+            } catch (logError: Throwable) {
+                Timber.w(logError, "Router diagnostic log failed")
+            }
         }
         return result
     }

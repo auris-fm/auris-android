@@ -169,6 +169,68 @@ class LfmIntentRouterTest {
     }
 
     @Test
+    fun diagnosticSinkThrows_emitsExactlyOneDiagnosticAndKeepsOutcome() = runTest {
+        val inference = FakeLfmInference().apply {
+            classifyLabel = "playback:pause"
+            generateResult =
+                "<|tool_call_start|>[playback(action='pause')]<|tool_call_end|>"
+        }
+        val diagnostics = mutableListOf<RouterStageDiagnostic>()
+        val router = createRouter(inference).also {
+            it.diagnosticSink = { diagnostic ->
+                diagnostics += diagnostic
+                throw IllegalStateException("sink boom")
+            }
+        }
+
+        router.ensureReady().getOrThrow()
+        assertEquals(
+            VoiceIntent.Playback.Pause,
+            router.recognize(english("pause"), RECOGNITION_CONTEXT).intent,
+        )
+        assertEquals(1, diagnostics.size)
+        assertEquals(RouterStageDiagnostic.OUTCOME_INTENT, diagnostics.single().finalOutcome)
+        assertEquals(1, inference.resetCount)
+    }
+
+    @Test
+    fun resetThrows_preservesRoutingResultAndSingleDiagnostic() = runTest {
+        val inference = FakeLfmInference().apply {
+            classifyLabel = "playback:pause"
+            generateResult =
+                "<|tool_call_start|>[playback(action='pause')]<|tool_call_end|>"
+            resetThrows = IllegalStateException("reset boom")
+        }
+        val diagnostics = mutableListOf<RouterStageDiagnostic>()
+        val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
+
+        router.ensureReady().getOrThrow()
+        assertEquals(
+            VoiceIntent.Playback.Pause,
+            router.recognize(english("pause"), RECOGNITION_CONTEXT).intent,
+        )
+        assertEquals(1, diagnostics.size)
+        assertEquals(RouterStageDiagnostic.OUTCOME_INTENT, diagnostics.single().finalOutcome)
+        assertEquals(1, inference.resetCount)
+    }
+
+    @Test
+    fun postClassifyException_retainsClassifierLabel() = runTest {
+        val inference = FakeLfmInference().apply {
+            classifyLabel = "playback:pause"
+            generateThrows = IllegalStateException("generate boom")
+        }
+        val diagnostics = mutableListOf<RouterStageDiagnostic>()
+        val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
+
+        router.ensureReady().getOrThrow()
+        assertNull(router.recognize(english("pause"), RECOGNITION_CONTEXT).intent)
+        val diagnostic = diagnostics.single()
+        assertEquals(RouterStageDiagnostic.STAGE_EXCEPTION, diagnostic.failedStage)
+        assertEquals("playback:pause", diagnostic.classifierLabel)
+    }
+
+    @Test
     fun pauseCommand_mapsToPlaybackPause() = runTest {
         val inference = FakeLfmInference().apply {
             classifyLabel = "playback:pause"
@@ -286,6 +348,8 @@ internal class FakeLfmInference : LfmInference {
     var generateResult: String? =
         "<|tool_call_start|>[playback(action='pause')]<|tool_call_end|>"
     var tokenizeThrows: Throwable? = null
+    var generateThrows: Throwable? = null
+    var resetThrows: Throwable? = null
     var classifyCount = 0
     var resetCount = 0
     val tokenizedTexts = mutableListOf<String>()
@@ -315,10 +379,14 @@ internal class FakeLfmInference : LfmInference {
         return classifyLabel
     }
 
-    override fun generate(prefill: String, nPredict: Int): String? = generateResult
+    override fun generate(prefill: String, nPredict: Int): String? {
+        generateThrows?.let { throw it }
+        return generateResult
+    }
 
     override fun reset() {
         resetCount++
+        resetThrows?.let { throw it }
     }
 
     override fun release() = Unit

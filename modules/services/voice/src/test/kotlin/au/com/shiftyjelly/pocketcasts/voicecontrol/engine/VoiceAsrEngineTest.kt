@@ -12,6 +12,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrCapabilities
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.CanaryFlashBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame
@@ -461,7 +462,8 @@ class VoiceAsrEngineTest {
     }
 
     @Test
-    fun `backend translation records backend kind without platform translate`() = runTest {
+    fun `canary result semantics yield backend envelope with configured source lang`() = runTest {
+        // Production Canary returns English text with configured src lang (de/es/fr), not "en".
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -490,11 +492,12 @@ class VoiceAsrEngineTest {
         )
         engine.scope = this
 
+        val canaryResult = CanaryFlashBackend.asrResultForTranslatedText(
+            text = "Go back to 3 minutes.",
+            sourceLanguage = "de",
+        )
         engine.start(
-            backend = ResultBackend(
-                AsrResult(text = "rewind three minutes", detectedLanguage = "de"),
-                canTranslateToEnglish = true,
-            ),
+            backend = ResultBackend(canaryResult, canTranslateToEnglish = true),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
             playbackBufferProvider = { FloatArray(0) },
@@ -506,7 +509,7 @@ class VoiceAsrEngineTest {
         val routed = recognizer.inputs.single()
         assertNull(routed.sourceTranscript)
         assertEquals("de", routed.sourceLanguage)
-        assertEquals("rewind three minutes", routed.routerTranscript)
+        assertEquals("Go back to 3 minutes.", routed.routerTranscript)
         assertEquals(TranslationKind.BACKEND, routed.translationKind)
         verify(translationStage, never()).translate(any(), any())
 

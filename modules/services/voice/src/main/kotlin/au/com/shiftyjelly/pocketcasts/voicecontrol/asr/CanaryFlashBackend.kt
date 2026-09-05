@@ -90,12 +90,7 @@ class CanaryFlashBackend @Inject constructor(
                 rec.decode(stream)
                 val result = rec.getResult(stream)
                 val trimmed = result.text.trim()
-                if (trimmed.isEmpty()) {
-                    AsrResult(text = "", detectedLanguage = canarySourceLanguage())
-                } else {
-                    // Canary translates to English natively, so the transcript is English.
-                    AsrResult(text = trimmed, detectedLanguage = "en")
-                }
+                asrResultForTranslatedText(trimmed, canarySourceLanguage())
             } finally {
                 stream.release()
             }
@@ -146,5 +141,21 @@ class CanaryFlashBackend @Inject constructor(
         private const val CANARY_TARGET_DIR = "canary-flash-model"
 
         private val SUPPORTED_SOURCE_LANGUAGES = setOf("en", "de", "es", "fr")
+
+        /**
+         * Maps a Canary decode into the routing ASR result: English text with the
+         * configured source language preserved (never relabeled as `en`).
+         */
+        internal fun asrResultForTranslatedText(
+            text: String,
+            sourceLanguage: String,
+        ): AsrResult {
+            val trimmed = text.trim()
+            return if (trimmed.isEmpty()) {
+                AsrResult(text = "", detectedLanguage = sourceLanguage)
+            } else {
+                AsrResult(text = trimmed, detectedLanguage = sourceLanguage)
+            }
+        }
     }
 }

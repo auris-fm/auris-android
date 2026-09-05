@@ -30,12 +30,25 @@ internal data class LfmAsset(
 
 internal data class LfmRelease(
     val version: String,
+    val quant: String?,
+    val routerInputFormat: RouterInputFormat,
     val requiredAssets: List<LfmAsset>,
 )
 
 internal fun parseLfmManifest(json: String): LfmRelease {
     val manifest = JSONObject(json)
     val version = manifest.getString("version")
+    val quant = if (manifest.has("quant") && !manifest.isNull("quant")) {
+        manifest.getString("quant").takeIf { it.isNotBlank() }
+    } else {
+        null
+    }
+    val formatRaw = if (manifest.has("router_input_format") && !manifest.isNull("router_input_format")) {
+        manifest.getString("router_input_format")
+    } else {
+        null
+    }
+    val routerInputFormat = RouterInputFormat.parse(formatRaw)
     val assets = manifest.getJSONObject("assets")
     val requiredNames = listOf(
         ModelManager.LFM_MODEL_FILENAME,
@@ -53,7 +66,12 @@ internal fun parseLfmManifest(json: String): LfmRelease {
             sha256 = asset.getString("sha256"),
         )
     }
-    return LfmRelease(version, requiredAssets)
+    return LfmRelease(
+        version = version,
+        quant = quant,
+        routerInputFormat = routerInputFormat,
+        requiredAssets = requiredAssets,
+    )
 }
 
 @Singleton
@@ -143,6 +161,7 @@ class ModelManager @Inject constructor(
         if (!lfmManifestFile.exists()) return false
         return try {
             val release = parseLfmManifest(lfmManifestFile.readText())
+            if (!release.routerInputFormat.isReadyForInference) return false
             release.requiredAssets.all { asset ->
                 val file = File(lfmDir, asset.name)
                 file.isFile && file.length() == asset.bytes
@@ -153,12 +172,16 @@ class ModelManager @Inject constructor(
         }
     }
 
-    fun lfmReleaseVersion(): String? {
+    fun lfmReleaseVersion(): String? = lfmRelease()?.version
+
+    internal fun lfmRelease(): LfmRelease? {
         if (!lfmManifestFile.exists()) return null
         return runCatching {
-            parseLfmManifest(lfmManifestFile.readText()).version
+            parseLfmManifest(lfmManifestFile.readText())
         }.getOrNull()
     }
+
+    fun lfmRouterInputFormat(): RouterInputFormat? = lfmRelease()?.routerInputFormat
 
     suspend fun ensureLfmModel(): Result<Unit> = withContext(Dispatchers.IO) {
         if (isLfmModelReady()) return@withContext Result.success(Unit)
@@ -168,6 +191,13 @@ class ModelManager @Inject constructor(
                 lfmDir.mkdirs()
                 val manifest = downloadText(LFM_LATEST_URL, "LFM manifest")
                 val release = parseLfmManifest(manifest)
+                if (!release.routerInputFormat.isReadyForInference) {
+                    return@withContext Result.failure(
+                        IllegalStateException(
+                            "Unsupported router_input_format: ${release.routerInputFormat.wireName}",
+                        ),
+                    )
+                }
                 release.requiredAssets.forEach { asset ->
                     downloadFile(
                         urlStr = asset.url,
@@ -178,7 +208,11 @@ class ModelManager @Inject constructor(
                     )
                 }
                 writeAtomically(lfmManifestFile, manifest.toByteArray())
-                Timber.i("LFM release %s ready", release.version)
+                Timber.i(
+                    "LFM release %s ready (format=%s)",
+                    release.version,
+                    release.routerInputFormat.wireName,
+                )
                 Result.success(Unit)
             } catch (e: Exception) {
                 Timber.e(e, "LFM model download failed")

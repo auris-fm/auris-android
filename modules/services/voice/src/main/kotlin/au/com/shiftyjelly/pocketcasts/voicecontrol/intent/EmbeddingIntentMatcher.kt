@@ -3,7 +3,9 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.intent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.EditDistance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.EmbeddingEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.embedding.TextTokenizer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.IntentRoutingInput
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizeResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -109,17 +111,18 @@ class EmbeddingIntentMatcher @Inject constructor(
     // -- VoiceRecognizer implementation ------------------------------------
 
     override suspend fun recognize(
-        transcript: String,
+        input: IntentRoutingInput,
         context: VoiceRecognitionContext,
-    ): VoiceIntent? = withContext(Dispatchers.IO) {
-        if (transcript.isBlank()) return@withContext null
+    ): VoiceRecognizeResult = withContext(Dispatchers.IO) {
+        val transcript = input.routerTranscript
+        if (transcript.isBlank()) return@withContext VoiceRecognizeResult(intent = null)
         if (!initialized) {
             Timber.w("EmbeddingIntentMatcher not initialized")
-            return@withContext null
+            return@withContext VoiceRecognizeResult(intent = null)
         }
 
-        val match = matchIntent(transcript) ?: return@withContext null
-        assembleIntent(match.intentType, transcript)
+        val match = matchIntent(transcript) ?: return@withContext VoiceRecognizeResult(intent = null)
+        VoiceRecognizeResult(intent = assembleIntent(match.intentType, transcript))
     }
 
     override fun release() = Unit

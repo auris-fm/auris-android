@@ -12,6 +12,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrCapabilities
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken
+import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.CanaryFlashBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame
@@ -20,7 +21,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.IntentRoutingInput
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.TranslationKind
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
+import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizeResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
@@ -35,6 +39,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.Mockito.mock
@@ -345,6 +350,168 @@ class VoiceAsrEngineTest {
         verify(translationStage).ensureReady("zh")
         verify(translationStage).translate("你好", "zh")
         assertTrue("Expected translated 'hello' to reach recognizer", recognizer.calls.contains("recognize:hello"))
+        val routed = recognizer.inputs.single()
+        assertEquals("你好", routed.sourceTranscript)
+        assertEquals("zh", routed.sourceLanguage)
+        assertEquals("hello", routed.routerTranscript)
+        assertEquals(TranslationKind.PLATFORM, routed.translationKind)
+
+        engine.stop()
+    }
+
+    @Test
+    fun `zh translation preserves source envelope for rewind phrase`() = runTest {
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            WakeWordResult(detected = false, confidence = 0f),
+        )
+        `when`(translationStage.ensureReady("zh")).thenReturn(Result.success(Unit))
+        `when`(translationStage.translate("倒回去3分钟。", "zh"))
+            .thenReturn(Result.success("Go back to 3 minutes."))
+
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+
+        engine.start(
+            backend = ResultBackend(AsrResult(text = "倒回去3分钟。", detectedLanguage = "zh")),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        advanceUntilIdle()
+
+        val routed = recognizer.inputs.single()
+        assertEquals("倒回去3分钟。", routed.sourceTranscript)
+        assertEquals("zh", routed.sourceLanguage)
+        assertEquals("Go back to 3 minutes.", routed.routerTranscript)
+        assertEquals(TranslationKind.PLATFORM, routed.translationKind)
+
+        engine.stop()
+    }
+
+    @Test
+    fun `english transcript uses none translation kind with identical source and router`() = runTest {
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            WakeWordResult(detected = false, confidence = 0f),
+        )
+
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+
+        engine.start(
+            backend = ResultBackend(AsrResult(text = "pause", detectedLanguage = "en")),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        advanceUntilIdle()
+
+        val routed = recognizer.inputs.single()
+        assertEquals("pause", routed.sourceTranscript)
+        assertEquals("en", routed.sourceLanguage)
+        assertEquals("pause", routed.routerTranscript)
+        assertEquals(TranslationKind.NONE, routed.translationKind)
+        verify(translationStage, never()).translate(any(), any())
+
+        engine.stop()
+    }
+
+    @Test
+    fun `canary result semantics yield backend envelope with configured source lang`() = runTest {
+        // Production Canary returns English text with configured src lang (de/es/fr), not "en".
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            WakeWordResult(detected = false, confidence = 0f),
+        )
+
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+
+        val canaryResult = CanaryFlashBackend.asrResultForTranslatedText(
+            text = "Go back to 3 minutes.",
+            sourceLanguage = "de",
+        )
+        engine.start(
+            backend = ResultBackend(canaryResult, canTranslateToEnglish = true),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        advanceUntilIdle()
+
+        val routed = recognizer.inputs.single()
+        assertNull(routed.sourceTranscript)
+        assertEquals("de", routed.sourceLanguage)
+        assertEquals("Go back to 3 minutes.", routed.routerTranscript)
+        assertEquals(TranslationKind.BACKEND, routed.translationKind)
+        verify(translationStage, never()).translate(any(), any())
 
         engine.stop()
     }
@@ -804,6 +971,7 @@ class VoiceAsrEngineTest {
         private val intent: VoiceIntent?,
     ) : VoiceRecognizer {
         val calls = mutableListOf<String>()
+        val inputs = mutableListOf<IntentRoutingInput>()
 
         override suspend fun ensureReady(): Result<Unit> {
             calls += "ensureReady"
@@ -811,11 +979,12 @@ class VoiceAsrEngineTest {
         }
 
         override suspend fun recognize(
-            transcript: String,
+            input: IntentRoutingInput,
             context: VoiceRecognitionContext,
-        ): VoiceIntent? {
-            calls += "recognize:$transcript"
-            return intent
+        ): VoiceRecognizeResult {
+            calls += "recognize:${input.routerTranscript}"
+            inputs += input
+            return VoiceRecognizeResult(intent = intent)
         }
 
         override fun release() = Unit
@@ -838,6 +1007,7 @@ class VoiceAsrEngineTest {
 
     private class ResultBackend(
         private val result: AsrResult,
+        private val canTranslateToEnglish: Boolean = false,
     ) : AsrBackend {
         override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
 
@@ -846,8 +1016,8 @@ class VoiceAsrEngineTest {
         override val requiredModel: ModelSpec = ModelSpec(files = emptyList(), targetDir = "")
 
         override val capabilities: AsrCapabilities = AsrCapabilities(
-            supportedLanguages = setOf("zh", "en"),
-            canTranslateToEnglish = false,
+            supportedLanguages = setOf("zh", "en", "de"),
+            canTranslateToEnglish = canTranslateToEnglish,
         )
 
         override fun release() = Unit

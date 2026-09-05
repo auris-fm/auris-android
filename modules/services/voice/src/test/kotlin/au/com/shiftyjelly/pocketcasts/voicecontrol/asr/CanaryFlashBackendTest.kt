@@ -1,5 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.asr
 
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -35,5 +37,33 @@ class CanaryFlashBackendTest {
         assertEquals("pause", result.text)
         assertEquals("en", result.detectedLanguage)
         assertNull(result.tokens)
+    }
+
+    @Test
+    fun loadedDeSessionKeepsDeLabelAfterLocaleChangesToFr() {
+        val locale = AtomicReference(Locale.GERMAN)
+        val backend = CanaryFlashBackend(currentLocale = { locale.get() })
+        backend.bindLoadedSourceLanguageForTest("de")
+
+        locale.set(Locale.FRENCH)
+
+        assertEquals("de", backend.loadedSourceLanguage())
+        val result = CanaryFlashBackend.resultForDecodedText(
+            text = "Go back to 3 minutes.",
+            loadedSourceLanguage = backend.loadedSourceLanguage()!!,
+        )
+        assertEquals("de", result.detectedLanguage)
+        assertEquals("fr", locale.get().language)
+    }
+
+    @Test
+    fun releaseClearsLoadedSourceLanguage() {
+        val backend = CanaryFlashBackend(currentLocale = { Locale.GERMAN })
+        backend.bindLoadedSourceLanguageForTest("de")
+        assertEquals("de", backend.loadedSourceLanguage())
+
+        backend.release()
+
+        assertNull(backend.loadedSourceLanguage())
     }
 }

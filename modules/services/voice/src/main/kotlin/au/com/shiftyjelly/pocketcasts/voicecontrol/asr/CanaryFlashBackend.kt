@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.asr
 
+import androidx.annotation.VisibleForTesting
 import com.k2fsa.sherpa.onnx.FeatureConfig
 import com.k2fsa.sherpa.onnx.OfflineCanaryModelConfig
 import com.k2fsa.sherpa.onnx.OfflineModelConfig
@@ -29,6 +30,9 @@ class CanaryFlashBackend @Inject constructor(
 ) : AsrBackend {
 
     private var recognizer: OfflineRecognizer? = null
+
+    /** Source language baked into the currently loaded recognizer config. */
+    private var loadedSrcLang: String? = null
     private var modelDir: File? = null
 
     override suspend fun ensureReady(): Result<Unit> = withContext(Dispatchers.IO) {
@@ -66,13 +70,16 @@ class CanaryFlashBackend @Inject constructor(
             )
             val previous = recognizer
             recognizer = null
+            loadedSrcLang = null
             previous?.release()
             val created = OfflineRecognizer(config = config)
             recognizer = created
+            loadedSrcLang = srcLang
             Timber.i("CanaryFlashBackend ready (src=%s, tgt=en)", srcLang)
             Result.success(Unit)
         } catch (e: Exception) {
             recognizer = null
+            loadedSrcLang = null
             Timber.e(e, "Canary Flash initialization failed")
             Result.failure(e)
         }
@@ -80,7 +87,8 @@ class CanaryFlashBackend @Inject constructor(
 
     override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult = withContext(Dispatchers.IO) {
         val rec = recognizer
-        if (rec == null) {
+        val srcLang = loadedSrcLang
+        if (rec == null || srcLang == null) {
             return@withContext AsrResult(text = "", detectedLanguage = null)
         }
         try {
@@ -89,8 +97,7 @@ class CanaryFlashBackend @Inject constructor(
                 stream.acceptWaveform(samples, sampleRateHz)
                 rec.decode(stream)
                 val result = rec.getResult(stream)
-                val trimmed = result.text.trim()
-                asrResultForTranslatedText(trimmed, canarySourceLanguage())
+                resultForDecodedText(result.text, srcLang)
             } finally {
                 stream.release()
             }
@@ -126,9 +133,23 @@ class CanaryFlashBackend @Inject constructor(
     override fun release() {
         recognizer?.release()
         recognizer = null
+        loadedSrcLang = null
     }
 
     private fun canarySourceLanguage(): String = currentLocale().language
+
+    /** Source language tied to the loaded recognizer (null if not ready). */
+    @VisibleForTesting
+    internal fun loadedSourceLanguage(): String? = loadedSrcLang
+
+    /**
+     * Test seam: bind a loaded source language without constructing native OfflineRecognizer.
+     * Mirrors a successful ensureReady() that captured [srcLang].
+     */
+    @VisibleForTesting
+    internal fun bindLoadedSourceLanguageForTest(srcLang: String) {
+        loadedSrcLang = srcLang
+    }
 
     companion object {
         // INT8 export of NVIDIA canary-180m-flash (en/de/es/fr), confirmed on HuggingFace:
@@ -144,17 +165,22 @@ class CanaryFlashBackend @Inject constructor(
 
         /**
          * Maps a Canary decode into the routing ASR result: English text with the
-         * configured source language preserved (never relabeled as `en`).
+         * loaded recognizer's source language preserved (never relabeled as `en`).
          */
         internal fun asrResultForTranslatedText(
             text: String,
             sourceLanguage: String,
+        ): AsrResult = resultForDecodedText(text, sourceLanguage)
+
+        internal fun resultForDecodedText(
+            text: String,
+            loadedSourceLanguage: String,
         ): AsrResult {
             val trimmed = text.trim()
             return if (trimmed.isEmpty()) {
-                AsrResult(text = "", detectedLanguage = sourceLanguage)
+                AsrResult(text = "", detectedLanguage = loadedSourceLanguage)
             } else {
-                AsrResult(text = trimmed, detectedLanguage = sourceLanguage)
+                AsrResult(text = trimmed, detectedLanguage = loadedSourceLanguage)
             }
         }
     }

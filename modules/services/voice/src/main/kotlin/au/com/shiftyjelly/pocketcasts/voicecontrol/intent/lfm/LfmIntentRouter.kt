@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm
 
+import android.os.SystemClock
 import au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.LfmPrompt
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.SlotRepair
@@ -24,7 +25,7 @@ class LfmIntentRouter internal constructor(
     private val dialogManager: VoiceDialogManager,
     private val modelManager: ModelManager,
     private val inference: LfmInference,
-    private val monoMs: () -> Long = { System.currentTimeMillis() },
+    private val monoMs: () -> Long = { SystemClock.elapsedRealtime() },
 ) : VoiceRecognizer {
     @Inject constructor(
         dialogManager: VoiceDialogManager,

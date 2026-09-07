@@ -372,6 +372,8 @@ interface Settings {
 
     fun clearPlusPreferences()
 
+    fun clearUserPreferences()
+
     fun setDismissLowStorageModalTime(lastUpdateTime: Long)
     fun shouldShowLowStorageModalAfterSnooze(): Boolean
 

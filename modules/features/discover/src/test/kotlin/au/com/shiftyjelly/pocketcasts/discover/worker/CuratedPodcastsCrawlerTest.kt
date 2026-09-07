@@ -1,6 +1,8 @@
 package au.com.shiftyjelly.pocketcasts.discover.worker
 
 import au.com.shiftyjelly.pocketcasts.models.entity.CuratedPodcast
+import au.com.shiftyjelly.pocketcasts.preferences.Settings
+import au.com.shiftyjelly.pocketcasts.preferences.gateway.GatewayUrlProvider
 import au.com.shiftyjelly.pocketcasts.repositories.lists.ListRepository
 import au.com.shiftyjelly.pocketcasts.servers.di.NetworkModule
 import au.com.shiftyjelly.pocketcasts.servers.server.ListWebService
@@ -13,6 +15,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
+import org.mockito.kotlin.mock
+import org.mockito.kotlin.whenever
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.create
@@ -31,7 +35,14 @@ class CuratedPodcastsCrawlerTest {
             .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
             .create<ListWebService>()
-        val listRepository = ListRepository(listWebService = service, syncManager = null, platform = "android")
+        val gatewayUrlProvider = mock<GatewayUrlProvider>()
+        whenever(gatewayUrlProvider.serverApiUrl()).thenReturn(Settings.SERVER_API_URL)
+        val listRepository = ListRepository(
+            listWebService = service,
+            syncManager = null,
+            platform = "android",
+            gatewayUrlProvider = gatewayUrlProvider,
+        )
         crawler = CuratedPodcastsCrawler(listRepository, staticHostUrl = server.url("/static").toString())
     }
 

@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.podcasts.viewmodel.podcast
 
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.preferences.UserSetting
+import au.com.shiftyjelly.pocketcasts.preferences.gateway.GatewayUrlProvider
 import au.com.shiftyjelly.pocketcasts.repositories.lists.ListRepository
 import au.com.shiftyjelly.pocketcasts.repositories.podcast.PodcastManager
 import au.com.shiftyjelly.pocketcasts.servers.model.DiscoverPodcast
@@ -32,7 +33,14 @@ class RecommendationsHandlerTest {
     @Before
     fun setup() {
         listWebService = mock()
-        val listRepository = ListRepository(listWebService = listWebService, syncManager = null, platform = "android")
+        val gatewayUrlProvider = mock<GatewayUrlProvider>()
+        whenever(gatewayUrlProvider.serverApiUrl()).thenReturn(Settings.SERVER_API_URL)
+        val listRepository = ListRepository(
+            listWebService = listWebService,
+            syncManager = null,
+            platform = "android",
+            gatewayUrlProvider = gatewayUrlProvider,
+        )
         podcastManager = mock()
 
         val discoverCountryCode = mock<UserSetting<String>>()

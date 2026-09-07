@@ -32,4 +32,17 @@ class CloudIdentityTest {
         assertEquals(id1, id2)
         assertTrue(id1.startsWith("user_"))
     }
+
+    @Test
+    fun `userId persists in SharedPreferences across new instances`() {
+        val context = RuntimeEnvironment.getApplication()
+        val first = CloudIdentity(context)
+        first.clear()
+
+        val created = first.userId()
+        val reloaded = CloudIdentity(context).userId()
+
+        assertEquals(created, reloaded)
+        assertTrue(created.startsWith("user_"))
+    }
 }

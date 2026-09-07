@@ -33,6 +33,8 @@ import au.com.shiftyjelly.pocketcasts.repositories.endofyear.EndOfYearSync
 import au.com.shiftyjelly.pocketcasts.repositories.endofyear.EndOfYearSyncImpl
 import au.com.shiftyjelly.pocketcasts.repositories.external.ExternalDataManager
 import au.com.shiftyjelly.pocketcasts.repositories.external.ExternalDataManagerImpl
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.SharedPreferencesCloudConfig
 import au.com.shiftyjelly.pocketcasts.repositories.history.upnext.UpNextHistoryManager
 import au.com.shiftyjelly.pocketcasts.repositories.history.upnext.UpNextHistoryManagerImpl
 import au.com.shiftyjelly.pocketcasts.repositories.notification.NotificationDrawer
@@ -270,6 +272,9 @@ abstract class RepositoryModule {
 
     @Binds
     abstract fun providePlaybackStatsCollector(collector: PersistentPlaybackStatsCollector): PlaybackStatsCollector
+
+    @Binds
+    abstract fun bindCloudConfig(impl: SharedPreferencesCloudConfig): CloudConfig
 
     companion object {
         @Provides

@@ -6,6 +6,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import au.com.shiftyjelly.pocketcasts.payment.PaymentClient
 import au.com.shiftyjelly.pocketcasts.payment.PaymentDataSource
+import au.com.shiftyjelly.pocketcasts.preferences.gateway.GatewayUrlProvider
 import au.com.shiftyjelly.pocketcasts.repositories.lists.ListRepository
 import au.com.shiftyjelly.pocketcasts.repositories.payment.AnalyticsPaymentListener
 import au.com.shiftyjelly.pocketcasts.repositories.payment.LoggingPaymentListener
@@ -68,7 +69,12 @@ class RepositoryProviderModule {
 
     @Provides
     @Singleton
-    internal fun provideDiscoverRepository(listWebService: ListWebService, syncManager: SyncManager, @ApplicationContext context: Context): ListRepository {
+    internal fun provideDiscoverRepository(
+        listWebService: ListWebService,
+        syncManager: SyncManager,
+        gatewayUrlProvider: GatewayUrlProvider,
+        @ApplicationContext context: Context,
+    ): ListRepository {
         val platform = when {
             Util.isAutomotive(context) -> ListRepository.PLATFORM_AUTOMOTIVE
             Util.isTv(context) -> ListRepository.PLATFORM_TV
@@ -78,6 +84,7 @@ class RepositoryProviderModule {
             listWebService,
             syncManager,
             platform,
+            gatewayUrlProvider,
         )
     }
 

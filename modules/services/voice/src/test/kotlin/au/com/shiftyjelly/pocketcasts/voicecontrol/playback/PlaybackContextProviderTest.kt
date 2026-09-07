@@ -19,7 +19,11 @@ class PlaybackContextProviderTest {
     fun `unmatched playback window keeps client position but clears reference position`() {
         val playbackManager = mock<PlaybackManager>()
         val fingerprintTimingManager = mock<FingerprintTimingManager>()
-        val provider = PlaybackManagerPlaybackContextProvider(playbackManager, fingerprintTimingManager)
+        val provider = PlaybackManagerPlaybackContextProvider(
+            playbackManager,
+            fingerprintTimingManager,
+            CloudPlaybackContextState(),
+        )
         val episode = PodcastEpisode(
             uuid = "episode-id",
             publishedDate = Date(),

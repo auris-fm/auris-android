@@ -7,6 +7,7 @@ import au.com.shiftyjelly.pocketcasts.localization.helper.LocaliseHelper
 import au.com.shiftyjelly.pocketcasts.models.entity.Podcast
 import au.com.shiftyjelly.pocketcasts.models.to.Share
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
+import au.com.shiftyjelly.pocketcasts.preferences.gateway.GatewayUrlProvider
 import au.com.shiftyjelly.pocketcasts.servers.di.NoCacheTokened
 import au.com.shiftyjelly.pocketcasts.servers.discover.PodcastSearch
 import au.com.shiftyjelly.pocketcasts.servers.refresh.RefreshPodcastBatcher
@@ -33,6 +34,7 @@ open class ServiceManager @Inject constructor(
     @ApplicationContext private val context: Context,
     @NoCacheTokened private val httpClient: Lazy<OkHttpClient>,
     private val settings: Settings,
+    private val gatewayUrlProvider: GatewayUrlProvider,
 ) {
     companion object {
         private const val LIST_SEPARATOR = ","
@@ -80,7 +82,7 @@ open class ServiceManager @Inject constructor(
             val requestParams = parameters ?: Parameters()
             addDeviceParameters(requestParams)
             val request = Request.Builder()
-                .url(Settings.SERVER_MAIN_URL + path)
+                .url(gatewayUrlProvider.serverMainUrl() + path)
                 .post(requestParams.toFormBody())
                 .build()
 

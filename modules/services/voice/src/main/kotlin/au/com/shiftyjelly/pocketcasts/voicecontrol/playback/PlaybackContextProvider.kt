@@ -14,6 +14,7 @@ interface PlaybackContextProvider {
 class PlaybackManagerPlaybackContextProvider @Inject constructor(
     private val playbackManager: PlaybackManager,
     private val fingerprintTimingManager: FingerprintTimingManager,
+    private val cloudPlaybackContextState: CloudPlaybackContextState,
 ) : PlaybackContextProvider {
     override fun current(): PlaybackContext {
         val episode = playbackManager.getCurrentEpisode()
@@ -30,11 +31,14 @@ class PlaybackManagerPlaybackContextProvider @Inject constructor(
         } else {
             null
         }
+        val state = cloudPlaybackContextState.snapshot()
         return PlaybackContext(
             episodeId = episode?.uuid.orEmpty(),
             podcastId = episode?.podcastOrSubstituteUuid.orEmpty(),
             referencePositionMs = referencePositionMs,
             clientPositionMs = clientPositionMs,
+            recentReferencePositions = state.recentReferencePositions,
+            previousReferencePositionMs = state.previousReferencePositionMs,
         )
     }
 }

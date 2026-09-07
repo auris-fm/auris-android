@@ -174,6 +174,7 @@ class FingerprintTimingManager @Inject constructor(
     private var currentReferenceFilePath: String? = null
     private var currentReference: ReferenceFingerprint? = null
     private var currentMatcher: CheckpointMatcher? = null
+
     // Cloud-alignment path: reference data served by the Auris cloud
     // (/api/v1/episodes/{id}/fingerprints) matched with CloudReferenceMatcher.
     // Independent of the transcript-sync Rust matcher above.
@@ -944,7 +945,7 @@ class FingerprintTimingManager @Inject constructor(
      * Starts mapping when only the cloud reference is available (no usable
      * transcript reference). Uses the PCM tap path; the Rust matcher stays null.
      */
-    private fun startCloudOnly(
+    private suspend fun startCloudOnly(
         gen: Long,
         audioFilePath: String,
         episodeUuid: String,

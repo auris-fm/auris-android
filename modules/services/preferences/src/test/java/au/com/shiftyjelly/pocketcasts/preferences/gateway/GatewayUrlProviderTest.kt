@@ -46,7 +46,11 @@ class GatewayUrlProviderTest {
 
         assertTrue(gateway.isCutoverActive())
         assertEquals("https://gateway.staging.example.com", gateway.serverApiUrl())
-        assertEquals("https://gateway.staging.example.com", gateway.serverMainUrl())
+        // Single-upstream gateway cannot serve refresh/static; keep them direct.
+        assertEquals(Settings.SERVER_MAIN_URL, gateway.serverMainUrl())
+        assertEquals(Settings.SERVER_STATIC_URL, gateway.serverStaticUrl())
+        assertEquals(Settings.SEARCH_API_URL, gateway.searchApiUrl())
+        assertEquals(Settings.SERVER_CACHE_URL, gateway.serverCacheUrl())
     }
 
     @Test
@@ -56,6 +60,7 @@ class GatewayUrlProviderTest {
 
         assertEquals("https://override.example.com", gateway.configuredGatewayUrl())
         assertEquals("https://override.example.com", gateway.serverApiUrl())
+        assertEquals(Settings.SERVER_MAIN_URL, gateway.serverMainUrl())
     }
 
     @Test

@@ -5,10 +5,12 @@ import au.com.shiftyjelly.pocketcasts.preferences.Settings
 /**
  * Resolves Pocket Casts-compatible API base URLs for gateway cutover.
  *
- * When [isCutoverActive], all proxied Pocket Casts hosts collapse to the
- * configured gateway base URL. When the gateway URL is empty or the local
- * kill switch is enabled, upstream [Settings] BuildConfig URLs are used
- * unchanged (safe default for production).
+ * When [isCutoverActive], [serverApiUrl] points at the gateway (plain host swap;
+ * upstream-shaped paths). Other Pocket Casts hosts stay on direct upstream until
+ * the gateway can multi-host proxy — collapsing static/refresh/search onto
+ * api.pocketcasts.com yields 401s that never happen on the real hosts. Kill
+ * switch / empty gateway URL restores direct API upstream too. Auris cloud
+ * routes still use [configuredGatewayUrl] via CloudConfig.
  */
 interface GatewayUrlProvider {
     /** Gateway URL from SharedPreferences override or build default (may be blank). */

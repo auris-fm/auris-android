@@ -10,12 +10,20 @@ Use this checklist when validating gateway cutover on a debug/staging build befo
 
 ## Pocket Casts-compatible traffic (proxied through gateway)
 
-- [ ] Login / token refresh
-- [ ] Sync up and sync down
-- [ ] Discovery / search
+**Interim Android cutover (until gateway multi-host routing):** only
+`serverApiUrl` → gateway. Refresh/static/search/cache/list/sharing stay on
+direct Pocket Casts hosts. Collapsing those onto api.pocketcasts.com via the
+single-upstream proxy yields 401 on discover/OPML (static/refresh return 200).
+Auris `/api/v1/...` still uses the gateway via CloudConfig. Failed HTTP
+responses log `HTTP <code> <method> <url>`. OPML fails closed on non-2xx.
+
+- [ ] Login / token refresh (gateway)
+- [ ] Sync up and sync down (gateway)
+- [ ] Discovery / search (direct static/search)
 - [ ] Episode metadata and podcast cache
 - [ ] Playback file URL resolution
 - [ ] List / sharing hosts
+- [ ] OPML import (direct refresh; failure toast on HTTP error)
 
 ## Auris-owned routes (same gateway host, Bearer `user_{uuid}`)
 

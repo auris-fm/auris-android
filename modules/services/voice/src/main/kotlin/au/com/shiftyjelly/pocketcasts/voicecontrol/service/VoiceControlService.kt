@@ -283,13 +283,22 @@ class VoiceControlService : Service() {
     }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    private fun startEngine(mode: ListeningMode) {
+    private suspend fun startEngine(mode: ListeningMode) {
         if (engineStarted) return
         val backend = asrBackendSelector.select()
         if (backend == null) {
             Timber.w(
                 "[VoicePipeline] ASR locale unsupported — refusing to start engine",
             )
+            return
+        }
+
+        // engine.stop() released the backend's recognizer; re-initialize so a
+        // gate-driven restart doesn't transcribe into a dead recognizer
+        // (silently empty results). ensureReady is idempotent when ready.
+        val ready = backend.ensureReady()
+        if (ready.isFailure) {
+            Timber.e(ready.exceptionOrNull(), "[VoicePipeline] ASR backend not ready — refusing to start engine")
             return
         }
 

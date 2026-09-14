@@ -12,23 +12,32 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
+/**
+ * Test seam over the native sherpa recognizer. The backend only needs the
+ * mechanical stream→decode→result round-trip, so the unit tests can stub it.
+ */
+internal interface OfflineAsrRecognizer {
+    /** Returns the raw transcript text (tags included), or an empty string. */
+    fun transcribe(samples: FloatArray, sampleRateHz: Int): String
+
+    fun release()
+}
+
 @Singleton
 class SenseVoiceBackend @Inject constructor() : AsrBackend {
 
-    private var recognizer: OfflineRecognizer? = null
+    private var recognizer: OfflineAsrRecognizer? = null
+
+    /** Model dir the current [recognizer] was built for; null when none. */
+    private var readyDir: File? = null
     private var modelDir: File? = null
 
-    override suspend fun ensureReady(): Result<Unit> = withContext(Dispatchers.IO) {
-        val dir = modelDir
-        if (dir == null || !dir.exists()) {
-            return@withContext Result.failure(IllegalStateException("SenseVoice model directory not set"))
-        }
-        val modelFile = File(dir, SENSEVOICE_MODEL_FILENAME)
-        val tokensFile = File(dir, SENSEVOICE_TOKENS_FILENAME)
-        if (!modelFile.exists() || !tokensFile.exists()) {
-            return@withContext Result.failure(IllegalStateException("SenseVoice model files missing"))
-        }
-        try {
+    /**
+     * Test seam: builds the native recognizer for the given model/tokens files.
+     * Replaced in unit tests to avoid loading the native sherpa library.
+     */
+    internal var recognizerFactory: (modelFile: File, tokensFile: File) -> OfflineAsrRecognizer =
+        { modelFile, tokensFile ->
             val config = OfflineRecognizerConfig(
                 featConfig = FeatureConfig(sampleRate = 16000, featureDim = 80),
                 modelConfig = OfflineModelConfig(
@@ -38,15 +47,37 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
                     provider = "cpu",
                 ),
             )
+            SherpaRecognizer(config)
+        }
+
+    override suspend fun ensureReady(): Result<Unit> = withContext(Dispatchers.IO) {
+        val dir = modelDir
+        if (dir == null || !dir.exists()) {
+            return@withContext Result.failure(IllegalStateException("SenseVoice model directory not set"))
+        }
+        // Idempotent: rebuilding the native recognizer costs ~2s, and the
+        // gate-restart path calls ensureReady on every engine start.
+        if (recognizer != null && readyDir == dir) {
+            return@withContext Result.success(Unit)
+        }
+        val modelFile = File(dir, SENSEVOICE_MODEL_FILENAME)
+        val tokensFile = File(dir, SENSEVOICE_TOKENS_FILENAME)
+        if (!modelFile.exists() || !tokensFile.exists()) {
+            return@withContext Result.failure(IllegalStateException("SenseVoice model files missing"))
+        }
+        try {
             val previous = recognizer
             recognizer = null
+            readyDir = null
             previous?.release()
-            val created = OfflineRecognizer(config = config)
+            val created = recognizerFactory(modelFile, tokensFile)
             recognizer = created
+            readyDir = dir
             Timber.i("SenseVoiceBackend ready")
             Result.success(Unit)
         } catch (e: Exception) {
             recognizer = null
+            readyDir = null
             Timber.e(e, "SenseVoice initialization failed")
             Result.failure(e)
         }
@@ -58,21 +89,12 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
             return@withContext AsrResult(text = "", detectedLanguage = null)
         }
         try {
-            val stream = rec.createStream()
-            try {
-                stream.acceptWaveform(samples, sampleRateHz)
-                rec.decode(stream)
-                val result = rec.getResult(stream)
-                val trimmed = result.text.trim()
-                if (trimmed.isEmpty()) {
-                    AsrResult(text = "", detectedLanguage = null)
-                } else {
-                    val lang = resolveDetectedLanguage(result.lang, trimmed)
-                    val cleanText = stripLanguageTag(trimmed)
-                    AsrResult(text = cleanText, detectedLanguage = lang)
-                }
-            } finally {
-                stream.release()
+            val trimmed = rec.transcribe(samples, sampleRateHz).trim()
+            if (trimmed.isEmpty()) {
+                AsrResult(text = "", detectedLanguage = null)
+            } else {
+                val lang = resolveDetectedLanguage(null, trimmed)
+                AsrResult(text = stripLanguageTag(trimmed), detectedLanguage = lang)
             }
         } catch (e: Exception) {
             Timber.e(e, "SenseVoice transcription failed")
@@ -113,6 +135,25 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
     override fun release() {
         recognizer?.release()
         recognizer = null
+        readyDir = null
+    }
+
+    /** Thin adapter over the native sherpa recognizer. */
+    private class SherpaRecognizer(config: OfflineRecognizerConfig) : OfflineAsrRecognizer {
+        private val rec = OfflineRecognizer(config = config)
+
+        override fun transcribe(samples: FloatArray, sampleRateHz: Int): String {
+            val stream = rec.createStream()
+            try {
+                stream.acceptWaveform(samples, sampleRateHz)
+                rec.decode(stream)
+                return rec.getResult(stream).text
+            } finally {
+                stream.release()
+            }
+        }
+
+        override fun release() = rec.release()
     }
 
     companion object {

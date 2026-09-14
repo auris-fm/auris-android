@@ -56,8 +56,10 @@ class AsrIntentBenchmarkReceiver @Inject constructor() : BroadcastReceiver() {
         val utterancesFile = File(requireArg(intent, EXTRA_UTTERANCES))
         val modelsDir = File(requireArg(intent, EXTRA_MODELS_DIR))
         val variants = (intent.getStringExtra(EXTRA_VARIANTS) ?: "a,b").split(",").map { it.trim() }
-        val warmup = intent.getIntExtra(EXTRA_WARMUP, AsrIntentBenchmarkRunner.WARMUP_ITERATIONS)
-        val measured = intent.getIntExtra(EXTRA_MEASURED, AsrIntentBenchmarkRunner.MEASURED_ITERATIONS)
+        val warmup = intent.getStringExtra(EXTRA_WARMUP)?.toIntOrNull()
+            ?: AsrIntentBenchmarkRunner.WARMUP_ITERATIONS
+        val measured = intent.getStringExtra(EXTRA_MEASURED)?.toIntOrNull()
+            ?: AsrIntentBenchmarkRunner.MEASURED_ITERATIONS
 
         val utterances = runner.loadUtterances(utterancesFile)
         Timber.i("[AsrIntentBenchmark] %d utterances, variants=%s warmup=%d measured=%d", utterances.size, variants, warmup, measured)

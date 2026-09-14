@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!-- Debug-only ASR/intent benchmark driver (representation benchmark, Item 21).
+             Triggered via adb: am broadcast -a fm.auris.debug.ASR_INTENT_BENCHMARK
+             Not registered in release builds. -->
+        <receiver
+            android:name="au.com.shiftyjelly.pocketcasts.benchmark.AsrIntentBenchmarkReceiver"
+            android:exported="true" />
+    </application>
+
+</manifest>

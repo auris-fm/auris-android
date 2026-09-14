@@ -37,7 +37,10 @@ class SenseVoiceBackendInitTest {
 
     private fun backend(calls: MutableList<Int>): SenseVoiceBackend {
         val b = SenseVoiceBackend()
-        b.recognizerFactory = { _, _ -> calls += 1; FakeRecognizer() }
+        b.recognizerFactory = { _, _ ->
+            calls += 1
+            FakeRecognizer()
+        }
         return b
     }
 

@@ -118,4 +118,34 @@ class SlotRepairTest {
         )
         assertEquals(-30, backwards!!.params["delta_seconds"])
     }
+
+    @Test
+    fun repair_cloudRouteBackfillsMissingRequestFromUtterance() {
+        // Model closed the call without the request arg; the full utterance is
+        // the documented cloud request payload ("preserve the full user request").
+        val repaired = SlotRepair.repair(
+            raw = "<|tool_call_start|>[cloud_route(action='route')]<|tool_call_end|>",
+            utterance = "Find beginner friendly episodes about investing.",
+            tool = "cloud_route",
+            action = "route",
+        )
+        assertNotNull(repaired)
+        assertEquals(
+            "Find beginner friendly episodes about investing",
+            repaired!!.params["request"],
+        )
+    }
+
+    @Test
+    fun repair_cloudRouteKeepsModelSuppliedRequest() {
+        val repaired = SlotRepair.repair(
+            raw = "<|tool_call_start|>[cloud_route(action='route', request='Why is it controversial?', tier='unknown')]<|tool_call_end|>",
+            utterance = "Why is it controversial?",
+            tool = "cloud_route",
+            action = "route",
+        )
+        assertNotNull(repaired)
+        assertEquals("Why is it controversial?", repaired!!.params["request"])
+        assertEquals("unknown", repaired.params["tier"])
+    }
 }

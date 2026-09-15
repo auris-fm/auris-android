@@ -21,6 +21,7 @@ object SlotRepair {
         params = sanitizeParams(tool, action, params).toMutableMap()
         params = dropNoneLike(params).toMutableMap()
         params = fillSeekRelativeDefault(tool, action, params, utterance).toMutableMap()
+        backfillCloudRouteRequest(tool, action, params, utterance)
         return ToolCall(tool, action, params)
     }
 
@@ -318,6 +319,26 @@ object SlotRepair {
     }
 
     private val THIS_ONE_REGEX = Regex("""\bthis one\b""", RegexOption.IGNORE_CASE)
+
+    /**
+     * cloud_route's `request` is the full user utterance by contract
+     * ("preserve the full user request; do not locally decompose it"). When
+     * generation omitted it or left it blank, backfill from the utterance so
+     * the mapper can build the CloudRoute intent instead of dropping the
+     * correctly classified turn.
+     */
+    private fun backfillCloudRouteRequest(
+        tool: String,
+        action: String,
+        params: MutableMap<String, Any?>,
+        utterance: String,
+    ) {
+        if (tool != "cloud_route" || action != "route") return
+        val existing = (params["request"] as? String)?.trim().orEmpty()
+        if (existing.isNotEmpty()) return
+        val cleaned = utterance.trim().trimEnd('.', '?', '!', ' ', ',')
+        if (cleaned.isNotEmpty()) params["request"] = cleaned
+    }
 
     private fun repairOneString(
         key: String,

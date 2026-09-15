@@ -17,8 +17,10 @@ import timber.log.Timber
  * mechanical stream→decode→result round-trip, so the unit tests can stub it.
  */
 internal interface OfflineAsrRecognizer {
-    /** Returns the raw transcript text (tags included), or an empty string. */
-    fun transcribe(samples: FloatArray, sampleRateHz: Int): String
+    /** Raw recognition output: transcript text (tags included) + structured language, if the model reported one. */
+    data class RawResult(val text: String, val lang: String?)
+
+    fun transcribe(samples: FloatArray, sampleRateHz: Int): RawResult
 
     fun release()
 }
@@ -89,11 +91,14 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
             return@withContext AsrResult(text = "", detectedLanguage = null)
         }
         try {
-            val trimmed = rec.transcribe(samples, sampleRateHz).trim()
+            val raw = rec.transcribe(samples, sampleRateHz)
+            val trimmed = raw.text.trim()
             if (trimmed.isEmpty()) {
                 AsrResult(text = "", detectedLanguage = null)
             } else {
-                val lang = resolveDetectedLanguage(null, trimmed)
+                // Structured lang is the reliable LID source; the text tag is
+                // only a fallback (some transcripts carry no tag).
+                val lang = resolveDetectedLanguage(raw.lang, trimmed)
                 AsrResult(text = stripLanguageTag(trimmed), detectedLanguage = lang)
             }
         } catch (e: Exception) {
@@ -142,12 +147,13 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
     private class SherpaRecognizer(config: OfflineRecognizerConfig) : OfflineAsrRecognizer {
         private val rec = OfflineRecognizer(config = config)
 
-        override fun transcribe(samples: FloatArray, sampleRateHz: Int): String {
+        override fun transcribe(samples: FloatArray, sampleRateHz: Int): OfflineAsrRecognizer.RawResult {
             val stream = rec.createStream()
             try {
                 stream.acceptWaveform(samples, sampleRateHz)
                 rec.decode(stream)
-                return rec.getResult(stream).text
+                val result = rec.getResult(stream)
+                return OfflineAsrRecognizer.RawResult(text = result.text, lang = result.lang)
             } finally {
                 stream.release()
             }

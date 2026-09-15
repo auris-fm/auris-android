@@ -13,6 +13,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
+import timber.log.Timber
 
 @Singleton
 class CloudRouteSink internal constructor(
@@ -54,8 +55,10 @@ class CloudRouteSink internal constructor(
         context: PlaybackContext,
     ): VoiceResponse {
         if (resolveBaseUrl().isBlank()) {
+            Timber.w("CloudRouteSink: no gateway base URL configured — refusing to route")
             return VoiceResponse.Spoken(COMING_SOON_MESSAGE)
         }
+        Timber.i("CloudRouteSink: routing turn to %s/api/v1/cloud/route (tier=%s)", resolveBaseUrl(), tier)
 
         var tokenBuffer = ""
         val routeContext = buildRouteContext(context)
@@ -90,6 +93,7 @@ class CloudRouteSink internal constructor(
                 is CloudRouteEvent.Error -> {
                     tokenBuffer = ""
                     restoreTransientAudioState()
+                    Timber.e("CloudRouteSink: turn error code=%s message=%s", event.code, event.message)
                     analytics.recordTurn(outcome = "error")
                     outcome = if (event.message.isBlank()) {
                         VoiceResponse.Earcon(EarconId.ERROR)

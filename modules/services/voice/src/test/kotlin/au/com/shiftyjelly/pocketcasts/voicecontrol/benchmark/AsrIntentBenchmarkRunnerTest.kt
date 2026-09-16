@@ -30,8 +30,20 @@ class AsrIntentBenchmarkRunnerTest {
 
     private class FakeTranslation : TranslationStage {
         var fail = false
+
+        /** Fails on the first [failFirstN] calls only (intermittent-failure shape). */
+        var failFirstN = 0
+        private var calls = 0
+
         override suspend fun ensureReady(sourceLanguage: String): Result<Unit> = Result.success(Unit)
-        override suspend fun translate(text: String, sourceLanguage: String): Result<String> = if (fail) Result.failure(IllegalStateException("no language pack")) else Result.success("en:$text")
+        override suspend fun translate(text: String, sourceLanguage: String): Result<String> {
+            calls += 1
+            return when {
+                fail -> Result.failure(IllegalStateException("no language pack"))
+                calls <= failFirstN -> Result.failure(IllegalStateException("transient"))
+                else -> Result.success("en:$text")
+            }
+        }
     }
 
     private class FakeRecognizer : VoiceRecognizer {
@@ -211,6 +223,26 @@ class AsrIntentBenchmarkRunnerTest {
         ).cases.single()
         assertEquals(false, failed.translationSuccess)
         assertNull(failed.translatedTextSha256)
+    }
+
+    @Test
+    fun `translation flag ANDs across iterations, not last-wins`() = runTest {
+        val translation = FakeTranslation().apply { failFirstN = 1 }
+        val runner = AsrIntentBenchmarkRunner(
+            translationStage = translation,
+            voiceRecognizer = FakeRecognizer(),
+            modelManager = unusedModelManager(),
+        ).apply { modelInstaller = FakeInstaller() }
+        val case = runner.runVariant(
+            variant = AsrIntentBenchmarkRunner.VARIANT_A,
+            modelSourceDir = tmp.newFolder("english_v1"),
+            utterances = listOf(AsrIntentBenchmarkRunner.Utterance("c_zh", "zh", "快进两分钟")),
+            warmupIterations = 0,
+            measuredIterations = 2,
+        ).cases.single()
+        // Iteration 1 failed (native text measured), iteration 2 succeeded —
+        // last-wins would report true; AND must report false.
+        assertEquals(false, case.translationSuccess)
     }
 
     @Test

@@ -145,7 +145,9 @@ class AsrIntentBenchmarkRunner @Inject constructor(
             if (utterance.language != "en") {
                 translationStage.ensureReady(utterance.language)
                 val translation = translationStage.translate(utterance.text, utterance.language)
-                translationSuccess = translation.isSuccess
+                // AND across all non-en iterations: a single fallback means
+                // some inputs were native text — the flag must not say true.
+                translationSuccess = (translationSuccess ?: true) && translation.isSuccess
                 translated = translation.getOrNull()
                 translatedHash = translated?.sha256()
             }

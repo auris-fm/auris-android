@@ -9,6 +9,7 @@ import android.content.Intent
 import android.os.IBinder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.benchmark.AsrIntentBenchmarkRunner
 import au.com.shiftyjelly.pocketcasts.voicecontrol.benchmark.BenchmarkRequest
+import au.com.shiftyjelly.pocketcasts.voicecontrol.benchmark.BenchmarkResultsIndex
 import dagger.hilt.android.AndroidEntryPoint
 import java.io.File
 import javax.inject.Inject
@@ -77,14 +78,14 @@ class AsrIntentBenchmarkService : Service() {
     private suspend fun runBenchmark(request: BenchmarkRequest) {
         val utterances = runner.loadUtterances(File(request.utterancesPath))
         val resultsFile = resultsFile()
-        val doneIds = loadDoneCaseIds(resultsFile)
+        val doneByVariant = BenchmarkResultsIndex.loadDoneByVariant(resultsFile)
         Timber.i(
-            "[AsrIntentBenchmark] %d utterances, variants=%s warmup=%d measured=%d, resuming %d done case(s)",
+            "[AsrIntentBenchmark] %d utterances, variants=%s warmup=%d measured=%d, resuming done=%s",
             utterances.size,
             request.variants,
             request.warmup,
             request.measured,
-            doneIds.size,
+            doneByVariant.mapValues { it.value.size },
         )
 
         for (variantKey in request.variants) {
@@ -101,7 +102,7 @@ class AsrIntentBenchmarkService : Service() {
                 utterances = utterances,
                 warmupIterations = request.warmup,
                 measuredIterations = request.measured,
-                skipCaseIds = doneIds,
+                skipCaseIds = doneByVariant[variantKey].orEmpty(),
                 onCaseResult = { case, release, format ->
                     resultsFile.appendText(
                         caseLine(
@@ -131,17 +132,6 @@ class AsrIntentBenchmarkService : Service() {
     }
 
     internal fun resultsFile(): File = File(File(filesDir, "benchmark/results").apply { mkdirs() }, "benchmark_results.jsonl")
-
-    /** Case IDs already persisted, so a restart resumes instead of re-measuring. */
-    internal fun loadDoneCaseIds(resultsFile: File): Set<String> = buildSet {
-        if (!resultsFile.exists()) return@buildSet
-        resultsFile.forEachLine { line ->
-            if (line.isBlank()) return@forEachLine
-            runCatching {
-                add(org.json.JSONObject(line).getJSONObject("case").getString("case_id"))
-            }
-        }
-    }
 
     private fun caseLine(
         variantKey: String,

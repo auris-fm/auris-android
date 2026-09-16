@@ -4,10 +4,16 @@
     <application>
         <!-- Debug-only ASR/intent benchmark driver (representation benchmark, Item 21).
              Triggered via adb: am broadcast -a fm.auris.debug.ASR_INTENT_BENCHMARK
-             Not registered in release builds. -->
+             Not registered in release builds.
+             Execution runs in a foreground service: the official measured run is
+             multi-hour and exceeds the broadcast goAsync window. -->
         <receiver
             android:name="au.com.shiftyjelly.pocketcasts.benchmark.AsrIntentBenchmarkReceiver"
             android:exported="true" />
+        <service
+            android:name="au.com.shiftyjelly.pocketcasts.benchmark.AsrIntentBenchmarkService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 
 </manifest>

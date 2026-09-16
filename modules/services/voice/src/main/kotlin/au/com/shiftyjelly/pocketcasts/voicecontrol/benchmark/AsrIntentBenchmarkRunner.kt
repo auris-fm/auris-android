@@ -93,6 +93,8 @@ class AsrIntentBenchmarkRunner @Inject constructor(
         utterances: List<Utterance>,
         warmupIterations: Int = WARMUP_ITERATIONS,
         measuredIterations: Int = MEASURED_ITERATIONS,
+        skipCaseIds: Set<String> = emptySet(),
+        onCaseResult: ((CaseResult, modelRelease: String?, routerFormat: String?) -> Unit)? = null,
     ): VariantReport = withContext(Dispatchers.IO) {
         modelInstaller.install(modelSourceDir)
         val ready = voiceRecognizer.ensureReady()
@@ -100,8 +102,10 @@ class AsrIntentBenchmarkRunner @Inject constructor(
         val format = modelInstaller.currentFormat()
         val release = modelInstaller.currentRelease()
 
-        val cases = utterances.map { utterance ->
-            runCase(variant, utterance, warmupIterations, measuredIterations, format)
+        val cases = utterances.filter { it.caseId !in skipCaseIds }.map { utterance ->
+            runCase(variant, utterance, warmupIterations, measuredIterations, format).also {
+                onCaseResult?.invoke(it, release, format)
+            }
         }
         VariantReport(
             variant = variant,

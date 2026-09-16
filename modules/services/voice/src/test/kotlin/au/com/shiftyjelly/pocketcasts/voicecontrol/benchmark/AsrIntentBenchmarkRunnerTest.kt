@@ -170,6 +170,45 @@ class AsrIntentBenchmarkRunnerTest {
     }
 
     @Test
+    fun `skipCaseIds resumes past already-measured cases`() = runTest {
+        val recognizer = FakeRecognizer()
+        val runner = runner(recognizer, FakeInstaller())
+        val utterances = listOf(
+            AsrIntentBenchmarkRunner.Utterance("c1", "zh", "快进两分钟"),
+            AsrIntentBenchmarkRunner.Utterance("c2", "en", "play"),
+        )
+        val report = runner.runVariant(
+            variant = AsrIntentBenchmarkRunner.VARIANT_B,
+            modelSourceDir = tmp.newFolder("dual_v1"),
+            utterances = utterances,
+            warmupIterations = 0,
+            measuredIterations = 1,
+            skipCaseIds = setOf("c1"),
+        )
+        assertEquals(listOf("c2"), report.cases.map { it.caseId })
+        assertEquals(1, recognizer.calls)
+    }
+
+    @Test
+    fun `onCaseResult fires once per measured case`() = runTest {
+        val recognizer = FakeRecognizer()
+        val runner = runner(recognizer, FakeInstaller())
+        val seen = mutableListOf<String>()
+        runner.runVariant(
+            variant = AsrIntentBenchmarkRunner.VARIANT_B,
+            modelSourceDir = tmp.newFolder("dual_v1"),
+            utterances = listOf(
+                AsrIntentBenchmarkRunner.Utterance("c1", "en", "play"),
+                AsrIntentBenchmarkRunner.Utterance("c2", "en", "pause"),
+            ),
+            warmupIterations = 0,
+            measuredIterations = 1,
+            onCaseResult = { case, _, _ -> seen += case.caseId },
+        )
+        assertEquals(listOf("c1", "c2"), seen)
+    }
+
+    @Test
     fun `installer receives the variant model source dir`() = runTest {
         val dir = tmp.newFolder("dual_v1")
         val installer = FakeInstaller()

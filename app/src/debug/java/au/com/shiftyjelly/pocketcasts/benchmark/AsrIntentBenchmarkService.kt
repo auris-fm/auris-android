@@ -23,13 +23,14 @@ import timber.log.Timber
  * Debug-only foreground service that executes the representation benchmark
  * (docs/plans/benchmark/asr-intent-benchmark.md, Item 21).
  *
- * The official measured run is multi-hour, which exceeds the broadcast
- * `goAsync` window (receiver ANRs → process killed). The receiver therefore
- * only forwards the parsed [BenchmarkRequest]; this service owns execution
- * under a dataSync foreground notification and stops itself when done.
+ * Durability model: this device kills long-running background work, so the
+ * run persists EVERY case result as its own flushed JSONL line the moment it
+ * is measured, and on restart already-recorded case IDs are skipped. A kill
+ * therefore costs at most the in-flight case, not hours.
  *
  * Writes `files/benchmark/results/benchmark_results.jsonl` (one line per
- * variant report; chunked runs simply append).
+ * case, plus the variant metadata on every line so any subset is
+ * self-describing; aggregation happens host-side).
  */
 @AndroidEntryPoint
 class AsrIntentBenchmarkService : Service() {
@@ -43,11 +44,21 @@ class AsrIntentBenchmarkService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val request = intent?.let { runCatching { BenchmarkRequest.fromIntent(it) }.getOrNull() }
         if (request == null) {
-            Timber.e("[AsrIntentBenchmark] service started without a parsable request; stopping")
-            stopSelf()
-            return START_NOT_STICKY
+            // Sticky restart after a kill carries a null intent: keep the
+            // last request so the run resumes where it left off.
+            val last = lastRequest
+            if (last == null) {
+                Timber.e("[AsrIntentBenchmark] service started without a parsable request; stopping")
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            return runWith(last)
         }
+        return runWith(request)
+    }
 
+    private fun runWith(request: BenchmarkRequest): Int {
+        lastRequest = request
         startForeground(NOTIFICATION_ID, buildNotification("starting: ${request.variants.joinToString(",")}"))
 
         scope.launch {
@@ -60,21 +71,21 @@ class AsrIntentBenchmarkService : Service() {
                 stopSelf()
             }
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     private suspend fun runBenchmark(request: BenchmarkRequest) {
         val utterances = runner.loadUtterances(File(request.utterancesPath))
+        val resultsFile = resultsFile()
+        val doneIds = loadDoneCaseIds(resultsFile)
         Timber.i(
-            "[AsrIntentBenchmark] %d utterances, variants=%s warmup=%d measured=%d",
+            "[AsrIntentBenchmark] %d utterances, variants=%s warmup=%d measured=%d, resuming %d done case(s)",
             utterances.size,
             request.variants,
             request.warmup,
             request.measured,
+            doneIds.size,
         )
-
-        val resultsDir = File(filesDir, "benchmark/results").apply { mkdirs() }
-        val resultsFile = File(resultsDir, "benchmark_results.jsonl")
 
         for (variantKey in request.variants) {
             val modelDirName = MODEL_DIRS[variantKey] ?: error("Unknown variant key: $variantKey")
@@ -90,47 +101,88 @@ class AsrIntentBenchmarkService : Service() {
                 utterances = utterances,
                 warmupIterations = request.warmup,
                 measuredIterations = request.measured,
+                skipCaseIds = doneIds,
+                onCaseResult = { case, release, format ->
+                    resultsFile.appendText(
+                        caseLine(
+                            variantKey = variantKey,
+                            variant = variant,
+                            modelRelease = release,
+                            routerFormat = format,
+                            warmupIterations = request.warmup,
+                            measuredIterations = request.measured,
+                            case = case,
+                        ) + "\n",
+                    )
+                    updateNotification(
+                        "variant $variantKey: ${case.caseId} (${case.routerInputFormat})",
+                    )
+                },
             )
-            resultsFile.appendText(reportToJsonl(report) + "\n")
-            Timber.i("[AsrIntentBenchmark] variant %s done: release=%s format=%s", variant, report.modelRelease, report.routerInputFormat)
+            Timber.i(
+                "[AsrIntentBenchmark] variant %s done: %d new case(s), release=%s format=%s",
+                variant,
+                report.cases.size,
+                report.modelRelease,
+                report.routerInputFormat,
+            )
         }
         Timber.i("[AsrIntentBenchmark] results at %s", resultsFile.absolutePath)
     }
 
-    private fun reportToJsonl(report: AsrIntentBenchmarkRunner.VariantReport): String {
-        val obj = org.json.JSONObject()
-        obj.put("variant", report.variant)
-        obj.put("model_release", report.modelRelease ?: org.json.JSONObject.NULL)
-        obj.put("router_input_format", report.routerInputFormat ?: org.json.JSONObject.NULL)
-        obj.put("warmup_iterations", report.warmupIterations)
-        obj.put("measured_iterations", report.measuredIterations)
-        val cases = org.json.JSONArray()
-        report.cases.forEach { case ->
-            val c = org.json.JSONObject()
-            c.put("case_id", case.caseId)
-            c.put("language", case.language)
-            c.put("outcome", case.outcome ?: org.json.JSONObject.NULL)
-            c.put("router_input_format", case.routerInputFormat ?: org.json.JSONObject.NULL)
-            c.put("translate_median_ms", AsrIntentBenchmarkRunner.median(case.translateMs))
-            c.put("translate_p95_ms", AsrIntentBenchmarkRunner.percentile95(case.translateMs))
-            val stages = org.json.JSONObject()
-            case.stageLatencyMs.forEach { (stage, values) ->
-                val s = org.json.JSONObject()
-                s.put("median_ms", AsrIntentBenchmarkRunner.median(values))
-                s.put("p95_ms", AsrIntentBenchmarkRunner.percentile95(values))
-                stages.put(stage, s)
+    internal fun resultsFile(): File = File(File(filesDir, "benchmark/results").apply { mkdirs() }, "benchmark_results.jsonl")
+
+    /** Case IDs already persisted, so a restart resumes instead of re-measuring. */
+    internal fun loadDoneCaseIds(resultsFile: File): Set<String> = buildSet {
+        if (!resultsFile.exists()) return@buildSet
+        resultsFile.forEachLine { line ->
+            if (line.isBlank()) return@forEachLine
+            runCatching {
+                add(org.json.JSONObject(line).getJSONObject("case").getString("case_id"))
             }
-            c.put("router_stages", stages)
-            c.put("router_total_median_ms", AsrIntentBenchmarkRunner.median(case.totalMs))
-            c.put("router_total_p95_ms", AsrIntentBenchmarkRunner.percentile95(case.totalMs))
-            c.put(
-                "e2e_translate_plus_router_median_ms",
-                AsrIntentBenchmarkRunner.median(case.translateMs) + AsrIntentBenchmarkRunner.median(case.totalMs),
-            )
-            c.put("heap_delta_median_bytes", AsrIntentBenchmarkRunner.median(case.heapDeltaBytes))
-            cases.put(c)
         }
-        obj.put("cases", cases)
+    }
+
+    private fun caseLine(
+        variantKey: String,
+        variant: String,
+        modelRelease: String?,
+        routerFormat: String?,
+        warmupIterations: Int,
+        measuredIterations: Int,
+        case: AsrIntentBenchmarkRunner.CaseResult,
+    ): String {
+        val obj = org.json.JSONObject()
+        obj.put("variant_key", variantKey)
+        obj.put("variant", variant)
+        obj.put("model_release", modelRelease ?: org.json.JSONObject.NULL)
+        obj.put("router_input_format", case.routerInputFormat ?: routerFormat ?: org.json.JSONObject.NULL)
+        obj.put("warmup_iterations", warmupIterations)
+        obj.put("measured_iterations", measuredIterations)
+        obj.put("measured_at_epoch_ms", System.currentTimeMillis())
+        val c = org.json.JSONObject()
+        c.put("case_id", case.caseId)
+        c.put("language", case.language)
+        c.put("outcome", case.outcome ?: org.json.JSONObject.NULL)
+        c.put("router_input_format", case.routerInputFormat ?: org.json.JSONObject.NULL)
+        c.put("translate_median_ms", AsrIntentBenchmarkRunner.median(case.translateMs))
+        c.put("translate_p95_ms", AsrIntentBenchmarkRunner.percentile95(case.translateMs))
+        val stages = org.json.JSONObject()
+        case.stageLatencyMs.forEach { (stage, values) ->
+            val s = org.json.JSONObject()
+            s.put("median_ms", AsrIntentBenchmarkRunner.median(values))
+            s.put("p95_ms", AsrIntentBenchmarkRunner.percentile95(values))
+            stages.put(stage, s)
+        }
+        c.put("router_stages", stages)
+        c.put("router_total_median_ms", AsrIntentBenchmarkRunner.median(case.totalMs))
+        c.put("router_total_p95_ms", AsrIntentBenchmarkRunner.percentile95(case.totalMs))
+        c.put(
+            "e2e_translate_plus_router_median_ms",
+            AsrIntentBenchmarkRunner.median(case.translateMs) + AsrIntentBenchmarkRunner.median(case.totalMs),
+        )
+        c.put("heap_delta_median_bytes", AsrIntentBenchmarkRunner.median(case.heapDeltaBytes))
+        obj.put("case", c)
         return obj.toString()
     }
 
@@ -160,6 +212,10 @@ class AsrIntentBenchmarkService : Service() {
     companion object {
         private const val CHANNEL_ID = "asr_intent_benchmark"
         private const val NOTIFICATION_ID = 0x2110
+
+        /** Last accepted request, so a sticky restart resumes the same run. */
+        @Volatile
+        var lastRequest: BenchmarkRequest? = null
 
         val MODEL_DIRS = mapOf(
             "a" to "english_v1",

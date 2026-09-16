@@ -20,9 +20,13 @@ class SenseVoiceBackendInitTest {
     @get:Rule
     val tmp = TemporaryFolder()
 
-    private class FakeRecognizer : OfflineAsrRecognizer {
+    private class FakeRecognizer(
+        private val text: String = "<|en|>pause playback",
+        private val lang: String? = null,
+    ) : OfflineAsrRecognizer {
         var released = false
-        override fun transcribe(samples: FloatArray, sampleRateHz: Int): String = "<|en|>pause playback"
+        override fun transcribe(samples: FloatArray, sampleRateHz: Int): OfflineAsrRecognizer.RawResult = OfflineAsrRecognizer.RawResult(text = text, lang = lang)
+
         override fun release() {
             released = true
         }
@@ -81,12 +85,36 @@ class SenseVoiceBackendInitTest {
     @Test
     fun `transcribe uses initialized recognizer and strips lang tag`() = runTest {
         val b = backend(mutableListOf())
+        b.recognizerFactory = { _, _ -> FakeRecognizer(text = "<|en|>pause playback") }
         b.setModelDir(modelDir())
         assertTrue(b.ensureReady().isSuccess)
 
         val result = b.transcribe(FloatArray(16000), 16000)
         assertEquals("pause playback", result.text)
         assertEquals("en", result.detectedLanguage)
+    }
+
+    @Test
+    fun `transcribe prefers structured lang when text tag is absent`() = runTest {
+        val b = backend(mutableListOf())
+        b.recognizerFactory = { _, _ -> FakeRecognizer(text = "快进两分钟", lang = "zh") }
+        b.setModelDir(modelDir())
+        assertTrue(b.ensureReady().isSuccess)
+
+        val result = b.transcribe(FloatArray(16000), 16000)
+        assertEquals("快进两分钟", result.text)
+        assertEquals("zh", result.detectedLanguage)
+    }
+
+    @Test
+    fun `transcribe falls back to text tag when structured lang is null`() = runTest {
+        val b = backend(mutableListOf())
+        b.recognizerFactory = { _, _ -> FakeRecognizer(text = "<|yue|>快进", lang = null) }
+        b.setModelDir(modelDir())
+        assertTrue(b.ensureReady().isSuccess)
+
+        val result = b.transcribe(FloatArray(16000), 16000)
+        assertEquals("yue", result.detectedLanguage)
     }
 
     @Test

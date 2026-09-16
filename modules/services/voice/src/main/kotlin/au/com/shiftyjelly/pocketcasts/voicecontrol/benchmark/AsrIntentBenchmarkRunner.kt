@@ -56,6 +56,10 @@ class AsrIntentBenchmarkRunner @Inject constructor(
         val outcome: String?,
         val routerInputFormat: String?,
         val heapDeltaBytes: List<Long>,
+        /** null for en cases (translation not involved). Required evidence per pack rule. */
+        val translationSuccess: Boolean? = null,
+        /** sha-256 of the translated text actually fed to the router (null when no translation). */
+        val translatedTextSha256: String? = null,
     )
 
     data class VariantReport(
@@ -129,6 +133,8 @@ class AsrIntentBenchmarkRunner @Inject constructor(
         val totalMs = mutableListOf<Long>()
         val heapDeltas = mutableListOf<Long>()
         var outcome: String? = null
+        var translationSuccess: Boolean? = null
+        var translatedHash: String? = null
 
         repeat(warmupIterations + measuredIterations) { iteration ->
             val measured = iteration >= warmupIterations
@@ -138,7 +144,10 @@ class AsrIntentBenchmarkRunner @Inject constructor(
             val t0 = System.currentTimeMillis()
             if (utterance.language != "en") {
                 translationStage.ensureReady(utterance.language)
-                translated = translationStage.translate(utterance.text, utterance.language).getOrNull()
+                val translation = translationStage.translate(utterance.text, utterance.language)
+                translationSuccess = translation.isSuccess
+                translated = translation.getOrNull()
+                translatedHash = translated?.sha256()
             }
             val translateCost = System.currentTimeMillis() - t0
             if (measured) translateMs += translateCost
@@ -171,7 +180,14 @@ class AsrIntentBenchmarkRunner @Inject constructor(
             outcome = outcome,
             routerInputFormat = format,
             heapDeltaBytes = heapDeltas.toList(),
+            translationSuccess = translationSuccess,
+            translatedTextSha256 = translatedHash,
         )
+    }
+
+    private fun String.sha256(): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }
     }
 
     private fun buildInput(variant: String, utterance: Utterance, translated: String?): IntentRoutingInput {

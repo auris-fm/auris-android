@@ -182,6 +182,8 @@ class AsrIntentBenchmarkService : Service() {
             AsrIntentBenchmarkRunner.median(case.translateMs) + AsrIntentBenchmarkRunner.median(case.totalMs),
         )
         c.put("heap_delta_median_bytes", AsrIntentBenchmarkRunner.median(case.heapDeltaBytes))
+        c.put("translation_success", case.translationSuccess ?: org.json.JSONObject.NULL)
+        c.put("translated_text_sha256", case.translatedTextSha256 ?: org.json.JSONObject.NULL)
         obj.put("case", c)
         return obj.toString()
     }

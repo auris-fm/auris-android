@@ -9,6 +9,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import java.io.File
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -28,8 +29,9 @@ class AsrIntentBenchmarkRunnerTest {
     val tmp = TemporaryFolder()
 
     private class FakeTranslation : TranslationStage {
+        var fail = false
         override suspend fun ensureReady(sourceLanguage: String): Result<Unit> = Result.success(Unit)
-        override suspend fun translate(text: String, sourceLanguage: String): Result<String> = Result.success("en:$text")
+        override suspend fun translate(text: String, sourceLanguage: String): Result<String> = if (fail) Result.failure(IllegalStateException("no language pack")) else Result.success("en:$text")
     }
 
     private class FakeRecognizer : VoiceRecognizer {
@@ -167,6 +169,48 @@ class AsrIntentBenchmarkRunnerTest {
         assertEquals(3L, AsrIntentBenchmarkRunner.median(listOf(2, 4))) // even → midpoint
         assertEquals(10L, AsrIntentBenchmarkRunner.percentile95(listOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10))) // nearest-rank: ceil(9.5)=10th
         assertEquals(10L, AsrIntentBenchmarkRunner.percentile95(listOf(10)))
+    }
+
+    @Test
+    fun `translation evidence recorded per pack rule`() = runTest {
+        val translation = FakeTranslation()
+        val runner = AsrIntentBenchmarkRunner(
+            translationStage = translation,
+            voiceRecognizer = FakeRecognizer(),
+            modelManager = unusedModelManager(),
+        ).apply { modelInstaller = FakeInstaller() }
+
+        val en = runner.runVariant(
+            variant = AsrIntentBenchmarkRunner.VARIANT_A,
+            modelSourceDir = tmp.newFolder("english_v1"),
+            utterances = listOf(AsrIntentBenchmarkRunner.Utterance("c_en", "en", "play")),
+            warmupIterations = 0,
+            measuredIterations = 1,
+        ).cases.single()
+        assertNull(en.translationSuccess)
+        assertNull(en.translatedTextSha256)
+
+        translation.fail = false
+        val ok = runner.runVariant(
+            variant = AsrIntentBenchmarkRunner.VARIANT_A,
+            modelSourceDir = tmp.newFolder("english_v1_2"),
+            utterances = listOf(AsrIntentBenchmarkRunner.Utterance("c_zh", "zh", "快进两分钟")),
+            warmupIterations = 0,
+            measuredIterations = 1,
+        ).cases.single()
+        assertEquals(true, ok.translationSuccess)
+        assertEquals(64, ok.translatedTextSha256!!.length)
+
+        translation.fail = true
+        val failed = runner.runVariant(
+            variant = AsrIntentBenchmarkRunner.VARIANT_A,
+            modelSourceDir = tmp.newFolder("english_v1_3"),
+            utterances = listOf(AsrIntentBenchmarkRunner.Utterance("c_zh2", "zh", "暂停")),
+            warmupIterations = 0,
+            measuredIterations = 1,
+        ).cases.single()
+        assertEquals(false, failed.translationSuccess)
+        assertNull(failed.translatedTextSha256)
     }
 
     @Test

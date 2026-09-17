@@ -9,8 +9,14 @@ internal data class CloudRouteSseParseResult(
 )
 
 internal class CloudRouteSseParser {
-    fun parse(body: BufferedReader): CloudRouteSseParseResult {
-        val events = mutableListOf<CloudRouteEvent>()
+
+    /**
+     * Streaming parse: dispatches each complete SSE event to [onEvent] as it
+     * is read, so `play_quote` actions and tokens can flow mid-turn instead
+     * of waiting for the whole body. Returns true when the body ended
+     * abnormally (mid-event connection loss).
+     */
+    fun parse(body: BufferedReader, onEvent: (CloudRouteEvent) -> Unit): Boolean {
         var eventName: String? = null
         val dataLines = mutableListOf<String>()
         var truncated = false
@@ -25,7 +31,7 @@ internal class CloudRouteSseParser {
 
             val line = rawLine.trimEnd('\r')
             if (line.isEmpty()) {
-                dispatch(eventName, dataLines)?.let(events::add)
+                dispatch(eventName, dataLines)?.let(onEvent)
                 eventName = null
                 dataLines.clear()
                 continue
@@ -40,9 +46,15 @@ internal class CloudRouteSseParser {
         }
 
         if (!truncated) {
-            dispatch(eventName, dataLines)?.let(events::add)
+            dispatch(eventName, dataLines)?.let(onEvent)
         }
 
+        return truncated
+    }
+
+    fun parse(body: BufferedReader): CloudRouteSseParseResult {
+        val events = mutableListOf<CloudRouteEvent>()
+        val truncated = parse(body, events::add)
         return CloudRouteSseParseResult(events = events, truncated = truncated)
     }
 

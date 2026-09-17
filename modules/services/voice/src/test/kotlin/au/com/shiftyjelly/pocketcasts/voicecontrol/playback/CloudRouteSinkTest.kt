@@ -7,8 +7,12 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -24,6 +28,43 @@ class CloudRouteSinkTest {
         referencePositionMs = 1_230_000L,
         clientPositionMs = 50_000L,
     )
+
+    @Test
+    fun `upstream throw during collect still restores auto pause`() = runTest {
+        val deps = TestDeps(
+            events = flow {
+                emit(CloudRouteEvent.Token("partial "))
+                throw IllegalStateException("upstream blew up")
+            },
+        )
+        val sink = deps.sink()
+
+        val failure = runCatching {
+            sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext)
+        }
+        assertTrue(failure.exceptionOrNull() is IllegalStateException)
+        assertEquals(listOf("pause", "resume"), deps.playback.calls)
+    }
+
+    @Test
+    fun `cancellation during collect still restores auto pause`() = runTest {
+        val deps = TestDeps(
+            events = flow {
+                emit(CloudRouteEvent.Token("partial "))
+                awaitCancellation()
+            },
+        )
+        val sink = deps.sink()
+
+        val cancelled = runCatching {
+            withTimeout(1_000) {
+                sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext)
+            }
+        }
+        assertTrue(cancelled.exceptionOrNull() is CancellationException)
+
+        assertEquals(listOf("pause", "resume"), deps.playback.calls)
+    }
 
     @Test
     fun `empty base url returns coming soon without calling route`() = runTest {

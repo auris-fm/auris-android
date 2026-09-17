@@ -66,41 +66,43 @@ class CloudRouteSink internal constructor(
 
         // Flow.collect's action is crossinline — cannot return@routeToCloud from it.
         var outcome: VoiceResponse? = null
-        events.collect { event ->
-            if (outcome != null) return@collect
-            when (event) {
-                is CloudRouteEvent.Action -> executeAction(event.tool, event.action, event.params)
+        try {
+            events.collect { event ->
+                if (outcome != null) return@collect
+                when (event) {
+                    is CloudRouteEvent.Action -> executeAction(event.tool, event.action, event.params)
 
-                is CloudRouteEvent.Token -> tokenBuffer += event.text
+                    is CloudRouteEvent.Token -> tokenBuffer += event.text
 
-                is CloudRouteEvent.Done -> {
-                    analytics.recordTurn(
-                        outcome = "done",
-                        inputTokens = event.inputTokens,
-                        outputTokens = event.outputTokens,
-                    )
-                    restoreTransientAudioState()
-                    outcome = if (tokenBuffer.isEmpty()) {
-                        VoiceResponse.Silent
-                    } else {
-                        VoiceResponse.Spoken(tokenBuffer)
+                    is CloudRouteEvent.Done -> {
+                        analytics.recordTurn(
+                            outcome = "done",
+                            inputTokens = event.inputTokens,
+                            outputTokens = event.outputTokens,
+                        )
+                        restoreTransientAudioState()
+                        outcome = if (tokenBuffer.isEmpty()) {
+                            VoiceResponse.Silent
+                        } else {
+                            VoiceResponse.Spoken(tokenBuffer)
+                        }
                     }
-                }
 
-                is CloudRouteEvent.Error -> {
-                    tokenBuffer = ""
-                    restoreTransientAudioState()
-                    analytics.recordTurn(outcome = "error")
-                    outcome = if (event.message.isBlank()) {
-                        VoiceResponse.Earcon(EarconId.ERROR)
-                    } else {
-                        VoiceResponse.Spoken(event.message)
+                    is CloudRouteEvent.Error -> {
+                        tokenBuffer = ""
+                        restoreTransientAudioState()
+                        analytics.recordTurn(outcome = "error")
+                        outcome = if (event.message.isBlank()) {
+                            VoiceResponse.Earcon(EarconId.ERROR)
+                        } else {
+                            VoiceResponse.Spoken(event.message)
+                        }
                     }
                 }
             }
-        }
-
-        if (outcome == null) {
+        } finally {
+            // Any exit path — normal return, upstream cancellation, timeouts,
+            // unexpected throws — must not leave playback paused silently.
             restoreTransientAudioState()
         }
         return outcome ?: VoiceResponse.Silent

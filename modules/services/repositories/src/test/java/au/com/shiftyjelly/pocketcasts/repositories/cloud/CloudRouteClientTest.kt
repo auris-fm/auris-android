@@ -334,6 +334,39 @@ class CloudRouteClientTest {
         assertTrue("read timeout should exceed 5s server budget", timeouts.second >= 15)
     }
 
+    @Test
+    fun `events stream before the body completes so play_quote fires mid-turn`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                sseResponse(
+                    """
+                    event: action
+                    data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":1130000}}
+
+                    """.trimIndent(),
+                ).setSocketPolicy(SocketPolicy.KEEP_OPEN),
+            )
+            server.start()
+
+            val client = CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
+
+            client.route("play the quote", sampleContext).test {
+                // The action must arrive while the SSE body is still open —
+                // a buffered implementation would only emit after EOF.
+                assertEquals(
+                    CloudRouteEvent.Action(
+                        tool = "playback",
+                        action = "play_quote",
+                        params = mapOf("reference_position_ms" to 1_130_000L),
+                    ),
+                    awaitItem(),
+                )
+                expectNoEvents()
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+    }
+
     private fun sseResponse(body: String): MockResponse {
         return MockResponse()
             .setResponseCode(200)

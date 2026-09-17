@@ -6,10 +6,12 @@ import java.io.InputStreamReader
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -17,6 +19,11 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
+/**
+ * Streams the gateway's SSE turn as events, not as a buffered list: tokens
+ * and `play_quote` actions are emitted as they arrive so the turn can play
+ * mid-response instead of after it.
+ */
 class CloudRouteClient(
     private val baseUrl: String,
     private val userId: String,
@@ -30,7 +37,7 @@ class CloudRouteClient(
     internal val readTimeoutSeconds: Long
         get() = okHttpClient.readTimeoutMillis / 1000L
 
-    fun route(request: String, context: CloudRouteContext): Flow<CloudRouteEvent> = flow {
+    fun route(request: String, context: CloudRouteContext): Flow<CloudRouteEvent> = channelFlow {
         val bodyJson = CloudRouteJson.requestBodyAdapter.toJson(
             CloudRouteRequestBody(request = request, context = context),
         )
@@ -44,49 +51,42 @@ class CloudRouteClient(
         val call = okHttpClient.newCall(httpRequest)
         currentCoroutineContext().job.invokeOnCompletion { call.cancel() }
 
-        val events = withContext(Dispatchers.IO) {
+        withContext(Dispatchers.IO) {
             currentCoroutineContext().ensureActive()
             try {
                 call.execute().use { response ->
                     if (!response.isSuccessful) {
-                        return@withContext listOf(
-                            preStreamError(response.code, response.body.string()),
-                        )
+                        send(preStreamError(response.code, response.body.string()))
+                        return@withContext
                     }
 
                     val reader = InputStreamReader(response.body.byteStream())
-                    val parseResult = CloudRouteSseParser().parse(reader.buffered())
-                    buildList<CloudRouteEvent> {
-                        addAll(parseResult.events)
-                        if (parseResult.truncated) {
-                            add(
-                                CloudRouteEvent.Error(
-                                    code = "connection_lost",
-                                    message = "Connection lost",
-                                ),
-                            )
-                        }
+                    val truncated = CloudRouteSseParser().parse(reader.buffered()) { event ->
+                        // Blocks the SSE reader when the collector is slow,
+                        // which is the desired backpressure shape.
+                        trySendBlocking(event).getOrThrow()
+                    }
+                    if (truncated) {
+                        send(
+                            CloudRouteEvent.Error(
+                                code = "connection_lost",
+                                message = "Connection lost",
+                            ),
+                        )
                     }
                 }
             } catch (error: IOException) {
-                if (!call.isCanceled()) {
-                    currentCoroutineContext().ensureActive()
-                }
                 if (call.isCanceled()) {
                     throw CancellationException("Cloud route cancelled", error)
                 }
-                listOf(
+                currentCoroutineContext().ensureActive()
+                send(
                     CloudRouteEvent.Error(
                         code = "connection_lost",
                         message = error.message ?: "Connection lost",
                     ),
                 )
             }
-        }
-
-        for (event in events) {
-            currentCoroutineContext().ensureActive()
-            emit(event)
         }
     }
 

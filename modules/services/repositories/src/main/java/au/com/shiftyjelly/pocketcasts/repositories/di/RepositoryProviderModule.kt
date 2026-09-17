@@ -61,11 +61,10 @@ class RepositoryProviderModule {
         @ApplicationContext context: Context,
         listeners: Set<@JvmSuppressWildcards PaymentClient.Listener>,
     ): PaymentDataSource {
-        // Variant suffixes (.debug, .tv, ...) strip to the release
-        // applicationId; anything else (unit tests, unknown builds) is
-        // not a Play-Billing install.
-        val baseApplicationId = context.packageName.removeSuffix(".debug").removeSuffix(".tv")
-        return if (baseApplicationId == BuildConfig.RELEASE_APPLICATION_ID) {
+        // Exact match, no suffix stripping: the pre-existing intent is
+        // billing on the release applicationId only — variant builds
+        // (.debug, .tv, unit tests) deliberately take the fake path.
+        return if (context.packageName == BuildConfig.RELEASE_APPLICATION_ID) {
             PaymentDataSource.billing(context, listeners)
         } else {
             PaymentDataSource.fake()

@@ -10,6 +10,11 @@ android {
     buildFeatures {
         buildConfig = true
     }
+    defaultConfig {
+        // Single source: dependencies.gradle.kts sets the "applicationId"
+        // extra consumed by the app module's applicationId.
+        buildConfigField("String", "RELEASE_APPLICATION_ID", "\"${rootProject.property("applicationId")}\"")
+    }
 }
 
 dependencies {

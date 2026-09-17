@@ -7,6 +7,7 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import au.com.shiftyjelly.pocketcasts.payment.PaymentClient
 import au.com.shiftyjelly.pocketcasts.payment.PaymentDataSource
 import au.com.shiftyjelly.pocketcasts.preferences.gateway.GatewayUrlProvider
+import au.com.shiftyjelly.pocketcasts.repositories.BuildConfig
 import au.com.shiftyjelly.pocketcasts.repositories.lists.ListRepository
 import au.com.shiftyjelly.pocketcasts.repositories.payment.AnalyticsPaymentListener
 import au.com.shiftyjelly.pocketcasts.repositories.payment.LoggingPaymentListener
@@ -60,7 +61,11 @@ class RepositoryProviderModule {
         @ApplicationContext context: Context,
         listeners: Set<@JvmSuppressWildcards PaymentClient.Listener>,
     ): PaymentDataSource {
-        return if (context.packageName == "fm.auris") {
+        // Variant suffixes (.debug, .tv, ...) strip to the release
+        // applicationId; anything else (unit tests, unknown builds) is
+        // not a Play-Billing install.
+        val baseApplicationId = context.packageName.removeSuffix(".debug").removeSuffix(".tv")
+        return if (baseApplicationId == BuildConfig.RELEASE_APPLICATION_ID) {
             PaymentDataSource.billing(context, listeners)
         } else {
             PaymentDataSource.fake()

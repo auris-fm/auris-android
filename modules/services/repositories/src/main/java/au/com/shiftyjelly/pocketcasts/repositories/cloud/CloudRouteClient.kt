@@ -128,7 +128,12 @@ class CloudRouteClient(
         private const val ROUTE_PATH = "/api/v1/cloud/route"
         private val JSON_MEDIA_TYPE = "application/json".toMediaType()
 
-        fun defaultOkHttpClient(): OkHttpClient = OkHttpClient.Builder()
+        fun defaultOkHttpClient(): OkHttpClient = SHARED
+
+        // One client (connection pool, dispatcher, threads) for the process
+        // lifetime: constructing a client per turn leaked both handshakes and
+        // worker threads.
+        private val SHARED = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .writeTimeout(15, TimeUnit.SECONDS)

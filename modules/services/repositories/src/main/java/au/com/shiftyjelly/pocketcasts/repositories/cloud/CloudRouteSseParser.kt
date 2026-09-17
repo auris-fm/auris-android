@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import java.io.BufferedReader
 import java.io.IOException
+import timber.log.Timber
 
 internal data class CloudRouteSseParseResult(
     val events: List<CloudRouteEvent>,
@@ -84,7 +85,12 @@ internal class CloudRouteSseParser {
                 CloudRouteEvent.Error(payload.code, payload.message)
             }
 
-            else -> throw IOException("Unknown SSE event: $eventName")
+            else -> {
+                // Forward compatibility: a server-added event type must not
+                // kill every turn (and must not surface as connection_lost).
+                Timber.w("Unknown SSE event: %s", eventName)
+                null
+            }
         }
     }
 

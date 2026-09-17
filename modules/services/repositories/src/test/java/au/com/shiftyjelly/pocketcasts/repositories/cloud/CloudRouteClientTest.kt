@@ -1,6 +1,9 @@
 package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import app.cash.turbine.test
+import java.net.InetAddress
+import java.net.ServerSocket
+import kotlin.concurrent.thread
 import kotlinx.coroutines.runBlocking
 import okhttp3.Call
 import okhttp3.EventListener
@@ -335,35 +338,87 @@ class CloudRouteClientTest {
     }
 
     @Test
-    fun `events stream before the body completes so play_quote fires mid-turn`() = runBlocking {
-        MockWebServer().use { server ->
-            server.enqueue(
-                sseResponse(
-                    """
-                    event: action
-                    data: {"tool":"playback","action":"play_quote","params":{"reference_position_ms":1130000}}
-
-                    """.trimIndent(),
-                ).setSocketPolicy(SocketPolicy.KEEP_OPEN),
-            )
-            server.start()
-
-            val client = CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
-
-            client.route("play the quote", sampleContext).test {
-                // The action must arrive while the SSE body is still open —
-                // a buffered implementation would only emit after EOF.
-                assertEquals(
-                    CloudRouteEvent.Action(
-                        tool = "playback",
-                        action = "play_quote",
-                        params = mapOf("reference_position_ms" to 1_130_000L),
-                    ),
-                    awaitItem(),
+    fun `events stream before the body completes so play_quote fires mid-turn`() {
+        // Raw socket so the body can be held open deterministically: the
+        // action event is written immediately, the done event only after a
+        // long hold. A buffered implementation cannot emit the action before
+        // EOF, so it misses the elapsed-time bound; a streaming one passes.
+        val server = ServerSocket(0, 1, InetAddress.getLoopbackAddress())
+        val bodyHoldMs = 2500L
+        val actionPart =
+            (
+                "event: action\n" +
+                    "data: {\"tool\":\"playback\",\"action\":\"play_quote\"," +
+                    "\"params\":{\"reference_position_ms\":1130000}}\n\n"
                 )
-                expectNoEvents()
-                cancelAndIgnoreRemainingEvents()
+        val donePart =
+            (
+                "event: done\n" +
+                    "data: {\"input_tokens\":1,\"output_tokens\":1}\n\n"
+                )
+        val fullBody = (actionPart + donePart).toByteArray()
+        val writer = thread(start = true, isDaemon = true) {
+            runCatching {
+                server.accept().use { socket ->
+                    val out = socket.getOutputStream()
+                    // Exact Content-Length: OkHttp must see a clean EOF at the
+                    // end of the done event, not a truncated-body error.
+                    out.write(
+                        (
+                            "HTTP/1.1 200 OK\r\n" +
+                                "Content-Type: text/event-stream\r\n" +
+                                "Content-Length: " + fullBody.size + "\r\n" +
+                                "Connection: close\r\n" +
+                                "\r\n"
+                            ).toByteArray(),
+                    )
+                    out.flush()
+                    out.write(actionPart.toByteArray())
+                    out.flush()
+                    Thread.sleep(bodyHoldMs)
+                    out.write(donePart.toByteArray())
+                    out.flush()
+                }
             }
+        }
+
+        try {
+            val client = CloudRouteClient(
+                "http://127.0.0.1:" + server.localPort,
+                userId,
+            )
+
+            val startedAt = System.nanoTime()
+            val events = mutableListOf<CloudRouteEvent>()
+            var firstEventElapsedMs = -1L
+            runBlocking {
+                client.route("play the quote", sampleContext).collect { event ->
+                    if (firstEventElapsedMs < 0) {
+                        firstEventElapsedMs = (System.nanoTime() - startedAt) / 1_000_000
+                    }
+                    events.add(event)
+                }
+            }
+            val actionElapsedMs = firstEventElapsedMs
+
+            assertEquals(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "play_quote",
+                    params = mapOf("reference_position_ms" to 1_130_000L),
+                ),
+                events.firstOrNull(),
+            )
+            assertEquals(CloudRouteEvent.Done(inputTokens = 1, outputTokens = 1), events.lastOrNull())
+            // The action must have been emitted while the body was still
+            // open — well before the EOF that unblocks the done event.
+            assertTrue(
+                "action arrived after body hold ($actionElapsedMs ms) — flow is buffering, not streaming",
+                actionElapsedMs < bodyHoldMs / 2,
+            )
+        } finally {
+            server.close()
+            writer.join(5_000)
         }
     }
 

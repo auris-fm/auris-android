@@ -343,7 +343,7 @@ class CloudRouteClientTest {
         // action event is written immediately, the done event only after a
         // long hold. A buffered implementation cannot emit the action before
         // EOF, so it misses the elapsed-time bound; a streaming one passes.
-        val server = ServerSocket(0, 1, InetAddress.getLoopbackAddress())
+        val server = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
         val bodyHoldMs = 2500L
         val actionPart =
             (
@@ -357,8 +357,9 @@ class CloudRouteClientTest {
                     "data: {\"input_tokens\":1,\"output_tokens\":1}\n\n"
                 )
         val fullBody = (actionPart + donePart).toByteArray()
+        var writerFailure: Throwable? = null
         val writer = thread(start = true, isDaemon = true) {
-            runCatching {
+            try {
                 server.accept().use { socket ->
                     val out = socket.getOutputStream()
                     // Exact Content-Length: OkHttp must see a clean EOF at the
@@ -379,27 +380,29 @@ class CloudRouteClientTest {
                     out.write(donePart.toByteArray())
                     out.flush()
                 }
+            } catch (t: Throwable) {
+                writerFailure = t
             }
         }
 
         try {
             val client = CloudRouteClient(
-                "http://127.0.0.1:" + server.localPort,
+                "http://" + server.inetAddress.hostAddress + ":" + server.localPort,
                 userId,
             )
 
             val startedAt = System.nanoTime()
+            var actionElapsedMs = -1L
+            var doneElapsedMs = -1L
             val events = mutableListOf<CloudRouteEvent>()
-            var firstEventElapsedMs = -1L
             runBlocking {
                 client.route("play the quote", sampleContext).collect { event ->
-                    if (firstEventElapsedMs < 0) {
-                        firstEventElapsedMs = (System.nanoTime() - startedAt) / 1_000_000
-                    }
+                    val elapsed = (System.nanoTime() - startedAt) / 1_000_000
+                    if (actionElapsedMs < 0) actionElapsedMs = elapsed
+                    if (event is CloudRouteEvent.Done) doneElapsedMs = elapsed
                     events.add(event)
                 }
             }
-            val actionElapsedMs = firstEventElapsedMs
 
             assertEquals(
                 CloudRouteEvent.Action(
@@ -412,13 +415,18 @@ class CloudRouteClientTest {
             assertEquals(CloudRouteEvent.Done(inputTokens = 1, outputTokens = 1), events.lastOrNull())
             // The action must have been emitted while the body was still
             // open — well before the EOF that unblocks the done event.
+            // Self-calibrating: the done event can only arrive after the
+            // writer's hold, so doneElapsedMs IS "the buffered number".
+            // Buffered (emit-at-EOF): both ~= hold → ratio ~1 → fails.
+            // Streaming: action within ms of connect, done at ~hold → ~100x margin.
             assertTrue(
-                "action arrived after body hold ($actionElapsedMs ms) — flow is buffering, not streaming",
-                actionElapsedMs < bodyHoldMs / 2,
+                "action at ${actionElapsedMs}ms vs done at ${doneElapsedMs}ms — flow is buffering, not streaming",
+                actionElapsedMs < doneElapsedMs / 2,
             )
         } finally {
             server.close()
             writer.join(5_000)
+            writerFailure?.let { throw it }
         }
     }
 

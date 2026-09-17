@@ -12,12 +12,15 @@ class HttpStatusUrlLoggingInterceptor : Interceptor {
     override fun intercept(chain: Interceptor.Chain): Response {
         val response = chain.proceed(chain.request())
         if (!response.isSuccessful) {
-            Timber.e(
-                "HTTP %s %s %s",
-                response.code,
-                response.request.method,
-                response.request.url,
-            )
+            // 5xx is a genuine failure; expected 4xx control flow (404
+            // "no fingerprint reference", CDN misses) must not pollute
+            // error reporting — debug only.
+            val message = "HTTP %s %s %s"
+            if (response.code >= 500) {
+                Timber.e(message, response.code, response.request.method, response.request.url)
+            } else {
+                Timber.d(message, response.code, response.request.method, response.request.url)
+            }
         }
         return response
     }

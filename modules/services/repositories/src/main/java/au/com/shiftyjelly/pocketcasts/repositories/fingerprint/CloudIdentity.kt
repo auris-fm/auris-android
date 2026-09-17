@@ -35,7 +35,7 @@ class CloudIdentity @Inject constructor(
     }
 
     companion object {
-        private const val PREFS_NAME = "auris_cloud"
+        private const val PREFS_NAME = au.com.shiftyjelly.pocketcasts.preferences.gateway.AurisCloudPrefs.PREFS_NAME
         private const val KEY_USER_ID = "user_id"
 
         /** User IDs are client-generated UUIDv4 with a `user_` prefix (cloud-identity.md). */

@@ -12,7 +12,9 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.withContext
 
 @Singleton
 class CloudRouteSink internal constructor(
@@ -103,7 +105,9 @@ class CloudRouteSink internal constructor(
         } finally {
             // Any exit path — normal return, upstream cancellation, timeouts,
             // unexpected throws — must not leave playback paused silently.
-            restoreTransientAudioState()
+            // NonCancellable: the resume path itself suspends (play-queue
+            // loads), and on a cancelled turn it must still run to completion.
+            withContext(NonCancellable) { restoreTransientAudioState() }
         }
         return outcome ?: VoiceResponse.Silent
     }
@@ -171,11 +175,20 @@ class CloudRouteSink internal constructor(
     }
 
     private fun capturePreActionPosition(referenceMs: Long) {
-        val previous = playbackContextProvider.current().clientPositionMs
-        preQuotePositionMs = previous
+        val previousPlaybackMs = playbackContextProvider.current().clientPositionMs
+        // preQuotePositionMs stays on the playback timeline: stop_quote seeks
+        // the local player back to it.
+        preQuotePositionMs = previousPlaybackMs
+        // previous_reference_position_ms is a reference-timeline value on the
+        // wire — convert from the playback timeline (ad/intro offset). When no
+        // mapping exists yet, omit the field rather than send a wrong-timeline
+        // value.
+        val previousReferenceMs = fingerprintTimingManager
+            .referenceTime(previousPlaybackMs.toInt())
+            ?.let { referenceSeconds -> (referenceSeconds * 1000).toLong() }
         cloudPlaybackContextState.record(
             referencePositionMs = referenceMs,
-            previousReferencePositionMs = previous,
+            previousReferencePositionMs = previousReferenceMs,
         )
     }
 

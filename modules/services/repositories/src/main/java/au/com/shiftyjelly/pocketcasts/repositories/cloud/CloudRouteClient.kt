@@ -6,7 +6,6 @@ import java.io.InputStreamReader
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -76,16 +75,28 @@ class CloudRouteClient(
                     }
                 }
             } catch (error: IOException) {
-                if (call.isCanceled()) {
-                    throw CancellationException("Cloud route cancelled", error)
-                }
+                // Answers "did the *collector* cancel us?" — a callTimeout
+                // cancels the OkHttp call too, so call.isCanceled() alone
+                // cannot distinguish the two.
                 currentCoroutineContext().ensureActive()
-                send(
-                    CloudRouteEvent.Error(
-                        code = "connection_lost",
-                        message = error.message ?: "Connection lost",
-                    ),
-                )
+                if (call.isCanceled()) {
+                    // Call timeout (or external cancel of the call): the turn
+                    // ended without a verdict — surface it as an error event
+                    // so analytics and the user both see it.
+                    send(
+                        CloudRouteEvent.Error(
+                            code = "connection_lost",
+                            message = "Request timed out",
+                        ),
+                    )
+                } else {
+                    send(
+                        CloudRouteEvent.Error(
+                            code = "connection_lost",
+                            message = error.message ?: "Connection lost",
+                        ),
+                    )
+                }
             }
         }
     }

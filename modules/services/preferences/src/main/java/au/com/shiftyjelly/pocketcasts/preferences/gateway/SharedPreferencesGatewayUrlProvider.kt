@@ -63,6 +63,17 @@ internal class GatewayUrlResolver(
     private fun resolveApi(upstreamUrl: String): String = if (isCutoverActive()) configuredGatewayUrl().trimEnd('/') else upstreamUrl
 }
 
-internal const val PREFS_NAME = "auris_cloud"
-internal const val KEY_BASE_URL = "base_url"
-internal const val KEY_DIRECT_UPSTREAM = "direct_upstream"
+/**
+ * Single source of truth for the auris cloud prefs file name and base-url key.
+ * CloudConfig/CloudIdentity (repositories module) must reference these — a
+ * mismatch silently desyncs the gateway cutover from cloud routing.
+ */
+object AurisCloudPrefs {
+    const val PREFS_NAME = "auris_cloud"
+    const val KEY_BASE_URL = "base_url"
+    const val KEY_DIRECT_UPSTREAM = "direct_upstream"
+}
+
+internal const val PREFS_NAME = AurisCloudPrefs.PREFS_NAME
+internal const val KEY_BASE_URL = AurisCloudPrefs.KEY_BASE_URL
+internal const val KEY_DIRECT_UPSTREAM = AurisCloudPrefs.KEY_DIRECT_UPSTREAM

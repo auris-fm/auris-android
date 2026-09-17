@@ -18,6 +18,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
+import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 
 class CloudRouteSinkTest {
@@ -97,6 +98,37 @@ class CloudRouteSinkTest {
             listOf(CloudRouteAnalyticsCall("done", 10, 5)),
             deps.analytics.calls,
         )
+    }
+
+    @Test
+    fun `play_quote records previous position on the reference timeline`() = runTest {
+        val fingerprint = mock<FingerprintTimingManager>()
+        whenever(fingerprint.referenceTime(60_000)).thenReturn(45.0)
+        whenever(fingerprint.playbackTimeMs(45_000.0)).thenReturn(45_000)
+        val state = CloudPlaybackContextState()
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            cloudPlaybackContextState = state,
+            clientPositionMs = 60_000L,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "play_quote",
+                    params = mapOf("reference_position_ms" to 45_000_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("play the quote", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // preQuote is playback-timeline; the context state must carry the
+        // reference-timeline conversion (45s reference == 60s playback here).
+        assertEquals(45_000L, state.snapshot().previousReferencePositionMs)
+        // stop_quote recovery still uses the playback-timeline position.
+        assertTrue(deps.playback.calls.contains("seekTo:45000"))
+        assertTrue(deps.playback.calls.contains("resume"))
     }
 
     @Test

@@ -13,13 +13,15 @@ package au.com.shiftyjelly.pocketcasts.repositories.fingerprint
 class CloudReferenceMatcher {
     data class Match(val timestampSeconds: Float, val score: Float)
 
-    private data class Checkpoint(val timestampSeconds: Float, val hashes: LongArray)
+    private data class Checkpoint(val timestampSeconds: Float, val hashes: LongArray, val hashSet: HashSet<Long>)
 
     private val checkpoints = mutableListOf<Checkpoint>()
 
     /** Adds a reference checkpoint (timestamp in seconds, sorted hash set). */
     fun add(timestampSeconds: Float, hashes: LongArray, durationSeconds: Float) {
-        checkpoints.add(Checkpoint(timestampSeconds, hashes))
+        // The hash set is immutable per checkpoint — precompute it once here
+        // instead of rebuilding it for every query window.
+        checkpoints.add(Checkpoint(timestampSeconds, hashes, hashes.toHashSet()))
     }
 
     fun clear() = checkpoints.clear()
@@ -29,10 +31,33 @@ class CloudReferenceMatcher {
     /** Returns the top [maxResults] reference checkpoints by overlap score. */
     fun findTopMatches(queryHashes: LongArray, maxResults: Int): List<Match> {
         if (queryHashes.isEmpty()) return emptyList()
-        return checkpoints
-            .map { Match(it.timestampSeconds, overlapScore(queryHashes, it.hashes)) }
-            .sortedByDescending { it.score }
-            .take(maxResults)
+        val querySet = queryHashes.toHashSet()
+        // Single pass keeping the top maxResults by score — no full-list
+        // sort per query (this runs once per emitted window under a mutex).
+        val top = ArrayList<Match>(maxResults)
+        for (cp in checkpoints) {
+            var intersection = 0
+            for (h in queryHashes) if (h in cp.hashSet) intersection++
+            val smallest = minOf(querySet.size, cp.hashes.size)
+            val score = if (smallest == 0) 0f else intersection.toFloat() / smallest
+            insertTop(top, Match(cp.timestampSeconds, score), maxResults)
+        }
+        return top
+    }
+
+    private fun insertTop(top: ArrayList<Match>, candidate: Match, maxResults: Int) {
+        if (top.size < maxResults) {
+            top.add(candidate)
+            if (top.size == maxResults) top.sortByDescending { it.score }
+            return
+        }
+        if (candidate.score <= top.last().score) return
+        top[top.lastIndex] = candidate
+        var i = top.lastIndex
+        while (i > 0 && top[i].score > top[i - 1].score) {
+            top[i - 1] = candidate.also { top[i] = top[i - 1] }
+            i--
+        }
     }
 
     companion object {

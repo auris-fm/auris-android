@@ -33,7 +33,7 @@ class SharedPreferencesCloudConfig @Inject constructor(
     }
 
     companion object {
-        const val PREFS_NAME = "auris_cloud"
-        const val KEY_BASE_URL = "base_url"
+        const val PREFS_NAME = au.com.shiftyjelly.pocketcasts.preferences.gateway.AurisCloudPrefs.PREFS_NAME
+        const val KEY_BASE_URL = au.com.shiftyjelly.pocketcasts.preferences.gateway.AurisCloudPrefs.KEY_BASE_URL
     }
 }

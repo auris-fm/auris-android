@@ -84,15 +84,18 @@ class CloudFingerprinter {
      * whole-file processing).
      */
     fun finish(): List<Window> {
-        if (finished) return windows
-        finished = true
-        drainResampled()
-        computeFrames()
-        while (nextWindowStartSec <= lastFullWindowStartSec()) {
-            emitWindow(nextWindowStartSec)
-            nextWindowStartSec += windowIntervalMs / 1000
+        if (!finished) {
+            finished = true
+            drainResampled()
+            computeFrames()
+            while (nextWindowStartSec <= lastFullWindowStartSec()) {
+                emitWindow(nextWindowStartSec)
+                nextWindowStartSec += windowIntervalMs / 1000
+            }
         }
-        return windows
+        // Only the not-yet-drained tail: callers that already drainWindows()
+        // during the stream must not re-match the whole history.
+        return drainWindows()
     }
 
     /** Windows emitted so far (a window is only emitted once its tail lookahead is available). */

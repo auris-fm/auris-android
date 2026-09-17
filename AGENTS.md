@@ -263,4 +263,4 @@ adb logcat -v time --pid=$PID OkHttp:S
 
 ## PR review discipline
 
-Before any PR merges, **every review comment on it must be addressed** — either fixed in code or explicitly resolved with a written justification. No comment is skipped silently. Applies to all Auris repos; canonical text lives in core's CLAUDE.md. The final merge decision is always the owner's (@merlinran).
+Before any PR merges, **every review comment on it must be addressed** — either fixed in code or rejected with a written reason. Deferral to follow-up tickets is only for comments irrelevant to the PR's changes; anything relevant is handled or rejected-with-reason, never parked. No comment is skipped silently. Applies to all Auris repos; canonical text lives in core's CLAUDE.md. The final merge decision is always the owner's (@merlinran).

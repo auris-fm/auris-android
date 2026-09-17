@@ -60,10 +60,24 @@ class CloudRouteClient(
                     }
 
                     val reader = InputStreamReader(response.body.byteStream())
-                    val truncated = CloudRouteSseParser().parse(reader.buffered()) { event ->
-                        // Blocks the SSE reader when the collector is slow,
-                        // which is the desired backpressure shape.
-                        trySendBlocking(event).getOrThrow()
+                    // A throw out of the parser is a protocol/payload problem,
+                    // not a transport one — give it its own code so it cannot
+                    // be mistaken for a network failure (the outer catch maps
+                    // IOException to connection_lost).
+                    val truncated = try {
+                        CloudRouteSseParser().parse(reader.buffered()) { event ->
+                            // Blocks the SSE reader when the collector is slow,
+                            // which is the desired backpressure shape.
+                            trySendBlocking(event).getOrThrow()
+                        }
+                    } catch (error: IOException) {
+                        send(
+                            CloudRouteEvent.Error(
+                                code = "invalid_response",
+                                message = error.message ?: "Malformed stream",
+                            ),
+                        )
+                        return@withContext
                     }
                     if (truncated) {
                         send(

@@ -232,6 +232,30 @@ class CloudRouteClientTest {
     }
 
     @Test
+    fun `malformed payload emits invalid_response not connection_lost`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                sseResponse(
+                    """
+                    event: token
+                    data: {"text": not-valid-json}
+
+                    """.trimIndent(),
+                ),
+            )
+            server.start()
+
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
+                .route("hello", sampleContext)
+                .test {
+                    val error = awaitItem() as CloudRouteEvent.Error
+                    assertEquals("invalid_response", error.code)
+                    awaitComplete()
+                }
+        }
+    }
+
+    @Test
     fun `mid-stream connection drop emits connection error`() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(

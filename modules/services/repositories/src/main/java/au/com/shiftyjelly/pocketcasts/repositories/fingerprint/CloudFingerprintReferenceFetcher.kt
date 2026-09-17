@@ -30,12 +30,7 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
         .build()
 
     suspend fun fetchReference(baseUrl: String, episodeUuid: String): CloudReferenceMatcher? = withContext(Dispatchers.IO) {
-        // Caller budget: preparation runs this before the transcript fetch,
-        // so an unbounded wait here stalls the whole pipeline (the read
-        // timeout alone allows ~60s).
-        withTimeoutOrNull(FingerprintConstants.ON_DEMAND_FETCH_TIMEOUT_MS) {
-            fetchReferenceOnce(baseUrl, episodeUuid)
-        }.also { if (it == null) Timber.w("CloudFingerprintReferenceFetcher: fetch timed out or failed for %s", episodeUuid) }
+        fetchReferenceOnce(baseUrl, episodeUuid)
     }
 
     private fun fetchReferenceOnce(baseUrl: String, episodeUuid: String): CloudReferenceMatcher? {
@@ -44,9 +39,16 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
             .url(url)
             .header("Authorization", "Bearer " + cloudIdentity.userId())
             .build()
+        // The whole fetch is blocking I/O, so a coroutine timeout would never
+        // fire mid-call (and would only discard late successes). call.timeout
+        // is the lever that actually cancels the socket.
+        val call = client.newCall(request)
+        call.timeout().timeout(FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         return try {
-            client.newCall(request).execute().use { response ->
+            call.execute().use { response ->
                 if (!response.isSuccessful) {
+                    // Definitive statuses (e.g. 404 = no reference) are not
+                    // timeouts — log them as what they are.
                     Timber.w("CloudFingerprintReferenceFetcher: status ${response.code} for $episodeUuid")
                     null
                 } else {
@@ -54,7 +56,7 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
                 }
             }
         } catch (e: IOException) {
-            Timber.w(e, "CloudFingerprintReferenceFetcher: fetch failed for $episodeUuid")
+            Timber.w(e, "CloudFingerprintReferenceFetcher: fetch failed or timed out for $episodeUuid")
             null
         }
     }

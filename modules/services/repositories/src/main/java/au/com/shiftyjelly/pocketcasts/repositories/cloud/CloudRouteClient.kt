@@ -4,7 +4,6 @@ import androidx.annotation.VisibleForTesting
 import java.io.IOException
 import java.io.InputStreamReader
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.currentCoroutineContext
@@ -17,6 +16,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import timber.log.Timber
 
 /**
  * Streams the gateway's SSE turn as events, not as a buffered list: tokens
@@ -71,10 +71,13 @@ class CloudRouteClient(
                             trySendBlocking(event).getOrThrow()
                         }
                     } catch (error: IOException) {
+                        // Parser detail goes to the log; the user hears a
+                        // fixed, speakable line — never parser internals.
+                        Timber.w(error, "Cloud route payload could not be parsed")
                         send(
                             CloudRouteEvent.Error(
                                 code = "invalid_response",
-                                message = error.message ?: "Malformed stream",
+                                message = "Sorry, I couldn't understand the response.",
                             ),
                         )
                         return@withContext

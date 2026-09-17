@@ -18,7 +18,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
-import org.mockito.kotlin.verify
 import org.mockito.kotlin.whenever
 
 class CloudRouteSinkTest {
@@ -129,6 +128,36 @@ class CloudRouteSinkTest {
         // stop_quote recovery still uses the playback-timeline position.
         assertTrue(deps.playback.calls.contains("seekTo:45000"))
         assertTrue(deps.playback.calls.contains("resume"))
+    }
+
+    @Test
+    fun `unmapped referenceTime clears previous instead of resending a stale value`() = runTest {
+        val fingerprint = mock<FingerprintTimingManager>()
+        whenever(fingerprint.referenceTime(60_000)).thenReturn(null)
+        whenever(fingerprint.playbackTimeMs(45_000.0)).thenReturn(45_000)
+        val state = CloudPlaybackContextState(
+            recentReferencePositions = emptyList(),
+            previousReferencePositionMs = 300L,
+        )
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            cloudPlaybackContextState = state,
+            clientPositionMs = 60_000L,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "play_quote",
+                    params = mapOf("reference_position_ms" to 45_000_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("play the quote", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // Turn 2+ regression guard: null must clear, not retain turn 1's value.
+        assertEquals(null, state.snapshot().previousReferencePositionMs)
     }
 
     @Test

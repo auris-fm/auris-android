@@ -32,7 +32,7 @@ internal class CloudRouteSseParser {
 
             val line = rawLine.trimEnd('\r')
             if (line.isEmpty()) {
-                dispatch(eventName, dataLines)?.let(onEvent)
+                dispatchSafe(eventName, dataLines, onEvent)
                 eventName = null
                 dataLines.clear()
                 continue
@@ -47,10 +47,30 @@ internal class CloudRouteSseParser {
         }
 
         if (!truncated) {
-            dispatch(eventName, dataLines)?.let(onEvent)
+            dispatchSafe(eventName, dataLines, onEvent)
         }
 
         return truncated
+    }
+
+    /**
+     * Payload/shape failures (Moshi throws both IOException and
+     * RuntimeException hierarchies) are normalised to IOException so the
+     * client maps every parse failure to `invalid_response` — none can
+     * escape as a silent RuntimeException.
+     */
+    private fun dispatchSafe(
+        eventName: String?,
+        dataLines: List<String>,
+        onEvent: (CloudRouteEvent) -> Unit,
+    ) {
+        try {
+            dispatch(eventName, dataLines)?.let(onEvent)
+        } catch (error: IOException) {
+            throw error
+        } catch (error: Exception) {
+            throw IOException(error.message ?: "Malformed SSE payload", error)
+        }
     }
 
     fun parse(body: BufferedReader): CloudRouteSseParseResult {
@@ -64,7 +84,10 @@ internal class CloudRouteSseParser {
         val data = dataLines.joinToString("\n")
         if (data.isEmpty()) return null
 
-        return when (eventName) {
+        // SSE spec: a frame with data but no event: line is a "message"
+        // event, not an unknown one.
+        val name = eventName ?: "message"
+        return when (name) {
             "action" -> parseActionPayload(data)
 
             "token" -> {
@@ -88,7 +111,7 @@ internal class CloudRouteSseParser {
             else -> {
                 // Forward compatibility: a server-added event type must not
                 // kill every turn (and must not surface as connection_lost).
-                Timber.w("Unknown SSE event: %s", eventName)
+                Timber.w("Unknown SSE event: %s (payload starts %s)", name, data.take(64))
                 null
             }
         }

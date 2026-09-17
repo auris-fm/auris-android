@@ -7,8 +7,12 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -24,6 +28,43 @@ class CloudRouteSinkTest {
         referencePositionMs = 1_230_000L,
         clientPositionMs = 50_000L,
     )
+
+    @Test
+    fun `upstream throw during collect still restores auto pause`() = runTest {
+        val deps = TestDeps(
+            events = flow {
+                emit(CloudRouteEvent.Token("partial "))
+                throw IllegalStateException("upstream blew up")
+            },
+        )
+        val sink = deps.sink()
+
+        val failure = runCatching {
+            sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext)
+        }
+        assertTrue(failure.exceptionOrNull() is IllegalStateException)
+        assertEquals(listOf("pause", "resume"), deps.playback.calls)
+    }
+
+    @Test
+    fun `cancellation during collect still restores auto pause`() = runTest {
+        val deps = TestDeps(
+            events = flow {
+                emit(CloudRouteEvent.Token("partial "))
+                awaitCancellation()
+            },
+        )
+        val sink = deps.sink()
+
+        val cancelled = runCatching {
+            withTimeout(1_000) {
+                sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext)
+            }
+        }
+        assertTrue(cancelled.exceptionOrNull() is CancellationException)
+
+        assertEquals(listOf("pause", "resume"), deps.playback.calls)
+    }
 
     @Test
     fun `empty base url returns coming soon without calling route`() = runTest {
@@ -56,6 +97,67 @@ class CloudRouteSinkTest {
             listOf(CloudRouteAnalyticsCall("done", 10, 5)),
             deps.analytics.calls,
         )
+    }
+
+    @Test
+    fun `play_quote records previous position on the reference timeline`() = runTest {
+        val fingerprint = mock<FingerprintTimingManager>()
+        whenever(fingerprint.referenceTime(60_000)).thenReturn(45.0)
+        whenever(fingerprint.playbackTimeMs(45_000.0)).thenReturn(45_000)
+        val state = CloudPlaybackContextState()
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            cloudPlaybackContextState = state,
+            clientPositionMs = 60_000L,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "play_quote",
+                    params = mapOf("reference_position_ms" to 45_000_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("play the quote", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // preQuote is playback-timeline; the context state must carry the
+        // reference-timeline conversion (45s reference == 60s playback here).
+        assertEquals(45_000L, state.snapshot().previousReferencePositionMs)
+        // stop_quote recovery still uses the playback-timeline position.
+        assertTrue(deps.playback.calls.contains("seekTo:45000"))
+        assertTrue(deps.playback.calls.contains("resume"))
+    }
+
+    @Test
+    fun `unmapped referenceTime clears previous instead of resending a stale value`() = runTest {
+        val fingerprint = mock<FingerprintTimingManager>()
+        whenever(fingerprint.referenceTime(60_000)).thenReturn(null)
+        whenever(fingerprint.playbackTimeMs(45_000.0)).thenReturn(45_000)
+        val state = CloudPlaybackContextState(
+            recentReferencePositions = emptyList(),
+            previousReferencePositionMs = 300L,
+        )
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            cloudPlaybackContextState = state,
+            clientPositionMs = 60_000L,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "play_quote",
+                    params = mapOf("reference_position_ms" to 45_000_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("play the quote", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // Turn 2+ regression guard: null must clear, not retain turn 1's value.
+        assertEquals(null, state.snapshot().previousReferencePositionMs)
     }
 
     @Test

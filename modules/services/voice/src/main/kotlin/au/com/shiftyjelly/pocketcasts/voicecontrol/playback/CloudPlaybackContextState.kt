@@ -26,9 +26,10 @@ class CloudPlaybackContextState @Inject constructor() {
 
     fun record(referencePositionMs: Long, previousReferencePositionMs: Long?) {
         synchronized(lock) {
-            if (previousReferencePositionMs != null) {
-                this.previousReferencePositionMs = previousReferencePositionMs
-            }
+            // Assign unconditionally: a null means "no valid reference-timeline
+            // value this turn" — keeping a previous turn's value would re-send
+            // exactly the wrong-timeline payload this field exists to avoid.
+            this.previousReferencePositionMs = previousReferencePositionMs
             recentReferencePositions = (recentReferencePositions + referencePositionMs)
                 .takeLast(RECENT_LIMIT)
         }

@@ -12,8 +12,9 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
-import timber.log.Timber
+import kotlinx.coroutines.withContext
 
 @Singleton
 class CloudRouteSink internal constructor(
@@ -55,10 +56,8 @@ class CloudRouteSink internal constructor(
         context: PlaybackContext,
     ): VoiceResponse {
         if (resolveBaseUrl().isBlank()) {
-            Timber.w("CloudRouteSink: no gateway base URL configured — refusing to route")
             return VoiceResponse.Spoken(COMING_SOON_MESSAGE)
         }
-        Timber.i("CloudRouteSink: routing turn to %s/api/v1/cloud/route (tier=%s)", resolveBaseUrl(), tier)
 
         var tokenBuffer = ""
         val routeContext = buildRouteContext(context)
@@ -69,43 +68,46 @@ class CloudRouteSink internal constructor(
 
         // Flow.collect's action is crossinline — cannot return@routeToCloud from it.
         var outcome: VoiceResponse? = null
-        events.collect { event ->
-            if (outcome != null) return@collect
-            when (event) {
-                is CloudRouteEvent.Action -> executeAction(event.tool, event.action, event.params)
+        try {
+            events.collect { event ->
+                if (outcome != null) return@collect
+                when (event) {
+                    is CloudRouteEvent.Action -> executeAction(event.tool, event.action, event.params)
 
-                is CloudRouteEvent.Token -> tokenBuffer += event.text
+                    is CloudRouteEvent.Token -> tokenBuffer += event.text
 
-                is CloudRouteEvent.Done -> {
-                    analytics.recordTurn(
-                        outcome = "done",
-                        inputTokens = event.inputTokens,
-                        outputTokens = event.outputTokens,
-                    )
-                    restoreTransientAudioState()
-                    outcome = if (tokenBuffer.isEmpty()) {
-                        VoiceResponse.Silent
-                    } else {
-                        VoiceResponse.Spoken(tokenBuffer)
+                    is CloudRouteEvent.Done -> {
+                        analytics.recordTurn(
+                            outcome = "done",
+                            inputTokens = event.inputTokens,
+                            outputTokens = event.outputTokens,
+                        )
+                        restoreTransientAudioState()
+                        outcome = if (tokenBuffer.isEmpty()) {
+                            VoiceResponse.Silent
+                        } else {
+                            VoiceResponse.Spoken(tokenBuffer)
+                        }
                     }
-                }
 
-                is CloudRouteEvent.Error -> {
-                    tokenBuffer = ""
-                    restoreTransientAudioState()
-                    Timber.e("CloudRouteSink: turn error code=%s message=%s", event.code, event.message)
-                    analytics.recordTurn(outcome = "error")
-                    outcome = if (event.message.isBlank()) {
-                        VoiceResponse.Earcon(EarconId.ERROR)
-                    } else {
-                        VoiceResponse.Spoken(event.message)
+                    is CloudRouteEvent.Error -> {
+                        tokenBuffer = ""
+                        restoreTransientAudioState()
+                        analytics.recordTurn(outcome = "error")
+                        outcome = if (event.message.isBlank()) {
+                            VoiceResponse.Earcon(EarconId.ERROR)
+                        } else {
+                            VoiceResponse.Spoken(event.message)
+                        }
                     }
                 }
             }
-        }
-
-        if (outcome == null) {
-            restoreTransientAudioState()
+        } finally {
+            // Any exit path — normal return, upstream cancellation, timeouts,
+            // unexpected throws — must not leave playback paused silently.
+            // NonCancellable: the resume path itself suspends (play-queue
+            // loads), and on a cancelled turn it must still run to completion.
+            withContext(NonCancellable) { restoreTransientAudioState() }
         }
         return outcome ?: VoiceResponse.Silent
     }
@@ -173,11 +175,20 @@ class CloudRouteSink internal constructor(
     }
 
     private fun capturePreActionPosition(referenceMs: Long) {
-        val previous = playbackContextProvider.current().clientPositionMs
-        preQuotePositionMs = previous
+        val previousPlaybackMs = playbackContextProvider.current().clientPositionMs
+        // preQuotePositionMs stays on the playback timeline: stop_quote seeks
+        // the local player back to it.
+        preQuotePositionMs = previousPlaybackMs
+        // previous_reference_position_ms is a reference-timeline value on the
+        // wire — convert from the playback timeline (ad/intro offset). When no
+        // mapping exists yet, omit the field rather than send a wrong-timeline
+        // value.
+        val previousReferenceMs = fingerprintTimingManager
+            .referenceTime(previousPlaybackMs.toInt())
+            ?.let { referenceSeconds -> (referenceSeconds * 1000).toLong() }
         cloudPlaybackContextState.record(
             referencePositionMs = referenceMs,
-            previousReferencePositionMs = previous,
+            previousReferencePositionMs = previousReferenceMs,
         )
     }
 

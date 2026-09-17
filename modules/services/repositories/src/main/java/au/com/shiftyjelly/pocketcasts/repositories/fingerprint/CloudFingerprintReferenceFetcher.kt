@@ -1,11 +1,13 @@
 package au.com.shiftyjelly.pocketcasts.repositories.fingerprint
 
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintConstants
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import timber.log.Timber
@@ -28,22 +30,33 @@ class CloudFingerprintReferenceFetcher @Inject constructor(
         .build()
 
     suspend fun fetchReference(baseUrl: String, episodeUuid: String): CloudReferenceMatcher? = withContext(Dispatchers.IO) {
+        fetchReferenceOnce(baseUrl, episodeUuid)
+    }
+
+    private fun fetchReferenceOnce(baseUrl: String, episodeUuid: String): CloudReferenceMatcher? {
         val url = baseUrl.trimEnd('/') + "/api/v1/episodes/" + episodeUuid + "/fingerprints"
         val request = Request.Builder()
             .url(url)
             .header("Authorization", "Bearer " + cloudIdentity.userId())
             .build()
-        try {
-            client.newCall(request).execute().use { response ->
+        // The whole fetch is blocking I/O, so a coroutine timeout would never
+        // fire mid-call (and would only discard late successes). call.timeout
+        // is the lever that actually cancels the socket.
+        val call = client.newCall(request)
+        call.timeout().timeout(FingerprintConstants.CLOUD_REFERENCE_FETCH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        return try {
+            call.execute().use { response ->
                 if (!response.isSuccessful) {
+                    // Definitive statuses (e.g. 404 = no reference) are not
+                    // timeouts — log them as what they are.
                     Timber.w("CloudFingerprintReferenceFetcher: status ${response.code} for $episodeUuid")
-                    return@withContext null
+                    null
+                } else {
+                    buildMatcher(response.body.bytes())
                 }
-                val body = response.body.bytes()
-                buildMatcher(body)
             }
         } catch (e: IOException) {
-            Timber.w(e, "CloudFingerprintReferenceFetcher: fetch failed for $episodeUuid")
+            Timber.w(e, "CloudFingerprintReferenceFetcher: fetch failed or timed out for $episodeUuid")
             null
         }
     }

@@ -49,14 +49,58 @@ class CloudFingerprinter {
 
     private data class Peak(val bin: Int, val frame: Int)
 
+    /**
+     * Growable float buffer with absolute indexing: [get]/[trimTo] take
+     * absolute positions, so consumers can trim consumed prefixes without
+     * re-basing their arithmetic. Not thread-safe (single streaming thread).
+     */
+    private class FloatSpan(initialCapacity: Int = 1 shl 16) {
+        private var array = FloatArray(initialCapacity)
+        private var base = 0L // absolute index of array[0]
+        private var count = 0 // valid elements in array
+
+        /** Absolute index of the first retained element. */
+        val start: Long get() = base
+
+        /** Absolute index one past the last appended element. */
+        val end: Long get() = base + count
+
+        operator fun get(index: Long): Float = array[(index - base).toInt()]
+
+        fun append(value: Float) {
+            ensureCapacity(count + 1)
+            array[count++] = value
+        }
+
+        fun trimTo(newBase: Long) {
+            val drop = (newBase - base).toInt()
+            if (drop <= 0) return
+            array.copyInto(array, 0, drop, count)
+            base += drop
+            count -= drop
+        }
+
+        private fun ensureCapacity(required: Int) {
+            if (required <= array.size) return
+            var newSize = array.size
+            while (newSize < required) newSize = newSize shl 1
+            array = array.copyOf(newSize)
+        }
+    }
+
     // Input (downmixed, source rate) and resampled (16 kHz mono) buffers.
-    private val input = mutableListOf<Float>()
-    private val resampled = mutableListOf<Float>()
+    // Both are absolute-indexed with consumed prefixes trimmed after use, so
+    // peak memory is O(window), not O(episode).
+    private val input = FloatSpan()
+    private val resampled = FloatSpan()
     private var sourceRate = targetSampleRate
 
-    // STFT frames and their peaks, computed incrementally.
+    // STFT frames and their peaks, computed incrementally. framePeaks holds
+    // frames [frameBase, frameBase + framePeaks.size); Peak.frame stores the
+    // absolute frame index, so dt math is trim-invariant.
     private val framePeaks = mutableListOf<List<Peak>>()
-    private var frameStart = 0
+    private var frameBase = 0L
+    private var frameStart = 0L
 
     private val hannWindow = DoubleArray(fftSize) { i ->
         0.5 - 0.5 * cos(2.0 * PI * i / (fftSize - 1))
@@ -84,15 +128,18 @@ class CloudFingerprinter {
      * whole-file processing).
      */
     fun finish(): List<Window> {
-        if (finished) return windows
-        finished = true
-        drainResampled()
-        computeFrames()
-        while (nextWindowStartSec <= lastFullWindowStartSec()) {
-            emitWindow(nextWindowStartSec)
-            nextWindowStartSec += windowIntervalMs / 1000
+        if (!finished) {
+            finished = true
+            drainResampled()
+            computeFrames()
+            while (nextWindowStartSec <= lastFullWindowStartSec()) {
+                emitWindow(nextWindowStartSec)
+                nextWindowStartSec += windowIntervalMs / 1000
+            }
         }
-        return windows
+        // Only the not-yet-drained tail: callers that already drainWindows()
+        // during the stream must not re-match the whole history.
+        return drainWindows()
     }
 
     /** Windows emitted so far (a window is only emitted once its tail lookahead is available). */
@@ -111,39 +158,43 @@ class CloudFingerprinter {
 
     private fun appendDownmixed(samples: FloatArray, channels: Int) {
         if (channels <= 1) {
-            input.addAll(samples.toList())
+            for (sample in samples) input.append(sample)
         } else {
             val n = samples.size / channels
             for (i in 0 until n) {
                 var sum = 0.0f
                 for (c in 0 until channels) sum += samples[i * channels + c]
-                input.add(sum / channels)
+                input.append(sum / channels)
             }
         }
     }
 
     private fun drainResampled() {
-        if (input.isEmpty()) return
+        if (input.end == 0L) return
         // Mirror the server's output length: floor(len × toRate / fromRate).
-        val targetOutLen = (input.size.toDouble() * targetSampleRate / sourceRate).toInt()
+        val targetOutLen = (input.end.toDouble() * targetSampleRate / sourceRate).toLong()
         val ratio = sourceRate.toDouble() / targetSampleRate
         val cutoff = if (targetSampleRate < sourceRate) {
             0.9 * targetSampleRate.toDouble() / sourceRate
         } else {
             0.9
         }
-        while (resampled.size < targetOutLen) {
-            val pos = resampled.size * ratio
+        while (resampled.end < targetOutLen) {
+            val pos = resampled.end * ratio
             val i0 = pos.toInt()
             val frac = pos - i0
             var sum = 0.0
             for (k in -resampleTaps..resampleTaps) {
-                val idx = i0 + k
-                if (idx < 0 || idx >= input.size) continue
+                val idx = i0.toLong() + k
+                if (idx < 0 || idx >= input.end) continue
                 sum += input[idx].toDouble() * sincKernel(k - frac, cutoff)
             }
-            resampled.add(sum.toFloat())
+            resampled.append(sum.toFloat())
         }
+        // Input samples older than the next resample position minus the kernel
+        // radius can never be read again.
+        val stillNeeded = ((resampled.end * ratio).toInt() - resampleTaps).coerceAtLeast(0).toLong()
+        input.trimTo(stillNeeded)
     }
 
     /** Blackman-windowed sinc kernel — mirrors the server's `sincKernel`. */
@@ -157,7 +208,7 @@ class CloudFingerprinter {
     }
 
     private fun computeFrames() {
-        while (frameStart + fftSize <= resampled.size) {
+        while (frameStart + fftSize <= resampled.end) {
             val re = DoubleArray(fftSize)
             val im = DoubleArray(fftSize)
             for (i in 0 until fftSize) {
@@ -168,6 +219,21 @@ class CloudFingerprinter {
             framePeaks.add(pickPeaks(mag))
             frameStart += hopSize
         }
+        // Frames before the oldest window still to be emitted are never read
+        // again (windowHashes starts at firstFrame(nextWindowStartSec)).
+        val firstNeededFrame = (nextWindowStartSec.toDouble() / frameDurationS).toLong()
+        trimFramesBefore(firstNeededFrame)
+        // Resampled samples before the current frame frontier are consumed.
+        resampled.trimTo(frameStart)
+    }
+
+    private fun trimFramesBefore(absoluteFrame: Long) {
+        var drop = (absoluteFrame - frameBase).toInt()
+        if (drop <= 0) return
+        if (drop > framePeaks.size) drop = framePeaks.size
+        if (drop <= 0) return
+        framePeaks.subList(0, drop).clear()
+        frameBase += drop
     }
 
     private fun pickPeaks(mag: DoubleArray): List<Peak> {
@@ -188,7 +254,7 @@ class CloudFingerprinter {
             if (selected.size >= maxPeaksPerFrame) break
             if (selected.none { abs(it - b) < peakMinSeparation }) selected.add(b)
         }
-        return selected.map { Peak(it, framePeaks.size) }
+        return selected.map { Peak(it, (frameBase + framePeaks.size).toInt()) }
     }
 
     private fun emitWindows() {
@@ -203,7 +269,7 @@ class CloudFingerprinter {
         // lastFullStart = int(totalDuration) - windowDuration; we don't know the
         // final duration mid-stream, so upper-bound with the available frames.
         val duration = windowDurationMs / 1000
-        val totalDuration = (resampled.size.toDouble() / targetSampleRate).toInt()
+        val totalDuration = (resampled.end.toDouble() / targetSampleRate).toInt()
         return (totalDuration - duration).coerceAtLeast(0)
     }
 
@@ -211,7 +277,7 @@ class CloudFingerprinter {
     // within the computed frames: lastFrame(start) + targetZoneFrames < size.
     private fun canEmit(startSec: Int): Boolean {
         val lastFrame = ((startSec + windowDurationMs / 1000).toDouble() / frameDurationS).toInt()
-        return lastFrame + targetZoneFrames < framePeaks.size
+        return lastFrame + targetZoneFrames < frameBase + framePeaks.size
     }
 
     private fun emitWindow(startSec: Int) {
@@ -225,12 +291,13 @@ class CloudFingerprinter {
         val seen = HashSet<Long>()
         val hashes = mutableListOf<Long>()
         for (fi in firstFrame..lastFrame) {
-            if (fi >= framePeaks.size) break
-            for (anchor in framePeaks[fi]) {
+            if (fi >= frameBase + framePeaks.size) break
+            val anchorFrameList = framePeaks.getOrNull((fi - frameBase).toInt()) ?: break
+            for (anchor in anchorFrameList) {
                 var targets = 0
                 var tf = fi + 1
-                while (tf < framePeaks.size && tf <= fi + targetZoneFrames && targets < maxTargetsPerAnchor) {
-                    for (target in framePeaks[tf]) {
+                while (tf < frameBase + framePeaks.size && tf <= fi + targetZoneFrames && targets < maxTargetsPerAnchor) {
+                    for (target in framePeaks[(tf - frameBase).toInt()]) {
                         if (targets >= maxTargetsPerAnchor) break
                         val h = pairHash(anchor.bin, target.bin, tf - fi)
                         if (seen.add(h)) hashes.add(h)

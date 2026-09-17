@@ -11,6 +11,7 @@ import au.com.shiftyjelly.pocketcasts.models.type.PodcastsSortTypeMoshiAdapter
 import au.com.shiftyjelly.pocketcasts.preferences.AccessToken
 import au.com.shiftyjelly.pocketcasts.preferences.RefreshToken
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
+import au.com.shiftyjelly.pocketcasts.preferences.gateway.GatewayUrlProvider
 import au.com.shiftyjelly.pocketcasts.servers.OkHttpInterceptor
 import au.com.shiftyjelly.pocketcasts.servers.adapters.ExecutorEnqueueAdapterFactory
 import au.com.shiftyjelly.pocketcasts.servers.adapters.InstantAdapter
@@ -240,9 +241,10 @@ class NetworkModule {
     fun provideApiRetrofit(
         builder: Retrofit.Builder,
         @Cached httpClient: Lazy<OkHttpClient>,
+        gatewayUrlProvider: GatewayUrlProvider,
     ): Retrofit {
         return builder
-            .baseUrl(Settings.SERVER_API_URL)
+            .baseUrl(gatewayUrlProvider.serverApiUrl())
             .callFactory { request -> httpClient.get().newCall(request) }
             .build()
     }
@@ -266,9 +268,10 @@ class NetworkModule {
     fun provideRefreshRetrofit(
         builder: Retrofit.Builder,
         @NoCacheTokened httpClient: Lazy<OkHttpClient>,
+        gatewayUrlProvider: GatewayUrlProvider,
     ): Retrofit {
         return builder
-            .baseUrl(Settings.SERVER_MAIN_URL)
+            .baseUrl(gatewayUrlProvider.serverMainUrl())
             .callFactory { request -> httpClient.get().newCall(request) }
             .build()
     }
@@ -279,9 +282,10 @@ class NetworkModule {
     fun providePodcastRetrofit(
         builder: Retrofit.Builder,
         @Cached httpClient: Lazy<OkHttpClient>,
+        gatewayUrlProvider: GatewayUrlProvider,
     ): Retrofit {
         return builder
-            .baseUrl(Settings.SERVER_CACHE_URL)
+            .baseUrl(gatewayUrlProvider.serverCacheUrl())
             .callFactory { request -> httpClient.get().newCall(request) }
             .build()
     }
@@ -292,9 +296,10 @@ class NetworkModule {
     fun provideStaticRetrofit(
         builder: Retrofit.Builder,
         @Cached httpClient: Lazy<OkHttpClient>,
+        gatewayUrlProvider: GatewayUrlProvider,
     ): Retrofit {
         return builder
-            .baseUrl(Settings.SERVER_STATIC_URL)
+            .baseUrl(gatewayUrlProvider.serverStaticUrl())
             .callFactory { request -> httpClient.get().newCall(request) }
             .build()
     }
@@ -305,9 +310,10 @@ class NetworkModule {
     fun provideListDownloadRetrofit(
         builder: Retrofit.Builder,
         @NoCache httpClient: Lazy<OkHttpClient>,
+        gatewayUrlProvider: GatewayUrlProvider,
     ): Retrofit {
         return builder
-            .baseUrl(Settings.SERVER_LIST_URL)
+            .baseUrl(gatewayUrlProvider.serverListUrl())
             .callFactory { request -> httpClient.get().newCall(request) }
             .build()
     }
@@ -318,9 +324,10 @@ class NetworkModule {
     fun provideListUploadRetrofit(
         builder: Retrofit.Builder,
         @NoCache httpClient: Lazy<OkHttpClient>,
+        gatewayUrlProvider: GatewayUrlProvider,
     ): Retrofit {
         return builder
-            .baseUrl(Settings.SERVER_SHARING_URL)
+            .baseUrl(gatewayUrlProvider.serverSharingUrl())
             .callFactory { request -> httpClient.get().newCall(request) }
             .build()
     }
@@ -331,9 +338,10 @@ class NetworkModule {
     fun provideDiscoverRetrofit(
         builder: Retrofit.Builder,
         @Cached httpClient: Lazy<OkHttpClient>,
+        gatewayUrlProvider: GatewayUrlProvider,
     ): Retrofit {
         return builder
-            .baseUrl(Settings.SERVER_STATIC_URL)
+            .baseUrl(gatewayUrlProvider.serverStaticUrl())
             .callFactory { request -> httpClient.get().newCall(request) }
             .build()
     }
@@ -357,9 +365,10 @@ class NetworkModule {
     fun provideSearchApiRetrofit(
         builder: Retrofit.Builder,
         @Cached httpClient: Lazy<OkHttpClient>,
+        gatewayUrlProvider: GatewayUrlProvider,
     ): Retrofit {
         return builder
-            .baseUrl(Settings.SEARCH_API_URL)
+            .baseUrl(gatewayUrlProvider.searchApiUrl())
             .callFactory { request -> httpClient.get().newCall(request) }
             .build()
     }
@@ -370,9 +379,10 @@ class NetworkModule {
     fun provideWebFeedsRetrofit(
         builder: Retrofit.Builder,
         @Cached httpClient: Lazy<OkHttpClient>,
+        gatewayUrlProvider: GatewayUrlProvider,
     ): Retrofit {
         return builder
-            .baseUrl(Settings.WEB_FEEDS_API_URL)
+            .baseUrl(gatewayUrlProvider.webFeedsApiUrl())
             .callFactory { request -> httpClient.get().newCall(request) }
             .build()
     }

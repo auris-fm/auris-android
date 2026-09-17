@@ -35,7 +35,9 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.LfmIntentRouter
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.AudioManagerVolumeSink
-import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.NoOpCloudRouteSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudPlaybackContextState
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteAnalytics
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextActiveCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextProvider
@@ -47,6 +49,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackManagerPlayb
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackQuerySink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.SleepTimerSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.StatsQuerySink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.TimberCloudRouteAnalytics
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.UpNextQueueSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceBookmarkSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceChapterSink
@@ -94,7 +97,9 @@ abstract class VoiceControlModule {
 
     @Binds abstract fun bindVoiceBookmarkSink(impl: PlaybackManagerBookmarkSink): VoiceBookmarkSink
 
-    @Binds abstract fun bindVoiceCloudRouteSink(impl: NoOpCloudRouteSink): VoiceCloudRouteSink
+    @Binds abstract fun bindVoiceCloudRouteSink(impl: CloudRouteSink): VoiceCloudRouteSink
+
+    @Binds abstract fun bindCloudRouteAnalytics(impl: TimberCloudRouteAnalytics): CloudRouteAnalytics
 
     @Binds abstract fun bindPlaybackContextProvider(impl: PlaybackManagerPlaybackContextProvider): PlaybackContextProvider
 

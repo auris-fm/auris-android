@@ -1,6 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.repositories.lists
 
-import au.com.shiftyjelly.pocketcasts.preferences.Settings
+import au.com.shiftyjelly.pocketcasts.preferences.gateway.GatewayUrlProvider
 import au.com.shiftyjelly.pocketcasts.repositories.sync.SyncManager
 import au.com.shiftyjelly.pocketcasts.servers.model.Discover
 import au.com.shiftyjelly.pocketcasts.servers.model.DiscoverCategory
@@ -12,6 +12,7 @@ class ListRepository(
     private val listWebService: ListWebService,
     private val syncManager: SyncManager?,
     private val platform: String,
+    private val gatewayUrlProvider: GatewayUrlProvider,
 ) {
 
     suspend fun getDiscoverFeed(): Discover {
@@ -41,7 +42,7 @@ class ListRepository(
     }
 
     suspend fun getPodcastRecommendations(podcastUuid: String, countryCode: String?): ListFeed? {
-        return getListFeed(url = "${Settings.SERVER_API_URL}/recommendations/podcast/$podcastUuid?country=${countryCode ?: "global"}")
+        return getListFeed(url = "${gatewayUrlProvider.serverApiUrl()}/recommendations/podcast/$podcastUuid?country=${countryCode ?: "global"}")
     }
 
     companion object {

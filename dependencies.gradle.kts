@@ -59,7 +59,7 @@ val getBuildPlatform = {
 project.apply {
     extra.apply {
         // Application
-        set("applicationId", "au.com.shiftyjelly.pocketcasts")
+        set("applicationId", "fm.auris")
 
         set("versionName", getVersionName())
         set("versionCode", getVersionCode())

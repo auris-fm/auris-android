@@ -39,7 +39,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.asFlow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
@@ -176,7 +175,7 @@ class OpmlImportTask @AssistedInject constructor(
         var pollUuids = urls.chunked(100)
             .asFlow()
             // call the server with the feed urls to get the podcast uuids
-            .mapNotNull { callServer(urls = it) }
+            .map { callServer(urls = it) }
             // use the podcast uuids to subscribe to the podcasts
             .subscribeToPodcasts(podcastManager)
             // update the notification progress
@@ -188,7 +187,7 @@ class OpmlImportTask @AssistedInject constructor(
             pollUuids = pollUuids.chunked(100)
                 .asFlow()
                 // poll the server with the create uuids to get the podcast uuids
-                .mapNotNull { pollServer(pollUuids = it) }
+                .map { pollServer(pollUuids = it) }
                 // use the podcast uuids to subscribe to the podcasts
                 .subscribeToPodcasts(podcastManager)
                 // update the notification progress
@@ -245,15 +244,26 @@ class OpmlImportTask @AssistedInject constructor(
      * - uuids: found podcast uuids
      * - poll_uuids: the create podcast ids to call the server back with to check if they have been added to the database yet
      * - failed: the number of podcast creates that have failed
+     *
+     * Non-2xx responses throw so [doWork] reports failure instead of toasting success
+     * with zero imports (Retrofit still returns a Response body accessor that is null).
      */
-    suspend fun callServer(urls: List<String>): ImportOpmlResponse? {
+    suspend fun callServer(urls: List<String>): ImportOpmlResponse {
         val response = refreshServiceManager.importOpml(urls)
+        if (!response.isSuccessful) {
+            throw IllegalStateException("OPML import HTTP ${response.code()}")
+        }
         return response.body()?.result
+            ?: throw IllegalStateException("OPML import returned empty body")
     }
 
-    suspend fun pollServer(pollUuids: List<String>): ImportOpmlResponse? {
+    suspend fun pollServer(pollUuids: List<String>): ImportOpmlResponse {
         val response = refreshServiceManager.pollImportOpml(pollUuids)
+        if (!response.isSuccessful) {
+            throw IllegalStateException("OPML poll HTTP ${response.code()}")
+        }
         return response.body()?.result
+            ?: throw IllegalStateException("OPML poll returned empty body")
     }
 }
 

@@ -8,12 +8,14 @@ import com.squareup.moshi.Moshi
 import retrofit2.HttpException
 import timber.log.Timber
 
+fun HttpException.requestUrl(): String? = response()?.raw()?.request?.url?.toString()
+
 fun HttpException.parseErrorResponse(moshi: Moshi): ErrorResponse? {
     val errorBody = this.response()?.errorBody() ?: return null
     return try {
         moshi.adapter(ErrorResponse::class.java).fromJson(errorBody.source())
     } catch (e: Exception) {
-        Timber.e(e)
+        Timber.e(e, "Failed to parse error body for %s", requestUrl())
         null
     }
 }

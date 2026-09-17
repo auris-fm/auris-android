@@ -5,7 +5,7 @@ import com.squareup.moshi.JsonReader
 import com.squareup.moshi.JsonWriter
 
 object AccountConstants {
-    val ACCOUNT_TYPE = (if (BuildConfig.DEBUG) "au.com.shiftyjelly.pocketcasts.debug" else "au.com.shiftyjelly.pocketcasts") + ".pocketcasts"
+    val ACCOUNT_TYPE = (if (BuildConfig.DEBUG) "fm.auris.debug" else "fm.auris") + ".pocketcasts"
     const val TOKEN_TYPE = "sync"
     const val UUID = "uuid"
     const val SIGN_IN_TYPE_KEY = "sign_in"

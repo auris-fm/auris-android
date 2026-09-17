@@ -9,6 +9,7 @@ import au.com.shiftyjelly.pocketcasts.models.to.StatsBundle
 import au.com.shiftyjelly.pocketcasts.preferences.AccessToken
 import au.com.shiftyjelly.pocketcasts.preferences.RefreshToken
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
+import au.com.shiftyjelly.pocketcasts.preferences.gateway.GatewayUrlProvider
 import au.com.shiftyjelly.pocketcasts.servers.di.Cached
 import au.com.shiftyjelly.pocketcasts.servers.sync.forgotpassword.ForgotPasswordRequest
 import au.com.shiftyjelly.pocketcasts.servers.sync.forgotpassword.ForgotPasswordResponse
@@ -75,6 +76,7 @@ open class SyncServiceManager @Inject constructor(
     private val service: SyncService,
     val settings: Settings,
     @Cached val cache: Lazy<Cache>,
+    private val gatewayUrlProvider: GatewayUrlProvider,
 ) {
 
     companion object {
@@ -263,7 +265,7 @@ open class SyncServiceManager @Inject constructor(
 
     fun deleteFromServer(episode: UserEpisode, token: AccessToken): Single<Response<Void>> = service.deleteFile(addBearer(token), episode.uuid)
 
-    fun getPlaybackUrl(episode: UserEpisode, token: AccessToken): Single<String> = Single.just("${Settings.SERVER_API_URL}/files/url/${episode.uuid}?token=${token.value}")
+    fun getPlaybackUrl(episode: UserEpisode, token: AccessToken): Single<String> = Single.just("${gatewayUrlProvider.serverApiUrl()}/files/url/${episode.uuid}?token=${token.value}")
 
     fun getUserEpisode(uuid: String, token: AccessToken): Single<Response<ServerFile>> = service.getFile(addBearer(token), uuid)
 

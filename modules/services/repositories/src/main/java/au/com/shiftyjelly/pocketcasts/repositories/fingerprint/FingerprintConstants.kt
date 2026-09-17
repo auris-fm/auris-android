@@ -79,6 +79,9 @@ object FingerprintConstants {
     /** Timeout for the reference fetch of an on-demand resolve; short because reference files are small. */
     const val ON_DEMAND_FETCH_TIMEOUT_MS = 3_000L
 
+    /** Budget for the cloud reference fingerprint download (cloud-ingestion.md). */
+    const val CLOUD_REFERENCE_FETCH_TIMEOUT_MS = 10_000L
+
     /** Budget for the decode of an on-demand resolve; opening a remote source alone can take seconds. */
     const val ON_DEMAND_DECODE_TIMEOUT_MS = 8_000L
 

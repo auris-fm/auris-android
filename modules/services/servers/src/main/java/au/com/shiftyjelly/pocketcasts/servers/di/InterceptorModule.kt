@@ -7,6 +7,7 @@ import au.com.shiftyjelly.pocketcasts.servers.BuildConfig
 import au.com.shiftyjelly.pocketcasts.servers.CleanAndRetryInterceptor
 import au.com.shiftyjelly.pocketcasts.servers.OkHttpInterceptor
 import au.com.shiftyjelly.pocketcasts.servers.interceptors.BasicAuthInterceptor
+import au.com.shiftyjelly.pocketcasts.servers.interceptors.HttpStatusUrlLoggingInterceptor
 import au.com.shiftyjelly.pocketcasts.servers.interceptors.InternationalizationInterceptor
 import au.com.shiftyjelly.pocketcasts.servers.sync.TokenHandler
 import au.com.shiftyjelly.pocketcasts.servers.sync.exception.RefreshTokenExpiredException
@@ -97,6 +98,8 @@ object InterceptorModule {
 
     private val basicAuthInterceptor = BasicAuthInterceptor().toClientInterceptor()
 
+    private val httpStatusUrlLoggingInterceptor = HttpStatusUrlLoggingInterceptor().toClientInterceptor()
+
     @Provides
     @TokenInterceptor
     fun provideTokenInterceptor(
@@ -166,6 +169,7 @@ object InterceptorModule {
         @I18nInterceptor i18nInterceptor: Interceptor,
     ): List<OkHttpInterceptor> {
         return buildList {
+            add(httpStatusUrlLoggingInterceptor)
             add(cacheControlInterceptor.toClientInterceptor())
             add(internalUserAgentInterceptor.toClientInterceptor())
             add(i18nInterceptor.toClientInterceptor())
@@ -186,6 +190,7 @@ object InterceptorModule {
         @I18nInterceptor i18nInterceptor: Interceptor,
     ): List<OkHttpInterceptor> {
         return buildList {
+            add(httpStatusUrlLoggingInterceptor)
             add(internalUserAgentInterceptor.toClientInterceptor())
             add(i18nInterceptor.toClientInterceptor())
             add(crashLoggingInterceptor.toClientInterceptor())
@@ -206,6 +211,7 @@ object InterceptorModule {
         @I18nInterceptor i18nInterceptor: Interceptor,
     ): List<OkHttpInterceptor> {
         return buildList {
+            add(httpStatusUrlLoggingInterceptor)
             add(internalUserAgentInterceptor.toClientInterceptor())
             add(i18nInterceptor.toClientInterceptor())
             add(interceptor.toClientInterceptor())

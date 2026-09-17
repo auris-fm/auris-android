@@ -2,7 +2,7 @@
 <shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
 
     <shortcut android:icon="@drawable/shortcut_grid" android:enabled="true" android:shortcutId="shortcut-podcasts" android:shortcutShortLabel="@string/podcasts">
-        <intent android:targetPackage="au.com.shiftyjelly.pocketcasts.debug"
+        <intent android:targetPackage="fm.auris.debug"
                 android:targetClass="au.com.shiftyjelly.pocketcasts.ui.MainActivity"
                 android:action="android.intent.action.VIEW">
             <extra android:name="launch-page" android:value="podcasts" />
@@ -10,7 +10,7 @@
     </shortcut>
 
     <shortcut android:icon="@drawable/shortcut_search" android:enabled="true" android:shortcutId="shortcut-search" android:shortcutShortLabel="@string/search">
-        <intent android:targetPackage="au.com.shiftyjelly.pocketcasts.debug"
+        <intent android:targetPackage="fm.auris.debug"
                 android:targetClass="au.com.shiftyjelly.pocketcasts.ui.MainActivity"
                 android:action="android.intent.action.VIEW">
             <extra android:name="launch-page" android:value="search" />
@@ -18,7 +18,7 @@
     </shortcut>
 
     <shortcut android:icon="@drawable/shortcut_upnext" android:enabled="true" android:shortcutId="shortcut-up-next" android:shortcutShortLabel="@string/up_next">
-        <intent android:targetPackage="au.com.shiftyjelly.pocketcasts.debug"
+        <intent android:targetPackage="fm.auris.debug"
                 android:targetClass="au.com.shiftyjelly.pocketcasts.ui.MainActivity"
                 android:action="android.intent.action.VIEW">
             <extra android:name="launch-page" android:value="upnext" />

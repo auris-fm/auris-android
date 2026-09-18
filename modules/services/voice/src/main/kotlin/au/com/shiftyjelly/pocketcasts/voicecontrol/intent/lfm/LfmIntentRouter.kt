@@ -111,14 +111,21 @@ class LfmIntentRouter internal constructor(
                     ),
                 )
             }
-            if (loadedRelease == null || format == null || !format.isReadyForInference) {
+            // Same benchmark-mode allowance as ensureReady: the GO'd dual_v1
+            // candidate is measurable while the benchmark flag is set.
+            val formatUsable = format != null &&
+                (
+                    format.isReadyForInference ||
+                        (modelManager.benchmarkFormatsAllowed && format is RouterInputFormat.DualV1)
+                    )
+            if (loadedRelease == null || format == null || !formatUsable) {
                 Timber.w("LFM router not ready — ensureReady() was not called before recognize()")
-                val stage = if (format != null && !format.isReadyForInference) {
+                val stage = if (format != null && !formatUsable) {
                     RouterStageDiagnostic.STAGE_UNSUPPORTED_FORMAT
                 } else {
                     RouterStageDiagnostic.STAGE_NOT_READY
                 }
-                val reason = if (format != null && !format.isReadyForInference) {
+                val reason = if (format != null && !formatUsable) {
                     RouterStageDiagnostic.REASON_UNSUPPORTED_INPUT_FORMAT
                 } else {
                     RouterStageDiagnostic.REASON_MODEL_NOT_LOADED

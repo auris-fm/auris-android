@@ -204,6 +204,32 @@ class ModelManagerLfmTest {
     }
 
     @Test
+    fun lfmDualV1StaysFailClosedByDefaultButIsReadyForBenchmark() {
+        val modelDir = File(tempDir.root, "function-call").apply { mkdirs() }
+        File(modelDir, "model.gguf").writeText("gguf")
+        File(modelDir, "classifier.bin").writeText("cls")
+        File(modelDir, "label_map.json").writeText("label")
+        File(modelDir, "manifest.json").writeText(
+            manifestFor(
+                ggufBytes = 4,
+                ggufSha = sha256("gguf"),
+                classifierBytes = 3,
+                classifierSha = sha256("cls"),
+                labelMapBytes = 5,
+                labelMapSha = sha256("label"),
+                routerInputFormat = "dual_v1",
+            ),
+        )
+        val manager = ModelManager(context).apply { filesDir = tempDir.root }
+
+        // Production: dual_v1 stays fail-closed until the rollout decision.
+        assertFalse(manager.isLfmModelReady())
+        // Benchmark sideload (representation benchmark, Item 21): the GO'd
+        // candidate is measured via the benchmark-scoped bypass.
+        assertTrue(manager.isLfmModelReady(allowBenchmarkFormats = true))
+    }
+
+    @Test
     fun lfmIsNotReadyWhenRouterInputFormatIsUnknown() {
         val modelDir = File(tempDir.root, "function-call").apply { mkdirs() }
         File(modelDir, "model.gguf").writeText("gguf")

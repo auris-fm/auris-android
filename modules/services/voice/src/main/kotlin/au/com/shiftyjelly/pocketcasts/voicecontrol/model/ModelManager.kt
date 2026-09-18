@@ -157,11 +157,17 @@ class ModelManager @Inject constructor(
     val lfmLabelMapFile get() = File(lfmDir, LFM_LABEL_MAP_FILENAME)
     private val lfmManifestFile get() = File(lfmDir, LFM_MANIFEST_FILENAME)
 
-    fun isLfmModelReady(): Boolean {
+    fun isLfmModelReady(allowBenchmarkFormats: Boolean = false): Boolean {
         if (!lfmManifestFile.exists()) return false
         return try {
             val release = parseLfmManifest(lfmManifestFile.readText())
-            if (!release.routerInputFormat.isReadyForInference) return false
+            val formatReady = release.routerInputFormat.isReadyForInference ||
+                // Benchmark-only bypass (representation benchmark, Item 21):
+                // the GO'd dual_v1 candidate is installed via the benchmark
+                // sideload for the measured run. The production download path
+                // never sets this flag, so dual_v1 stays fail-closed there.
+                (allowBenchmarkFormats && release.routerInputFormat is RouterInputFormat.DualV1)
+            if (!formatReady) return false
             release.requiredAssets.all { asset ->
                 val file = File(lfmDir, asset.name)
                 file.isFile && file.length() == asset.bytes

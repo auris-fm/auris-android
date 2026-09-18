@@ -230,7 +230,10 @@ class AsrIntentBenchmarkRunner @Inject constructor(
                 file.copyTo(File(target, file.name), overwrite = true)
             }
         }
-        check(modelManager.isLfmModelReady()) { "Sideloaded release in $sourceDir is not a complete LFM release" }
+        // Benchmark-scoped bypass: the GO'd dual_v1 candidate is installed
+        // through the sideload for the measured run only. The production
+        // download path keeps dual_v1 fail-closed.
+        check(modelManager.isLfmModelReady(allowBenchmarkFormats = true)) { "Sideloaded release in $sourceDir is not a complete LFM release" }
         voiceRecognizer.release()
     }
 

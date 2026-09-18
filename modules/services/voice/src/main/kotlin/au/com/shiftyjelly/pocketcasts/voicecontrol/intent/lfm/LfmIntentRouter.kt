@@ -48,10 +48,12 @@ class LfmIntentRouter internal constructor(
                 }
                 val release = modelManager.lfmRelease()
                     ?: return@withContext Result.failure(IllegalStateException("LFM manifest release is unavailable"))
-                if (!release.routerInputFormat.isReadyForInference) {
+                val format = release.routerInputFormat
+                val benchmarkAllowed = modelManager.benchmarkFormatsAllowed && format is RouterInputFormat.DualV1
+                if (!format.isReadyForInference && !benchmarkAllowed) {
                     return@withContext Result.failure(
                         IllegalStateException(
-                            "Unsupported router_input_format: ${release.routerInputFormat.wireName}",
+                            "Unsupported router_input_format: ${format.wireName}",
                         ),
                     )
                 }

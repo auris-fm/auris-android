@@ -157,6 +157,15 @@ class ModelManager @Inject constructor(
     val lfmLabelMapFile get() = File(lfmDir, LFM_LABEL_MAP_FILENAME)
     private val lfmManifestFile get() = File(lfmDir, LFM_MANIFEST_FILENAME)
 
+    /**
+     * Benchmark-only escape hatch (representation benchmark, Item 21): set by
+     * the debug benchmark runner while the GO'd dual_v1 sideload is measured.
+     * Gates in [isLfmModelReady]/[ensureLfmModel]/LfmIntentRouter consult it;
+     * production never sets it, keeping dual_v1 fail-closed there.
+     */
+    @Volatile
+    var benchmarkFormatsAllowed: Boolean = false
+
     fun isLfmModelReady(allowBenchmarkFormats: Boolean = false): Boolean {
         if (!lfmManifestFile.exists()) return false
         return try {
@@ -164,9 +173,13 @@ class ModelManager @Inject constructor(
             val formatReady = release.routerInputFormat.isReadyForInference ||
                 // Benchmark-only bypass (representation benchmark, Item 21):
                 // the GO'd dual_v1 candidate is installed via the benchmark
-                // sideload for the measured run. The production download path
-                // never sets this flag, so dual_v1 stays fail-closed there.
-                (allowBenchmarkFormats && release.routerInputFormat is RouterInputFormat.DualV1)
+                // sideload for the measured run. Set only by the benchmark
+                // runner; the production download path never sets it, so
+                // dual_v1 stays fail-closed there.
+                (
+                    (allowBenchmarkFormats || benchmarkFormatsAllowed) &&
+                        release.routerInputFormat is RouterInputFormat.DualV1
+                    )
             if (!formatReady) return false
             release.requiredAssets.all { asset ->
                 val file = File(lfmDir, asset.name)
@@ -193,6 +206,15 @@ class ModelManager @Inject constructor(
         if (isLfmModelReady()) return@withContext Result.success(Unit)
         downloadMutex.withLock {
             if (isLfmModelReady()) return@withContext Result.success(Unit)
+            // Benchmark mode: the sideloaded dual_v1 release is the model —
+            // never download latest.json over it.
+            if (benchmarkFormatsAllowed && lfmRouterInputFormat() is RouterInputFormat.DualV1) {
+                return@withContext if (isLfmModelReady(allowBenchmarkFormats = true)) {
+                    Result.success(Unit)
+                } else {
+                    Result.failure(IllegalStateException("Benchmark sideload incomplete"))
+                }
+            }
             try {
                 lfmDir.mkdirs()
                 val manifest = downloadText(LFM_LATEST_URL, "LFM manifest")

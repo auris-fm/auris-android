@@ -223,6 +223,9 @@ class AsrIntentBenchmarkRunner @Inject constructor(
      * entirely local: no download, no latest.json touch.
      */
     private suspend fun installModelRelease(modelManager: ModelManager, sourceDir: File) {
+        // Gate-open for the measured run: the benchmark app deliberately
+        // allows the GO'd dual_v1 candidate (production stays fail-closed).
+        modelManager.benchmarkFormatsAllowed = true
         val target = modelManager.lfmDir
         target.mkdirs()
         sourceDir.listFiles()?.forEach { file ->

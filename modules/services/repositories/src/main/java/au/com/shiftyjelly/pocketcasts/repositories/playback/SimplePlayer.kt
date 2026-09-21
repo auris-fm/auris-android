@@ -29,6 +29,8 @@ import au.com.shiftyjelly.pocketcasts.utils.AppPlatform
 import au.com.shiftyjelly.pocketcasts.utils.Util
 import au.com.shiftyjelly.pocketcasts.utils.featureflag.Feature
 import au.com.shiftyjelly.pocketcasts.utils.featureflag.FeatureFlag
+import au.com.shiftyjelly.pocketcasts.utils.fingerprint.FingerprintDecodePolicy
+import au.com.shiftyjelly.pocketcasts.utils.fingerprint.FingerprintPolicy
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -42,10 +44,12 @@ class SimplePlayer(
     private val context: Context,
     private val dataSourceFactory: ExoPlayerDataSourceFactory,
     private val fingerprintPcmTap: FingerprintPcmTap? = null,
+    private val fingerprintDecodePolicy: FingerprintDecodePolicy,
     override val onPlayerEvent: (au.com.shiftyjelly.pocketcasts.repositories.playback.Player, PlayerEvent) -> Unit,
 ) : LocalPlayer(onPlayerEvent) {
     private val reducedBufferManufacturers = listOf("mercedes-benz")
     private val useReducedBuffer = reducedBufferManufacturers.contains(Build.MANUFACTURER.lowercase()) || Util.isWearOs(context)
+    private val isTv = Util.isTv(context)
     private val bufferTimeMinMillis = TimeUnit.MINUTES.toMillis(2).toInt()
     private val bufferTimeMaxMillis = if (useReducedBuffer) TimeUnit.MINUTES.toMillis(2).toInt() else TimeUnit.MINUTES.toMillis(4).toInt()
 
@@ -57,6 +61,7 @@ class SimplePlayer(
     @UnstableApi
     private var trackSelector: DefaultTrackSelector? = null
 
+    @Volatile
     private var renderersFactory: ShiftyRenderersFactory? = null
     private var playbackEffects: PlaybackEffects? = null
 
@@ -65,7 +70,12 @@ class SimplePlayer(
 
     override var isPip: Boolean = false
 
+    override val currentAudioLevel: Float get() = renderersFactory?.currentAudioLevel ?: 0f
+
     private var videoChangedListener: VideoChangedListener? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private var hasVideoSurface = false
 
     private var hasVideoSurface = false
 
@@ -344,8 +354,14 @@ class SimplePlayer(
                     videoHeight = videoSize.height
                     onVideoTrackChanged(true)
                     videoChangedListener?.let {
-                        Handler(Looper.getMainLooper()).post { it.videoSizeChanged(videoSize.width, videoSize.height, videoSize.pixelWidthHeightRatio) }
+                        mainHandler.post { it.videoSizeChanged(videoSize.width, videoSize.height, videoSize.pixelWidthHeightRatio) }
                     }
+                }
+            }
+
+            override fun onRenderedFirstFrame() {
+                videoChangedListener?.let {
+                    mainHandler.post { it.videoFirstFrameRendered() }
                 }
             }
         })
@@ -359,8 +375,11 @@ class SimplePlayer(
             boostVolume = playbackEffects?.isVolumeBoosted ?: false,
             fingerprintPcmTap = fingerprintPcmTap,
             fingerprintTapEnabled = {
-                FeatureFlag.isEnabled(Feature.SYNCED_TRANSCRIPTS) && Util.getAppPlatform(context) == AppPlatform.Phone
+                FeatureFlag.isEnabled(Feature.SYNCED_TRANSCRIPTS) &&
+                    Util.getAppPlatform(context) == AppPlatform.Phone &&
+                    fingerprintDecodePolicy.current() != FingerprintPolicy.DISABLED
             },
+            audioLevelMeterEnabled = { isTv },
         )
     }
 
@@ -379,6 +398,7 @@ class SimplePlayer(
     interface VideoChangedListener {
         fun videoSizeChanged(width: Int, height: Int, pixelWidthHeightRatio: Float)
         fun videoNeedsReset()
+        fun videoFirstFrameRendered()
     }
 
     fun setVideoSizeChangedListener(videoChangedListener: VideoChangedListener) {

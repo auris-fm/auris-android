@@ -36,9 +36,15 @@ class CloudRouteClient(
     internal val readTimeoutSeconds: Long
         get() = okHttpClient.readTimeoutMillis / 1000L
 
-    fun route(request: String, context: CloudRouteContext): Flow<CloudRouteEvent> = channelFlow {
+    fun route(turn: CloudRouteTurn): Flow<CloudRouteEvent> = channelFlow {
         val bodyJson = CloudRouteJson.requestBodyAdapter.toJson(
-            CloudRouteRequestBody(request = request, context = context),
+            CloudRouteRequestBody(
+                request = turn.request,
+                context = turn.context,
+                requestId = turn.requestId,
+                capabilities = turn.capabilities,
+                routeHint = turn.routeHint,
+            ),
         )
         val httpRequest = Request.Builder()
             .url(baseUrl.trimEnd('/') + ROUTE_PATH)

@@ -1,8 +1,13 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteCapabilities
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteClient
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteConversationEntry
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteLimits
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudIdentity
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
@@ -10,9 +15,12 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 
@@ -25,7 +33,10 @@ class CloudRouteSink internal constructor(
     private val playbackContextProvider: PlaybackContextProvider,
     private val cloudPlaybackContextState: CloudPlaybackContextState,
     private val analytics: CloudRouteAnalytics,
-    private val routeInvoker: ((String, CloudRouteContext) -> Flow<CloudRouteEvent>)?,
+    private val routeInvoker: ((CloudRouteTurn) -> Flow<CloudRouteEvent>)?,
+    /** Non-null only when this client can render structured discovery results. */
+    private val searchResultsRenderer: CloudSearchResultsRenderer? = null,
+    private val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
 ) : VoiceCloudRouteSink {
 
     @Inject constructor(
@@ -45,23 +56,60 @@ class CloudRouteSink internal constructor(
         cloudPlaybackContextState = cloudPlaybackContextState,
         analytics = analytics,
         routeInvoker = null,
+        searchResultsRenderer = null,
+        conversationMemory = CloudConversationMemory(),
     )
 
     private var preQuotePositionMs: Long? = null
     private var didAutoPause = false
 
+    /** The in-flight turn, cancelled when a newer turn supersedes it. */
+    private val activeTurnLock = Any()
+    private var activeTurn: Job? = null
+
     override suspend fun routeToCloud(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
+    ): VoiceResponse = routeTurn(request, tier, context, hint = null)
+
+    override suspend fun routeToCloudWithHint(
+        request: String,
+        tier: VoiceIntent.CloudTier,
+        context: PlaybackContext,
+        hint: CloudRouteHint,
+    ): VoiceResponse = routeTurn(request, tier, context, hint = hint)
+
+    private suspend fun routeTurn(
+        request: String,
+        tier: VoiceIntent.CloudTier,
+        context: PlaybackContext,
+        hint: CloudRouteHint?,
     ): VoiceResponse {
         if (resolveBaseUrl().isBlank()) {
             return VoiceResponse.Spoken(COMING_SOON_MESSAGE)
         }
 
+        // A newer turn supersedes the previous one: cancel it before starting.
+        val myJob = currentCoroutineContext()[Job]
+        synchronized(activeTurnLock) {
+            activeTurn?.takeIf { it !== myJob }?.cancel()
+            activeTurn = myJob
+        }
+
         var tokenBuffer = ""
         val routeContext = buildRouteContext(context)
-        val events = openRoute(request, routeContext)
+        val turn = CloudRouteTurn(
+            request = request,
+            context = routeContext,
+            // Stable per logical turn; a transport retry reuses it, and the
+            // server rejects a repeat rather than re-executing (no auto-retry
+            // is attempted by this client).
+            requestId = UUID.randomUUID().toString(),
+            capabilities = advertisedCapabilities(),
+            routeHint = hint,
+        )
+        val events = openRoute(turn)
 
         playbackSink.pause()
         didAutoPause = true
@@ -83,10 +131,26 @@ class CloudRouteSink internal constructor(
                             outputTokens = event.outputTokens,
                         )
                         restoreTransientAudioState()
+                        if (tokenBuffer.isNotEmpty()) {
+                            conversationMemory.record(request, tokenBuffer)
+                        }
                         outcome = if (tokenBuffer.isEmpty()) {
                             VoiceResponse.Silent
                         } else {
                             VoiceResponse.Spoken(tokenBuffer)
+                        }
+                    }
+
+                    is CloudRouteEvent.Result -> {
+                        // Renderer is present iff we advertised the capability;
+                        // results never auto-play.
+                        val renderer = searchResultsRenderer
+                        if (renderer != null) {
+                            if (event.results.items.isEmpty()) {
+                                renderer.renderEmpty(event.results.scope)
+                            } else {
+                                renderer.renderResults(event.results)
+                            }
                         }
                     }
 
@@ -112,14 +176,22 @@ class CloudRouteSink internal constructor(
         return outcome ?: VoiceResponse.Silent
     }
 
-    private fun openRoute(request: String, context: CloudRouteContext): Flow<CloudRouteEvent> {
-        routeInvoker?.let { return it(request, context) }
-        return CloudRouteClient(resolveBaseUrl(), resolveUserId()).route(request, context)
+    private fun openRoute(turn: CloudRouteTurn): Flow<CloudRouteEvent> {
+        routeInvoker?.let { return it(turn) }
+        return CloudRouteClient(resolveBaseUrl(), resolveUserId()).route(turn)
+    }
+
+    /** Advertise a capability only when its renderer is actually available. */
+    private fun advertisedCapabilities(): List<String> = if (searchResultsRenderer != null) {
+        listOf(CloudRouteCapabilities.SEARCH_RESULTS_V1)
+    } else {
+        emptyList()
     }
 
     private fun buildRouteContext(context: PlaybackContext): CloudRouteContext {
         val state = cloudPlaybackContextState.snapshot()
         return CloudRouteContext(
+            recentConversation = CloudRouteLimits.clampConversation(conversationMemory.recent()),
             episodeId = context.episodeId,
             podcastId = context.podcastId.takeIf { it.isNotEmpty() },
             referencePositionMs = context.referencePositionMs,

@@ -108,6 +108,12 @@ internal class CloudRouteSseParser {
                 CloudRouteEvent.Error(payload.code, payload.message)
             }
 
+            "result" -> {
+                val payload = CloudRouteJson.resultAdapter.fromJson(data)
+                    ?: throw IOException("Invalid result payload")
+                CloudRouteEvent.Result(payload)
+            }
+
             else -> {
                 // Forward compatibility: a server-added event type must not
                 // kill every turn (and must not surface as connection_lost).

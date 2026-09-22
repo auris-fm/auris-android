@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
@@ -227,6 +228,18 @@ interface VoiceCloudRouteSink {
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
     ): VoiceResponse
+
+    /**
+     * Typed-flow entry point (cloud-assistant.md `route_hint`): only a typed UI
+     * flow or a validated structured parse may supply [hint]. Free-text
+     * utterances must use [routeToCloud] and never derive a hint.
+     */
+    suspend fun routeToCloudWithHint(
+        request: String,
+        tier: VoiceIntent.CloudTier,
+        context: PlaybackContext,
+        hint: CloudRouteHint,
+    ): VoiceResponse = routeToCloud(request, tier, context)
 }
 
 interface VoiceQueueSink {

@@ -1,16 +1,25 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteCapabilities
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteConversationEntry
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteLimits
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudSearchEvidenceItem
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudSearchResults
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
@@ -359,6 +368,179 @@ class CloudRouteSinkTest {
         )
     }
 
+    @Test
+    fun `each turn sends a distinct non-blank request id`() = runTest {
+        val deps = TestDeps()
+        val sink = deps.sink()
+
+        sink.routeToCloud("one", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("two", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        val ids = deps.routeTurns.map { it.requestId }
+        assertEquals(2, ids.size)
+        assertTrue(ids.all { it.isNotBlank() })
+        assertEquals(2, ids.toSet().size)
+    }
+
+    @Test
+    fun `capabilities are advertised only when a renderer is present`() = runTest {
+        val withoutRenderer = TestDeps()
+        withoutRenderer.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        assertTrue(withoutRenderer.routeTurns.single().capabilities.isEmpty())
+
+        val withRenderer = TestDeps(renderer = RecordingRenderer())
+        withRenderer.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        assertEquals(
+            listOf(CloudRouteCapabilities.SEARCH_RESULTS_V1),
+            withRenderer.routeTurns.single().capabilities,
+        )
+    }
+
+    @Test
+    fun `free text turns carry no route hint and typed entry supplies one`() = runTest {
+        val deps = TestDeps()
+        val sink = deps.sink()
+
+        sink.routeToCloud("find beginner investing episodes", VoiceIntent.CloudTier.Premium, playbackContext)
+        assertEquals(null, deps.routeTurns.single().routeHint)
+
+        val hint = CloudRouteHint(operation = "search_episodes", arguments = mapOf("query" to "investing"))
+        sink.routeToCloudWithHint(
+            "find beginner investing episodes",
+            VoiceIntent.CloudTier.Premium,
+            playbackContext,
+            hint,
+        )
+        assertEquals(hint, deps.routeTurns.last().routeHint)
+    }
+
+    @Test
+    fun `newer turn cancels the superseded in-flight turn`() = runTest {
+        val firstTurnStarted = CompletableDeferred<Unit>()
+        val firstCancelled = CompletableDeferred<Unit>()
+        val deps = TestDeps(
+            routeInvoker = { turn ->
+                if (turn.request == "first") {
+                    flow {
+                        firstTurnStarted.complete(Unit)
+                        try {
+                            awaitCancellation()
+                        } catch (cancellation: CancellationException) {
+                            firstCancelled.complete(Unit)
+                            throw cancellation
+                        }
+                    }
+                } else {
+                    flowOf(CloudRouteEvent.Done(1, 1))
+                }
+            },
+        )
+        val sink = deps.sink()
+
+        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        firstTurnStarted.await()
+        sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext)
+        firstCancelled.await()
+        assertTrue(first.isCancelled)
+    }
+
+    @Test
+    fun `result event renders items and never auto-plays`() = runTest {
+        val renderer = RecordingRenderer()
+        val deps = TestDeps(
+            renderer = renderer,
+            events = flowOf(
+                CloudRouteEvent.Result(
+                    CloudSearchResults(
+                        kind = CloudSearchResults.KIND_EPISODE_RESULTS,
+                        scope = CloudSearchResults.SCOPE_GLOBAL,
+                        items = listOf(
+                            CloudSearchEvidenceItem(
+                                evidenceId = "e1",
+                                episodeId = "ep-1",
+                                podcastId = "pod-1",
+                                title = "Investing 101",
+                                playable = true,
+                                seekable = true,
+                            ),
+                        ),
+                    ),
+                ),
+                CloudRouteEvent.Done(0, 0),
+            ),
+        )
+
+        deps.sink().routeToCloud("find investing", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(1, renderer.rendered.size)
+        assertEquals("ep-1", renderer.rendered.single().items.single().episodeId)
+        assertTrue(renderer.empties.isEmpty())
+        assertTrue(deps.playback.calls.none { it.startsWith("seekTo") })
+    }
+
+    @Test
+    fun `empty result renders the empty state not the unavailable state`() = runTest {
+        val renderer = RecordingRenderer()
+        val deps = TestDeps(
+            renderer = renderer,
+            events = flowOf(
+                CloudRouteEvent.Result(
+                    CloudSearchResults(
+                        kind = CloudSearchResults.KIND_EPISODE_RESULTS,
+                        scope = CloudSearchResults.SCOPE_LIBRARY,
+                    ),
+                ),
+                CloudRouteEvent.Done(0, 0),
+            ),
+        )
+
+        deps.sink().routeToCloud("nothing matches", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertTrue(renderer.rendered.isEmpty())
+        assertEquals(listOf(CloudSearchResults.SCOPE_LIBRARY), renderer.empties)
+        assertTrue(renderer.unavailableCount == 0)
+    }
+
+    @Test
+    fun `completed turn records bounded conversation context for the next turn`() = runTest {
+        val memory = CloudConversationMemory()
+        val deps = TestDeps(conversationMemory = memory, events = flowOf(CloudRouteEvent.Token("an answer"), CloudRouteEvent.Done(1, 1)))
+        val sink = deps.sink()
+
+        sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("a follow-up", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // The first turn supplied no context; the second carries the recorded exchange.
+        assertTrue(deps.routeTurns.first().context.recentConversation.isEmpty())
+        assertEquals(
+            listOf(
+                CloudRouteConversationEntry.ROLE_USER to "a question",
+                CloudRouteConversationEntry.ROLE_ASSISTANT to "an answer",
+            ),
+            deps.routeTurns.last().context.recentConversation.map { it.role to it.text },
+        )
+        // Never exceeds the spec bound.
+        assertTrue(deps.routeTurns.last().context.recentConversation.size <= CloudRouteLimits.MAX_CONVERSATION_ENTRIES)
+    }
+
+    private class RecordingRenderer : CloudSearchResultsRenderer {
+        val rendered = mutableListOf<CloudSearchResults>()
+        val empties = mutableListOf<String>()
+        var unavailableCount = 0
+
+        override fun renderResults(results: CloudSearchResults) {
+            rendered += results
+        }
+
+        override fun renderEmpty(scope: String) {
+            empties += scope
+        }
+
+        override fun renderUnavailable() {
+            unavailableCount += 1
+        }
+    }
+
     private data class CloudRouteAnalyticsCall(
         val outcome: String,
         val inputTokens: Int?,
@@ -375,11 +557,16 @@ class CloudRouteSinkTest {
         },
         private val cloudPlaybackContextState: CloudPlaybackContextState = CloudPlaybackContextState(),
         private val events: kotlinx.coroutines.flow.Flow<CloudRouteEvent> = flowOf(CloudRouteEvent.Done(0, 0)),
+        val renderer: CloudSearchResultsRenderer? = null,
+        val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
+        routeInvoker: ((CloudRouteTurn) -> kotlinx.coroutines.flow.Flow<CloudRouteEvent>)? = null,
     ) {
         val playback = FakePlaybackSink()
         val analytics = FakeCloudRouteAnalytics()
         val routeCalls = mutableListOf<String>()
         val routeContexts = mutableListOf<CloudRouteContext>()
+        val routeTurns = mutableListOf<CloudRouteTurn>()
+        private val explicitInvoker = routeInvoker
 
         private val playbackContextProvider = object : PlaybackContextProvider {
             override fun current(): PlaybackContext = PlaybackContext(clientPositionMs = clientPositionMs)
@@ -393,11 +580,14 @@ class CloudRouteSinkTest {
             playbackContextProvider = playbackContextProvider,
             cloudPlaybackContextState = cloudPlaybackContextState,
             analytics = analytics,
-            routeInvoker = { request: String, context: CloudRouteContext ->
-                routeCalls += request
-                routeContexts += context
-                events
+            routeInvoker = { turn: CloudRouteTurn ->
+                routeCalls += turn.request
+                routeContexts += turn.context
+                routeTurns += turn
+                explicitInvoker?.invoke(turn) ?: events
             },
+            searchResultsRenderer = renderer,
+            conversationMemory = conversationMemory,
         )
     }
 

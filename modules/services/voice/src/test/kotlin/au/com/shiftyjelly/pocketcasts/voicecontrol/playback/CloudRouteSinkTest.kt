@@ -510,17 +510,17 @@ class CloudRouteSinkTest {
         sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
         sink.routeToCloud("a follow-up", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        // The first turn supplied no context; the second carries the recorded exchange.
-        assertTrue(deps.routeTurns.first().context.recentConversation.isEmpty())
+        // The first turn omitted the field; the second carries the recorded exchange.
+        assertEquals(null, deps.routeTurns.first().context.recentConversation)
         assertEquals(
             listOf(
                 CloudRouteConversationEntry.ROLE_USER to "a question",
                 CloudRouteConversationEntry.ROLE_ASSISTANT to "an answer",
             ),
-            deps.routeTurns.last().context.recentConversation.map { it.role to it.text },
+            deps.routeTurns.last().context.recentConversation!!.map { it.role to it.text },
         )
         // Never exceeds the spec bound.
-        assertTrue(deps.routeTurns.last().context.recentConversation.size <= CloudRouteLimits.MAX_CONVERSATION_ENTRIES)
+        assertTrue(deps.routeTurns.last().context.recentConversation!!.size <= CloudRouteLimits.MAX_CONVERSATION_ENTRIES)
     }
 
     private class RecordingRenderer : CloudSearchResultsRenderer {

@@ -454,6 +454,54 @@ class CloudRouteClientTest {
         }
     }
 
+    @Test
+    fun `duplicate transport attempt of one logical turn reuses its request id`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(sseResponse("event: done\ndata: {\"input_tokens\":1,\"output_tokens\":0}\n\n"))
+            server.enqueue(sseResponse("event: done\ndata: {\"input_tokens\":1,\"output_tokens\":0}\n\n"))
+            server.start()
+
+            val client = CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
+            val logicalTurn = turn("pause")
+
+            // Two transport attempts of the same logical turn must carry the
+            // same request id — the server deduplicates rather than re-executing.
+            client.route(logicalTurn).test {
+                awaitItem()
+                awaitComplete()
+            }
+            client.route(logicalTurn).test {
+                awaitItem()
+                awaitComplete()
+            }
+
+            val first = server.takeRequest().body.readUtf8()
+            val second = server.takeRequest().body.readUtf8()
+            val idPattern = Regex("\"request_id\":\"([^\"]+)\"")
+            assertEquals(idPattern.find(first)!!.groupValues[1], idPattern.find(second)!!.groupValues[1])
+        }
+    }
+
+    @Test
+    fun `duplicate_request 409 surfaces as an error event`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(409)
+                    .setBody("""{"code":"duplicate_request","message":"This logical turn was already admitted."}"""),
+            )
+            server.start()
+
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
+                .route(turn("pause"))
+                .test {
+                    val error = awaitItem() as CloudRouteEvent.Error
+                    assertEquals("duplicate_request", error.code)
+                    awaitComplete()
+                }
+        }
+    }
+
     private fun turn(
         request: String,
         context: CloudRouteContext = sampleContext,
@@ -502,7 +550,7 @@ class CloudRouteClientTest {
             server.start()
 
             CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
-                .route(turn("pause", context = sampleContext.copy(recentConversation = emptyList())))
+                .route(turn("pause"))
                 .test {
                     awaitItem()
                     awaitComplete()
@@ -510,11 +558,11 @@ class CloudRouteClientTest {
 
             val body = server.takeRequest().body.readUtf8()
             assertTrue(body.contains("\"request_id\""))
-            // Optional turn-control fields are semantically absent whether
-            // omitted or serialized empty — the server treats both the same.
-            assertTrue(!body.contains("\"search_results_v1\""))
-            assertTrue(!body.contains("\"route_hint\":{"))
-            assertTrue(!body.contains("\"role\":"))
+            // Parity with the iOS half: optional turn-control fields are
+            // omitted entirely when there is nothing to send.
+            assertTrue(!body.contains("\"capabilities\""))
+            assertTrue(!body.contains("\"route_hint\""))
+            assertTrue(!body.contains("\"recent_conversation\""))
         }
     }
 

@@ -191,7 +191,8 @@ class CloudRouteSink internal constructor(
     private fun buildRouteContext(context: PlaybackContext): CloudRouteContext {
         val state = cloudPlaybackContextState.snapshot()
         return CloudRouteContext(
-            recentConversation = CloudRouteLimits.clampConversation(conversationMemory.recent()),
+            recentConversation = CloudRouteLimits.clampConversation(conversationMemory.recent())
+                .takeIf { it.isNotEmpty() },
             episodeId = context.episodeId,
             podcastId = context.podcastId.takeIf { it.isNotEmpty() },
             referencePositionMs = context.referencePositionMs,

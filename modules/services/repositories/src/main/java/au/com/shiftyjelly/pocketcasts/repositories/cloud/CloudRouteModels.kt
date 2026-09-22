@@ -11,7 +11,8 @@ data class CloudRouteContext(
     @Json(name = "client_position_ms") val clientPositionMs: Long,
     @Json(name = "recent_reference_positions") val recentReferencePositions: List<Long> = emptyList(),
     @Json(name = "previous_reference_position_ms") val previousReferencePositionMs: Long? = null,
-    @Json(name = "recent_conversation") val recentConversation: List<CloudRouteConversationEntry> = emptyList(),
+    /** Null (omitted on the wire) when there is no recent conversation. */
+    @Json(name = "recent_conversation") val recentConversation: List<CloudRouteConversationEntry>? = null,
 )
 
 /**
@@ -45,7 +46,8 @@ internal data class CloudRouteRequestBody(
     val request: String,
     val context: CloudRouteContext,
     @Json(name = "request_id") val requestId: String? = null,
-    val capabilities: List<String> = emptyList(),
+    /** Null (omitted) unless the client advertises at least one capability. */
+    val capabilities: List<String>? = null,
     @Json(name = "route_hint") val routeHint: CloudRouteHint? = null,
 )
 

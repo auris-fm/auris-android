@@ -42,7 +42,7 @@ class CloudRouteClient(
                 request = turn.request,
                 context = turn.context,
                 requestId = turn.requestId,
-                capabilities = turn.capabilities,
+                capabilities = turn.capabilities.takeIf { it.isNotEmpty() },
                 routeHint = turn.routeHint,
             ),
         )

@@ -16,6 +16,8 @@ internal object CloudRouteJson {
     val httpErrorAdapter: JsonAdapter<CloudRouteHttpErrorPayload> = CloudRouteHttpErrorPayloadJsonAdapter(moshi)
     val flexibleMapAdapter: JsonAdapter<Map<String, Any?>> = FlexibleMapAdapter()
     val resultAdapter: JsonAdapter<CloudSearchResults> = CloudSearchResultsJsonAdapter(moshi)
+    val prefetchRequestAdapter: JsonAdapter<CloudPrefetchRequest> = CloudPrefetchRequestJsonAdapter(moshi)
+    val prefetchResponseAdapter: JsonAdapter<CloudPrefetchResponse> = CloudPrefetchResponseJsonAdapter(moshi)
 }
 
 /**

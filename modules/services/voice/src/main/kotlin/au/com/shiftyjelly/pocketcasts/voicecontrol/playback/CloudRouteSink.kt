@@ -8,6 +8,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteLimits
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudSearchResults
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudIdentity
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
@@ -143,9 +144,12 @@ class CloudRouteSink internal constructor(
 
                     is CloudRouteEvent.Result -> {
                         // Renderer is present iff we advertised the capability;
-                        // results never auto-play.
+                        // results never auto-play. An unknown result kind is
+                        // ignored (forward compatibility) rather than rendered.
                         val renderer = searchResultsRenderer
-                        if (renderer != null) {
+                        if (renderer != null &&
+                            event.results.kind == CloudSearchResults.KIND_EPISODE_RESULTS
+                        ) {
                             if (event.results.items.isEmpty()) {
                                 renderer.renderEmpty(event.results.scope)
                             } else {

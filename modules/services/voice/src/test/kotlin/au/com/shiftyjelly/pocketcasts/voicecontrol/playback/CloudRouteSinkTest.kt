@@ -479,6 +479,32 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `unknown result kind is ignored for forward compatibility`() = runTest {
+        val renderer = RecordingRenderer()
+        val deps = TestDeps(
+            renderer = renderer,
+            events = flowOf(
+                CloudRouteEvent.Result(
+                    CloudSearchResults(
+                        kind = "future_kind_v9",
+                        scope = CloudSearchResults.SCOPE_GLOBAL,
+                        items = listOf(
+                            CloudSearchEvidenceItem(evidenceId = "e1", episodeId = "ep-1", playable = true, seekable = true),
+                        ),
+                    ),
+                ),
+                CloudRouteEvent.Done(0, 0),
+            ),
+        )
+
+        deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertTrue(renderer.rendered.isEmpty())
+        assertTrue(renderer.empties.isEmpty())
+        assertEquals(0, renderer.unavailableCount)
+    }
+
+    @Test
     fun `empty result renders the empty state not the unavailable state`() = runTest {
         val renderer = RecordingRenderer()
         val deps = TestDeps(

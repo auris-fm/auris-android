@@ -12,6 +12,11 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import timber.log.Timber
 
+/** Seam so the playback-start observer can be tested without a network client. */
+interface CloudPrefetchHinter {
+    suspend fun prefetch(episodeId: String, podcastId: String? = null): CloudPrefetchClient.Outcome
+}
+
 /**
  * Best-effort prefetch hint fired on playback start
  * (`POST /api/v1/cloud/context/prefetch`, cloud-assistant.md).
@@ -24,7 +29,7 @@ class CloudPrefetchClient(
     private val baseUrl: String,
     private val userId: String,
     private val okHttpClient: OkHttpClient = sharedClient(),
-) {
+) : CloudPrefetchHinter {
     /** Result of a best-effort prefetch hint; informational only. */
     enum class Outcome { ACCEPTED, SKIPPED, NOT_SENT }
 
@@ -33,7 +38,7 @@ class CloudPrefetchClient(
      * answered, [Outcome.NOT_SENT] when nothing was attempted (missing
      * configuration/identity) or the attempt failed. Never throws.
      */
-    suspend fun prefetch(episodeId: String, podcastId: String? = null): Outcome = withContext(Dispatchers.IO) {
+    override suspend fun prefetch(episodeId: String, podcastId: String?): Outcome = withContext(Dispatchers.IO) {
         val base = baseUrl.trimEnd('/')
         if (base.isBlank() || userId.isBlank() || episodeId.isBlank()) return@withContext Outcome.NOT_SENT
 

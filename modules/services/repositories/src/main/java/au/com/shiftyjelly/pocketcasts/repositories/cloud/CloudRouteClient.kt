@@ -25,9 +25,21 @@ import timber.log.Timber
  */
 class CloudRouteClient(
     private val baseUrl: String,
-    private val userId: String,
+    private val tokenProvider: CloudTokenProviding,
     private val okHttpClient: OkHttpClient = defaultOkHttpClient(),
 ) {
+    /** Convenience for today's static identity (tests and legacy call sites). */
+    constructor(
+        baseUrl: String,
+        userId: String,
+        okHttpClient: OkHttpClient = defaultOkHttpClient(),
+    ) : this(baseUrl, CloudFixedTokenProvider(userId), okHttpClient)
+
+    /** Static-identity token; the issuer integration replaces this seam. */
+    internal class CloudFixedTokenProvider(private val token: String) : CloudTokenProviding {
+        override suspend fun currentToken(): String? = token.takeIf { it.isNotBlank() }
+    }
+
     @VisibleForTesting
     internal val connectTimeoutSeconds: Long
         get() = okHttpClient.connectTimeoutMillis / 1000L
@@ -37,6 +49,17 @@ class CloudRouteClient(
         get() = okHttpClient.readTimeoutMillis / 1000L
 
     fun route(turn: CloudRouteTurn): Flow<CloudRouteEvent> = channelFlow {
+        // Fail closed: no token means no request is attempted.
+        val token = tokenProvider.currentToken()
+        if (token.isNullOrBlank()) {
+            send(
+                CloudRouteEvent.Error(
+                    code = "unauthorized",
+                    message = "Sign in to use cloud responses.",
+                ),
+            )
+            return@channelFlow
+        }
         val bodyJson = CloudRouteJson.requestBodyAdapter.toJson(
             CloudRouteRequestBody(
                 request = turn.request,
@@ -49,7 +72,7 @@ class CloudRouteClient(
         val httpRequest = Request.Builder()
             .url(baseUrl.trimEnd('/') + ROUTE_PATH)
             .post(bodyJson.toRequestBody(JSON_MEDIA_TYPE))
-            .header("Authorization", "Bearer $userId")
+            .header("Authorization", "Bearer $token")
             .header("Accept", "text/event-stream")
             .build()
 

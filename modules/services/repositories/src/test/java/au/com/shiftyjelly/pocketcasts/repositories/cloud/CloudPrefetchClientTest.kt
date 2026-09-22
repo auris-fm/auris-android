@@ -52,6 +52,22 @@ class CloudPrefetchClientTest {
     }
 
     @Test
+    fun `no token means no hint is dialed`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+
+            val noToken = object : CloudTokenProviding {
+                override suspend fun currentToken(): String? = null
+            }
+            val outcome = CloudPrefetchClient(server.url("/").toString().trimEnd('/'), noToken)
+                .prefetch("ep-1")
+
+            assertEquals(CloudPrefetchClient.Outcome.NOT_SENT, outcome)
+            assertEquals(0, server.requestCount)
+        }
+    }
+
+    @Test
     fun `server failure is swallowed with a single attempt`() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setResponseCode(500))

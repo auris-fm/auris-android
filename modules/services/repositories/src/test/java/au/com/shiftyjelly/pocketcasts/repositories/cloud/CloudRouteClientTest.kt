@@ -455,6 +455,45 @@ class CloudRouteClientTest {
     }
 
     @Test
+    fun `a missing token fails closed without dialing the server`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+
+            val noToken = object : CloudTokenProviding {
+                override suspend fun currentToken(): String? = null
+            }
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), noToken)
+                .route(turn("hello"))
+                .test {
+                    val error = awaitItem() as CloudRouteEvent.Error
+                    assertEquals("unauthorized", error.code)
+                    awaitComplete()
+                }
+
+            assertEquals(0, server.requestCount)
+        }
+    }
+
+    @Test
+    fun `an expired token reported as null also fails closed`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+
+            val expiring = object : CloudTokenProviding {
+                override suspend fun currentToken(): String? = "" // revoked/expired
+            }
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), expiring)
+                .route(turn("hello"))
+                .test {
+                    assertEquals("unauthorized", (awaitItem() as CloudRouteEvent.Error).code)
+                    awaitComplete()
+                }
+
+            assertEquals(0, server.requestCount)
+        }
+    }
+
+    @Test
     fun `duplicate transport attempt of one logical turn reuses its request id`() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(sseResponse("event: done\ndata: {\"input_tokens\":1,\"output_tokens\":0}\n\n"))

@@ -27,9 +27,16 @@ interface CloudPrefetchHinter {
  */
 class CloudPrefetchClient(
     private val baseUrl: String,
-    private val userId: String,
+    private val tokenProvider: CloudTokenProviding,
     private val okHttpClient: OkHttpClient = sharedClient(),
 ) : CloudPrefetchHinter {
+    /** Convenience for today's static identity (tests and legacy call sites). */
+    constructor(
+        baseUrl: String,
+        userId: String,
+        okHttpClient: OkHttpClient = sharedClient(),
+    ) : this(baseUrl, CloudRouteClient.CloudFixedTokenProvider(userId), okHttpClient)
+
     /** Result of a best-effort prefetch hint; informational only. */
     enum class Outcome { ACCEPTED, SKIPPED, NOT_SENT }
 
@@ -40,7 +47,9 @@ class CloudPrefetchClient(
      */
     override suspend fun prefetch(episodeId: String, podcastId: String?): Outcome = withContext(Dispatchers.IO) {
         val base = baseUrl.trimEnd('/')
-        if (base.isBlank() || userId.isBlank() || episodeId.isBlank()) return@withContext Outcome.NOT_SENT
+        if (base.isBlank() || episodeId.isBlank()) return@withContext Outcome.NOT_SENT
+        val token = tokenProvider.currentToken()
+        if (token.isNullOrBlank()) return@withContext Outcome.NOT_SENT
 
         val body = CloudRouteJson.prefetchRequestAdapter.toJson(
             CloudPrefetchRequest(episodeId = episodeId, podcastId = podcastId),
@@ -48,7 +57,7 @@ class CloudPrefetchClient(
         val request = Request.Builder()
             .url(base + PREFETCH_PATH)
             .post(body.toRequestBody(JSON_MEDIA_TYPE))
-            .header("Authorization", "Bearer $userId")
+            .header("Authorization", "Bearer $token")
             .build()
 
         try {

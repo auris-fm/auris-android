@@ -549,6 +549,117 @@ class CloudRouteSinkTest {
         assertTrue(deps.routeTurns.last().context.recentConversation!!.size <= CloudRouteLimits.MAX_CONVERSATION_ENTRIES)
     }
 
+    @Test
+    fun `interrupted mixed stream keeps executed actions and clears buffered text`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("reference_position_ms" to 500_000L),
+                ),
+                CloudRouteEvent.Token("She was about to"),
+                CloudRouteEvent.Error(code = "provider_error", message = "The assistant hit an error."),
+            ),
+        )
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // The executed seek is not rolled back; the partial speech is dropped.
+        assertTrue(deps.playback.calls.contains("seekTo:500000"))
+        assertEquals(VoiceResponse.Spoken("The assistant hit an error."), response)
+        // Auto-pause is restored exactly once.
+        assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
+    }
+
+    @Test
+    fun `unseekable result items never produce a timed jump`() = runTest {
+        val renderer = RecordingRenderer()
+        val deps = TestDeps(
+            renderer = renderer,
+            events = flowOf(
+                CloudRouteEvent.Result(
+                    CloudSearchResults(
+                        kind = CloudSearchResults.KIND_EPISODE_RESULTS,
+                        scope = CloudSearchResults.SCOPE_GLOBAL,
+                        items = listOf(
+                            // Identified but unaligned, and a discovery-only entry.
+                            CloudSearchEvidenceItem(
+                                evidenceId = "e1",
+                                episodeId = "ep-1",
+                                playable = true,
+                                seekable = false,
+                            ),
+                            CloudSearchEvidenceItem(
+                                evidenceId = "e2",
+                                episodeId = null,
+                                playable = false,
+                                seekable = false,
+                            ),
+                        ),
+                    ),
+                ),
+                CloudRouteEvent.Done(0, 0),
+            ),
+        )
+
+        deps.sink().routeToCloud("find something", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(1, renderer.rendered.size)
+        assertTrue(deps.playback.calls.none { it.startsWith("seekTo") })
+        // Discovery-only entry keeps a null episode id for catalog resolution.
+        assertEquals(null, renderer.rendered.single().items.last().episodeId)
+    }
+
+    @Test
+    fun `retrieval_unavailable renders as speech without actions`() = runTest {
+        val renderer = RecordingRenderer()
+        val deps = TestDeps(
+            renderer = renderer,
+            events = flowOf(
+                CloudRouteEvent.Error(
+                    code = "retrieval_unavailable",
+                    message = "I can't reach the podcast evidence right now.",
+                ),
+            ),
+        )
+
+        val response = deps.sink().routeToCloud("what did she mean?", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(VoiceResponse.Spoken("I can't reach the podcast evidence right now."), response)
+        assertTrue(deps.playback.calls.none { it.startsWith("seekTo") })
+        assertTrue(renderer.rendered.isEmpty())
+    }
+
+    @Test
+    fun `a token that expires between turns fails the next turn closed`() = runTest {
+        var token: String? = "user_test"
+        val deps = TestDeps(
+            routeInvoker = { _ ->
+                if (token == null) {
+                    flowOf(CloudRouteEvent.Error("unauthorized", "Sign in to use cloud responses."))
+                } else {
+                    flowOf(CloudRouteEvent.Token("answer"), CloudRouteEvent.Done(1, 1))
+                }
+            },
+        )
+        val sink = deps.sink()
+
+        // Turn 1 succeeds while the token is valid.
+        assertEquals(
+            VoiceResponse.Spoken("answer"),
+            sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext),
+        )
+
+        // The token expires mid-session: the next turn fails closed and no
+        // playback action is attempted.
+        token = null
+        val second = sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(VoiceResponse.Spoken("Sign in to use cloud responses."), second)
+        assertTrue(deps.playback.calls.none { it.startsWith("seekTo") })
+    }
+
     private class RecordingRenderer : CloudSearchResultsRenderer {
         val rendered = mutableListOf<CloudSearchResults>()
         val empties = mutableListOf<String>()

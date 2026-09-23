@@ -163,6 +163,39 @@ class AurisTokenProviderTest {
     }
 
     @Test
+    fun `an inconclusive failure keeps a still-valid token instead of failing the request`() = runTest {
+        var phase = 0
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    if (phase > 0) {
+                        // Both upstream paths unreachable: verification is
+                        // inconclusive, not a rejection.
+                        return MockResponse().setResponseCode(503).setHeader("Retry-After", "5")
+                    }
+                    // 10s lifetime: stale under the 30s skew (so the refresh
+                    // path is attempted) yet still unexpired.
+                    return MockResponse().setResponseCode(200).setBody(tokensResponse("access-valid", expiresIn = 10))
+                }
+            }
+            server.start()
+
+            val provider = AurisTokenProvider(
+                clientProvider = { AurisAuthClient(server.url("/").toString().trimEnd('/')) },
+                credentialProvider = FakeCredential("pc-session"),
+            )
+
+            assertEquals("access-valid", provider.currentToken())
+
+            // Upstream verification path now fails inconclusively: the client
+            // must not dial unauthenticated, must not sign the user out, and
+            // must keep serving the token that is still within its lifetime.
+            phase = 1
+            assertEquals("access-valid", provider.currentToken())
+        }
+    }
+
+    @Test
     fun `an inconclusive exchange failure fails closed and caches nothing`() = runTest {
         MockWebServer().use { server ->
             server.dispatcher = object : Dispatcher() {

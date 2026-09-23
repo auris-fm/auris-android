@@ -38,13 +38,29 @@ class AurisTokenProvider(
                 cached = null
                 return@withLock null
             }
+            // A token past the refresh skew but still inside its real lifetime
+            // can keep serving through an inconclusive upstream blip.
+            val stillValid = cached?.takeIf { it.isWithinLifetime() }
             val refreshed = refreshOnce(client) ?: exchangeWithCredential(client)
-            refreshed?.let { tokens ->
-                cached = CachedTokens(tokens, fetchedAtMs = clock())
-                tokens.accessToken
-            } ?: run {
-                cached = null
-                null
+            when {
+                refreshed != null -> {
+                    cached = CachedTokens(refreshed, fetchedAtMs = clock())
+                    refreshed.accessToken
+                }
+
+                stillValid != null -> {
+                    // Inconclusive failure (e.g. 503 on the verification path):
+                    // never dial unauthenticated, but do not sign the user out
+                    // or discard a token that is still valid. A later retry
+                    // re-attempts the exchange.
+                    cached = stillValid
+                    stillValid.tokens.accessToken
+                }
+
+                else -> {
+                    cached = null
+                    null
+                }
             }
         }
     }
@@ -70,10 +86,13 @@ class AurisTokenProvider(
     }
 
     private inner class CachedTokens(val tokens: AurisTokens, val fetchedAtMs: Long) {
-        fun isFresh(): Boolean {
-            val lifetimeMs = tokens.expiresIn * 1000
-            return clock() < fetchedAtMs + lifetimeMs - EXPIRY_SKEW_MS
-        }
+        private fun expiresAtMs(): Long = fetchedAtMs + tokens.expiresIn * 1000
+
+        /** Usable without a refresh (with pre-expiry skew). */
+        fun isFresh(): Boolean = clock() < expiresAtMs() - EXPIRY_SKEW_MS
+
+        /** Still genuinely unexpired, even if past the skew window. */
+        fun isWithinLifetime(): Boolean = clock() < expiresAtMs()
     }
 
     private companion object {

@@ -18,6 +18,10 @@ internal object CloudRouteJson {
     val resultAdapter: JsonAdapter<CloudSearchResults> = CloudSearchResultsJsonAdapter(moshi)
     val prefetchRequestAdapter: JsonAdapter<CloudPrefetchRequest> = CloudPrefetchRequestJsonAdapter(moshi)
     val prefetchResponseAdapter: JsonAdapter<CloudPrefetchResponse> = CloudPrefetchResponseJsonAdapter(moshi)
+    val aurisTokenRequestAdapter: JsonAdapter<AurisTokenRequest> = AurisTokenRequestJsonAdapter(moshi)
+    val aurisRefreshRequestAdapter: JsonAdapter<AurisRefreshRequest> = AurisRefreshRequestJsonAdapter(moshi)
+    val aurisTokensAdapter: JsonAdapter<AurisTokens> = AurisTokensJsonAdapter(moshi)
+    val aurisAuthErrorAdapter: JsonAdapter<AurisAuthErrorPayload> = AurisAuthErrorPayloadJsonAdapter(moshi)
 }
 
 /**

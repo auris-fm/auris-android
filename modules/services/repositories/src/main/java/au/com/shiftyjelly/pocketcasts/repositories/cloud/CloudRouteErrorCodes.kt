@@ -10,6 +10,7 @@ object CloudRouteErrorCodes {
     const val BUDGET_EXCEEDED = "budget_exceeded"
     const val DUPLICATE_REQUEST = "duplicate_request"
     const val PROVIDER_ERROR = "provider_error"
+    const val INVALID_REQUEST = "invalid_request"
 
     private val KNOWN = setOf(
         RETRIEVAL_UNAVAILABLE,
@@ -20,7 +21,11 @@ object CloudRouteErrorCodes {
         BUDGET_EXCEEDED,
         DUPLICATE_REQUEST,
         PROVIDER_ERROR,
+        INVALID_REQUEST,
     )
+
+    /** `http_<3-digit status>` is minted locally from the response code. */
+    private val HTTP_STATUS_CODE = Regex("http_\\d{3}")
 
     /**
      * Log-safe form of a server-supplied code: a known code is logged as
@@ -29,7 +34,13 @@ object CloudRouteErrorCodes {
      */
     fun normalizeForLog(code: String?): String = when {
         code == null -> "none"
-        code in KNOWN -> code
+
+        // Known server codes, plus the bounded shapes this client mints
+        // itself: `invalid_request`, and `http_<status>`, which carries the
+        // status of an unparseable error body — exactly the diagnostic worth
+        // having when a gateway answers with HTML.
+        code in KNOWN || HTTP_STATUS_CODE.matches(code) -> code
+
         else -> "unrecognized"
     }
 }

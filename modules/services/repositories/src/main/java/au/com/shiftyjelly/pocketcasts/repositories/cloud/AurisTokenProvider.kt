@@ -63,8 +63,14 @@ class AurisTokenProvider(
             // for this same credential.
             val stillValid = cached?.takeIf { it.matches(lockedIdentity) && it.isWithinLifetime() }
             val attempt = acquire(client, lockedIdentity)
+            // The identity can change *while* the request is in flight: a logout
+            // or a switch during the exchange would otherwise mint a token for
+            // the new account and hand it to the old account's turn (and stamp
+            // it with the identity we started with). Re-read before returning or
+            // caching anything, and start over on the next call if it moved.
+            val settledIdentity = currentIdentity()
             when {
-                attempt is Acquisition.Tokens -> {
+                attempt is Acquisition.Tokens && settledIdentity == lockedIdentity -> {
                     cached = CachedTokens(attempt.tokens, fetchedAtMs = clock(), identity = lockedIdentity)
                     attempt.tokens.accessToken
                 }
@@ -72,7 +78,7 @@ class AurisTokenProvider(
                 // A 401 on either path is upstream saying this identity is no
                 // longer good — and a replayed refresh token revokes the chain.
                 // Serving the still-valid bearer here is exactly the wrong move.
-                stillValid != null && !attempt.definitive -> {
+                stillValid != null && !attempt.definitive && settledIdentity == lockedIdentity -> {
                     // Inconclusive failure (e.g. 503 on the verification path):
                     // never dial unauthenticated, but do not sign the user out
                     // or discard a token that is still valid. A later retry
@@ -82,6 +88,9 @@ class AurisTokenProvider(
                 }
 
                 else -> {
+                    // Includes the race: the token in hand belongs to an account
+                    // that is no longer signed in, so it is not usable and not
+                    // worth caching.
                     cached = null
                     null
                 }

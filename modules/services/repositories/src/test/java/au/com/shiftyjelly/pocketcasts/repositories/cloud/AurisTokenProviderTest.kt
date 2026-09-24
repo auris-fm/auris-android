@@ -91,6 +91,70 @@ class AurisTokenProviderTest {
     }
 
     @Test
+    fun `an exchange that lands after an account switch is not returned or cached`() = runTest {
+        var exchangeCalls = 0
+        lateinit var credential: FakeCredential
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    exchangeCalls += 1
+                    if (exchangeCalls > 1) {
+                        return MockResponse().setResponseCode(200).setBody(tokensResponse("access-b", "r-b"))
+                    }
+                    // The account changes while this first request is in flight.
+                    credential.value = "pc-session-b"
+                    return MockResponse().setResponseCode(200).setBody(tokensResponse("access-a", "r-a"))
+                }
+            }
+            server.start()
+
+            credential = FakeCredential("pc-session-a")
+            val provider = AurisTokenProvider(
+                clientProvider = { AurisAuthClient(server.url("/").toString().trimEnd('/')) },
+                credentialProvider = credential,
+            )
+
+            // The exchange minted for the account that is no longer signed in:
+            // handing it to this turn, or caching it, would be a cross-account
+            // leak (the token in hand is B's, stamped with A's identity).
+            assertNull(provider.currentToken())
+
+            // The next call acquires for the account that is actually signed in.
+            assertEquals("access-b", provider.currentToken())
+            assertEquals(2, exchangeCalls)
+        }
+    }
+
+    @Test
+    fun `a logout during an in-flight exchange re-acquires rather than returning the old token`() = runTest {
+        var exchangeCalls = 0
+        lateinit var credential: FakeCredential
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    exchangeCalls += 1
+                    // Signed out while the request is in flight.
+                    credential.value = null
+                    return MockResponse().setResponseCode(200).setBody(tokensResponse("access-1", "r-1"))
+                }
+            }
+            server.start()
+
+            credential = FakeCredential("pc-session")
+            val provider = AurisTokenProvider(
+                clientProvider = { AurisAuthClient(server.url("/").toString().trimEnd('/')) },
+                credentialProvider = credential,
+            )
+
+            assertNull(provider.currentToken())
+
+            // Still signed out: nothing to acquire, and no request is made.
+            assertNull(provider.currentToken())
+            assertEquals(1, exchangeCalls)
+        }
+    }
+
+    @Test
     fun `a logout stops the cached token being served`() = runTest {
         MockWebServer().use { server ->
             server.dispatcher = object : Dispatcher() {

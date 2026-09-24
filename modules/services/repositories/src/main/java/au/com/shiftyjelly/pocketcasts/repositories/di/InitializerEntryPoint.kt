@@ -11,6 +11,8 @@ import dagger.hilt.components.SingletonComponent
 @InstallIn(SingletonComponent::class)
 interface InitializerEntryPoint {
     fun inject(initializer: DefaultPlaylistsStartupInitializer)
+
+    fun inject(initializer: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudPrefetchStartupInitializer)
 }
 
 internal fun Context.initializerEntryPoint() = EntryPointAccessors.fromApplication<InitializerEntryPoint>(this)

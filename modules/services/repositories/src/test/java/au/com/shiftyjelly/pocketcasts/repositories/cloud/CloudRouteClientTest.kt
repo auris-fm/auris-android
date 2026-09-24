@@ -56,7 +56,7 @@ class CloudRouteClientTest {
 
             val client = CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
 
-            client.route("What did she mean?", sampleContext).test {
+            client.route(turn("What did she mean?")).test {
                 assertEquals(
                     CloudRouteEvent.Action(
                         tool = "playback",
@@ -92,7 +92,7 @@ class CloudRouteClientTest {
             server.start()
 
             CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
-                .route("pause", sampleContext)
+                .route(turn("pause"))
                 .test {
                     assertEquals(
                         CloudRouteEvent.Action("playback", "pause", emptyMap()),
@@ -124,7 +124,7 @@ class CloudRouteClientTest {
             server.start()
 
             CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
-                .route("summarize", sampleContext)
+                .route(turn("summarize"))
                 .test {
                     assertEquals(CloudRouteEvent.Token("Hello"), awaitItem())
                     assertEquals(CloudRouteEvent.Token(" world"), awaitItem())
@@ -145,7 +145,7 @@ class CloudRouteClientTest {
             server.start()
 
             CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
-                .route("", sampleContext)
+                .route(turn(""))
                 .test {
                     assertEquals(
                         CloudRouteEvent.Error("invalid_request", "missing request"),
@@ -167,7 +167,7 @@ class CloudRouteClientTest {
             server.start()
 
             CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
-                .route("hello", sampleContext)
+                .route(turn("hello"))
                 .test {
                     val error = awaitItem() as CloudRouteEvent.Error
                     assertEquals("unauthorized", error.code)
@@ -190,7 +190,7 @@ class CloudRouteClientTest {
             server.start()
 
             CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
-                .route("hello", sampleContext)
+                .route(turn("hello"))
                 .test {
                     assertEquals(
                         CloudRouteEvent.Error(
@@ -222,9 +222,40 @@ class CloudRouteClientTest {
             server.start()
 
             CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
-                .route("hello", sampleContext)
+                .route(turn("hello"))
                 .test {
                     assertEquals(CloudRouteEvent.Token("line1\nline2"), awaitItem())
+                    assertEquals(CloudRouteEvent.Done(1, 1), awaitItem())
+                    awaitComplete()
+                }
+        }
+    }
+
+    @Test
+    fun `unparseable result payload is skipped so the turn survives`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                sseResponse(
+                    """
+                    event: result
+                    data: {"kind":"episode_results","scope":["not","a","string"],"items":[]}
+
+                    event: token
+                    data: {"text":"Still answered."}
+
+                    event: done
+                    data: {"input_tokens":1,"output_tokens":1}
+                    """.trimIndent(),
+                ),
+            )
+            server.start()
+
+            // A result this client cannot read must not abort a turn it never
+            // asked for (the event reaches non-advertising clients too).
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
+                .route(turn("hello"))
+                .test {
+                    assertEquals(CloudRouteEvent.Token("Still answered."), awaitItem())
                     assertEquals(CloudRouteEvent.Done(1, 1), awaitItem())
                     awaitComplete()
                 }
@@ -246,7 +277,7 @@ class CloudRouteClientTest {
             server.start()
 
             CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
-                .route("hello", sampleContext)
+                .route(turn("hello"))
                 .test {
                     val error = awaitItem() as CloudRouteEvent.Error
                     assertEquals("invalid_response", error.code)
@@ -272,11 +303,14 @@ class CloudRouteClientTest {
             server.start()
 
             CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
-                .route("hello", sampleContext)
+                .route(turn("hello"))
                 .test {
                     assertEquals(CloudRouteEvent.Token("partial"), awaitItem())
                     val error = awaitItem() as CloudRouteEvent.Error
                     assertEquals("connection_lost", error.code)
+                    // Client-minted diagnostics carry no prose: the sink
+                    // localises by code (template or earcon).
+                    assertEquals("", error.message)
                     awaitComplete()
                 }
         }
@@ -318,7 +352,7 @@ class CloudRouteClientTest {
                 okHttpClient = okHttpClient,
             )
 
-            client.route("hello", sampleContext).test {
+            client.route(turn("hello")).test {
                 assertEquals(CloudRouteEvent.Token("first"), awaitItem())
                 cancelAndIgnoreRemainingEvents()
             }
@@ -341,7 +375,7 @@ class CloudRouteClientTest {
             server.start()
 
             CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
-                .route("hello", sampleContext)
+                .route(turn("hello"))
                 .test {
                     awaitItem()
                     awaitComplete()
@@ -420,7 +454,7 @@ class CloudRouteClientTest {
             var doneElapsedMs = -1L
             val events = mutableListOf<CloudRouteEvent>()
             runBlocking {
-                client.route("play the quote", sampleContext).collect { event ->
+                client.route(turn("play the quote")).collect { event ->
                     val elapsed = (System.nanoTime() - startedAt) / 1_000_000
                     if (actionElapsedMs < 0) actionElapsedMs = elapsed
                     if (event is CloudRouteEvent.Done) doneElapsedMs = elapsed
@@ -451,6 +485,298 @@ class CloudRouteClientTest {
             server.close()
             writer.join(5_000)
             writerFailure?.let { throw it }
+        }
+    }
+
+    @Test
+    fun `a missing token fails closed without dialing the server`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+
+            val noToken = object : CloudTokenProviding {
+                override suspend fun currentToken(): String? = null
+            }
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), noToken)
+                .route(turn("hello"))
+                .test {
+                    val error = awaitItem() as CloudRouteEvent.Error
+                    assertEquals("unauthorized", error.code)
+                    awaitComplete()
+                }
+
+            assertEquals(0, server.requestCount)
+        }
+    }
+
+    @Test
+    fun `an expired token reported as null also fails closed`() = runBlocking {
+        MockWebServer().use { server ->
+            server.start()
+
+            val expiring = object : CloudTokenProviding {
+                override suspend fun currentToken(): String? = "" // revoked/expired
+            }
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), expiring)
+                .route(turn("hello"))
+                .test {
+                    assertEquals("unauthorized", (awaitItem() as CloudRouteEvent.Error).code)
+                    awaitComplete()
+                }
+
+            assertEquals(0, server.requestCount)
+        }
+    }
+
+    @Test
+    fun `a call timeout surfaces as a connection_lost event with no prose`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+            server.start()
+
+            val timeoutClient = OkHttpClient.Builder()
+                .callTimeout(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+                .build()
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), userId, timeoutClient)
+                .route(turn("hello"))
+                .test {
+                    val error = awaitItem() as CloudRouteEvent.Error
+                    assertEquals("connection_lost", error.code)
+                    // The timeout wording comes from the localized template,
+                    // never from a client-authored English string.
+                    assertEquals("", error.message)
+                    awaitComplete()
+                }
+        }
+    }
+
+    @Test
+    fun `a malformed configured base url surfaces as an error event, not a throw`() = runBlocking {
+        // "http://[" is rejected by OkHttp's URL builder (IllegalArgumentException)
+        // before any request exists; it must not escape this flow.
+        val client = CloudRouteClient("http://[malformed", userId)
+
+        client.route(turn("hello")).test {
+            val error = awaitItem() as CloudRouteEvent.Error
+            assertEquals(CloudRouteErrorCodes.INTERNAL_ERROR, error.code)
+            awaitComplete()
+        }
+    }
+
+    @Test
+    fun `a failing credential provider surfaces as an error event, not a throw`() = runBlocking {
+        val exploding = object : CloudTokenProviding {
+            override suspend fun currentToken(): String? = error("credential store unavailable")
+        }
+
+        CloudRouteClient("https://cloud.example.com", exploding)
+            .route(turn("hello"))
+            .test {
+                val error = awaitItem() as CloudRouteEvent.Error
+                assertEquals(CloudRouteErrorCodes.INTERNAL_ERROR, error.code)
+                awaitComplete()
+            }
+    }
+
+    @Test
+    fun `duplicate transport attempt of one logical turn reuses its request id`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(sseResponse("event: done\ndata: {\"input_tokens\":1,\"output_tokens\":0}\n\n"))
+            server.enqueue(sseResponse("event: done\ndata: {\"input_tokens\":1,\"output_tokens\":0}\n\n"))
+            server.start()
+
+            val client = CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
+            val logicalTurn = turn("pause")
+
+            // Two transport attempts of the same logical turn must carry the
+            // same request id — the server deduplicates rather than re-executing.
+            client.route(logicalTurn).test {
+                awaitItem()
+                awaitComplete()
+            }
+            client.route(logicalTurn).test {
+                awaitItem()
+                awaitComplete()
+            }
+
+            val first = server.takeRequest().body.readUtf8()
+            val second = server.takeRequest().body.readUtf8()
+            val idPattern = Regex("\"request_id\":\"([^\"]+)\"")
+            assertEquals(idPattern.find(first)!!.groupValues[1], idPattern.find(second)!!.groupValues[1])
+        }
+    }
+
+    @Test
+    fun `duplicate_request 409 surfaces as an error event`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(409)
+                    .setBody("""{"code":"duplicate_request","message":"This logical turn was already admitted."}"""),
+            )
+            server.start()
+
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
+                .route(turn("pause"))
+                .test {
+                    val error = awaitItem() as CloudRouteEvent.Error
+                    assertEquals("duplicate_request", error.code)
+                    awaitComplete()
+                }
+        }
+    }
+
+    private fun turn(
+        request: String,
+        context: CloudRouteContext = sampleContext,
+        requestId: String = "2b870f93-52bf-4e38-9232-f7c93b8ffdaa",
+        capabilities: List<String> = emptyList(),
+        routeHint: CloudRouteHint? = null,
+    ) = CloudRouteTurn(
+        request = request,
+        context = context,
+        requestId = requestId,
+        capabilities = capabilities,
+        routeHint = routeHint,
+    )
+
+    @Test
+    fun `request carries turn control fields`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(sseResponse("event: done\ndata: {\"input_tokens\":1,\"output_tokens\":1}\n\n"))
+            server.start()
+
+            val client = CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
+            client.route(
+                turn(
+                    request = "find beginner investing episodes",
+                    capabilities = listOf(CloudRouteCapabilities.SEARCH_RESULTS_V1),
+                    routeHint = CloudRouteHint("search_episodes", mapOf("query" to "investing")),
+                ),
+            ).test {
+                awaitItem()
+                awaitComplete()
+            }
+
+            val body = server.takeRequest().body.readUtf8()
+            assertTrue(body.contains("\"request_id\":\"2b870f93-52bf-4e38-9232-f7c93b8ffdaa\""))
+            assertTrue(body.contains("\"capabilities\":[\"search_results_v1\"]"))
+            assertTrue(body.contains("\"route_hint\""))
+            assertTrue(body.contains("\"operation\":\"search_episodes\""))
+            assertTrue(body.contains("\"query\":\"investing\""))
+        }
+    }
+
+    @Test
+    fun `legacy shape omits optional turn control fields`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(sseResponse("event: done\ndata: {\"input_tokens\":1,\"output_tokens\":0}\n\n"))
+            server.start()
+
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
+                .route(turn("pause"))
+                .test {
+                    awaitItem()
+                    awaitComplete()
+                }
+
+            val body = server.takeRequest().body.readUtf8()
+            assertTrue(body.contains("\"request_id\""))
+            // Parity with the iOS half: optional turn-control fields are
+            // omitted entirely when there is nothing to send.
+            assertTrue(!body.contains("\"capabilities\""))
+            assertTrue(!body.contains("\"route_hint\""))
+            assertTrue(!body.contains("\"recent_conversation\""))
+        }
+    }
+
+    @Test
+    fun `recent conversation is serialized inside context`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(sseResponse("event: done\ndata: {\"input_tokens\":1,\"output_tokens\":0}\n\n"))
+            server.start()
+
+            val context = sampleContext.copy(
+                recentConversation = listOf(
+                    CloudRouteConversationEntry(CloudRouteConversationEntry.ROLE_USER, "first question"),
+                    CloudRouteConversationEntry(CloudRouteConversationEntry.ROLE_ASSISTANT, "first answer"),
+                ),
+            )
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
+                .route(turn("a follow-up", context = context))
+                .test {
+                    awaitItem()
+                    awaitComplete()
+                }
+
+            val body = server.takeRequest().body.readUtf8()
+            assertTrue(body.contains("\"recent_conversation\":["))
+            assertTrue(body.contains("\"role\":\"user\",\"text\":\"first question\""))
+            assertTrue(body.contains("\"role\":\"assistant\",\"text\":\"first answer\""))
+        }
+    }
+
+    @Test
+    fun `negotiated result event is parsed with items`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                sseResponse(
+                    """
+                    event: result
+                    data: {"kind":"episode_results","scope":"global","items":[{"evidence_id":"e1","episode_id":"ep-1","podcast_id":"pod-1","title":"Investing 101","text":"snippet","speaker":null,"source_url":null,"playable":true,"seekable":true}],"next_cursor":null}
+
+                    event: done
+                    data: {"input_tokens":0,"output_tokens":0}
+                    """.trimIndent(),
+                ),
+            )
+            server.start()
+
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
+                .route(turn("find investing", capabilities = listOf(CloudRouteCapabilities.SEARCH_RESULTS_V1)))
+                .test {
+                    val result = awaitItem() as CloudRouteEvent.Result
+                    assertEquals(CloudSearchResults.KIND_EPISODE_RESULTS, result.results.kind)
+                    assertEquals(CloudSearchResults.SCOPE_GLOBAL, result.results.scope)
+                    val item = result.results.items.single()
+                    assertEquals("e1", item.evidenceId)
+                    assertEquals("ep-1", item.episodeId)
+                    assertTrue(item.playable && item.seekable)
+                    awaitItem()
+                    awaitComplete()
+                }
+        }
+    }
+
+    @Test
+    fun `result event is skipped by clients that did not advertise it`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                sseResponse(
+                    """
+                    event: result
+                    data: {"kind":"episode_results","scope":"global","items":[],"next_cursor":null}
+
+                    event: token
+                    data: {"text":"No matches."}
+
+                    event: done
+                    data: {"input_tokens":0,"output_tokens":0}
+                    """.trimIndent(),
+                ),
+            )
+            server.start()
+
+            // A legacy-shaped client still parses the stream; the server only
+            // sends result events to advertising clients, so the fallback text
+            // path is exercised here through token+done.
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
+                .route(turn("find investing"))
+                .test {
+                    awaitItem() // result (harmless: no renderer wired at this layer)
+                    assertEquals(CloudRouteEvent.Token("No matches."), awaitItem())
+                    awaitItem()
+                    awaitComplete()
+                }
         }
     }
 

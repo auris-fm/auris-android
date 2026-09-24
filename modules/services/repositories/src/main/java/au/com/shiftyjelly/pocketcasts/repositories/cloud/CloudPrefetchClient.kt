@@ -53,21 +53,25 @@ class CloudPrefetchClient(
      * configuration/identity) or the attempt failed. Never throws.
      */
     override suspend fun prefetch(episodeId: String, podcastId: String?): Outcome = withContext(Dispatchers.IO) {
-        val base = baseUrlProvider().trimEnd('/')
-        if (base.isBlank() || episodeId.isBlank()) return@withContext Outcome.NOT_SENT
-        val token = tokenProvider.currentToken()
-        if (token.isNullOrBlank()) return@withContext Outcome.NOT_SENT
-
-        val body = CloudRouteJson.prefetchRequestAdapter.toJson(
-            CloudPrefetchRequest(episodeId = episodeId, podcastId = podcastId),
-        )
-        val request = Request.Builder()
-            .url(base + PREFETCH_PATH)
-            .post(body.toRequestBody(JSON_MEDIA_TYPE))
-            .header("Authorization", "Bearer $token")
-            .build()
-
+        // The whole body is inside the guard: building the URL (a malformed
+        // configured base URL throws IllegalArgumentException), reading the
+        // token and serializing are all part of the best-effort path the
+        // "never throws" contract covers.
         try {
+            val base = baseUrlProvider().trimEnd('/')
+            if (base.isBlank() || episodeId.isBlank()) return@withContext Outcome.NOT_SENT
+            val token = tokenProvider.currentToken()
+            if (token.isNullOrBlank()) return@withContext Outcome.NOT_SENT
+
+            val body = CloudRouteJson.prefetchRequestAdapter.toJson(
+                CloudPrefetchRequest(episodeId = episodeId, podcastId = podcastId),
+            )
+            val request = Request.Builder()
+                .url(base + PREFETCH_PATH)
+                .post(body.toRequestBody(JSON_MEDIA_TYPE))
+                .header("Authorization", "Bearer " + token)
+                .build()
+
             okHttpClient.newCall(request).execute().use { response ->
                 when {
                     response.code == 401 -> {
@@ -100,9 +104,9 @@ class CloudPrefetchClient(
             }
         } catch (error: Exception) {
             // Best effort, and the contract says this never throws: anything
-            // out of the request path (malformed configured URL, call
-            // machinery, transport) is swallowed. This runs on an app-scope
-            // coroutine whose uncaught exceptions would crash the process.
+            // out of this path (malformed configured URL, call machinery,
+            // transport) is swallowed. It runs on an app-scope coroutine
+            // whose uncaught exceptions would crash the process.
             Timber.w(error, "CloudPrefetch: hint failed")
             Outcome.NOT_SENT
         }

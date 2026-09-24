@@ -4,6 +4,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteCapabilities
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteClient
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteConversationEntry
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteErrorCodes
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteLimits
@@ -102,8 +103,13 @@ class CloudRouteSink internal constructor(
         // A newer turn supersedes the previous one: cancel it before starting.
         val myJob = currentCoroutineContext()[Job]
         synchronized(activeTurnLock) {
-            activeTurn?.takeIf { it !== myJob }?.cancel()
+            // Register first, then cancel: the successor must already be the
+            // current turn when the superseded turn unwinds, otherwise its
+            // turn-identity guard sees itself as still current and restores
+            // audio the successor is about to pause.
+            val previous = activeTurn
             activeTurn = myJob
+            if (previous != null && previous !== myJob) previous.cancel()
         }
 
         var tokenBuffer = ""
@@ -175,7 +181,8 @@ class CloudRouteSink internal constructor(
                         // renderer owns whenever one is present (three states,
                         // not two); the spoken message still goes out below.
                         if (searchResultsRenderer != null &&
-                            event.code == ERROR_RETRIEVAL_UNAVAILABLE
+                            turn.capabilities.contains(CloudRouteCapabilities.SEARCH_RESULTS_V1) &&
+                            event.code == CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE
                         ) {
                             searchResultsRenderer.renderUnavailable()
                         }
@@ -193,7 +200,20 @@ class CloudRouteSink internal constructor(
             // unexpected throws — must not leave playback paused silently.
             // NonCancellable: the resume path itself suspends (play-queue
             // loads), and on a cancelled turn it must still run to completion.
-            withContext(NonCancellable) { restoreTransientAudioState(turnState) }
+            //
+            // Turn-identity guard: the *player* is shared, so a superseded
+            // turn's unwind must not restore audio the newer turn has already
+            // paused. Only the turn that is still current touches audio state,
+            // and it clears its own registration as it goes.
+            withContext(NonCancellable) {
+                val stillCurrent = synchronized(activeTurnLock) { activeTurn === myJob }
+                if (stillCurrent) {
+                    restoreTransientAudioState(turnState)
+                    synchronized(activeTurnLock) {
+                        if (activeTurn === myJob) activeTurn = null
+                    }
+                }
+            }
         }
         return outcome ?: VoiceResponse.Silent
     }
@@ -309,8 +329,5 @@ class CloudRouteSink internal constructor(
 
     companion object {
         private const val COMING_SOON_MESSAGE = "Cloud processing is coming soon"
-
-        /** Mirrors the server's error code for genuinely unavailable evidence. */
-        private const val ERROR_RETRIEVAL_UNAVAILABLE = "retrieval_unavailable"
     }
 }

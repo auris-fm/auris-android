@@ -20,6 +20,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
@@ -29,6 +30,7 @@ import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 
+@kotlinx.coroutines.ExperimentalCoroutinesApi
 class CloudRouteSinkTest {
 
     private val playbackContext = PlaybackContext(
@@ -660,6 +662,41 @@ class CloudRouteSinkTest {
 
         assertEquals(VoiceResponse.Spoken("Sign in to use cloud responses."), second)
         assertTrue(deps.playback.calls.none { it.startsWith("seekTo") })
+    }
+
+    @Test
+    fun `a superseded turn never restores audio owned by the newer turn`() = runTest(UnconfinedTestDispatcher()) {
+        val firstStarted = CompletableDeferred<Unit>()
+        val firstCancelled = CompletableDeferred<Unit>()
+        val deps = TestDeps(
+            routeInvoker = { turn ->
+                if (turn.request == "first") {
+                    flow {
+                        firstStarted.complete(Unit)
+                        try {
+                            awaitCancellation()
+                        } catch (cancellation: CancellationException) {
+                            firstCancelled.complete(Unit)
+                            throw cancellation
+                        }
+                    }
+                } else {
+                    flowOf(CloudRouteEvent.Done(1, 1))
+                }
+            },
+        )
+        val sink = deps.sink()
+
+        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        firstStarted.await()
+        sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext)
+        firstCancelled.await()
+        first.join()
+
+        // Turn one paused; the successor paused and resumed once. The superseded
+        // turn must NOT resume — otherwise it resumes audio the newer turn
+        // paused, and the answer streams over playing audio.
+        assertEquals(listOf("pause", "pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
     }
 
     private class RecordingRenderer : CloudSearchResultsRenderer {

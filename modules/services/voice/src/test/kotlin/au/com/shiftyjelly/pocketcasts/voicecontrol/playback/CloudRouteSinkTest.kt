@@ -665,6 +665,83 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `cancellation during the initial pause still restores audio`() = runTest(UnconfinedTestDispatcher()) {
+        val gate = CompletableDeferred<Unit>()
+        val deps = TestDeps(events = flowOf(CloudRouteEvent.Done(1, 1)))
+        deps.playback.pauseGate = gate
+        val sink = deps.sink()
+
+        // The player is already paused when cancellation lands mid-call: the
+        // restore must still run, or audio stays paused with no owner.
+        val turn = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.pauseStarted.await()
+        turn.cancel()
+        gate.complete(Unit)
+        turn.join()
+
+        assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
+    }
+
+    @Test
+    fun `a superseded turn's action cannot resume the player under the new turn`() = runTest(UnconfinedTestDispatcher()) {
+        val gate = CompletableDeferred<Unit>()
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "play_quote",
+                    params = mapOf("reference_position_ms" to 45_000_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        deps.playback.resumeGate = gate
+        val sink = deps.sink()
+
+        // Turn A: auto-pause, then its play_quote action resumes — suspending
+        // inside the player while A still owns it.
+        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.resumeStarted.await()
+
+        // B must not register/pause until A's action has finished with the player.
+        val second = launch { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext) }
+        gate.complete(Unit)
+        first.join()
+        second.join()
+
+        assertEquals(
+            listOf("pause", "resume", "pause", "resume"),
+            deps.playback.calls.filter { it == "pause" || it == "resume" },
+        )
+    }
+
+    @Test
+    fun `a successor failing after hand-off still restores the predecessor's pause`() = runTest(UnconfinedTestDispatcher()) {
+        val deps = TestDeps(
+            routeInvoker = { turn ->
+                when (turn.request) {
+                    // Predecessor: pauses, then stays in flight until superseded.
+                    "first" -> flow { awaitCancellation() }
+
+                    else -> error("successor failed during setup")
+                }
+            },
+        )
+        val sink = deps.sink()
+
+        val first = launch { runCatching { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) } }
+        deps.playback.pauseStarted.await()
+        val second = launch { runCatching { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext) } }
+        first.join()
+        second.join()
+
+        // The player was paused by the predecessor; ownership moved to the
+        // successor, whose setup failed before its own pause. The obligation
+        // travels with ownership, so the successor still restores it.
+        assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
+    }
+
+    @Test
     fun `a setup failure with no predecessor leaves no stale ownership`() = runTest(UnconfinedTestDispatcher()) {
         var fail = true
         val deps = TestDeps(

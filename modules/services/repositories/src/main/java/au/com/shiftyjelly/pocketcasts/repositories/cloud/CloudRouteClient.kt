@@ -79,7 +79,7 @@ class CloudRouteClient(
         if (token.isNullOrBlank()) {
             send(
                 CloudRouteEvent.Error(
-                    code = "unauthorized",
+                    code = CloudRouteErrorCodes.UNAUTHORIZED,
                     message = "Sign in to use cloud responses.",
                 ),
             )
@@ -130,7 +130,7 @@ class CloudRouteClient(
                         Timber.w(error, "Cloud route payload could not be parsed")
                         send(
                             CloudRouteEvent.Error(
-                                code = "invalid_response",
+                                code = CloudRouteErrorCodes.INVALID_RESPONSE,
                                 message = "Sorry, I couldn't understand the response.",
                             ),
                         )
@@ -139,7 +139,7 @@ class CloudRouteClient(
                     if (truncated) {
                         send(
                             CloudRouteEvent.Error(
-                                code = "connection_lost",
+                                code = CloudRouteErrorCodes.CONNECTION_LOST,
                                 message = "Connection lost",
                             ),
                         )
@@ -156,14 +156,14 @@ class CloudRouteClient(
                     // so analytics and the user both see it.
                     send(
                         CloudRouteEvent.Error(
-                            code = "connection_lost",
+                            code = CloudRouteErrorCodes.CONNECTION_LOST,
                             message = "Request timed out",
                         ),
                     )
                 } else {
                     send(
                         CloudRouteEvent.Error(
-                            code = "connection_lost",
+                            code = CloudRouteErrorCodes.CONNECTION_LOST,
                             message = error.message ?: "Connection lost",
                         ),
                     )
@@ -185,7 +185,7 @@ class CloudRouteClient(
 
     private fun httpStatusToCode(httpStatus: Int): String = when (httpStatus) {
         400 -> "invalid_request"
-        401 -> "unauthorized"
+        401 -> CloudRouteErrorCodes.UNAUTHORIZED
         else -> "http_$httpStatus"
     }
 

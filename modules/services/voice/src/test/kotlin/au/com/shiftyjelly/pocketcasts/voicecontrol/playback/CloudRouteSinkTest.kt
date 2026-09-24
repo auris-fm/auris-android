@@ -743,7 +743,33 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `a setup failure after registration leaves no stale ownership and no paused player`() = runTest(UnconfinedTestDispatcher()) {
+    fun `a successor failing after hand-off still restores the predecessor's pause`() = runTest(UnconfinedTestDispatcher()) {
+        val deps = TestDeps(
+            routeInvoker = { turn ->
+                when (turn.request) {
+                    // Predecessor: pauses, then stays in flight until superseded.
+                    "first" -> flow { awaitCancellation() }
+
+                    else -> error("successor failed during setup")
+                }
+            },
+        )
+        val sink = deps.sink()
+
+        val first = launch { runCatching { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) } }
+        deps.playback.pauseStarted.await()
+        val second = launch { runCatching { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext) } }
+        first.join()
+        second.join()
+
+        // The player was paused by the predecessor; ownership moved to the
+        // successor, whose setup failed before its own pause. The obligation
+        // travels with ownership, so the successor still restores it.
+        assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
+    }
+
+    @Test
+    fun `a setup failure with no predecessor leaves no stale ownership`() = runTest(UnconfinedTestDispatcher()) {
         var fail = true
         val deps = TestDeps(
             routeInvoker = { _ ->
@@ -753,12 +779,11 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        // A registers, then its setup throws before pausing: ownership must be
-        // released, and the player must not be left paused.
+        // Nothing was paused before the failure, so the only claim this test
+        // makes is about ownership: a later turn registers cleanly.
         val first = launch { runCatching { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) } }
         first.join()
 
-        // A later turn therefore works normally.
         fail = false
         val second = sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext)
 

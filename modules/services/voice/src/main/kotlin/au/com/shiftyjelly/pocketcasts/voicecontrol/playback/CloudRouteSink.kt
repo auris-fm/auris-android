@@ -215,8 +215,10 @@ class CloudRouteSink internal constructor(
                         // Genuinely unavailable evidence is a state the results
                         // renderer owns whenever it is present AND this turn had a
                         // results surface (three states, not two).
+                        // Capability advertisement is client-scoped (a client
+                        // advertises only what it can render), so the renderer
+                        // check is the whole gate — see advertisedCapabilities().
                         if (searchResultsRenderer != null &&
-                            turn.capabilities.contains(CloudRouteCapabilities.SEARCH_RESULTS_V1) &&
                             event.code == CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE
                         ) {
                             searchResultsRenderer.renderUnavailable()
@@ -224,7 +226,10 @@ class CloudRouteSink internal constructor(
                         // Code only: the server's message can carry upstream
                         // detail derived from the user's request or account,
                         // and it is already spoken/shown where it belongs.
-                        Timber.e(
+                        // A server-signalled result state, not a client defect:
+                        // keep it visible without putting a normal turn outcome
+                        // at error level.
+                        Timber.w(
                             "CloudRouteSink: turn error code=%s",
                             CloudRouteErrorCodes.normalizeForLog(event.code),
                         )

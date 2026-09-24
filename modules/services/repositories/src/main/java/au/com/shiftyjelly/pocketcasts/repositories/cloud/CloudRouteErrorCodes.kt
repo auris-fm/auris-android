@@ -1,6 +1,11 @@
 package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
-/** Server error codes the client branches on, in one place (cloud-assistant.md). */
+/**
+ * The cloud error-code vocabulary in one place (cloud-assistant.md): the codes
+ * this client adopts from the server *and* the ones it mints itself from the
+ * response status — and the allowlist [normalizeForLog] uses to keep both out
+ * of device logs verbatim.
+ */
 object CloudRouteErrorCodes {
     const val RETRIEVAL_UNAVAILABLE = "retrieval_unavailable"
     const val INVALID_RESPONSE = "invalid_response"

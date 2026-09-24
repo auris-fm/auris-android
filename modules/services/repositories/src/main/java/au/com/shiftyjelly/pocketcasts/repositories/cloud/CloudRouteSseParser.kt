@@ -12,6 +12,11 @@ internal data class CloudRouteSseParseResult(
 
 internal class CloudRouteSseParser {
 
+    private companion object {
+        /** Bound for the server-supplied event name in logs. */
+        const val MAX_LOGGED_EVENT_NAME = 32
+    }
+
     /**
      * Streaming parse: dispatches each complete SSE event to [onEvent] as it
      * is read, so `play_quote` actions and tokens can flow mid-turn instead
@@ -121,7 +126,7 @@ internal class CloudRouteSseParser {
                 // for the capability — skip it like an unknown event.
                 val payload = runCatching { CloudRouteJson.resultAdapter.fromJson(data) }.getOrNull()
                 if (payload == null) {
-                    Timber.w("Skipping unparseable result payload (len=%d)", data.length)
+                    Timber.w("Skipping unparseable result payload (%d bytes)", data.toByteArray(Charsets.UTF_8).size)
                     null
                 } else {
                     CloudRouteEvent.Result(payload)
@@ -135,7 +140,9 @@ internal class CloudRouteSseParser {
                 // may echo user context.
                 Timber.w(
                     "Unknown SSE event: %s (payload %d bytes)",
-                    name,
+                    // Server-controlled token: bounded so its length is ours to
+                    // decide, while keeping the forward-compat diagnostic.
+                    name.take(MAX_LOGGED_EVENT_NAME),
                     data.toByteArray(Charsets.UTF_8).size,
                 )
                 null

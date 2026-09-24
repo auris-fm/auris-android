@@ -902,6 +902,28 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a whitespace-only answer is silent rather than spoken`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Token("   "),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+
+        val sink = deps.sink()
+        val response = sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // Same rule as the error path: blank is not speech. Speaking "   " would
+        // send a whitespace utterance to the TTS engine instead of a no-op.
+        assertEquals(VoiceResponse.Silent, response)
+
+        // And it is not worth remembering either: what follows carries no
+        // conversation context, which is only true if nothing was recorded.
+        sink.routeToCloud("a follow-up", VoiceIntent.CloudTier.Premium, playbackContext)
+        assertEquals(null, deps.routeTurns.last().context.recentConversation)
+    }
+
+    @Test
     fun `a whitespace-only template is not spoken`() = runTest {
         val deps = TestDeps(
             templateResolver = SpokenTemplateResolver(mapOf("cloud_error_connection_lost" to "   ")),

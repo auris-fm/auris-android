@@ -97,13 +97,17 @@ class CloudRouteSink internal constructor(
     private var activeTurn: Job? = null
 
     /**
-     * True while the shared player is paused *because of a cloud turn*.
+     * True while this turn still *owes* the player the restore of a pause it
+     * applied — an obligation, not a description of the player's state. The
+     * two part company on purpose: after a `pause` action the player is paused
+     * while this is `false` (the user asked for that pause, so it is not ours
+     * to undo), and while a turn plays it is `false` too.
      *
      * Ownership-scoped rather than per-turn: when a turn is superseded the
-     * successor inherits the paused player, so the "we paused it" knowledge
-     * has to transfer with ownership — otherwise a successor that fails
-     * between registration and its own pause leaves audio paused with no
-     * owner (a handoff gap, not just a race).
+     * successor inherits the paused player, so the obligation has to transfer
+     * with ownership — otherwise a successor that fails between registration
+     * and its own pause leaves audio paused with no owner (a handoff gap, not
+     * just a race).
      */
     private var playerAutoPaused = false
     private val turnCounter = AtomicLong(0)
@@ -197,10 +201,10 @@ class CloudRouteSink internal constructor(
                             inputTokens = event.inputTokens,
                             outputTokens = event.outputTokens,
                         )
-                        if (tokenBuffer.isNotEmpty()) {
+                        if (tokenBuffer.isNotBlank()) {
                             conversationMemory.record(request, tokenBuffer)
                         }
-                        outcome = if (tokenBuffer.isEmpty()) {
+                        outcome = if (tokenBuffer.isBlank()) {
                             VoiceResponse.Silent
                         } else {
                             VoiceResponse.Spoken(tokenBuffer)
@@ -374,9 +378,10 @@ class CloudRouteSink internal constructor(
                     val referenceMs = params.referencePositionMs() ?: return
                     capturePreActionPosition(referenceMs, turnState)
                     seekToReference(referenceMs)
-                    // Clear before the suspending call: if resume() throws, the
-                    // obligation must not survive to resume a player the user
-                    // deliberately left paused.
+                    // Cleared before the suspending call so the flag never
+                    // outlives the player state it refers to. (Here a throw
+                    // would make the finally resume, which is what this action
+                    // wanted anyway — the reorder is for uniformity, not safety.)
                     playerAutoPaused = false
                     playbackSink.resume()
                 }
@@ -395,6 +400,8 @@ class CloudRouteSink internal constructor(
                 }
 
                 "resume" -> {
+                    // As at play_quote: cleared first for uniformity, so a throw
+                    // cannot leave the flag describing a state we failed to reach.
                     playerAutoPaused = false
                     playbackSink.resume()
                 }

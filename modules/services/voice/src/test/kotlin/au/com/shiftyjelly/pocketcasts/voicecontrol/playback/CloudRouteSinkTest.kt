@@ -665,6 +665,33 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a successor that fails before pausing still restores the player it inherited`() = runTest(UnconfinedTestDispatcher()) {
+        val deps = TestDeps(
+            routeInvoker = { turn ->
+                if (turn.request == "first") {
+                    // Pauses, then stays in flight until superseded.
+                    flow { awaitCancellation() }
+                } else {
+                    // Registers as owner, then fails before its pause section.
+                    error("successor failed during setup")
+                }
+            },
+        )
+        val sink = deps.sink()
+
+        val first = launch { runCatching { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) } }
+        deps.playback.pauseStarted.await()
+        val second = launch { runCatching { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext) } }
+        first.join()
+        second.join()
+
+        // Turn one paused and correctly leaves restoration to the successor;
+        // the successor never paused, so it must still be the one that resumes —
+        // otherwise the player is left paused with no owner.
+        assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
+    }
+
+    @Test
     fun `cancellation during the initial pause still restores audio`() = runTest(UnconfinedTestDispatcher()) {
         val gate = CompletableDeferred<Unit>()
         val deps = TestDeps(events = flowOf(CloudRouteEvent.Done(1, 1)))

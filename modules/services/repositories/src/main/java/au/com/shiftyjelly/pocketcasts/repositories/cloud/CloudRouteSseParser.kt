@@ -69,7 +69,10 @@ internal class CloudRouteSseParser {
         } catch (error: IOException) {
             throw error
         } catch (error: Exception) {
-            throw IOException(error.message ?: "Malformed SSE payload", error)
+            // Content-free: the underlying Moshi/parse message is derived from
+            // the server payload and must not reach logs (in the message or as
+            // a cause, whose message Timber would print too).
+            throw IOException("Malformed SSE payload")
         }
     }
 

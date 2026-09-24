@@ -74,7 +74,6 @@ class CloudRouteSink internal constructor(
      */
     private class TurnState {
         var preQuotePositionMs: Long? = null
-        var didAutoPause = false
     }
 
     /**
@@ -88,6 +87,17 @@ class CloudRouteSink internal constructor(
     private val turnMutex = Mutex()
     private var activeTurnId: Long = 0
     private var activeTurn: Job? = null
+
+    /**
+     * True while the shared player is paused *because of a cloud turn*.
+     *
+     * Ownership-scoped rather than per-turn: when a turn is superseded the
+     * successor inherits the paused player, so the "we paused it" knowledge
+     * has to transfer with ownership — otherwise a successor that fails
+     * between registration and its own pause leaves audio paused with no
+     * owner (a handoff gap, not just a race).
+     */
+    private var playerAutoPaused = false
     private val turnCounter = AtomicLong(0)
 
     override suspend fun routeToCloud(
@@ -154,7 +164,7 @@ class CloudRouteSink internal constructor(
                     // already be paused when cancellation lands mid-call, and a
                     // flag set afterwards would leave the finally thinking there
                     // is nothing to restore — audio stuck paused.
-                    turnState.didAutoPause = true
+                    playerAutoPaused = true
                     playbackSink.pause()
                 }
             }
@@ -214,7 +224,10 @@ class CloudRouteSink internal constructor(
                         // Code only: the server's message can carry upstream
                         // detail derived from the user's request or account,
                         // and it is already spoken/shown where it belongs.
-                        Timber.e("CloudRouteSink: turn error code=%s", event.code)
+                        Timber.e(
+                            "CloudRouteSink: turn error code=%s",
+                            CloudRouteErrorCodes.normalizeForLog(event.code),
+                        )
                         analytics.recordTurn(outcome = "error")
                         outcome = if (event.message.isBlank()) {
                             VoiceResponse.Earcon(EarconId.ERROR)
@@ -237,7 +250,7 @@ class CloudRouteSink internal constructor(
             withContext(NonCancellable) {
                 turnMutex.withLock {
                     if (activeTurnId == myId) {
-                        restoreTransientAudioState(turnState)
+                        restoreTransientAudioState()
                         activeTurnId = 0
                         activeTurn = null
                     }
@@ -276,10 +289,11 @@ class CloudRouteSink internal constructor(
         )
     }
 
-    private suspend fun restoreTransientAudioState(turnState: TurnState) {
-        if (turnState.didAutoPause) {
+    /** Owner-only: resume the player if this turn chain auto-paused it. */
+    private suspend fun restoreTransientAudioState() {
+        if (playerAutoPaused) {
             playbackSink.resume()
-            turnState.didAutoPause = false
+            playerAutoPaused = false
         }
     }
 
@@ -308,7 +322,7 @@ class CloudRouteSink internal constructor(
                     capturePreActionPosition(referenceMs, turnState)
                     seekToReference(referenceMs)
                     playbackSink.resume()
-                    turnState.didAutoPause = false
+                    playerAutoPaused = false
                 }
 
                 "stop_quote" -> {
@@ -318,12 +332,13 @@ class CloudRouteSink internal constructor(
 
                 "pause" -> {
                     playbackSink.pause()
-                    turnState.didAutoPause = false
+                    // Explicit pause: not ours to undo later.
+                    playerAutoPaused = false
                 }
 
                 "resume" -> {
                     playbackSink.resume()
-                    turnState.didAutoPause = false
+                    playerAutoPaused = false
                 }
             }
         }

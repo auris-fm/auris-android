@@ -525,6 +525,34 @@ class CloudRouteClientTest {
     }
 
     @Test
+    fun `a malformed configured base url surfaces as an error event, not a throw`() = runBlocking {
+        // "http://[" is rejected by OkHttp's URL builder (IllegalArgumentException)
+        // before any request exists; it must not escape this flow.
+        val client = CloudRouteClient("http://[malformed", userId)
+
+        client.route(turn("hello")).test {
+            val error = awaitItem() as CloudRouteEvent.Error
+            assertEquals(CloudRouteErrorCodes.INTERNAL_ERROR, error.code)
+            awaitComplete()
+        }
+    }
+
+    @Test
+    fun `a failing credential provider surfaces as an error event, not a throw`() = runBlocking {
+        val exploding = object : CloudTokenProviding {
+            override suspend fun currentToken(): String? = error("credential store unavailable")
+        }
+
+        CloudRouteClient("https://cloud.example.com", exploding)
+            .route(turn("hello"))
+            .test {
+                val error = awaitItem() as CloudRouteEvent.Error
+                assertEquals(CloudRouteErrorCodes.INTERNAL_ERROR, error.code)
+                awaitComplete()
+            }
+    }
+
+    @Test
     fun `duplicate transport attempt of one logical turn reuses its request id`() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(sseResponse("event: done\ndata: {\"input_tokens\":1,\"output_tokens\":0}\n\n"))

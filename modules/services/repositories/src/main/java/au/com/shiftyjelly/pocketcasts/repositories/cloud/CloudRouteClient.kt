@@ -4,7 +4,9 @@ import androidx.annotation.VisibleForTesting
 import java.io.IOException
 import java.io.InputStreamReader
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.ProducerScope
 import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -49,6 +51,29 @@ class CloudRouteClient(
         get() = okHttpClient.readTimeoutMillis / 1000L
 
     fun route(turn: CloudRouteTurn): Flow<CloudRouteEvent> = channelFlow {
+        try {
+            routeInto(turn)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Exception) {
+            // Nothing before or around the stream may escape as a raw throw:
+            // this flow is collected from `serviceScope.launch`, whose
+            // uncaught exceptions reach the default handler. A malformed
+            // configured URL or a failing credential provider surfaces as an
+            // error event instead of taking the process down.
+            Timber.w(error, "Cloud route turn failed before the stream")
+            send(
+                CloudRouteEvent.Error(
+                    code = CloudRouteErrorCodes.INTERNAL_ERROR,
+                    message = "Cloud request failed.",
+                ),
+            )
+        }
+    }
+
+    private suspend fun ProducerScope<CloudRouteEvent>.routeInto(
+        turn: CloudRouteTurn,
+    ) {
         // Fail closed: no token means no request is attempted.
         val token = tokenProvider.currentToken()
         if (token.isNullOrBlank()) {
@@ -58,7 +83,7 @@ class CloudRouteClient(
                     message = "Sign in to use cloud responses.",
                 ),
             )
-            return@channelFlow
+            return
         }
         val bodyJson = CloudRouteJson.requestBodyAdapter.toJson(
             CloudRouteRequestBody(

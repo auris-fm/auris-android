@@ -253,7 +253,11 @@ class CloudRouteSink internal constructor(
                         // template for it if one exists, and fall back to the
                         // error earcon when it doesn't — an internal diagnostic
                         // is a sound, not a foreign sentence.
-                        val spoken = event.message.ifEmpty {
+                        // ifBlank, not ifEmpty: a whitespace-only server message
+                        // would otherwise be "present" and get spoken as
+                        // silence instead of falling through to the localized
+                        // template or the earcon.
+                        val spoken = event.message.ifBlank {
                             localizedTemplate(KEY_CLOUD_ERROR_PREFIX + event.code)
                         }
                         outcome = if (spoken.isEmpty()) {

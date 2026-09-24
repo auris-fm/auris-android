@@ -864,6 +864,19 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a whitespace-only server message is treated as absent`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Error(code = "connection_lost", message = "   ")),
+        )
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // Whitespace is not a message: it must resolve the localized template
+        // rather than being spoken as silence.
+        assertEquals(VoiceResponse.Spoken("Connection lost. Please try again."), response)
+    }
+
+    @Test
     fun `a client code without a template falls back to the error earcon`() = runTest {
         val deps = TestDeps(
             events = flowOf(CloudRouteEvent.Error(code = "invalid_response", message = "")),

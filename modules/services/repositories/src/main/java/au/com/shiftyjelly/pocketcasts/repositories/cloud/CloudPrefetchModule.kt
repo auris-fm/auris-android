@@ -29,11 +29,10 @@ internal abstract class CloudPrefetchModule {
         /**
          * The credential every cloud call presents.
          *
-         * Config-gated so merging this changes nothing today: while cloud
-         * routing has no configured base URL the static identity token is used
-         * exactly as before. Once the environment values are in place the
-         * Auris-issued token provider takes over, resolving the base URL per
-         * call so a repointed environment is picked up.
+         * Config-gated *per call*: with no configured cutover the static
+         * identity token is used exactly as before, and the moment an Auris
+         * environment is configured the Auris-issued token takes over — no
+         * restart, and no legacy bearer reaching the edge.
          */
         @Provides
         @Singleton
@@ -41,15 +40,16 @@ internal abstract class CloudPrefetchModule {
             cloudConfig: CloudConfig,
             staticIdentity: CloudStaticIdentityTokenProvider,
             credentialProvider: AurisAccountCredentialProviding,
-        ): CloudTokenProviding {
-            if (cloudConfig.baseUrl().isBlank()) return staticIdentity
-            return AurisTokenProvider(
+        ): CloudTokenProviding = RoutingCloudTokenProviding(
+            isAurisActive = { cloudConfig.baseUrl().isNotBlank() },
+            auris = AurisTokenProvider(
                 clientProvider = {
-                    cloudConfig.baseUrl().takeIf { it.isNotBlank() }?.let { AurisAuthClient(it) }
+                    cloudConfig.baseUrl().takeIf { it.isNotBlank() }?.let(::AurisAuthClient)
                 },
                 credentialProvider = credentialProvider,
-            )
-        }
+            ),
+            legacy = staticIdentity,
+        )
 
         @Provides
         @Singleton

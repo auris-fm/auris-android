@@ -19,15 +19,18 @@ import timber.log.Timber
  * from the credential), anything else is inconclusive and must fail closed.
  */
 class AurisAuthClient(
-    private val baseUrl: String,
+    baseUrl: String,
     private val okHttpClient: OkHttpClient = SHARED,
 ) {
+    /** The environment this client talks to; a token is only valid for it. */
+    val origin: String = baseUrl.trimEnd('/')
+
     suspend fun exchange(credential: String, device: AurisDeviceInfo? = null): AurisAuthResult = post(AuthPaths.TOKEN, CloudRouteJson.aurisTokenRequestAdapter.toJson(AurisTokenRequest(credential, device)))
 
     suspend fun refresh(refreshToken: String): AurisAuthResult = post(AuthPaths.REFRESH, CloudRouteJson.aurisRefreshRequestAdapter.toJson(AurisRefreshRequest(refreshToken)))
 
     private suspend fun post(path: String, body: String): AurisAuthResult = withContext(Dispatchers.IO) {
-        val base = baseUrl.trimEnd('/')
+        val base = origin
         if (base.isBlank()) return@withContext AurisAuthResult.Unavailable
         val request = Request.Builder()
             .url(base + path)

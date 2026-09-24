@@ -629,6 +629,8 @@ class CloudRouteSinkTest {
         assertEquals(VoiceResponse.Spoken("I can't reach the podcast evidence right now."), response)
         assertTrue(deps.playback.calls.none { it.startsWith("seekTo") })
         assertTrue(renderer.rendered.isEmpty())
+        // Unavailable evidence is a rendered state too, not only spoken.
+        assertEquals(1, renderer.unavailableCount)
     }
 
     @Test

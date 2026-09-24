@@ -35,6 +35,25 @@ class CloudRouteLimitsTest {
     }
 
     @Test
+    fun `the serialized conversation fits the budget, not just its text`() {
+        // Roles and JSON framing are part of what the bound is stated against.
+        val fitted = CloudRouteLimits.clampConversation(
+            listOf(
+                entry("a".repeat(2700), role = CloudRouteConversationEntry.ROLE_ASSISTANT),
+                entry("b".repeat(2700), role = CloudRouteConversationEntry.ROLE_USER),
+                entry("c".repeat(2700), role = CloudRouteConversationEntry.ROLE_ASSISTANT),
+            ),
+        )
+        val serialized = fitted.joinToString(prefix = "[", postfix = "]") {
+            "{\"role\":\"${it.role}\",\"text\":\"${it.text}\"}"
+        }
+        assertTrue(
+            "serialized ${serialized.toByteArray(Charsets.UTF_8).size} must fit",
+            serialized.toByteArray(Charsets.UTF_8).size <= CloudRouteLimits.MAX_CONVERSATION_BYTES,
+        )
+    }
+
+    @Test
     fun `truncates a single oversized entry without splitting a character`() {
         val oversized = "é".repeat(CloudRouteLimits.MAX_CONVERSATION_BYTES)
         val clamped = CloudRouteLimits.clampConversation(listOf(entry(oversized)))

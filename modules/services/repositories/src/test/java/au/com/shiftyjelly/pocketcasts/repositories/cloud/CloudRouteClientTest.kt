@@ -232,6 +232,37 @@ class CloudRouteClientTest {
     }
 
     @Test
+    fun `unparseable result payload is skipped so the turn survives`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                sseResponse(
+                    """
+                    event: result
+                    data: {"kind":"episode_results","scope":["not","a","string"],"items":[]}
+
+                    event: token
+                    data: {"text":"Still answered."}
+
+                    event: done
+                    data: {"input_tokens":1,"output_tokens":1}
+                    """.trimIndent(),
+                ),
+            )
+            server.start()
+
+            // A result this client cannot read must not abort a turn it never
+            // asked for (the event reaches non-advertising clients too).
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
+                .route(turn("hello"))
+                .test {
+                    assertEquals(CloudRouteEvent.Token("Still answered."), awaitItem())
+                    assertEquals(CloudRouteEvent.Done(1, 1), awaitItem())
+                    awaitComplete()
+                }
+        }
+    }
+
+    @Test
     fun `malformed payload emits invalid_response not connection_lost`() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(

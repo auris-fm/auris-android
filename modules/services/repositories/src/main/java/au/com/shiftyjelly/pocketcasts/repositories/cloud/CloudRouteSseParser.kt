@@ -109,9 +109,17 @@ internal class CloudRouteSseParser {
             }
 
             "result" -> {
-                val payload = CloudRouteJson.resultAdapter.fromJson(data)
-                    ?: throw IOException("Invalid result payload")
-                CloudRouteEvent.Result(payload)
+                // Capability-negotiated event: a payload shape this client
+                // does not understand (a server-side addition to the result
+                // model) must not abort a turn for clients that never asked
+                // for the capability — skip it like an unknown event.
+                val payload = runCatching { CloudRouteJson.resultAdapter.fromJson(data) }.getOrNull()
+                if (payload == null) {
+                    Timber.w("Skipping unparseable result payload (len=%d)", data.length)
+                    null
+                } else {
+                    CloudRouteEvent.Result(payload)
+                }
             }
 
             else -> {

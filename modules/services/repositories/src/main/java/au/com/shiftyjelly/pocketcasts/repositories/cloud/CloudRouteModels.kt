@@ -70,6 +70,9 @@ object CloudRouteLimits {
     const val MAX_CONVERSATION_ENTRIES = 4
     const val MAX_CONVERSATION_BYTES = 8 * 1024
 
+    /** `{"role":"…","text":"…"}` plus separators — measured, not guessed. */
+    private const val JSON_ENTRY_FRAMING_BYTES = 24
+
     /**
      * Clamps recent conversation to the spec bounds: keep the newest entries
      * (at most four), then drop/truncate so the UTF-8 total is within 8 KiB.
@@ -79,25 +82,36 @@ object CloudRouteLimits {
         val newest = entries.takeLast(MAX_CONVERSATION_ENTRIES)
         // Walk from newest to oldest, keeping whole entries until the byte
         // budget is exhausted; a single oversized entry is truncated.
+        //
+        // Accounting covers the whole entry — role, text and the JSON framing
+        // the bound is stated against ("8 KiB UTF-8 total") — not just the
+        // text, so the serialized conversation cannot exceed the budget.
         val kept = ArrayDeque<CloudRouteConversationEntry>()
         var bytes = 0
         for (entry in newest.asReversed()) {
-            val entryBytes = entry.text.toByteArray(Charsets.UTF_8).size
+            val overhead = entryFramingBytes(entry)
+            val textBytes = entry.text.toByteArray(Charsets.UTF_8).size
             val remaining = MAX_CONVERSATION_BYTES - bytes
-            if (remaining <= 0) break
-            if (entryBytes <= remaining) {
+            if (remaining <= overhead) break
+            if (textBytes + overhead <= remaining) {
                 kept.addFirst(entry)
-                bytes += entryBytes
+                bytes += textBytes + overhead
             } else {
-                val truncated = entry.text.truncateToUtf8Bytes(remaining)
+                // Truncate the text to what fits once framing is accounted for.
+                val truncated = entry.text.truncateToUtf8Bytes(remaining - overhead)
                 if (truncated.isNotEmpty()) {
-                    kept.addFirst(entry.copy(text = truncated))
+                    val trimmed = entry.copy(text = truncated)
+                    kept.addFirst(trimmed)
+                    bytes += truncated.toByteArray(Charsets.UTF_8).size + entryFramingBytes(trimmed)
                 }
                 break
             }
         }
         return kept.toList()
     }
+
+    /** Bytes an entry adds beyond its text: role plus JSON key/quoting overhead. */
+    private fun entryFramingBytes(entry: CloudRouteConversationEntry): Int = entry.role.toByteArray(Charsets.UTF_8).size + JSON_ENTRY_FRAMING_BYTES
 
     private fun String.truncateToUtf8Bytes(maxBytes: Int): String {
         val bytes = toByteArray(Charsets.UTF_8)

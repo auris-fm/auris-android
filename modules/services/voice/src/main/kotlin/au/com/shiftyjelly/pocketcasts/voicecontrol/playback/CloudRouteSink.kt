@@ -61,8 +61,16 @@ class CloudRouteSink internal constructor(
         conversationMemory = CloudConversationMemory(),
     )
 
-    private var preQuotePositionMs: Long? = null
-    private var didAutoPause = false
+    /**
+     * Per-turn audio bookkeeping. Deliberately NOT instance state: this sink
+     * is a singleton and a superseded turn unwinds on another thread, so
+     * shared flags would let turn A's restore resume playback for turn B
+     * (A resumes and clears the flag, then B streams over playing audio).
+     */
+    private class TurnState {
+        var preQuotePositionMs: Long? = null
+        var didAutoPause = false
+    }
 
     /** The in-flight turn, cancelled when a newer turn supersedes it. */
     private val activeTurnLock = Any()
@@ -110,10 +118,11 @@ class CloudRouteSink internal constructor(
             capabilities = advertisedCapabilities(),
             routeHint = hint,
         )
+        val turnState = TurnState()
         val events = openRoute(turn)
 
         playbackSink.pause()
-        didAutoPause = true
+        turnState.didAutoPause = true
 
         // Flow.collect's action is crossinline — cannot return@routeToCloud from it.
         var outcome: VoiceResponse? = null
@@ -121,7 +130,8 @@ class CloudRouteSink internal constructor(
             events.collect { event ->
                 if (outcome != null) return@collect
                 when (event) {
-                    is CloudRouteEvent.Action -> executeAction(event.tool, event.action, event.params)
+                    is CloudRouteEvent.Action ->
+                        executeAction(event.tool, event.action, event.params, turnState)
 
                     is CloudRouteEvent.Token -> tokenBuffer += event.text
 
@@ -131,7 +141,7 @@ class CloudRouteSink internal constructor(
                             inputTokens = event.inputTokens,
                             outputTokens = event.outputTokens,
                         )
-                        restoreTransientAudioState()
+                        restoreTransientAudioState(turnState)
                         if (tokenBuffer.isNotEmpty()) {
                             conversationMemory.record(request, tokenBuffer)
                         }
@@ -160,7 +170,15 @@ class CloudRouteSink internal constructor(
 
                     is CloudRouteEvent.Error -> {
                         tokenBuffer = ""
-                        restoreTransientAudioState()
+                        restoreTransientAudioState(turnState)
+                        // Genuinely unavailable evidence is a state the results
+                        // renderer owns whenever one is present (three states,
+                        // not two); the spoken message still goes out below.
+                        if (searchResultsRenderer != null &&
+                            event.code == ERROR_RETRIEVAL_UNAVAILABLE
+                        ) {
+                            searchResultsRenderer.renderUnavailable()
+                        }
                         analytics.recordTurn(outcome = "error")
                         outcome = if (event.message.isBlank()) {
                             VoiceResponse.Earcon(EarconId.ERROR)
@@ -175,7 +193,7 @@ class CloudRouteSink internal constructor(
             // unexpected throws — must not leave playback paused silently.
             // NonCancellable: the resume path itself suspends (play-queue
             // loads), and on a cancelled turn it must still run to completion.
-            withContext(NonCancellable) { restoreTransientAudioState() }
+            withContext(NonCancellable) { restoreTransientAudioState(turnState) }
         }
         return outcome ?: VoiceResponse.Silent
     }
@@ -209,53 +227,58 @@ class CloudRouteSink internal constructor(
         )
     }
 
-    private suspend fun restoreTransientAudioState() {
-        if (didAutoPause) {
+    private suspend fun restoreTransientAudioState(turnState: TurnState) {
+        if (turnState.didAutoPause) {
             playbackSink.resume()
-            didAutoPause = false
+            turnState.didAutoPause = false
         }
     }
 
-    private suspend fun executeAction(tool: String, action: String, params: Map<String, Any?>) {
+    private suspend fun executeAction(
+        tool: String,
+        action: String,
+        params: Map<String, Any?>,
+        turnState: TurnState,
+    ) {
         if (tool != "playback") return
 
         when (action) {
             "seek_to" -> {
                 val referenceMs = params.referencePositionMs() ?: return
-                capturePreActionPosition(referenceMs)
+                capturePreActionPosition(referenceMs, turnState)
                 seekToReference(referenceMs)
             }
 
             "play_quote" -> {
                 val referenceMs = params.referencePositionMs() ?: return
-                capturePreActionPosition(referenceMs)
+                capturePreActionPosition(referenceMs, turnState)
                 seekToReference(referenceMs)
                 playbackSink.resume()
-                didAutoPause = false
+                turnState.didAutoPause = false
             }
 
             "stop_quote" -> {
-                val restoreMs = preQuotePositionMs ?: return
+                val restoreMs = turnState.preQuotePositionMs ?: return
                 playbackSink.seekTo(restoreMs.toInt())
             }
 
             "pause" -> {
                 playbackSink.pause()
-                didAutoPause = false
+                turnState.didAutoPause = false
             }
 
             "resume" -> {
                 playbackSink.resume()
-                didAutoPause = false
+                turnState.didAutoPause = false
             }
         }
     }
 
-    private fun capturePreActionPosition(referenceMs: Long) {
+    private fun capturePreActionPosition(referenceMs: Long, turnState: TurnState) {
         val previousPlaybackMs = playbackContextProvider.current().clientPositionMs
         // preQuotePositionMs stays on the playback timeline: stop_quote seeks
         // the local player back to it.
-        preQuotePositionMs = previousPlaybackMs
+        turnState.preQuotePositionMs = previousPlaybackMs
         // previous_reference_position_ms is a reference-timeline value on the
         // wire — convert from the playback timeline (ad/intro offset). When no
         // mapping exists yet, omit the field rather than send a wrong-timeline
@@ -286,5 +309,8 @@ class CloudRouteSink internal constructor(
 
     companion object {
         private const val COMING_SOON_MESSAGE = "Cloud processing is coming soon"
+
+        /** Mirrors the server's error code for genuinely unavailable evidence. */
+        private const val ERROR_RETRIEVAL_UNAVAILABLE = "retrieval_unavailable"
     }
 }

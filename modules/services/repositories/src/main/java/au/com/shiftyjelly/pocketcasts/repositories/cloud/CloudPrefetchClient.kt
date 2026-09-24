@@ -2,7 +2,6 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
-import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -26,16 +25,24 @@ interface CloudPrefetchHinter {
  * failed prefetch never consumes a conversational turn.
  */
 class CloudPrefetchClient(
-    private val baseUrl: String,
+    /** Resolved per call: the cloud base URL can be repointed at runtime. */
+    private val baseUrlProvider: () -> String,
     private val tokenProvider: CloudTokenProviding,
     private val okHttpClient: OkHttpClient = sharedClient(),
 ) : CloudPrefetchHinter {
-    /** Convenience for today's static identity (tests and legacy call sites). */
+    /** Convenience for tests and fixed-base call sites. */
+    constructor(
+        baseUrl: String,
+        tokenProvider: CloudTokenProviding,
+        okHttpClient: OkHttpClient = sharedClient(),
+    ) : this({ baseUrl }, tokenProvider, okHttpClient)
+
+    /** Convenience for today's static identity. */
     constructor(
         baseUrl: String,
         userId: String,
         okHttpClient: OkHttpClient = sharedClient(),
-    ) : this(baseUrl, CloudRouteClient.CloudFixedTokenProvider(userId), okHttpClient)
+    ) : this({ baseUrl }, CloudRouteClient.CloudFixedTokenProvider(userId), okHttpClient)
 
     /** Result of a best-effort prefetch hint; informational only. */
     enum class Outcome { ACCEPTED, SKIPPED, NOT_SENT }
@@ -46,7 +53,7 @@ class CloudPrefetchClient(
      * configuration/identity) or the attempt failed. Never throws.
      */
     override suspend fun prefetch(episodeId: String, podcastId: String?): Outcome = withContext(Dispatchers.IO) {
-        val base = baseUrl.trimEnd('/')
+        val base = baseUrlProvider().trimEnd('/')
         if (base.isBlank() || episodeId.isBlank()) return@withContext Outcome.NOT_SENT
         val token = tokenProvider.currentToken()
         if (token.isNullOrBlank()) return@withContext Outcome.NOT_SENT
@@ -91,8 +98,11 @@ class CloudPrefetchClient(
                     }
                 }
             }
-        } catch (error: IOException) {
-            // Best effort: a failed hint must never surface to the user.
+        } catch (error: Exception) {
+            // Best effort, and the contract says this never throws: anything
+            // out of the request path (malformed configured URL, call
+            // machinery, transport) is swallowed. This runs on an app-scope
+            // coroutine whose uncaught exceptions would crash the process.
             Timber.w(error, "CloudPrefetch: hint failed")
             Outcome.NOT_SENT
         }

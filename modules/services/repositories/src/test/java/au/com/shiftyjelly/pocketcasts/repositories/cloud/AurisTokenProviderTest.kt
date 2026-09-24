@@ -155,6 +155,42 @@ class AurisTokenProviderTest {
     }
 
     @Test
+    fun `a token minted for one environment is not replayed to another`() = runTest {
+        MockWebServer().use { first ->
+            MockWebServer().use { second ->
+                first.dispatcher = object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse = MockResponse()
+                        .setResponseCode(200)
+                        .setBody(tokensResponse("access-first"))
+                }
+                second.dispatcher = object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse = MockResponse()
+                        .setResponseCode(200)
+                        .setBody(tokensResponse("access-second"))
+                }
+                first.start()
+                second.start()
+
+                // The environment the app points at can change under us (a
+                // repointed gateway). The client is resolved per call.
+                var origin = first.url("/").toString().trimEnd('/')
+                val provider = AurisTokenProvider(
+                    clientProvider = { AurisAuthClient(origin) },
+                    credentialProvider = FakeCredential("pc-session"),
+                )
+
+                assertEquals("access-first", provider.currentToken())
+
+                // Same account, different environment: the cached token was
+                // issued by the first origin and must not be sent to the second.
+                origin = second.url("/").toString().trimEnd('/')
+                assertEquals("access-second", provider.currentToken())
+                assertEquals(1, second.requestCount)
+            }
+        }
+    }
+
+    @Test
     fun `a logout stops the cached token being served`() = runTest {
         MockWebServer().use { server ->
             server.dispatcher = object : Dispatcher() {

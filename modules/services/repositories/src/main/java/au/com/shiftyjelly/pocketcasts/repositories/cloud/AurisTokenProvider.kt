@@ -98,8 +98,20 @@ class AurisTokenProvider(
         }
     }
 
-    /** Digest of the credential we would present now; null when there is none. */
-    private suspend fun currentIdentity(): String? = credentialProvider.credential()?.takeIf { it.isNotBlank() }?.let(::credentialDigest)
+    /**
+     * What a usable token is bound to: the environment it was issued for, and
+     * the account it was issued to. Either changing invalidates the cache — a
+     * token minted by one environment must not be replayed to another, and a
+     * token minted for one account must not be served to the next.
+     *
+     * Null when there is no configured environment or no credential, so both
+     * failure modes collapse into "fail closed".
+     */
+    private suspend fun currentIdentity(): String? {
+        val origin = clientProvider()?.origin?.takeIf { it.isNotBlank() } ?: return null
+        val credential = credentialProvider.credential()?.takeIf { it.isNotBlank() } ?: return null
+        return origin + IDENTITY_SEPARATOR + credentialDigest(credential)
+    }
 
     /**
      * Get a token for [identity]: rotate the refresh token we hold for it, and
@@ -168,6 +180,9 @@ class AurisTokenProvider(
 
         /** Refresh slightly before expiry so an in-flight request never races it. */
         const val EXPIRY_SKEW_MS = 30_000L
+
+        /** Cannot occur in an origin or a hex digest, so the pair is unambiguous. */
+        const val IDENTITY_SEPARATOR = "\u0000"
     }
 }
 

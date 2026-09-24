@@ -11,22 +11,33 @@ import org.junit.Test
 class CloudRouteSseParserTest {
 
     @Test
-    fun `malformed payload failure is content-free`() {
+    fun `every malformed payload failure is content-free`() {
         val secret = "user_secret_marker_1234"
-        val body = "event: token\ndata: {\"text\": $secret-not-json}\n\n"
+        // Different failure shapes: Moshi syntax errors are IOException
+        // subclasses, shape mismatches are RuntimeExceptions, and one is a
+        // valid document with trailing content.
+        val payloads = listOf(
+            "{\"text\": $secret-not-json}",
+            "{\"text\": [$secret]}",
+            "{}",
+            "{\"text\":\"ok\"} $secret",
+        )
 
-        try {
-            CloudRouteSseParser().parse(BufferedReader(StringReader(body))) { }
-            fail("expected the malformed payload to fail the parse")
-        } catch (error: Exception) {
-            assertFalse(
-                "exception message must not echo payload content",
-                error.message.orEmpty().contains(secret),
-            )
-            assertTrue(
-                "cause must not carry payload-derived text either",
-                error.cause?.message.orEmpty().let { !it.contains(secret) },
-            )
+        payloads.forEach { payload ->
+            val body = "event: token\ndata: $payload\n\n"
+            try {
+                CloudRouteSseParser().parse(BufferedReader(StringReader(body))) { }
+                fail("expected failure for payload: $payload")
+            } catch (error: Exception) {
+                assertFalse(
+                    "message must not echo payload content ($payload)",
+                    error.message.orEmpty().contains(secret),
+                )
+                assertFalse(
+                    "cause must not echo payload content ($payload)",
+                    error.cause?.message.orEmpty().contains(secret),
+                )
+            }
         }
     }
 }

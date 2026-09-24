@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import java.io.BufferedReader
 import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import timber.log.Timber
 
 internal data class CloudRouteSseParseResult(
@@ -66,12 +67,14 @@ internal class CloudRouteSseParser {
     ) {
         try {
             dispatch(eventName, dataLines)?.let(onEvent)
-        } catch (error: IOException) {
-            throw error
+        } catch (cancellation: CancellationException) {
+            throw cancellation
         } catch (error: Exception) {
-            // Content-free: the underlying Moshi/parse message is derived from
-            // the server payload and must not reach logs (in the message or as
-            // a cause, whose message Timber would print too).
+            // Every parse failure is normalised, including IOException
+            // subclasses: Moshi's syntax errors are IOExceptions whose message
+            // can echo payload text, so rethrowing them unchanged would defeat
+            // the content-free guarantee. No cause is attached either — Timber
+            // prints cause messages.
             throw IOException("Malformed SSE payload")
         }
     }

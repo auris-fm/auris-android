@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteCapabilities
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteConversationEntry
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteErrorCodes
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteLimits
@@ -937,10 +938,13 @@ class CloudRouteSinkTest {
         val renderer: CloudSearchResultsRenderer? = null,
         val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
         private val locale: java.util.Locale = java.util.Locale.ENGLISH,
+        // Keys built from the same constant the sink uses, so renaming the
+        // wire code breaks these tests rather than silently detaching the
+        // template from it.
         private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(
             mapOf(
                 "general.cloud_coming_soon" to "Cloud processing is coming soon",
-                "cloud_error_connection_lost" to "Connection lost. Please try again.",
+                "cloud_error_" + CloudRouteErrorCodes.CONNECTION_LOST to "Connection lost. Please try again.",
             ),
         ),
         routeInvoker: ((CloudRouteTurn) -> kotlinx.coroutines.flow.Flow<CloudRouteEvent>)? = null,

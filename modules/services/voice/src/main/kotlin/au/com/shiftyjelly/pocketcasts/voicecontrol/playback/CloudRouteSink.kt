@@ -247,8 +247,12 @@ class CloudRouteSink internal constructor(
                             CloudRouteErrorCodes.normalizeForLog(event.code),
                         )
                         analytics.recordTurn(outcome = "error")
-                        // A server-supplied message passes through (localising it
-                        // is the server's job). When the code came from this
+                        // A server-supplied message passes through as-is. Note
+                        // this is not "the server's job" in any actionable
+                        // sense yet: the turn carries no language field, so the
+                        // server cannot choose a language — server-side text
+                        // localisation is a recorded limitation, not a contract.
+                        // When the code came from this
                         // client it carries no prose: resolve a localized
                         // template for it if one exists, and fall back to the
                         // error earcon when it doesn't — an internal diagnostic
@@ -323,11 +327,15 @@ class CloudRouteSink internal constructor(
     /**
      * Speaks a template only when it is actually in the user's language.
      *
-     * The templates live in `res/values` (the source locale), and Android falls
-     * back to those for every locale — so resolving one under a non-English
-     * locale would speak English. Until translations exist in `values-<lang>`,
-     * only the source locale speaks; every other locale gets the error earcon
-     * rather than a foreign sentence.
+     * The templates live in `res/values` (the source locale) and Android falls
+     * back to those for every locale, so resolving one under a non-English
+     * locale would speak English. This module ships no language-qualified
+     * resource directory at all (translations live in the localization module,
+     * and nothing below is wired into it), so the guard is a durable behaviour
+     * rather than a temporary shim: only the source locale speaks, and every
+     * other locale gets the error earcon instead of a foreign sentence. If a
+     * `values-<lang>` set is ever added here, this condition is what has to
+     * change to per-locale presence.
      */
     private fun localizedTemplate(key: String): String {
         if (!currentLocale().language.equals(Locale.ENGLISH.language, ignoreCase = true)) return ""

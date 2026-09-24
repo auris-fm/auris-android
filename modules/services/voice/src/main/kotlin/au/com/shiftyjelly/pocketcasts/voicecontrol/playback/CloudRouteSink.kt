@@ -201,6 +201,9 @@ class CloudRouteSink internal constructor(
                             inputTokens = event.inputTokens,
                             outputTokens = event.outputTokens,
                         )
+                        // Not redundant with the memory's own blank check: a
+                        // blank answer is not an exchange, and record() would
+                        // still add the user half of one.
                         if (tokenBuffer.isNotBlank()) {
                             conversationMemory.record(request, tokenBuffer)
                         }

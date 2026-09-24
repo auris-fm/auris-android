@@ -920,6 +920,9 @@ class CloudRouteSinkTest {
         // And it is not worth remembering either: what follows carries no
         // conversation context, which is only true if nothing was recorded.
         sink.routeToCloud("a follow-up", VoiceIntent.CloudTier.Premium, playbackContext)
+        // The premise first: null is also the expected value for turn one, so
+        // without this the next line stays green even if the turn never routed.
+        assertEquals("a follow-up", deps.routeTurns.last().request)
         assertEquals(null, deps.routeTurns.last().context.recentConversation)
     }
 

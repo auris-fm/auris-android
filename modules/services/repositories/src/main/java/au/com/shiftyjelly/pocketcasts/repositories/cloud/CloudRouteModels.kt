@@ -71,41 +71,62 @@ object CloudRouteLimits {
     const val MAX_CONVERSATION_BYTES = 8 * 1024
 
     /**
-     * Clamps recent conversation to the spec bounds: keep the newest entries
-     * (at most four), then drop/truncate so the UTF-8 total is within 8 KiB.
+     * Clamps recent conversation to the spec bound ("at most 8 KiB UTF-8
+     * total"): keep the newest entries (at most four), then drop/truncate
+     * until the *serialized* array fits.
+     *
+     * Measured, not estimated: the marshalled array is measured, so roles,
+     * JSON framing and escaping (each newline or quote in an assistant answer
+     * costs a byte when encoded) are inside the accounting.
      */
     fun clampConversation(entries: List<CloudRouteConversationEntry>): List<CloudRouteConversationEntry> {
         if (entries.isEmpty()) return emptyList()
         val newest = entries.takeLast(MAX_CONVERSATION_ENTRIES)
-        // Walk from newest to oldest, keeping whole entries until the byte
-        // budget is exhausted; a single oversized entry is truncated.
         val kept = ArrayDeque<CloudRouteConversationEntry>()
-        var bytes = 0
         for (entry in newest.asReversed()) {
-            val entryBytes = entry.text.toByteArray(Charsets.UTF_8).size
-            val remaining = MAX_CONVERSATION_BYTES - bytes
-            if (remaining <= 0) break
-            if (entryBytes <= remaining) {
+            if (serializedBytes(listOf(entry) + kept) <= MAX_CONVERSATION_BYTES) {
                 kept.addFirst(entry)
-                bytes += entryBytes
-            } else {
-                val truncated = entry.text.truncateToUtf8Bytes(remaining)
-                if (truncated.isNotEmpty()) {
-                    kept.addFirst(entry.copy(text = truncated))
-                }
-                break
+                continue
             }
+            largestFittingPrefix(entry, kept)?.let { kept.addFirst(it) }
+            break
         }
         return kept.toList()
     }
 
-    private fun String.truncateToUtf8Bytes(maxBytes: Int): String {
-        val bytes = toByteArray(Charsets.UTF_8)
-        if (bytes.size <= maxBytes) return this
-        var end = maxBytes
-        // Do not split a multi-byte character.
-        while (end > 0 && (bytes[end].toInt() and 0xC0) == 0x80) end--
-        return String(bytes, 0, end, Charsets.UTF_8)
+    private fun serializedBytes(entries: List<CloudRouteConversationEntry>): Int = CloudRouteJson.conversationListAdapter.toJson(entries).toByteArray(Charsets.UTF_8).size
+
+    /**
+     * Largest prefix of [entry]'s text that keeps the serialized conversation
+     * (together with [kept]) inside the budget, or null when nothing fits.
+     */
+    private fun largestFittingPrefix(
+        entry: CloudRouteConversationEntry,
+        kept: List<CloudRouteConversationEntry>,
+    ): CloudRouteConversationEntry? {
+        if (serializedBytes(listOf(entry.copy(text = "")) + kept) > MAX_CONVERSATION_BYTES) return null
+        var low = 0
+        var high = entry.text.length
+        var best: CloudRouteConversationEntry? = null
+        while (low <= high) {
+            val mid = (low + high) / 2
+            val candidate = entry.copy(text = entry.text.safePrefix(mid))
+            if (serializedBytes(listOf(candidate) + kept) <= MAX_CONVERSATION_BYTES) {
+                best = candidate
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        return best?.takeIf { it.text.isNotEmpty() }
+    }
+
+    /** [length] characters without splitting a surrogate pair. */
+    private fun String.safePrefix(length: Int): String {
+        if (length >= this.length) return this
+        var end = length
+        if (end > 0 && Character.isHighSurrogate(this[end - 1])) end -= 1
+        return substring(0, end)
     }
 }
 

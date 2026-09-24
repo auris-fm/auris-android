@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteCapabilities
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteConversationEntry
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteErrorCodes
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteLimits
@@ -11,6 +12,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudSearchEvidenceItem
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudSearchResults
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
@@ -20,6 +22,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
@@ -29,6 +32,7 @@ import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 
+@kotlinx.coroutines.ExperimentalCoroutinesApi
 class CloudRouteSinkTest {
 
     private val playbackContext = PlaybackContext(
@@ -629,6 +633,8 @@ class CloudRouteSinkTest {
         assertEquals(VoiceResponse.Spoken("I can't reach the podcast evidence right now."), response)
         assertTrue(deps.playback.calls.none { it.startsWith("seekTo") })
         assertTrue(renderer.rendered.isEmpty())
+        // Unavailable evidence is a rendered state too, not only spoken.
+        assertEquals(1, renderer.unavailableCount)
     }
 
     @Test
@@ -637,7 +643,9 @@ class CloudRouteSinkTest {
         val deps = TestDeps(
             routeInvoker = { _ ->
                 if (token == null) {
-                    flowOf(CloudRouteEvent.Error("unauthorized", "Sign in to use cloud responses."))
+                    // Client-minted code, no prose: the sink localises it, and
+                    // `unauthorized` has no template by design, so it earcons.
+                    flowOf(CloudRouteEvent.Error("unauthorized", ""))
                 } else {
                     flowOf(CloudRouteEvent.Token("answer"), CloudRouteEvent.Done(1, 1))
                 }
@@ -656,8 +664,274 @@ class CloudRouteSinkTest {
         token = null
         val second = sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        assertEquals(VoiceResponse.Spoken("Sign in to use cloud responses."), second)
+        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), second)
         assertTrue(deps.playback.calls.none { it.startsWith("seekTo") })
+    }
+
+    @Test
+    fun `cancellation during the initial pause still restores audio`() = runTest(UnconfinedTestDispatcher()) {
+        val gate = CompletableDeferred<Unit>()
+        val deps = TestDeps(events = flowOf(CloudRouteEvent.Done(1, 1)))
+        deps.playback.pauseGate = gate
+        val sink = deps.sink()
+
+        // The player is already paused when cancellation lands mid-call: the
+        // restore must still run, or audio stays paused with no owner.
+        val turn = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.pauseStarted.await()
+        turn.cancel()
+        gate.complete(Unit)
+        turn.join()
+
+        assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
+    }
+
+    @Test
+    fun `a superseded turn's action cannot resume the player under the new turn`() = runTest(UnconfinedTestDispatcher()) {
+        val gate = CompletableDeferred<Unit>()
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "play_quote",
+                    params = mapOf("reference_position_ms" to 45_000_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        deps.playback.resumeGate = gate
+        val sink = deps.sink()
+
+        // Turn A: auto-pause, then its play_quote action resumes — suspending
+        // inside the player while A still owns it.
+        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.resumeStarted.await()
+
+        // B must not register/pause until A's action has finished with the player.
+        val second = launch { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext) }
+        gate.complete(Unit)
+        first.join()
+        second.join()
+
+        assertEquals(
+            listOf("pause", "resume", "pause", "resume"),
+            deps.playback.calls.filter { it == "pause" || it == "resume" },
+        )
+    }
+
+    @Test
+    fun `a successor failing after hand-off still restores the predecessor's pause`() = runTest(UnconfinedTestDispatcher()) {
+        val deps = TestDeps(
+            routeInvoker = { turn ->
+                when (turn.request) {
+                    // Predecessor: pauses, then stays in flight until superseded.
+                    "first" -> flow { awaitCancellation() }
+
+                    else -> error("successor failed during setup")
+                }
+            },
+        )
+        val sink = deps.sink()
+
+        val first = launch { runCatching { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) } }
+        deps.playback.pauseStarted.await()
+        val second = launch { runCatching { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext) } }
+        first.join()
+        second.join()
+
+        // The player was paused by the predecessor; ownership moved to the
+        // successor, whose setup failed before its own pause. The obligation
+        // travels with ownership, so the successor still restores it.
+        assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
+    }
+
+    @Test
+    fun `a setup failure with no predecessor leaves no stale ownership`() = runTest(UnconfinedTestDispatcher()) {
+        var fail = true
+        val deps = TestDeps(
+            routeInvoker = { _ ->
+                if (fail) error("route invoker failed during setup")
+                flowOf(CloudRouteEvent.Token("answer"), CloudRouteEvent.Done(1, 1))
+            },
+        )
+        val sink = deps.sink()
+
+        // Nothing was paused before the failure, so the only claim this test
+        // makes is about ownership: a later turn registers cleanly.
+        val first = launch { runCatching { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) } }
+        first.join()
+
+        fail = false
+        val second = sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(VoiceResponse.Spoken("answer"), second)
+        assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
+    }
+
+    @Test
+    fun `a newer turn cannot pause while an older turn's restore is suspended`() = runTest(UnconfinedTestDispatcher()) {
+        val deps = TestDeps(events = flowOf(CloudRouteEvent.Token("a"), CloudRouteEvent.Done(1, 1)))
+        val gate = CompletableDeferred<Unit>()
+        deps.playback.resumeGate = gate
+        val sink = deps.sink()
+
+        // Turn A runs to completion, entering its restore — which suspends
+        // inside resume() (play-queue load) while still owning the player.
+        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.resumeStarted.await()
+
+        // Turn B starts during that suspension: its registration and pause must
+        // wait for A's restore to finish, or B's answer streams over resumed audio.
+        val second = launch { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext) }
+        gate.complete(Unit)
+        first.join()
+        second.join()
+
+        assertEquals(
+            listOf("pause", "resume", "pause", "resume"),
+            deps.playback.calls.filter { it == "pause" || it == "resume" },
+        )
+    }
+
+    @Test
+    fun `a superseded turn never restores audio owned by the newer turn`() = runTest(UnconfinedTestDispatcher()) {
+        val firstStarted = CompletableDeferred<Unit>()
+        val firstCancelled = CompletableDeferred<Unit>()
+        val deps = TestDeps(
+            routeInvoker = { turn ->
+                if (turn.request == "first") {
+                    flow {
+                        firstStarted.complete(Unit)
+                        try {
+                            awaitCancellation()
+                        } catch (cancellation: CancellationException) {
+                            firstCancelled.complete(Unit)
+                            throw cancellation
+                        }
+                    }
+                } else {
+                    flowOf(CloudRouteEvent.Done(1, 1))
+                }
+            },
+        )
+        val sink = deps.sink()
+
+        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        firstStarted.await()
+        sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext)
+        firstCancelled.await()
+        first.join()
+
+        // Turn one paused; the successor paused and resumed once. The superseded
+        // turn must NOT resume — otherwise it resumes audio the newer turn
+        // paused, and the answer streams over playing audio.
+        assertEquals(listOf("pause", "pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
+    }
+
+    @Test
+    fun `a translated template is not spoken under a locale that has no translation`() = runTest {
+        // The English template is present as the default resource, and Android
+        // falls back to it for every locale — so the guard, not the resource
+        // lookup, is what stops English being spoken to a Korean user.
+        val deps = TestDeps(
+            locale = java.util.Locale.KOREAN,
+            events = flowOf(CloudRouteEvent.Error(code = "connection_lost", message = "")),
+        )
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
+    }
+
+    @Test
+    fun `the no-gateway message is an earcon where no translation exists`() = runTest {
+        val deps = TestDeps(baseUrl = "", locale = java.util.Locale.JAPANESE)
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
+    }
+
+    @Test
+    fun `a client code with a template is spoken in the localized wording`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Error(code = "connection_lost", message = "")),
+        )
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // Localized template, not the client's own prose and not the code.
+        assertEquals(VoiceResponse.Spoken("Connection lost. Please try again."), response)
+    }
+
+    @Test
+    fun `a whitespace-only server message is treated as absent`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Error(code = "connection_lost", message = "   ")),
+        )
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // Whitespace is not a message: it must resolve the localized template
+        // rather than being spoken as silence.
+        assertEquals(VoiceResponse.Spoken("Connection lost. Please try again."), response)
+    }
+
+    @Test
+    fun `a client code without a template falls back to the error earcon`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Error(code = "invalid_response", message = "")),
+        )
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // Internal diagnostics are a sound, never English prose to a
+        // non-English user.
+        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
+    }
+
+    @Test
+    fun `a server-supplied message still passes through untouched`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Error(code = "limit_exceeded", message = "You've used 10/10 free requests today.")),
+        )
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(VoiceResponse.Spoken("You've used 10/10 free requests today."), response)
+    }
+
+    @Test
+    fun `a whitespace-only template is not spoken`() = runTest {
+        val deps = TestDeps(
+            templateResolver = SpokenTemplateResolver(mapOf("cloud_error_connection_lost" to "   ")),
+            events = flowOf(CloudRouteEvent.Error(code = "connection_lost", message = "")),
+        )
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
+    }
+
+    @Test
+    fun `a throwing pause does not leave a stale obligation to resume`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(tool = "playback", action = "pause", params = emptyMap()),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // Call 1 is the turn's own auto-pause; call 2 is the explicit action.
+        deps.playback.throwOnPauseCall = 2
+        val sink = deps.sink()
+
+        runCatching { sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext) }
+
+        // The explicit pause cleared the obligation before suspending, so even
+        // though the call threw there is nothing to undo: the user asked for a
+        // pause and the turn must not resume over it. (The first "pause" is the
+        // turn's own auto-pause; the second is the action that threw.)
+        assertEquals(listOf("pause", "pause"), deps.playback.calls)
     }
 
     private class RecordingRenderer : CloudSearchResultsRenderer {
@@ -696,6 +970,16 @@ class CloudRouteSinkTest {
         private val events: kotlinx.coroutines.flow.Flow<CloudRouteEvent> = flowOf(CloudRouteEvent.Done(0, 0)),
         val renderer: CloudSearchResultsRenderer? = null,
         val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
+        private val locale: java.util.Locale = java.util.Locale.ENGLISH,
+        // Keys built from the same constant the sink uses, so renaming the
+        // wire code breaks these tests rather than silently detaching the
+        // template from it.
+        private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(
+            mapOf(
+                "general.cloud_coming_soon" to "Cloud processing is coming soon",
+                "cloud_error_" + CloudRouteErrorCodes.CONNECTION_LOST to "Connection lost. Please try again.",
+            ),
+        ),
         routeInvoker: ((CloudRouteTurn) -> kotlinx.coroutines.flow.Flow<CloudRouteEvent>)? = null,
     ) {
         val playback = FakePlaybackSink()
@@ -725,18 +1009,38 @@ class CloudRouteSinkTest {
             },
             searchResultsRenderer = renderer,
             conversationMemory = conversationMemory,
+            templateResolver = templateResolver,
+            currentLocale = { locale },
         )
     }
 
     private class FakePlaybackSink : VoicePlaybackSink {
         val calls = mutableListOf<String>()
 
+        /** When set, resume() suspends until released (models play-queue loads). */
+        var resumeGate: CompletableDeferred<Unit>? = null
+        val resumeStarted = CompletableDeferred<Unit>()
+
+        /** When set, pause() takes effect then suspends until released. */
+        var pauseGate: CompletableDeferred<Unit>? = null
+        val pauseStarted = CompletableDeferred<Unit>()
+
+        /** Throw on this pause call number (1-based); null = never. */
+        var throwOnPauseCall: Int? = null
+        private var pauseCalls = 0
+
         override suspend fun pause(): VoiceResponse {
             calls += "pause"
+            pauseCalls += 1
+            if (throwOnPauseCall == pauseCalls) error("pause failed")
+            pauseStarted.complete(Unit)
+            pauseGate?.await()
             return VoiceResponse.Silent
         }
 
         override suspend fun resume(): VoiceResponse {
+            resumeStarted.complete(Unit)
+            resumeGate?.await()
             calls += "resume"
             return VoiceResponse.Silent
         }

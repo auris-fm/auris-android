@@ -4,6 +4,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteCapabilities
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteClient
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteConversationEntry
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteErrorCodes
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteLimits
@@ -13,17 +14,23 @@ import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudIdentity
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
+import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import timber.log.Timber
 
 @Singleton
 class CloudRouteSink internal constructor(
@@ -38,6 +45,8 @@ class CloudRouteSink internal constructor(
     /** Non-null only when this client can render structured discovery results. */
     private val searchResultsRenderer: CloudSearchResultsRenderer? = null,
     private val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
+    private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(emptyMap()),
+    private val currentLocale: () -> Locale = { Locale.getDefault() },
 ) : VoiceCloudRouteSink {
 
     @Inject constructor(
@@ -48,6 +57,8 @@ class CloudRouteSink internal constructor(
         playbackContextProvider: PlaybackContextProvider,
         cloudPlaybackContextState: CloudPlaybackContextState,
         analytics: CloudRouteAnalytics,
+        templateResolver: SpokenTemplateResolver,
+        currentLocale: () -> Locale,
     ) : this(
         resolveBaseUrl = cloudConfig::baseUrl,
         resolveUserId = cloudIdentity::userId,
@@ -59,14 +70,43 @@ class CloudRouteSink internal constructor(
         routeInvoker = null,
         searchResultsRenderer = null,
         conversationMemory = CloudConversationMemory(),
+        templateResolver = templateResolver,
+        currentLocale = currentLocale,
     )
 
-    private var preQuotePositionMs: Long? = null
-    private var didAutoPause = false
+    /**
+     * Per-turn audio bookkeeping. Deliberately NOT instance state: this sink
+     * is a singleton and a superseded turn unwinds on another thread, so
+     * shared flags would let turn A's restore resume playback for turn B
+     * (A resumes and clears the flag, then B streams over playing audio).
+     */
+    private class TurnState {
+        var preQuotePositionMs: Long? = null
+    }
 
-    /** The in-flight turn, cancelled when a newer turn supersedes it. */
-    private val activeTurnLock = Any()
+    /**
+     * Turn ownership and player-state transitions, serialized by one mutex.
+     *
+     * A monitor lock is not enough: the restore *suspends* (resume loads the
+     * play queue), so checking ownership and then restoring outside the lock
+     * lets a newer turn register and pause during that suspension — the older
+     * turn then resumes the shared player under the newer turn.
+     */
+    private val turnMutex = Mutex()
+    private var activeTurnId: Long = 0
     private var activeTurn: Job? = null
+
+    /**
+     * True while the shared player is paused *because of a cloud turn*.
+     *
+     * Ownership-scoped rather than per-turn: when a turn is superseded the
+     * successor inherits the paused player, so the "we paused it" knowledge
+     * has to transfer with ownership — otherwise a successor that fails
+     * between registration and its own pause leaves audio paused with no
+     * owner (a handoff gap, not just a race).
+     */
+    private var playerAutoPaused = false
+    private val turnCounter = AtomicLong(0)
 
     override suspend fun routeToCloud(
         request: String,
@@ -88,40 +128,66 @@ class CloudRouteSink internal constructor(
         hint: CloudRouteHint?,
     ): VoiceResponse {
         if (resolveBaseUrl().isBlank()) {
-            return VoiceResponse.Spoken(COMING_SOON_MESSAGE)
+            val soon = localizedTemplate(KEY_CLOUD_COMING_SOON)
+            return if (soon.isBlank()) {
+                VoiceResponse.Earcon(EarconId.ERROR)
+            } else {
+                VoiceResponse.Spoken(soon)
+            }
         }
 
-        // A newer turn supersedes the previous one: cancel it before starting.
         val myJob = currentCoroutineContext()[Job]
-        synchronized(activeTurnLock) {
-            activeTurn?.takeIf { it !== myJob }?.cancel()
-            activeTurn = myJob
-        }
-
+        val myId = turnCounter.incrementAndGet()
+        val turnState = TurnState()
         var tokenBuffer = ""
-        val routeContext = buildRouteContext(context)
-        val turn = CloudRouteTurn(
-            request = request,
-            context = routeContext,
-            // Stable per logical turn; a transport retry reuses it, and the
-            // server rejects a repeat rather than re-executing (no auto-retry
-            // is attempted by this client).
-            requestId = UUID.randomUUID().toString(),
-            capabilities = advertisedCapabilities(),
-            routeHint = hint,
-        )
-        val events = openRoute(turn)
-
-        playbackSink.pause()
-        didAutoPause = true
-
-        // Flow.collect's action is crossinline — cannot return@routeToCloud from it.
         var outcome: VoiceResponse? = null
+
+        // Everything from registration onward sits inside the cleanup path: a
+        // throw or cancellation during setup (context build, route opening, the
+        // initial pause) must still release ownership and restore audio, or the
+        // successor could inherit a paused player with no owner.
         try {
+            // A newer turn supersedes the previous one. Registration and the
+            // initial pause share the turn mutex, so a predecessor's suspending
+            // restore cannot land between them.
+            val previous = turnMutex.withLock {
+                val previousTurn = activeTurn
+                activeTurn = myJob
+                activeTurnId = myId
+                previousTurn
+            }
+            if (previous != null && previous !== myJob) previous.cancel()
+
+            val routeContext = buildRouteContext(context)
+            val turn = CloudRouteTurn(
+                request = request,
+                context = routeContext,
+                // Stable per logical turn; a transport retry reuses it, and the
+                // server rejects a repeat rather than re-executing (no auto-retry
+                // is attempted by this client).
+                requestId = UUID.randomUUID().toString(),
+                capabilities = advertisedCapabilities(),
+                routeHint = hint,
+            )
+            val events = openRoute(turn)
+
+            turnMutex.withLock {
+                if (activeTurnId == myId) {
+                    // Mark intent *before* the suspending pause: the player can
+                    // already be paused when cancellation lands mid-call, and a
+                    // flag set afterwards would leave the finally thinking there
+                    // is nothing to restore — audio stuck paused.
+                    playerAutoPaused = true
+                    playbackSink.pause()
+                }
+            }
+
+            // Flow.collect's action is crossinline — cannot return@routeTurn from it.
             events.collect { event ->
                 if (outcome != null) return@collect
                 when (event) {
-                    is CloudRouteEvent.Action -> executeAction(event.tool, event.action, event.params)
+                    is CloudRouteEvent.Action ->
+                        executeAction(event.tool, event.action, event.params, turnState, myId)
 
                     is CloudRouteEvent.Token -> tokenBuffer += event.text
 
@@ -131,7 +197,6 @@ class CloudRouteSink internal constructor(
                             inputTokens = event.inputTokens,
                             outputTokens = event.outputTokens,
                         )
-                        restoreTransientAudioState()
                         if (tokenBuffer.isNotEmpty()) {
                             conversationMemory.record(request, tokenBuffer)
                         }
@@ -160,12 +225,49 @@ class CloudRouteSink internal constructor(
 
                     is CloudRouteEvent.Error -> {
                         tokenBuffer = ""
-                        restoreTransientAudioState()
+                        // Genuinely unavailable evidence is a state the results
+                        // renderer owns whenever it is present AND this turn had a
+                        // results surface (three states, not two).
+                        // Capability advertisement is client-scoped (a client
+                        // advertises only what it can render), so the renderer
+                        // check is the whole gate — see advertisedCapabilities().
+                        if (searchResultsRenderer != null &&
+                            event.code == CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE
+                        ) {
+                            searchResultsRenderer.renderUnavailable()
+                        }
+                        // Code only: the server's message can carry upstream
+                        // detail derived from the user's request or account,
+                        // and it is already spoken/shown where it belongs.
+                        // A server-signalled result state, not a client defect:
+                        // keep it visible without putting a normal turn outcome
+                        // at error level.
+                        Timber.w(
+                            "CloudRouteSink: turn error code=%s",
+                            CloudRouteErrorCodes.normalizeForLog(event.code),
+                        )
                         analytics.recordTurn(outcome = "error")
-                        outcome = if (event.message.isBlank()) {
+                        // A server-supplied message passes through as-is. Note
+                        // this is not "the server's job" in any actionable
+                        // sense yet: the turn carries no language field, so the
+                        // server cannot choose a language — server-side text
+                        // localisation is a recorded limitation, not a contract.
+                        // When the code came from this
+                        // client it carries no prose: resolve a localized
+                        // template for it if one exists, and fall back to the
+                        // error earcon when it doesn't — an internal diagnostic
+                        // is a sound, not a foreign sentence.
+                        // ifBlank, not ifEmpty: a whitespace-only server message
+                        // would otherwise be "present" and get spoken as
+                        // silence instead of falling through to the localized
+                        // template or the earcon.
+                        val spoken = event.message.ifBlank {
+                            localizedTemplate(KEY_CLOUD_ERROR_PREFIX + event.code)
+                        }
+                        outcome = if (spoken.isBlank()) {
                             VoiceResponse.Earcon(EarconId.ERROR)
                         } else {
-                            VoiceResponse.Spoken(event.message)
+                            VoiceResponse.Spoken(spoken)
                         }
                     }
                 }
@@ -173,9 +275,22 @@ class CloudRouteSink internal constructor(
         } finally {
             // Any exit path — normal return, upstream cancellation, timeouts,
             // unexpected throws — must not leave playback paused silently.
-            // NonCancellable: the resume path itself suspends (play-queue
-            // loads), and on a cancelled turn it must still run to completion.
-            withContext(NonCancellable) { restoreTransientAudioState() }
+            // NonCancellable: the resume path itself suspends (play-queue loads),
+            // and on a cancelled turn it must still run to completion.
+            //
+            // Ownership check and restore happen under one mutex, so no newer
+            // turn can register and pause while this restore is suspended in
+            // resume(); only the current turn touches audio state, and it clears
+            // its own registration as it goes.
+            withContext(NonCancellable) {
+                turnMutex.withLock {
+                    if (activeTurnId == myId) {
+                        restoreTransientAudioState()
+                        activeTurnId = 0
+                        activeTurn = null
+                    }
+                }
+            }
         }
         return outcome ?: VoiceResponse.Silent
     }
@@ -209,53 +324,89 @@ class CloudRouteSink internal constructor(
         )
     }
 
+    /**
+     * Speaks a template only when it is actually in the user's language.
+     *
+     * The templates live in `res/values` (the source locale) and Android falls
+     * back to those for every locale, so resolving one under a non-English
+     * locale would speak English. This module ships no language-qualified
+     * resource directory at all (translations live in the localization module,
+     * and nothing below is wired into it), so the guard is a durable behaviour
+     * rather than a temporary shim: only the source locale speaks, and every
+     * other locale gets the error earcon instead of a foreign sentence. If a
+     * `values-<lang>` set is ever added here, this condition is what has to
+     * change to per-locale presence.
+     */
+    private fun localizedTemplate(key: String): String {
+        if (!currentLocale().language.equals(Locale.ENGLISH.language, ignoreCase = true)) return ""
+        return templateResolver.resolve(key)
+    }
+
+    /** Owner-only: resume the player if this turn chain auto-paused it. */
     private suspend fun restoreTransientAudioState() {
-        if (didAutoPause) {
+        if (playerAutoPaused) {
             playbackSink.resume()
-            didAutoPause = false
+            playerAutoPaused = false
         }
     }
 
-    private suspend fun executeAction(tool: String, action: String, params: Map<String, Any?>) {
+    private suspend fun executeAction(
+        tool: String,
+        action: String,
+        params: Map<String, Any?>,
+        turnState: TurnState,
+        myId: Long,
+    ) {
         if (tool != "playback") return
 
-        when (action) {
-            "seek_to" -> {
-                val referenceMs = params.referencePositionMs() ?: return
-                capturePreActionPosition(referenceMs)
-                seekToReference(referenceMs)
-            }
+        // Player-state changes are serialized with ownership: a superseded
+        // turn must not seek/resume/pause the player its successor now owns.
+        turnMutex.withLock {
+            if (activeTurnId != myId) return@withLock
+            when (action) {
+                "seek_to" -> {
+                    val referenceMs = params.referencePositionMs() ?: return
+                    capturePreActionPosition(referenceMs, turnState)
+                    seekToReference(referenceMs)
+                }
 
-            "play_quote" -> {
-                val referenceMs = params.referencePositionMs() ?: return
-                capturePreActionPosition(referenceMs)
-                seekToReference(referenceMs)
-                playbackSink.resume()
-                didAutoPause = false
-            }
+                "play_quote" -> {
+                    val referenceMs = params.referencePositionMs() ?: return
+                    capturePreActionPosition(referenceMs, turnState)
+                    seekToReference(referenceMs)
+                    // Clear before the suspending call: if resume() throws, the
+                    // obligation must not survive to resume a player the user
+                    // deliberately left paused.
+                    playerAutoPaused = false
+                    playbackSink.resume()
+                }
 
-            "stop_quote" -> {
-                val restoreMs = preQuotePositionMs ?: return
-                playbackSink.seekTo(restoreMs.toInt())
-            }
+                "stop_quote" -> {
+                    val restoreMs = turnState.preQuotePositionMs ?: return
+                    playbackSink.seekTo(restoreMs.toInt())
+                }
 
-            "pause" -> {
-                playbackSink.pause()
-                didAutoPause = false
-            }
+                "pause" -> {
+                    // Explicit pause is not ours to undo later — clear the
+                    // obligation before the suspending call so a throw cannot
+                    // leave us thinking we still own a pause the user asked for.
+                    playerAutoPaused = false
+                    playbackSink.pause()
+                }
 
-            "resume" -> {
-                playbackSink.resume()
-                didAutoPause = false
+                "resume" -> {
+                    playerAutoPaused = false
+                    playbackSink.resume()
+                }
             }
         }
     }
 
-    private fun capturePreActionPosition(referenceMs: Long) {
+    private fun capturePreActionPosition(referenceMs: Long, turnState: TurnState) {
         val previousPlaybackMs = playbackContextProvider.current().clientPositionMs
         // preQuotePositionMs stays on the playback timeline: stop_quote seeks
         // the local player back to it.
-        preQuotePositionMs = previousPlaybackMs
+        turnState.preQuotePositionMs = previousPlaybackMs
         // previous_reference_position_ms is a reference-timeline value on the
         // wire — convert from the playback timeline (ad/intro offset). When no
         // mapping exists yet, omit the field rather than send a wrong-timeline
@@ -285,6 +436,7 @@ class CloudRouteSink internal constructor(
     }
 
     companion object {
-        private const val COMING_SOON_MESSAGE = "Cloud processing is coming soon"
+        private const val KEY_CLOUD_COMING_SOON = "general.cloud_coming_soon"
+        private const val KEY_CLOUD_ERROR_PREFIX = "cloud_error_"
     }
 }

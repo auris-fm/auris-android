@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import java.io.BufferedReader
 import java.io.IOException
+import kotlinx.coroutines.CancellationException
 import timber.log.Timber
 
 internal data class CloudRouteSseParseResult(
@@ -66,10 +67,15 @@ internal class CloudRouteSseParser {
     ) {
         try {
             dispatch(eventName, dataLines)?.let(onEvent)
-        } catch (error: IOException) {
-            throw error
+        } catch (cancellation: CancellationException) {
+            throw cancellation
         } catch (error: Exception) {
-            throw IOException(error.message ?: "Malformed SSE payload", error)
+            // Every parse failure is normalised, including IOException
+            // subclasses: Moshi's syntax errors are IOExceptions whose message
+            // can echo payload text, so rethrowing them unchanged would defeat
+            // the content-free guarantee. No cause is attached either — Timber
+            // prints cause messages.
+            throw IOException("Malformed SSE payload")
         }
     }
 
@@ -109,15 +115,35 @@ internal class CloudRouteSseParser {
             }
 
             "result" -> {
-                val payload = CloudRouteJson.resultAdapter.fromJson(data)
-                    ?: throw IOException("Invalid result payload")
-                CloudRouteEvent.Result(payload)
+                // Capability-negotiated event: a payload shape this client
+                // does not understand (a server-side addition to the result
+                // model) must not abort a turn for clients that never asked
+                // for the capability — skip it like an unknown event.
+                val payload = runCatching { CloudRouteJson.resultAdapter.fromJson(data) }.getOrNull()
+                if (payload == null) {
+                    Timber.w("Skipping unparseable result payload (%d bytes)", data.toByteArray(Charsets.UTF_8).size)
+                    null
+                } else {
+                    CloudRouteEvent.Result(payload)
+                }
             }
 
             else -> {
                 // Forward compatibility: a server-added event type must not
                 // kill every turn (and must not surface as connection_lost).
-                Timber.w("Unknown SSE event: %s (payload starts %s)", name, data.take(64))
+                // Shape only, never content: the payload is server text that
+                // may echo user context.
+                // No server text at all — not even bounded: an event name is
+                // whatever the server sends and could itself be user content
+                // (an address, an identifier). The two sizes are what is left:
+                // they distinguish an empty/new-shape frame from a substantial
+                // one when diagnosing a forward-compat skip, and they carry
+                // none of the content.
+                Timber.w(
+                    "Unknown SSE event (name %d chars, payload %d bytes)",
+                    name.length,
+                    data.toByteArray(Charsets.UTF_8).size,
+                )
                 null
             }
         }

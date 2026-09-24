@@ -37,9 +37,12 @@ class CloudPrefetchObserver @Inject constructor(
                 .distinctUntilChanged()
                 .collect { episodeUuid ->
                     if (episodeUuid == null || !settings.isEnabled()) return@collect
-                    // Best effort: the client swallows every failure and does
-                    // not retry, so a hint can never affect playback.
-                    prefetchClient.prefetch(episodeUuid)
+                    // Best effort in both directions: the client swallows its
+                    // own failures, and this guard ensures nothing from this
+                    // path can reach the app-scope default handler (which
+                    // would crash the process).
+                    runCatching { prefetchClient.prefetch(episodeUuid) }
+                        .onFailure { Timber.w(it, "CloudPrefetch: hint failed (observer)") }
                 }
         }
         Timber.i("CloudPrefetchObserver started")

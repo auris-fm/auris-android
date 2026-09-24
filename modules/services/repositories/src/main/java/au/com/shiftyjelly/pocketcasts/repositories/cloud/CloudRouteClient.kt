@@ -4,7 +4,9 @@ import androidx.annotation.VisibleForTesting
 import java.io.IOException
 import java.io.InputStreamReader
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.ProducerScope
 import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -49,16 +51,42 @@ class CloudRouteClient(
         get() = okHttpClient.readTimeoutMillis / 1000L
 
     fun route(turn: CloudRouteTurn): Flow<CloudRouteEvent> = channelFlow {
+        try {
+            routeInto(turn)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Exception) {
+            // Nothing before or around the stream may escape as a raw throw:
+            // this flow is collected from `serviceScope.launch`, whose
+            // uncaught exceptions reach the default handler. A malformed
+            // configured URL or a failing credential provider surfaces as an
+            // error event instead of taking the process down.
+            Timber.w(error, "Cloud route turn failed before the stream")
+            send(
+                CloudRouteEvent.Error(
+                    code = CloudRouteErrorCodes.INTERNAL_ERROR,
+                    message = "",
+                ),
+            )
+        }
+    }
+
+    private suspend fun ProducerScope<CloudRouteEvent>.routeInto(
+        turn: CloudRouteTurn,
+    ) {
         // Fail closed: no token means no request is attempted.
         val token = tokenProvider.currentToken()
         if (token.isNullOrBlank()) {
             send(
                 CloudRouteEvent.Error(
-                    code = "unauthorized",
-                    message = "Sign in to use cloud responses.",
+                    code = CloudRouteErrorCodes.UNAUTHORIZED,
+                    // No prose: the code is the diagnostic and the sink
+                    // localises it (template where one exists, earcon
+                    // otherwise). Server-supplied messages still pass through.
+                    message = "",
                 ),
             )
-            return@channelFlow
+            return
         }
         val bodyJson = CloudRouteJson.requestBodyAdapter.toJson(
             CloudRouteRequestBody(
@@ -105,8 +133,8 @@ class CloudRouteClient(
                         Timber.w(error, "Cloud route payload could not be parsed")
                         send(
                             CloudRouteEvent.Error(
-                                code = "invalid_response",
-                                message = "Sorry, I couldn't understand the response.",
+                                code = CloudRouteErrorCodes.INVALID_RESPONSE,
+                                message = "",
                             ),
                         )
                         return@withContext
@@ -114,8 +142,9 @@ class CloudRouteClient(
                     if (truncated) {
                         send(
                             CloudRouteEvent.Error(
-                                code = "connection_lost",
-                                message = "Connection lost",
+                                code = CloudRouteErrorCodes.CONNECTION_LOST,
+                                // No prose: the sink localises by code.
+                                message = "",
                             ),
                         )
                     }
@@ -131,15 +160,17 @@ class CloudRouteClient(
                     // so analytics and the user both see it.
                     send(
                         CloudRouteEvent.Error(
-                            code = "connection_lost",
-                            message = "Request timed out",
+                            code = CloudRouteErrorCodes.CONNECTION_LOST,
+                            // No prose: the sink localises by code (and the
+                            // connection_lost template covers the wording).
+                            message = "",
                         ),
                     )
                 } else {
                     send(
                         CloudRouteEvent.Error(
-                            code = "connection_lost",
-                            message = error.message ?: "Connection lost",
+                            code = CloudRouteErrorCodes.CONNECTION_LOST,
+                            message = "",
                         ),
                     )
                 }
@@ -154,20 +185,16 @@ class CloudRouteClient(
         val code = parsed?.code
             ?: parsed?.error
             ?: httpStatusToCode(httpStatus)
-        val message = parsed?.message ?: defaultMessageForStatus(httpStatus)
+        // Server-supplied text passes through; the bare status fallback is
+        // client-composed, so it carries no prose (the sink localises by code).
+        val message = parsed?.message ?: ""
         return CloudRouteEvent.Error(code = code, message = message)
     }
 
     private fun httpStatusToCode(httpStatus: Int): String = when (httpStatus) {
-        400 -> "invalid_request"
-        401 -> "unauthorized"
+        400 -> CloudRouteErrorCodes.INVALID_REQUEST
+        401 -> CloudRouteErrorCodes.UNAUTHORIZED
         else -> "http_$httpStatus"
-    }
-
-    private fun defaultMessageForStatus(httpStatus: Int): String = when (httpStatus) {
-        400 -> "Invalid request"
-        401 -> "Unauthorized"
-        else -> "HTTP $httpStatus"
     }
 
     companion object {

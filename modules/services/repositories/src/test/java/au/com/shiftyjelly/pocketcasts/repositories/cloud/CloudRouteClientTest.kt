@@ -232,6 +232,37 @@ class CloudRouteClientTest {
     }
 
     @Test
+    fun `unparseable result payload is skipped so the turn survives`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(
+                sseResponse(
+                    """
+                    event: result
+                    data: {"kind":"episode_results","scope":["not","a","string"],"items":[]}
+
+                    event: token
+                    data: {"text":"Still answered."}
+
+                    event: done
+                    data: {"input_tokens":1,"output_tokens":1}
+                    """.trimIndent(),
+                ),
+            )
+            server.start()
+
+            // A result this client cannot read must not abort a turn it never
+            // asked for (the event reaches non-advertising clients too).
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)
+                .route(turn("hello"))
+                .test {
+                    assertEquals(CloudRouteEvent.Token("Still answered."), awaitItem())
+                    assertEquals(CloudRouteEvent.Done(1, 1), awaitItem())
+                    awaitComplete()
+                }
+        }
+    }
+
+    @Test
     fun `malformed payload emits invalid_response not connection_lost`() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(
@@ -277,6 +308,9 @@ class CloudRouteClientTest {
                     assertEquals(CloudRouteEvent.Token("partial"), awaitItem())
                     val error = awaitItem() as CloudRouteEvent.Error
                     assertEquals("connection_lost", error.code)
+                    // Client-minted diagnostics carry no prose: the sink
+                    // localises by code (template or earcon).
+                    assertEquals("", error.message)
                     awaitComplete()
                 }
         }
@@ -491,6 +525,56 @@ class CloudRouteClientTest {
 
             assertEquals(0, server.requestCount)
         }
+    }
+
+    @Test
+    fun `a call timeout surfaces as a connection_lost event with no prose`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+            server.start()
+
+            val timeoutClient = OkHttpClient.Builder()
+                .callTimeout(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+                .build()
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), userId, timeoutClient)
+                .route(turn("hello"))
+                .test {
+                    val error = awaitItem() as CloudRouteEvent.Error
+                    assertEquals("connection_lost", error.code)
+                    // The timeout wording comes from the localized template,
+                    // never from a client-authored English string.
+                    assertEquals("", error.message)
+                    awaitComplete()
+                }
+        }
+    }
+
+    @Test
+    fun `a malformed configured base url surfaces as an error event, not a throw`() = runBlocking {
+        // "http://[" is rejected by OkHttp's URL builder (IllegalArgumentException)
+        // before any request exists; it must not escape this flow.
+        val client = CloudRouteClient("http://[malformed", userId)
+
+        client.route(turn("hello")).test {
+            val error = awaitItem() as CloudRouteEvent.Error
+            assertEquals(CloudRouteErrorCodes.INTERNAL_ERROR, error.code)
+            awaitComplete()
+        }
+    }
+
+    @Test
+    fun `a failing credential provider surfaces as an error event, not a throw`() = runBlocking {
+        val exploding = object : CloudTokenProviding {
+            override suspend fun currentToken(): String? = error("credential store unavailable")
+        }
+
+        CloudRouteClient("https://cloud.example.com", exploding)
+            .route(turn("hello"))
+            .test {
+                val error = awaitItem() as CloudRouteEvent.Error
+                assertEquals(CloudRouteErrorCodes.INTERNAL_ERROR, error.code)
+                awaitComplete()
+            }
     }
 
     @Test

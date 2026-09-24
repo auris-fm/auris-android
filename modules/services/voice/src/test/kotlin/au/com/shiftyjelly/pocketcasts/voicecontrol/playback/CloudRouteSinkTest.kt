@@ -665,6 +665,63 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a superseded turn's action cannot resume the player under the new turn`() = runTest(UnconfinedTestDispatcher()) {
+        val gate = CompletableDeferred<Unit>()
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "play_quote",
+                    params = mapOf("reference_position_ms" to 45_000_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        deps.playback.resumeGate = gate
+        val sink = deps.sink()
+
+        // Turn A: auto-pause, then its play_quote action resumes — suspending
+        // inside the player while A still owns it.
+        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.resumeStarted.await()
+
+        // B must not register/pause until A's action has finished with the player.
+        val second = launch { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext) }
+        gate.complete(Unit)
+        first.join()
+        second.join()
+
+        assertEquals(
+            listOf("pause", "resume", "pause", "resume"),
+            deps.playback.calls.filter { it == "pause" || it == "resume" },
+        )
+    }
+
+    @Test
+    fun `a setup failure after registration leaves no stale ownership and no paused player`() = runTest(UnconfinedTestDispatcher()) {
+        var fail = true
+        val deps = TestDeps(
+            routeInvoker = { _ ->
+                if (fail) error("route invoker failed during setup")
+                flowOf(CloudRouteEvent.Token("answer"), CloudRouteEvent.Done(1, 1))
+            },
+        )
+        val sink = deps.sink()
+
+        // A registers, then its setup throws before pausing: ownership must be
+        // released, and the player must not be left paused.
+        val first = launch { runCatching { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) } }
+        first.join()
+
+        // A later turn therefore works normally.
+        fail = false
+        val second = sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(VoiceResponse.Spoken("answer"), second)
+        assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
+    }
+
+    @Test
     fun `a newer turn cannot pause while an older turn's restore is suspended`() = runTest(UnconfinedTestDispatcher()) {
         val deps = TestDeps(events = flowOf(CloudRouteEvent.Token("a"), CloudRouteEvent.Done(1, 1)))
         val gate = CompletableDeferred<Unit>()

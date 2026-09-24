@@ -14,6 +14,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudIdentity
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
@@ -43,6 +44,7 @@ class CloudRouteSink internal constructor(
     /** Non-null only when this client can render structured discovery results. */
     private val searchResultsRenderer: CloudSearchResultsRenderer? = null,
     private val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
+    private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(emptyMap()),
 ) : VoiceCloudRouteSink {
 
     @Inject constructor(
@@ -53,6 +55,7 @@ class CloudRouteSink internal constructor(
         playbackContextProvider: PlaybackContextProvider,
         cloudPlaybackContextState: CloudPlaybackContextState,
         analytics: CloudRouteAnalytics,
+        templateResolver: SpokenTemplateResolver,
     ) : this(
         resolveBaseUrl = cloudConfig::baseUrl,
         resolveUserId = cloudIdentity::userId,
@@ -64,6 +67,7 @@ class CloudRouteSink internal constructor(
         routeInvoker = null,
         searchResultsRenderer = null,
         conversationMemory = CloudConversationMemory(),
+        templateResolver = templateResolver,
     )
 
     /**
@@ -120,7 +124,7 @@ class CloudRouteSink internal constructor(
         hint: CloudRouteHint?,
     ): VoiceResponse {
         if (resolveBaseUrl().isBlank()) {
-            return VoiceResponse.Spoken(COMING_SOON_MESSAGE)
+            return VoiceResponse.Spoken(templateResolver.resolve(KEY_CLOUD_COMING_SOON))
         }
 
         val myJob = currentCoroutineContext()[Job]
@@ -234,10 +238,19 @@ class CloudRouteSink internal constructor(
                             CloudRouteErrorCodes.normalizeForLog(event.code),
                         )
                         analytics.recordTurn(outcome = "error")
-                        outcome = if (event.message.isBlank()) {
+                        // A server-supplied message passes through (localising it
+                        // is the server's job). When the code came from this
+                        // client it carries no prose: resolve a localized
+                        // template for it if one exists, and fall back to the
+                        // error earcon when it doesn't — an internal diagnostic
+                        // is a sound, not a foreign sentence.
+                        val spoken = event.message.ifEmpty {
+                            templateResolver.resolve(KEY_CLOUD_ERROR_PREFIX + event.code)
+                        }
+                        outcome = if (spoken.isEmpty()) {
                             VoiceResponse.Earcon(EarconId.ERROR)
                         } else {
-                            VoiceResponse.Spoken(event.message)
+                            VoiceResponse.Spoken(spoken)
                         }
                     }
                 }
@@ -383,6 +396,7 @@ class CloudRouteSink internal constructor(
     }
 
     companion object {
-        private const val COMING_SOON_MESSAGE = "Cloud processing is coming soon"
+        private const val KEY_CLOUD_COMING_SOON = "general.cloud_coming_soon"
+        private const val KEY_CLOUD_ERROR_PREFIX = "cloud_error_"
     }
 }

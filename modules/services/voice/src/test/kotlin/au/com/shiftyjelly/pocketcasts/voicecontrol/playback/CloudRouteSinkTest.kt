@@ -11,6 +11,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudSearchEvidenceItem
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudSearchResults
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
@@ -641,7 +642,9 @@ class CloudRouteSinkTest {
         val deps = TestDeps(
             routeInvoker = { _ ->
                 if (token == null) {
-                    flowOf(CloudRouteEvent.Error("unauthorized", "Sign in to use cloud responses."))
+                    // Client-minted code, no prose: the sink localises it, and
+                    // `unauthorized` has no template by design, so it earcons.
+                    flowOf(CloudRouteEvent.Error("unauthorized", ""))
                 } else {
                     flowOf(CloudRouteEvent.Token("answer"), CloudRouteEvent.Done(1, 1))
                 }
@@ -660,7 +663,7 @@ class CloudRouteSinkTest {
         token = null
         val second = sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        assertEquals(VoiceResponse.Spoken("Sign in to use cloud responses."), second)
+        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), second)
         assertTrue(deps.playback.calls.none { it.startsWith("seekTo") })
     }
 
@@ -824,6 +827,42 @@ class CloudRouteSinkTest {
         assertEquals(listOf("pause", "pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
     }
 
+    @Test
+    fun `a client code with a template is spoken in the localized wording`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Error(code = "connection_lost", message = "")),
+        )
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // Localized template, not the client's own prose and not the code.
+        assertEquals(VoiceResponse.Spoken("Connection lost. Please try again."), response)
+    }
+
+    @Test
+    fun `a client code without a template falls back to the error earcon`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Error(code = "invalid_response", message = "")),
+        )
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // Internal diagnostics are a sound, never English prose to a
+        // non-English user.
+        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
+    }
+
+    @Test
+    fun `a server-supplied message still passes through untouched`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Error(code = "limit_exceeded", message = "You've used 10/10 free requests today.")),
+        )
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(VoiceResponse.Spoken("You've used 10/10 free requests today."), response)
+    }
+
     private class RecordingRenderer : CloudSearchResultsRenderer {
         val rendered = mutableListOf<CloudSearchResults>()
         val empties = mutableListOf<String>()
@@ -860,6 +899,12 @@ class CloudRouteSinkTest {
         private val events: kotlinx.coroutines.flow.Flow<CloudRouteEvent> = flowOf(CloudRouteEvent.Done(0, 0)),
         val renderer: CloudSearchResultsRenderer? = null,
         val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
+        private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(
+            mapOf(
+                "general.cloud_coming_soon" to "Cloud processing is coming soon",
+                "cloud_error_connection_lost" to "Connection lost. Please try again.",
+            ),
+        ),
         routeInvoker: ((CloudRouteTurn) -> kotlinx.coroutines.flow.Flow<CloudRouteEvent>)? = null,
     ) {
         val playback = FakePlaybackSink()
@@ -889,6 +934,7 @@ class CloudRouteSinkTest {
             },
             searchResultsRenderer = renderer,
             conversationMemory = conversationMemory,
+            templateResolver = templateResolver,
         )
     }
 

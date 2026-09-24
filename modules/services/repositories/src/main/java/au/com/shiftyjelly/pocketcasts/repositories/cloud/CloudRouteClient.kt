@@ -65,7 +65,7 @@ class CloudRouteClient(
             send(
                 CloudRouteEvent.Error(
                     code = CloudRouteErrorCodes.INTERNAL_ERROR,
-                    message = "Cloud request failed.",
+                    message = "",
                 ),
             )
         }
@@ -80,7 +80,10 @@ class CloudRouteClient(
             send(
                 CloudRouteEvent.Error(
                     code = CloudRouteErrorCodes.UNAUTHORIZED,
-                    message = "Sign in to use cloud responses.",
+                    // No prose: the code is the diagnostic and the sink
+                    // localises it (template where one exists, earcon
+                    // otherwise). Server-supplied messages still pass through.
+                    message = "",
                 ),
             )
             return
@@ -131,7 +134,7 @@ class CloudRouteClient(
                         send(
                             CloudRouteEvent.Error(
                                 code = CloudRouteErrorCodes.INVALID_RESPONSE,
-                                message = "Sorry, I couldn't understand the response.",
+                                message = "",
                             ),
                         )
                         return@withContext
@@ -164,7 +167,7 @@ class CloudRouteClient(
                     send(
                         CloudRouteEvent.Error(
                             code = CloudRouteErrorCodes.CONNECTION_LOST,
-                            message = error.message ?: "Connection lost",
+                            message = "",
                         ),
                     )
                 }
@@ -179,7 +182,9 @@ class CloudRouteClient(
         val code = parsed?.code
             ?: parsed?.error
             ?: httpStatusToCode(httpStatus)
-        val message = parsed?.message ?: defaultMessageForStatus(httpStatus)
+        // Server-supplied text passes through; the bare status fallback is
+        // client-composed, so it carries no prose (the sink localises by code).
+        val message = parsed?.message ?: ""
         return CloudRouteEvent.Error(code = code, message = message)
     }
 
@@ -187,12 +192,6 @@ class CloudRouteClient(
         400 -> CloudRouteErrorCodes.INVALID_REQUEST
         401 -> CloudRouteErrorCodes.UNAUTHORIZED
         else -> "http_$httpStatus"
-    }
-
-    private fun defaultMessageForStatus(httpStatus: Int): String = when (httpStatus) {
-        400 -> "Invalid request"
-        401 -> "Unauthorized"
-        else -> "HTTP $httpStatus"
     }
 
     companion object {

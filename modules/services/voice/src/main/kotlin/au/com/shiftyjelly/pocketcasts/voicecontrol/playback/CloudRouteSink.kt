@@ -150,8 +150,12 @@ class CloudRouteSink internal constructor(
 
             turnMutex.withLock {
                 if (activeTurnId == myId) {
-                    playbackSink.pause()
+                    // Mark intent *before* the suspending pause: the player can
+                    // already be paused when cancellation lands mid-call, and a
+                    // flag set afterwards would leave the finally thinking there
+                    // is nothing to restore — audio stuck paused.
                     turnState.didAutoPause = true
+                    playbackSink.pause()
                 }
             }
 

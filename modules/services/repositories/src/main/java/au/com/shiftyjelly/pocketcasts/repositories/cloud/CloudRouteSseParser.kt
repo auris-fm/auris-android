@@ -127,7 +127,11 @@ internal class CloudRouteSseParser {
                 // kill every turn (and must not surface as connection_lost).
                 // Shape only, never content: the payload is server text that
                 // may echo user context.
-                Timber.w("Unknown SSE event: %s (payload %d bytes)", name, data.length)
+                Timber.w(
+                    "Unknown SSE event: %s (payload %d bytes)",
+                    name,
+                    data.toByteArray(Charsets.UTF_8).size,
+                )
                 null
             }
         }

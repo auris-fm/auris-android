@@ -665,6 +665,24 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `cancellation during the initial pause still restores audio`() = runTest(UnconfinedTestDispatcher()) {
+        val gate = CompletableDeferred<Unit>()
+        val deps = TestDeps(events = flowOf(CloudRouteEvent.Done(1, 1)))
+        deps.playback.pauseGate = gate
+        val sink = deps.sink()
+
+        // The player is already paused when cancellation lands mid-call: the
+        // restore must still run, or audio stays paused with no owner.
+        val turn = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.pauseStarted.await()
+        turn.cancel()
+        gate.complete(Unit)
+        turn.join()
+
+        assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
+    }
+
+    @Test
     fun `a superseded turn's action cannot resume the player under the new turn`() = runTest(UnconfinedTestDispatcher()) {
         val gate = CompletableDeferred<Unit>()
         val deps = TestDeps(
@@ -856,8 +874,14 @@ class CloudRouteSinkTest {
         var resumeGate: CompletableDeferred<Unit>? = null
         val resumeStarted = CompletableDeferred<Unit>()
 
+        /** When set, pause() takes effect then suspends until released. */
+        var pauseGate: CompletableDeferred<Unit>? = null
+        val pauseStarted = CompletableDeferred<Unit>()
+
         override suspend fun pause(): VoiceResponse {
             calls += "pause"
+            pauseStarted.complete(Unit)
+            pauseGate?.await()
             return VoiceResponse.Silent
         }
 

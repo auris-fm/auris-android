@@ -18,6 +18,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolv
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
@@ -45,6 +46,7 @@ class CloudRouteSink internal constructor(
     private val searchResultsRenderer: CloudSearchResultsRenderer? = null,
     private val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
     private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(emptyMap()),
+    private val currentLocale: () -> Locale = { Locale.getDefault() },
 ) : VoiceCloudRouteSink {
 
     @Inject constructor(
@@ -56,6 +58,7 @@ class CloudRouteSink internal constructor(
         cloudPlaybackContextState: CloudPlaybackContextState,
         analytics: CloudRouteAnalytics,
         templateResolver: SpokenTemplateResolver,
+        currentLocale: () -> Locale,
     ) : this(
         resolveBaseUrl = cloudConfig::baseUrl,
         resolveUserId = cloudIdentity::userId,
@@ -68,6 +71,7 @@ class CloudRouteSink internal constructor(
         searchResultsRenderer = null,
         conversationMemory = CloudConversationMemory(),
         templateResolver = templateResolver,
+        currentLocale = currentLocale,
     )
 
     /**
@@ -124,7 +128,12 @@ class CloudRouteSink internal constructor(
         hint: CloudRouteHint?,
     ): VoiceResponse {
         if (resolveBaseUrl().isBlank()) {
-            return VoiceResponse.Spoken(templateResolver.resolve(KEY_CLOUD_COMING_SOON))
+            val soon = localizedTemplate(KEY_CLOUD_COMING_SOON)
+            return if (soon.isEmpty()) {
+                VoiceResponse.Earcon(EarconId.ERROR)
+            } else {
+                VoiceResponse.Spoken(soon)
+            }
         }
 
         val myJob = currentCoroutineContext()[Job]
@@ -245,7 +254,7 @@ class CloudRouteSink internal constructor(
                         // error earcon when it doesn't — an internal diagnostic
                         // is a sound, not a foreign sentence.
                         val spoken = event.message.ifEmpty {
-                            templateResolver.resolve(KEY_CLOUD_ERROR_PREFIX + event.code)
+                            localizedTemplate(KEY_CLOUD_ERROR_PREFIX + event.code)
                         }
                         outcome = if (spoken.isEmpty()) {
                             VoiceResponse.Earcon(EarconId.ERROR)
@@ -305,6 +314,20 @@ class CloudRouteSink internal constructor(
             previousReferencePositionMs = context.previousReferencePositionMs
                 ?: state.previousReferencePositionMs,
         )
+    }
+
+    /**
+     * Speaks a template only when it is actually in the user's language.
+     *
+     * The templates live in `res/values` (the source locale), and Android falls
+     * back to those for every locale — so resolving one under a non-English
+     * locale would speak English. Until translations exist in `values-<lang>`,
+     * only the source locale speaks; every other locale gets the error earcon
+     * rather than a foreign sentence.
+     */
+    private fun localizedTemplate(key: String): String {
+        if (!currentLocale().language.equals(Locale.ENGLISH.language, ignoreCase = true)) return ""
+        return templateResolver.resolve(key)
     }
 
     /** Owner-only: resume the player if this turn chain auto-paused it. */

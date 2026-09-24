@@ -828,6 +828,30 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a translated template is not spoken under a locale that has no translation`() = runTest {
+        // The English template is present as the default resource, and Android
+        // falls back to it for every locale — so the guard, not the resource
+        // lookup, is what stops English being spoken to a Korean user.
+        val deps = TestDeps(
+            locale = java.util.Locale.KOREAN,
+            events = flowOf(CloudRouteEvent.Error(code = "connection_lost", message = "")),
+        )
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
+    }
+
+    @Test
+    fun `the no-gateway message is an earcon where no translation exists`() = runTest {
+        val deps = TestDeps(baseUrl = "", locale = java.util.Locale.JAPANESE)
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
+    }
+
+    @Test
     fun `a client code with a template is spoken in the localized wording`() = runTest {
         val deps = TestDeps(
             events = flowOf(CloudRouteEvent.Error(code = "connection_lost", message = "")),
@@ -899,6 +923,7 @@ class CloudRouteSinkTest {
         private val events: kotlinx.coroutines.flow.Flow<CloudRouteEvent> = flowOf(CloudRouteEvent.Done(0, 0)),
         val renderer: CloudSearchResultsRenderer? = null,
         val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
+        private val locale: java.util.Locale = java.util.Locale.ENGLISH,
         private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(
             mapOf(
                 "general.cloud_coming_soon" to "Cloud processing is coming soon",
@@ -935,6 +960,7 @@ class CloudRouteSinkTest {
             searchResultsRenderer = renderer,
             conversationMemory = conversationMemory,
             templateResolver = templateResolver,
+            currentLocale = { locale },
         )
     }
 

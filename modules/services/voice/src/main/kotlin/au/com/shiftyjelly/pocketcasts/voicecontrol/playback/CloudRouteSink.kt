@@ -18,12 +18,15 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 @Singleton
@@ -73,9 +76,18 @@ class CloudRouteSink internal constructor(
         var didAutoPause = false
     }
 
-    /** The in-flight turn, cancelled when a newer turn supersedes it. */
-    private val activeTurnLock = Any()
+    /**
+     * Turn ownership and player-state transitions, serialized by one mutex.
+     *
+     * A monitor lock is not enough: the restore *suspends* (resume loads the
+     * play queue), so checking ownership and then restoring outside the lock
+     * lets a newer turn register and pause during that suspension — the older
+     * turn then resumes the shared player under the newer turn.
+     */
+    private val turnMutex = Mutex()
+    private var activeTurnId: Long = 0
     private var activeTurn: Job? = null
+    private val turnCounter = AtomicLong(0)
 
     override suspend fun routeToCloud(
         request: String,
@@ -102,15 +114,16 @@ class CloudRouteSink internal constructor(
 
         // A newer turn supersedes the previous one: cancel it before starting.
         val myJob = currentCoroutineContext()[Job]
-        synchronized(activeTurnLock) {
-            // Register first, then cancel: the successor must already be the
-            // current turn when the superseded turn unwinds, otherwise its
-            // turn-identity guard sees itself as still current and restores
-            // audio the successor is about to pause.
-            val previous = activeTurn
+        val myId = turnCounter.incrementAndGet()
+        // Register and pause under the mutex: a predecessor's restore cannot
+        // interleave between becoming-current and pausing the player.
+        val previous = turnMutex.withLock {
+            val previousTurn = activeTurn
             activeTurn = myJob
-            if (previous != null && previous !== myJob) previous.cancel()
+            activeTurnId = myId
+            previousTurn
         }
+        if (previous != null && previous !== myJob) previous.cancel()
 
         var tokenBuffer = ""
         val routeContext = buildRouteContext(context)
@@ -127,8 +140,12 @@ class CloudRouteSink internal constructor(
         val turnState = TurnState()
         val events = openRoute(turn)
 
-        playbackSink.pause()
-        turnState.didAutoPause = true
+        turnMutex.withLock {
+            if (activeTurnId == myId) {
+                playbackSink.pause()
+                turnState.didAutoPause = true
+            }
+        }
 
         // Flow.collect's action is crossinline — cannot return@routeToCloud from it.
         var outcome: VoiceResponse? = null
@@ -147,7 +164,6 @@ class CloudRouteSink internal constructor(
                             inputTokens = event.inputTokens,
                             outputTokens = event.outputTokens,
                         )
-                        restoreTransientAudioState(turnState)
                         if (tokenBuffer.isNotEmpty()) {
                             conversationMemory.record(request, tokenBuffer)
                         }
@@ -176,7 +192,6 @@ class CloudRouteSink internal constructor(
 
                     is CloudRouteEvent.Error -> {
                         tokenBuffer = ""
-                        restoreTransientAudioState(turnState)
                         // Genuinely unavailable evidence is a state the results
                         // renderer owns whenever one is present (three states,
                         // not two); the spoken message still goes out below.
@@ -206,11 +221,14 @@ class CloudRouteSink internal constructor(
             // paused. Only the turn that is still current touches audio state,
             // and it clears its own registration as it goes.
             withContext(NonCancellable) {
-                val stillCurrent = synchronized(activeTurnLock) { activeTurn === myJob }
-                if (stillCurrent) {
-                    restoreTransientAudioState(turnState)
-                    synchronized(activeTurnLock) {
-                        if (activeTurn === myJob) activeTurn = null
+                // Ownership check and restore happen under one mutex, so no
+                // newer turn can register and pause while this restore is
+                // suspended in resume().
+                turnMutex.withLock {
+                    if (activeTurnId == myId) {
+                        restoreTransientAudioState(turnState)
+                        activeTurnId = 0
+                        activeTurn = null
                     }
                 }
             }

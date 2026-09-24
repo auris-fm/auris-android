@@ -665,6 +665,31 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a newer turn cannot pause while an older turn's restore is suspended`() = runTest(UnconfinedTestDispatcher()) {
+        val deps = TestDeps(events = flowOf(CloudRouteEvent.Token("a"), CloudRouteEvent.Done(1, 1)))
+        val gate = CompletableDeferred<Unit>()
+        deps.playback.resumeGate = gate
+        val sink = deps.sink()
+
+        // Turn A runs to completion, entering its restore — which suspends
+        // inside resume() (play-queue load) while still owning the player.
+        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.resumeStarted.await()
+
+        // Turn B starts during that suspension: its registration and pause must
+        // wait for A's restore to finish, or B's answer streams over resumed audio.
+        val second = launch { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext) }
+        gate.complete(Unit)
+        first.join()
+        second.join()
+
+        assertEquals(
+            listOf("pause", "resume", "pause", "resume"),
+            deps.playback.calls.filter { it == "pause" || it == "resume" },
+        )
+    }
+
+    @Test
     fun `a superseded turn never restores audio owned by the newer turn`() = runTest(UnconfinedTestDispatcher()) {
         val firstStarted = CompletableDeferred<Unit>()
         val firstCancelled = CompletableDeferred<Unit>()
@@ -770,12 +795,18 @@ class CloudRouteSinkTest {
     private class FakePlaybackSink : VoicePlaybackSink {
         val calls = mutableListOf<String>()
 
+        /** When set, resume() suspends until released (models play-queue loads). */
+        var resumeGate: CompletableDeferred<Unit>? = null
+        val resumeStarted = CompletableDeferred<Unit>()
+
         override suspend fun pause(): VoiceResponse {
             calls += "pause"
             return VoiceResponse.Silent
         }
 
         override suspend fun resume(): VoiceResponse {
+            resumeStarted.complete(Unit)
+            resumeGate?.await()
             calls += "resume"
             return VoiceResponse.Silent
         }

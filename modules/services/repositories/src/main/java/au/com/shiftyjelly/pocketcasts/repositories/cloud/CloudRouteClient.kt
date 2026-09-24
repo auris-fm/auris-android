@@ -143,7 +143,8 @@ class CloudRouteClient(
                         send(
                             CloudRouteEvent.Error(
                                 code = CloudRouteErrorCodes.CONNECTION_LOST,
-                                message = "Connection lost",
+                                // No prose: the sink localises by code.
+                                message = "",
                             ),
                         )
                     }
@@ -160,7 +161,9 @@ class CloudRouteClient(
                     send(
                         CloudRouteEvent.Error(
                             code = CloudRouteErrorCodes.CONNECTION_LOST,
-                            message = "Request timed out",
+                            // No prose: the sink localises by code (and the
+                            // connection_lost template covers the wording).
+                            message = "",
                         ),
                     )
                 } else {

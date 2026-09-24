@@ -308,6 +308,9 @@ class CloudRouteClientTest {
                     assertEquals(CloudRouteEvent.Token("partial"), awaitItem())
                     val error = awaitItem() as CloudRouteEvent.Error
                     assertEquals("connection_lost", error.code)
+                    // Client-minted diagnostics carry no prose: the sink
+                    // localises by code (template or earcon).
+                    assertEquals("", error.message)
                     awaitComplete()
                 }
         }
@@ -521,6 +524,28 @@ class CloudRouteClientTest {
                 }
 
             assertEquals(0, server.requestCount)
+        }
+    }
+
+    @Test
+    fun `a call timeout surfaces as a connection_lost event with no prose`() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+            server.start()
+
+            val timeoutClient = OkHttpClient.Builder()
+                .callTimeout(500, java.util.concurrent.TimeUnit.MILLISECONDS)
+                .build()
+            CloudRouteClient(server.url("/").toString().trimEnd('/'), userId, timeoutClient)
+                .route(turn("hello"))
+                .test {
+                    val error = awaitItem() as CloudRouteEvent.Error
+                    assertEquals("connection_lost", error.code)
+                    // The timeout wording comes from the localized template,
+                    // never from a client-authored English string.
+                    assertEquals("", error.message)
+                    awaitComplete()
+                }
         }
     }
 

@@ -125,7 +125,9 @@ internal class CloudRouteSseParser {
             else -> {
                 // Forward compatibility: a server-added event type must not
                 // kill every turn (and must not surface as connection_lost).
-                Timber.w("Unknown SSE event: %s (payload starts %s)", name, data.take(64))
+                // Shape only, never content: the payload is server text that
+                // may echo user context.
+                Timber.w("Unknown SSE event: %s (payload %d bytes)", name, data.length)
                 null
             }
         }

@@ -207,7 +207,10 @@ class CloudRouteSink internal constructor(
                         ) {
                             searchResultsRenderer.renderUnavailable()
                         }
-                        Timber.e("CloudRouteSink: turn error code=%s message=%s", event.code, event.message)
+                        // Code only: the server's message can carry upstream
+                        // detail derived from the user's request or account,
+                        // and it is already spoken/shown where it belongs.
+                        Timber.e("CloudRouteSink: turn error code=%s", event.code)
                         analytics.recordTurn(outcome = "error")
                         outcome = if (event.message.isBlank()) {
                             VoiceResponse.Earcon(EarconId.ERROR)

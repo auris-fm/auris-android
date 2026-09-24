@@ -901,6 +901,39 @@ class CloudRouteSinkTest {
         assertEquals(VoiceResponse.Spoken("You've used 10/10 free requests today."), response)
     }
 
+    @Test
+    fun `a whitespace-only template is not spoken`() = runTest {
+        val deps = TestDeps(
+            templateResolver = SpokenTemplateResolver(mapOf("cloud_error_connection_lost" to "   ")),
+            events = flowOf(CloudRouteEvent.Error(code = "connection_lost", message = "")),
+        )
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
+    }
+
+    @Test
+    fun `a throwing pause does not leave a stale obligation to resume`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(tool = "playback", action = "pause", params = emptyMap()),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // Call 1 is the turn's own auto-pause; call 2 is the explicit action.
+        deps.playback.throwOnPauseCall = 2
+        val sink = deps.sink()
+
+        runCatching { sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext) }
+
+        // The explicit pause cleared the obligation before suspending, so even
+        // though the call threw there is nothing to undo: the user asked for a
+        // pause and the turn must not resume over it. (The first "pause" is the
+        // turn's own auto-pause; the second is the action that threw.)
+        assertEquals(listOf("pause", "pause"), deps.playback.calls)
+    }
+
     private class RecordingRenderer : CloudSearchResultsRenderer {
         val rendered = mutableListOf<CloudSearchResults>()
         val empties = mutableListOf<String>()
@@ -992,8 +1025,14 @@ class CloudRouteSinkTest {
         var pauseGate: CompletableDeferred<Unit>? = null
         val pauseStarted = CompletableDeferred<Unit>()
 
+        /** Throw on this pause call number (1-based); null = never. */
+        var throwOnPauseCall: Int? = null
+        private var pauseCalls = 0
+
         override suspend fun pause(): VoiceResponse {
             calls += "pause"
+            pauseCalls += 1
+            if (throwOnPauseCall == pauseCalls) error("pause failed")
             pauseStarted.complete(Unit)
             pauseGate?.await()
             return VoiceResponse.Silent

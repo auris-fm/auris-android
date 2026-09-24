@@ -129,7 +129,7 @@ class CloudRouteSink internal constructor(
     ): VoiceResponse {
         if (resolveBaseUrl().isBlank()) {
             val soon = localizedTemplate(KEY_CLOUD_COMING_SOON)
-            return if (soon.isEmpty()) {
+            return if (soon.isBlank()) {
                 VoiceResponse.Earcon(EarconId.ERROR)
             } else {
                 VoiceResponse.Spoken(soon)
@@ -264,7 +264,7 @@ class CloudRouteSink internal constructor(
                         val spoken = event.message.ifBlank {
                             localizedTemplate(KEY_CLOUD_ERROR_PREFIX + event.code)
                         }
-                        outcome = if (spoken.isEmpty()) {
+                        outcome = if (spoken.isBlank()) {
                             VoiceResponse.Earcon(EarconId.ERROR)
                         } else {
                             VoiceResponse.Spoken(spoken)
@@ -374,8 +374,11 @@ class CloudRouteSink internal constructor(
                     val referenceMs = params.referencePositionMs() ?: return
                     capturePreActionPosition(referenceMs, turnState)
                     seekToReference(referenceMs)
-                    playbackSink.resume()
+                    // Clear before the suspending call: if resume() throws, the
+                    // obligation must not survive to resume a player the user
+                    // deliberately left paused.
                     playerAutoPaused = false
+                    playbackSink.resume()
                 }
 
                 "stop_quote" -> {
@@ -384,14 +387,16 @@ class CloudRouteSink internal constructor(
                 }
 
                 "pause" -> {
-                    playbackSink.pause()
-                    // Explicit pause: not ours to undo later.
+                    // Explicit pause is not ours to undo later — clear the
+                    // obligation before the suspending call so a throw cannot
+                    // leave us thinking we still own a pause the user asked for.
                     playerAutoPaused = false
+                    playbackSink.pause()
                 }
 
                 "resume" -> {
-                    playbackSink.resume()
                     playerAutoPaused = false
+                    playbackSink.resume()
                 }
             }
         }

@@ -21,7 +21,7 @@ class AurisTokenProviderTest {
 
     private fun tokensResponse(access: String, refresh: String? = "r-1", expiresIn: Long = 900): String = """{"access_token":"$access","token_type":"Bearer","expires_in":$expiresIn,"refresh_token":${refresh?.let { "\"$it\"" } ?: "null"}}"""
 
-    private class FakeCredential(private var value: String?) : AurisAccountCredentialProviding {
+    private class FakeCredential(var value: String?) : AurisAccountCredentialProviding {
         var calls = 0
         override suspend fun credential(): String? {
             calls += 1
@@ -49,7 +49,10 @@ class AurisTokenProviderTest {
             assertEquals("access-1", provider.currentToken())
             // The cached token is reused: exactly one exchange reached the server.
             assertEquals(1, server.requestCount)
-            assertEquals(1, credential.calls)
+            // The credential is consulted on every call (that is what makes a
+            // logout or account switch visible), so the read count grows with
+            // calls; what must not grow is the number of exchanges above.
+            assertTrue(credential.calls >= 2)
         }
     }
 
@@ -84,6 +87,95 @@ class AurisTokenProviderTest {
 
             assertTrue(results.all { it == "access-2" })
             assertEquals(1, refreshCalls.get())
+        }
+    }
+
+    @Test
+    fun `a logout stops the cached token being served`() = runTest {
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = MockResponse()
+                    .setResponseCode(200)
+                    .setBody(tokensResponse("access-1"))
+            }
+            server.start()
+
+            val credential = FakeCredential("pc-session")
+            val provider = AurisTokenProvider(
+                clientProvider = { AurisAuthClient(server.url("/").toString().trimEnd('/')) },
+                credentialProvider = credential,
+            )
+
+            assertEquals("access-1", provider.currentToken())
+
+            // Signed out: the token we hold belongs to an account that is gone.
+            credential.value = null
+            assertNull(provider.currentToken())
+            assertEquals(1, server.requestCount)
+        }
+    }
+
+    @Test
+    fun `an account switch re-acquires instead of serving the previous account's token`() = runTest {
+        val bodies = mutableListOf<String>()
+        var exchangeCalls = 0
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    exchangeCalls += 1
+                    bodies += request.body.readUtf8()
+                    return MockResponse().setResponseCode(200)
+                        .setBody(tokensResponse("access-$exchangeCalls", "r-$exchangeCalls"))
+                }
+            }
+            server.start()
+
+            val credential = FakeCredential("pc-session-a")
+            val provider = AurisTokenProvider(
+                clientProvider = { AurisAuthClient(server.url("/").toString().trimEnd('/')) },
+                credentialProvider = credential,
+            )
+
+            assertEquals("access-1", provider.currentToken())
+
+            // A different account is now signed in, with the first account's
+            // token still well inside its lifetime.
+            credential.value = "pc-session-b"
+            assertEquals("access-2", provider.currentToken())
+            assertTrue("second exchange carried the new credential", bodies[1].contains("pc-session-b"))
+            assertTrue("the new account's token is then reused", provider.currentToken() == "access-2")
+            assertEquals(2, exchangeCalls)
+        }
+    }
+
+    @Test
+    fun `a definitive 401 inside the skew window never serves the cached bearer`() = runTest {
+        var phase = 0
+        MockWebServer().use { server ->
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    if (phase == 0) {
+                        // Stale under the 30s skew, still inside its lifetime:
+                        // normally the token that may keep serving.
+                        return MockResponse().setResponseCode(200).setBody(tokensResponse("access-valid", expiresIn = 10))
+                    }
+                    return MockResponse().setResponseCode(401).setBody("""{"code":"refresh_reused"}""")
+                }
+            }
+            server.start()
+
+            val provider = AurisTokenProvider(
+                clientProvider = { AurisAuthClient(server.url("/").toString().trimEnd('/')) },
+                credentialProvider = FakeCredential("pc-session"),
+            )
+
+            assertEquals("access-valid", provider.currentToken())
+
+            // Upstream says this identity is finished (a replayed refresh token
+            // revokes the chain). A still-valid bearer is exactly what must not
+            // be served: it is the one we were just told is invalid.
+            phase = 1
+            assertNull(provider.currentToken())
         }
     }
 

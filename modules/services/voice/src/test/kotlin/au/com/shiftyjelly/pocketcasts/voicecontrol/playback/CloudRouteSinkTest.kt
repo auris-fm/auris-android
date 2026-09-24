@@ -925,8 +925,11 @@ class CloudRouteSinkTest {
         deps.playback.throwOnPauseCall = 2
         val sink = deps.sink()
 
-        runCatching { sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext) }
+        val outcome = runCatching { sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext) }
 
+        // Without this the assertions below would also hold if the action's
+        // pause had silently succeeded — the calls list would look the same.
+        assertEquals("pause failed", outcome.exceptionOrNull()?.message)
         // The explicit pause cleared the obligation before suspending, so even
         // though the call threw there is nothing to undo: the user asked for a
         // pause and the turn must not resume over it. (The first "pause" is the

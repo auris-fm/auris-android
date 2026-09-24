@@ -184,7 +184,7 @@ class CloudRouteClient(
     }
 
     private fun httpStatusToCode(httpStatus: Int): String = when (httpStatus) {
-        400 -> "invalid_request"
+        400 -> CloudRouteErrorCodes.INVALID_REQUEST
         401 -> CloudRouteErrorCodes.UNAUTHORIZED
         else -> "http_$httpStatus"
     }

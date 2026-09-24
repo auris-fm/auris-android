@@ -16,7 +16,12 @@ class CloudRouteErrorCodesTest {
 
     @Test
     fun `locally minted codes keep their diagnostic value`() {
-        assertEquals(CloudRouteErrorCodes.INVALID_REQUEST, CloudRouteErrorCodes.normalizeForLog("invalid_request"))
+        // Against the constant the producer emits, not a fresh literal: a
+        // rename then fails here instead of silently breaking the allowlist.
+        assertEquals(
+            CloudRouteErrorCodes.INVALID_REQUEST,
+            CloudRouteErrorCodes.normalizeForLog(CloudRouteErrorCodes.INVALID_REQUEST),
+        )
         assertEquals("http_503", CloudRouteErrorCodes.normalizeForLog("http_503"))
         assertEquals("http_404", CloudRouteErrorCodes.normalizeForLog("http_404"))
     }

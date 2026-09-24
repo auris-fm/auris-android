@@ -135,9 +135,10 @@ internal class CloudRouteSseParser {
                 // may echo user context.
                 // No server text at all — not even bounded: an event name is
                 // whatever the server sends and could itself be user content
-                // (an address, an identifier). The length keeps the
-                // forward-compat diagnostic ("a new event type appeared and it
-                // was about this big") without carrying any of it.
+                // (an address, an identifier). The two sizes are what is left:
+                // they distinguish an empty/new-shape frame from a substantial
+                // one when diagnosing a forward-compat skip, and they carry
+                // none of the content.
                 Timber.w(
                     "Unknown SSE event (name %d chars, payload %d bytes)",
                     name.length,

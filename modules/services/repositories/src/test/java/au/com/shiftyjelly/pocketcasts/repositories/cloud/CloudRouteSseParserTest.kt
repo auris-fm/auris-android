@@ -5,6 +5,7 @@ import java.io.StringReader
 import kotlinx.coroutines.CancellationException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -48,15 +49,17 @@ class CloudRouteSseParserTest {
 
     @Test
     fun `a cancellation through the event callback is rethrown untouched`() {
+        val cancellation = CancellationException("superseded")
         val outcome = runCatching {
-            parse("event: token\ndata: {\"text\":\"hello\"}\n\n") { throw CancellationException("superseded") }
+            parse("event: token\ndata: {\"text\":\"hello\"}\n\n") { throw cancellation }
         }
 
-        val error = outcome.exceptionOrNull()
         // CancellationException is an IllegalStateException: before this
         // boundary it was laundered into IOException and reported as
         // invalid_response, i.e. a superseded turn heard an error message.
-        assertTrue("cancellation must not be wrapped", error is CancellationException)
+        // assertSame, not `is`: the very instance must propagate, so a wrapper
+        // that merely constructed a new CancellationException would fail here.
+        assertSame(cancellation, outcome.exceptionOrNull())
     }
 
     @Test

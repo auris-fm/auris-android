@@ -17,19 +17,23 @@ internal enum class CloudEscalation {
  *
  * The line is deliberate rejection versus failure to decide:
  *
- * - **A failure to decide** — the model path produced no usable call
- *   (`tokenize_failed`, `classify_failed`, `generate_failed`,
- *   `parse_or_repair_failed`, `mapper_or_dialog_failed`, `inference_exception`)
- *   — dispatches. Nothing is overridden by asking the service, because the
- *   client never formed an answer. An unknown or missing reason dispatches for
- *   the same reason.
+ * - **A failure to decide dispatches** — every reason that is not a listed local
+ *   outcome, which covers the whole model path failing (`tokenize_failed`,
+ *   `classify_failed`, `generate_failed`, `parse_or_repair_failed`,
+ *   `mapper_or_dialog_failed`, `inference_exception`) and an unknown or missing
+ *   reason. Nothing is overridden by asking the service, because the client
+ *   never formed an answer; the list below is only the reasons that are *not*
+ *   failures, so it cannot drift into a second copy of the vocabulary.
  * - **`no_match` is a decision, not a failure** — the router's own label for a
  *   non-command (ambient speech, podcast bleed, a bare wake word). It stays
  *   local and silent, which is what the label exists for. Widening it to
  *   escalate was tried and measured: a bare wake phrase is `no_match` on every
  *   capture, so it spent the window and errored on the service each time, while
- *   a genuine question the client cannot route comes back as a *failure*
- *   (`mapper_or_dialog_failed`), which still dispatches. `docs/specs/voice-intents.md`
+ *   the one question we have observed the client could not route came back as a
+ *   *failure* (`mapper_or_dialog_failed`), which still dispatches. That is one
+ *   observation, not a guarantee: a real question that receives `no_match` stays
+ *   local, and that is the accepted cost of not firing on every wake-only
+ *   capture. `docs/specs/voice-intents.md`
  *   states the same contract: "Cloud-assistant questions should select
  *   `cloud_route`, not `no_match`".
  * - **Nothing to send, or nothing that could answer, speaks and stays local:**
@@ -39,15 +43,6 @@ internal enum class CloudEscalation {
  *   network, while silence would hide a real fault from the user.
  */
 internal object CloudEscalationPolicy {
-    private val FAILURES = setOf(
-        RouterStageDiagnostic.REASON_TOKENIZE_FAILED,
-        RouterStageDiagnostic.REASON_CLASSIFY_FAILED,
-        RouterStageDiagnostic.REASON_GENERATE_FAILED,
-        RouterStageDiagnostic.REASON_PARSE_OR_REPAIR_FAILED,
-        RouterStageDiagnostic.REASON_MAPPER_OR_DIALOG_FAILED,
-        RouterStageDiagnostic.REASON_INFERENCE_EXCEPTION,
-    )
-
     private val SPEAK_LOCALLY = setOf(
         RouterStageDiagnostic.REASON_BLANK_TRANSCRIPT,
         RouterStageDiagnostic.REASON_MODEL_NOT_LOADED,

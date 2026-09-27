@@ -205,6 +205,30 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `a spoken pause is reported as a user command`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+
+        executor.execute(VoiceIntent.Playback.Pause)
+
+        // The playback layer cannot tell the user's spoken pause from the cloud
+        // turn's own pause — both carry the voice tag — so the executor reports
+        // it, and that is what blocks a turn from restoring over the user.
+        org.mockito.kotlin.verify(sinks.playbackManager).noteUserPlaybackCommand()
+    }
+
+    @Test
+    fun `a spoken seek is not a play-pause command`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+
+        executor.execute(VoiceIntent.Playback.SeekRelative(30_000))
+
+        // A seek does not contest the turn's pause, so it must not invalidate it.
+        org.mockito.kotlin.verify(sinks.playbackManager, org.mockito.kotlin.never()).noteUserPlaybackCommand()
+    }
+
+    @Test
     fun `handling an escalation does not refresh the window budget`() = runTest {
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
         val sinks = FakeSinks()
@@ -377,6 +401,8 @@ class VoicePlaybackIntentExecutorTest {
         val playbackQuery = FakePlaybackQuerySink()
         val statsQuery = FakeStatsQuerySink()
 
+        val playbackManager: au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager = org.mockito.kotlin.mock()
+
         fun executor(signal: au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()) = VoicePlaybackIntentExecutor(
             playbackSink = playback,
             effectsSink = effects,
@@ -390,6 +416,7 @@ class VoicePlaybackIntentExecutorTest {
             playbackQuerySink = playbackQuery,
             statsQuerySink = statsQuery,
             gracePeriodSignal = signal,
+            playbackManager = playbackManager,
         )
     }
 

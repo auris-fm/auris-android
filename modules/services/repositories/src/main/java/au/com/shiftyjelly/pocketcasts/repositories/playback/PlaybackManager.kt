@@ -230,28 +230,43 @@ open class PlaybackManager @Inject constructor(
     val playbackStateFlow: Flow<PlaybackState> = playbackStateRelay.asFlow()
 
     /**
-     * Counts play/pause/stop commands issued by anyone *other than* the voice
-     * path, tagged by [SourceView].
+     * Counts every play/pause/stop command, whoever issued it — including the
+     * cloud turn's own and including the user's voice.
      *
-     * The voice cloud turn pauses the player to hold the user's place and later
-     * restores it. Whether that restore is still legitimate is a question about
-     * *ownership*, not about state: a user who presses pause while the turn runs
-     * leaves the player in exactly the state the turn left it, so a state sample
-     * cannot tell "nobody acted" from "the user acted". A command revision can,
-     * because it records who acted rather than what the result looks like.
+     * A voice cloud turn pauses the player to hold the user's place and later
+     * restores it. Whether the restore is still legitimate is a question about
+     * *ownership*, not state: a user who pauses while the turn runs leaves the
+     * player in exactly the state the turn left it, so a state sample cannot
+     * tell "nobody acted" from "the user acted". Counting commands can, because
+     * the turn knows how many of them were its own.
      *
-     * Deliberately counts only play/pause/stop: a seek or a scrub does not
-     * contest the pause the turn took, and treating it as if it did would refuse
-     * a restore the user never asked to skip.
+     * The voice path's own commands are filtered out by source, so the turn's
+     * pause and restore never count themselves; a user's *spoken* pause would
+     * carry the same tag, so the executor reports that one explicitly through
+     * [noteUserPlaybackCommand]. Without that, excluding `VOICE_COMMANDS` would
+     * excuse exactly the case this exists to catch.
+     *
+     * Counts play/pause/stop only. A seek or a scrub does not contest the pause,
+     * and treating it as if it did would refuse a restore the user never asked
+     * to skip.
      */
-    private val userPlaybackCommandRevisionRelay: Relay<Long> by lazy {
-        BehaviorRelay.createDefault(0L).toSerialized()
+    private val playbackCommandCount = java.util.concurrent.atomic.AtomicLong(0)
+
+    /** Synchronous, so a caller can compare it without a flow's lag. */
+    fun playbackCommandRevision(): Long = playbackCommandCount.get()
+
+    /**
+     * Records a playback command the user issued by voice. The executor knows a
+     * command was the user's; the playback layer cannot tell that from the
+     * `VOICE_COMMANDS` tag alone, which the cloud turn's own pause also carries.
+     */
+    fun noteUserPlaybackCommand() {
+        playbackCommandCount.incrementAndGet()
     }
-    val userPlaybackCommandRevision: Flow<Long> = userPlaybackCommandRevisionRelay.asFlow()
 
     private fun notePlaybackCommand(sourceView: SourceView) {
         if (sourceView == SourceView.VOICE_COMMANDS) return
-        userPlaybackCommandRevisionRelay.accept((userPlaybackCommandRevisionRelay.blockingFirst() ?: 0L) + 1L)
+        playbackCommandCount.incrementAndGet()
     }
 
     private var updateCount = 0

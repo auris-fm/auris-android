@@ -1017,7 +1017,9 @@ class CloudRouteSinkTest {
             hostPlaying = true,
             routeInvoker = {
                 kotlinx.coroutines.flow.flow {
-                    // The user presses play while the cloud turn is in flight.
+                    // The user presses play while the cloud turn is in flight:
+                    // a command, and a state change.
+                    deps.commandRevision += 1
                     deps.host.playing = true
                     emit(CloudRouteEvent.Done(1, 0))
                 }
@@ -1117,7 +1119,7 @@ class CloudRouteSinkTest {
             templateResolver = templateResolver,
             currentLocale = { locale },
             isHostPlaying = { host.playing },
-            userPlaybackCommandRevision = { commandRevision },
+            playbackCommandRevision = { commandRevision },
         )
     }
 

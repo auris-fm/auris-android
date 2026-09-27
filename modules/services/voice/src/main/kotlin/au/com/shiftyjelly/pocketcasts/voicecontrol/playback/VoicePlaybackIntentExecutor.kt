@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
+import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
@@ -21,6 +22,13 @@ class VoicePlaybackIntentExecutor @Inject constructor(
     private val playbackQuerySink: VoicePlaybackQuerySink,
     private val statsQuerySink: VoiceStatsQuerySink,
     private val gracePeriodSignal: GracePeriodSignal,
+    /**
+     * The playback layer, used to report a playback command the *user* issued by
+     * voice to its command revision. The cloud turn's own pause carries the same
+     * source tag, so the playback layer cannot separate the two; the executor is
+     * where the distinction is known.
+     */
+    private val playbackManager: PlaybackManager,
 ) {
     suspend fun execute(intent: VoiceIntent): VoiceResponse {
         val response = when (intent) {
@@ -47,6 +55,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
 
             is VoiceIntent.StatsQuery -> executeStatsQuery(intent)
         }
+        if (intent.changesPlayPauseState()) playbackManager.noteUserPlaybackCommand()
         gracePeriodSignal.onCommandRecognized(
             fromGeneration = intent.windowGenerationOf(),
             restoresAllowance = intent.restoresAllowance(),
@@ -294,3 +303,13 @@ internal fun VoiceIntent.windowGenerationOf(): Long? = (this as? VoiceIntent.Clo
  * the allowance it is spending exists for exactly that case.
  */
 internal fun VoiceIntent.restoresAllowance(): Boolean = (this as? VoiceIntent.CloudRoute)?.origin != VoiceIntent.CloudRouteOrigin.RoutingFailure
+
+/**
+ * True for the commands the user can issue by voice that change play/pause
+ * state — the ones that contest a cloud turn's claim on the player. A seek or a
+ * scrub is not one of them.
+ */
+internal fun VoiceIntent.changesPlayPauseState(): Boolean = when (this) {
+    VoiceIntent.Playback.Pause, VoiceIntent.Playback.Resume -> true
+    else -> false
+}

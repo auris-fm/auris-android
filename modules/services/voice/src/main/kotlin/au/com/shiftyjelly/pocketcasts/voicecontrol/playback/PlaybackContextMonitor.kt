@@ -26,15 +26,12 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
         .stateIn(scope, SharingStarted.Eagerly, PlaybackContext.Inactive)
 
     /**
-     * Counts play/pause/stop commands issued by anyone other than the voice
-     * path. A cloud turn samples this when it takes its pause and restores only
-     * while it is unchanged, which is what distinguishes "nobody acted" from
-     * "the user paused after us" — two cases a playback-state sample cannot tell
-     * apart, because both leave the player paused.
+     * How many play/pause/stop commands the playback layer has seen, including
+     * this app's own. Read synchronously rather than through a flow: a caller
+     * compares it before and after its own command, and a `stateIn` value can
+     * lag the command it is meant to describe.
      */
-    val userPlaybackCommandRevision: StateFlow<Long> = playbackManager
-        .userPlaybackCommandRevision
-        .stateIn(scope, SharingStarted.Eagerly, 0L)
+    fun playbackCommandRevision(): Long = playbackManager.playbackCommandRevision()
 
     /**
      * True when the host app (Pocket Casts) is actively playing audio. Used by

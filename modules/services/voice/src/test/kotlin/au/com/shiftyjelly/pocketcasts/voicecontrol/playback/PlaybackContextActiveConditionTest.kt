@@ -25,7 +25,6 @@ class PlaybackContextActiveConditionTest {
         )
         val playbackManager: PlaybackManager = mock {
             on { playbackStateFlow } doReturn playbackState as Flow<PlaybackState>
-            on { userPlaybackCommandRevision } doReturn MutableStateFlow(0L)
         }
 
         val monitor = PlaybackContextMonitor(playbackManager, backgroundScope)

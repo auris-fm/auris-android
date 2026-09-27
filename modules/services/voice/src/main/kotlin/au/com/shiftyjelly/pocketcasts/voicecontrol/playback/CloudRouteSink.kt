@@ -55,11 +55,13 @@ class CloudRouteSink internal constructor(
      */
     private val isHostPlaying: () -> Boolean,
     /**
-     * Counts play/pause/stop commands from outside the voice path. Sampled when
-     * the turn takes its pause; if it moves, someone else now owns the player's
-     * play/pause state and the turn must not restore over them.
+     * How many play/pause/stop commands the playback layer has seen. Sampled
+     * *after* the turn takes its own pause, so the value expected at restore
+     * accounts for that pause; any further command — a user's tap or their voice
+     * — means someone else now owns the player's state and the turn must not
+     * restore over them.
      */
-    private val userPlaybackCommandRevision: () -> Long = { 0L },
+    private val playbackCommandRevision: () -> Long = { 0L },
 ) : VoiceCloudRouteSink {
 
     @Inject constructor(
@@ -87,7 +89,7 @@ class CloudRouteSink internal constructor(
         templateResolver = templateResolver,
         currentLocale = currentLocale,
         isHostPlaying = { playbackContextMonitor.isHostAudioActive.value },
-        userPlaybackCommandRevision = { playbackContextMonitor.userPlaybackCommandRevision.value },
+        playbackCommandRevision = playbackContextMonitor::playbackCommandRevision,
     )
 
     /**
@@ -196,13 +198,15 @@ class CloudRouteSink internal constructor(
 
             turnMutex.withLock {
                 if (activeTurnId == myId && isHostPlaying()) {
-                    pauseCommandRevision = userPlaybackCommandRevision()
                     // Mark intent *before* the suspending pause: the player can
                     // already be paused when cancellation lands mid-call, and a
                     // flag set afterwards would leave the finally thinking there
                     // is nothing to restore — audio stuck paused.
                     playerAutoPaused = true
                     playbackSink.pause()
+                    // Sampled after our own pause: that count is what a quiet
+                    // turn looks like at restore time.
+                    pauseCommandRevision = playbackCommandRevision()
                     Timber.i("[VoicePipeline] cloud turn paused playback (host was playing)")
                 }
             }
@@ -378,7 +382,7 @@ class CloudRouteSink internal constructor(
         // Ownership is a question about commands, not state: a user who pressed
         // pause leaves the player in the same state the turn left it, so only a
         // command revision can tell their action from nobody acting.
-        if (userPlaybackCommandRevision() != pauseCommandRevision) {
+        if (playbackCommandRevision() != pauseCommandRevision) {
             Timber.i("[VoicePipeline] cloud turn left playback alone (someone else acted)")
             return
         }

@@ -54,8 +54,17 @@ class GracePeriodSignal @Inject constructor() {
      * own next attempt within the same window.
      */
     fun onCommandRecognized(fromEscalation: Boolean = false) {
+        if (fromEscalation) {
+            // A fallback is a network turn: it can still be in flight when a
+            // privacy close (backgrounding, audio-route change) or expiry ends
+            // the window. Extending is for a window that is *still open* — a
+            // completion must never undo a close, or the mic would be live
+            // again after the app was backgrounded.
+            if (_isActive.value) startOrReset()
+            return
+        }
         startOrReset()
-        if (!fromEscalation) escalationUsed = false
+        escalationUsed = false
     }
 
     /** Called when the wake word is detected — starts/resets the grace period. */

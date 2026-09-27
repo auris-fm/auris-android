@@ -57,6 +57,40 @@ class GracePeriodSignalTest {
     }
 
     @Test
+    fun `a fallback completing after a privacy close does not reopen the window`() {
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+
+        signal.onWakeWordDetected()
+        assertTrue(signal.tryConsumeEscalation())
+
+        // The network turn is still in flight when the privacy event lands.
+        signal.onAppBackgrounded()
+        signal.onCommandRecognized(fromEscalation = true)
+
+        assertFalse("a completion must not undo a close", signal.isActive.value)
+        assertFalse(signal.tryConsumeEscalation())
+
+        signal.onWakeWordDetected()
+        assertTrue(signal.tryConsumeEscalation())
+        signal.onAudioRouteChanged()
+        signal.onCommandRecognized(fromEscalation = true)
+
+        assertFalse("a completion must not undo a close", signal.isActive.value)
+    }
+
+    @Test
+    fun `a fallback completing while the window is open still extends it`() {
+        val signal = GracePeriodSignal(timeoutMs = 100L)
+
+        signal.onWakeWordDetected()
+        assertTrue(signal.tryConsumeEscalation())
+        signal.onCommandRecognized(fromEscalation = true)
+
+        assertTrue(signal.isActive.value)
+        assertFalse("and does not re-arm the budget", signal.tryConsumeEscalation())
+    }
+
+    @Test
     fun `an expired or closed window refuses the escalation`() = runTest {
         val signal = GracePeriodSignal(timeoutMs = 100L)
 

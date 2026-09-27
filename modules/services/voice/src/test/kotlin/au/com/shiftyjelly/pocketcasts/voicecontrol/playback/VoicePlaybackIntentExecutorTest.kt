@@ -232,6 +232,31 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `a fallback completing after a privacy close leaves the window closed`() = runTest {
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
+        val sinks = FakeSinks()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        assertTrue(signal.tryConsumeEscalation())
+
+        // The app is backgrounded while the cloud turn is still in flight.
+        sinks.cloudRoute.whileInFlight = { signal.onAppBackgrounded() }
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "what did the guests say about sleep and memory",
+                tier = VoiceIntent.CloudTier.Unknown,
+                escalated = true,
+            ),
+        )
+
+        // The turn's completion must not bring the mic back: the privacy close
+        // wins over an in-flight turn.
+        assertFalse("a completion reopened a closed window", signal.isActive.value)
+        assertFalse(signal.tryConsumeEscalation())
+    }
+
+    @Test
     fun `a locally recognised command refreshes the window budget`() = runTest {
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
         val sinks = FakeSinks()
@@ -445,12 +470,17 @@ class VoicePlaybackIntentExecutorTest {
 
     private class FakeCloudRouteSink : VoiceCloudRouteSink {
         val calls = mutableListOf<String>()
+
+        /** Runs while the turn is in flight, to land a privacy event mid-turn. */
+        var whileInFlight: (() -> Unit)? = null
+
         override suspend fun routeToCloud(
             request: String,
             tier: VoiceIntent.CloudTier,
             context: PlaybackContext,
         ): VoiceResponse {
             calls += "routeToCloud:$request:${tier.name}"
+            whileInFlight?.invoke()
             return VoiceResponse.Silent
         }
     }

@@ -352,7 +352,8 @@ class VoiceAsrEngine @Inject constructor(
         if (!gracePeriodSignal.tryConsumeEscalation()) {
             // This window's one dispatch is already spent. Say so rather than
             // fail quietly, for the same reason as above.
-            Timber.i("[VoicePipeline] cloud escalation skipped (window budget spent)")
+            // No open window, or this window's one dispatch is already spent.
+            Timber.i("[VoicePipeline] cloud escalation skipped (no window or budget spent)")
             audioFeedbackRenderer.playEarcon(EarconId.ERROR)
             return
         }

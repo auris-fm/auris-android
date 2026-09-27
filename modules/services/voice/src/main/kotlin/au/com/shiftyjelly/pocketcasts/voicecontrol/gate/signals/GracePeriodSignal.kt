@@ -64,8 +64,20 @@ class GracePeriodSignal @Inject constructor() {
         escalationUsed = false
     }
 
-    /** Consumes the window's single escalation; false when it is already spent. */
+    /**
+     * Consumes the window's single escalation.
+     *
+     * False when the budget is already spent, and false when no window is open:
+     * the bound is "one utterance per user-initiated act", so an utterance with
+     * no window has no act to spend against.
+     *
+     * This does **not** constrain a false wake. A false wake is a wake
+     * detection, so it opens a window and its one utterance is the residual we
+     * accepted knowingly; what this refuses is an utterance arriving with no
+     * window at all.
+     */
     fun tryConsumeEscalation(): Boolean {
+        if (!_isActive.value) return false
         if (escalationUsed) return false
         escalationUsed = true
         return true

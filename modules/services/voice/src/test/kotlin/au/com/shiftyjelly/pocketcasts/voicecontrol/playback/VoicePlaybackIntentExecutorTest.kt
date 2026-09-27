@@ -208,7 +208,8 @@ class VoicePlaybackIntentExecutorTest {
         val sinks = FakeSinks()
         val executor = sinks.executor(signal)
 
-        // The window's one dispatch has been spent on this escalation.
+        // A user act opens the window; its one dispatch is spent on this escalation.
+        signal.onWakeWordDetected()
         assertTrue(signal.tryConsumeEscalation())
         executor.execute(
             VoiceIntent.CloudRoute(
@@ -236,6 +237,7 @@ class VoicePlaybackIntentExecutorTest {
         val sinks = FakeSinks()
         val executor = sinks.executor(signal)
 
+        signal.onWakeWordDetected()
         assertTrue(signal.tryConsumeEscalation())
         executor.execute(VoiceIntent.Playback.Pause)
 

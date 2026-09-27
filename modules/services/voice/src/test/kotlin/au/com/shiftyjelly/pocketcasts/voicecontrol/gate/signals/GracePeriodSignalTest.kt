@@ -17,8 +17,9 @@ class GracePeriodSignalTest {
     fun `the cloud escalation budget is one per window`() {
         val signal = GracePeriodSignal(timeoutMs = 100L)
 
-        // No window has opened yet, so there is no act to spend against.
-        assertTrue(signal.tryConsumeEscalation())
+        // No window is open, so there is no user act to spend against. (This is
+        // not the false-wake case: a false wake opens a window. It is an
+        // utterance with no act behind it at all.)
         assertFalse(signal.tryConsumeEscalation())
 
         // A new act opens a fresh budget.
@@ -44,6 +45,7 @@ class GracePeriodSignalTest {
     fun `handling the escalation extends the window without refreshing its budget`() {
         val signal = GracePeriodSignal(timeoutMs = 100L)
 
+        signal.onWakeWordDetected()
         assertTrue(signal.tryConsumeEscalation())
         signal.onCommandRecognized(fromEscalation = true)
         assertTrue(signal.isActive.value)
@@ -52,6 +54,24 @@ class GracePeriodSignalTest {
         // A locally recognised command is a different act and does refresh it.
         signal.onCommandRecognized()
         assertTrue(signal.tryConsumeEscalation())
+    }
+
+    @Test
+    fun `an expired or closed window refuses the escalation`() = runTest {
+        val signal = GracePeriodSignal(timeoutMs = 100L)
+
+        signal.onWakeWordDetected()
+        delay(150L)
+        assertFalse(signal.isActive.value)
+        assertFalse("an expired window is not an open act", signal.tryConsumeEscalation())
+
+        signal.onWakeWordDetected()
+        signal.onAudioRouteChanged()
+        assertFalse("a privacy-closed window is not an open act", signal.tryConsumeEscalation())
+
+        signal.onWakeWordDetected()
+        signal.onAppBackgrounded()
+        assertFalse("a privacy-closed window is not an open act", signal.tryConsumeEscalation())
     }
 
     @Test

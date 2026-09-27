@@ -384,6 +384,9 @@ class VoiceAsrEngineTest {
     @Test
     fun `only one escalation is dispatched per grace window`() = runTest {
         val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        // The bound is per user act, so the window has to be open for either
+        // dispatch to be allowed at all.
+        signal.onWakeWordDetected()
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(

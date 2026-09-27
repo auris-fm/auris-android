@@ -16,6 +16,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRendere
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalationPolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.IntentRoutingInput
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.TranslationKind
@@ -315,17 +316,42 @@ class VoiceAsrEngine @Inject constructor(
                 input.routerTranscript,
             )
             handler(intent)
-        } else {
-            val stage = diagnostic?.failedStage ?: "unknown"
-            val reason = diagnostic?.reason ?: "none"
-            Timber.i(
-                "[VoicePipeline] intent none %dms stage=%s reason=%s ← '%s'",
-                elapsedMs,
-                stage,
-                reason,
-                input.routerTranscript,
-            )
+            return
         }
+
+        val stage = diagnostic?.failedStage ?: "unknown"
+        val reason = diagnostic?.reason ?: "none"
+        Timber.i(
+            "[VoicePipeline] intent none %dms stage=%s reason=%s ← '%s'",
+            elapsedMs,
+            stage,
+            reason,
+            input.routerTranscript,
+        )
+
+        // No usable intent. A routing *failure* is not a decision — the pipeline
+        // produced no answer at all — and `no_match` is a decision the user can
+        // still be wrong about ("this wasn't addressed to us" is the router's
+        // judgment, not a fact). Both go to the service, bounded to one
+        // escalation per grace window, through the same handler a chosen
+        // `cloud_route` uses, so superseded-turn cancellation and the auto-pause
+        // obligation still apply. What stays local is the case with nothing to
+        // send or nothing that could answer: see [CloudEscalationPolicy].
+        if (!CloudEscalationPolicy.escalates(reason)) {
+            // Nothing was sent, so the user would otherwise get silence for a
+            // turn that did happen: the earcon table already requires this tone.
+            audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+            return
+        }
+        if (!gracePeriodSignal.tryConsumeEscalation()) {
+            // This window's one dispatch is already spent. Say so rather than
+            // fail quietly, for the same reason as above.
+            Timber.i("[VoicePipeline] cloud escalation skipped (window budget spent)")
+            audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+            return
+        }
+        Timber.i("[VoicePipeline] cloud escalation ← '%s' (reason=%s)", input.routerTranscript, reason)
+        handler(VoiceIntent.CloudRoute(request = input.routerTranscript, tier = VoiceIntent.CloudTier.Unknown))
     }
 
     /**

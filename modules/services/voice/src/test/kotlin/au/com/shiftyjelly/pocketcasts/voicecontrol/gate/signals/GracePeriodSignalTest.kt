@@ -14,6 +14,33 @@ class GracePeriodSignalTest {
     val mainCoroutineRule = MainCoroutineRule()
 
     @Test
+    fun `the cloud escalation budget is one per window`() {
+        val signal = GracePeriodSignal(timeoutMs = 100L)
+
+        // No window has opened yet, so there is no act to spend against.
+        assertTrue(signal.tryConsumeEscalation())
+        assertFalse(signal.tryConsumeEscalation())
+
+        // A new act opens a fresh budget.
+        signal.onWakeWordDetected()
+        assertTrue(signal.tryConsumeEscalation())
+        assertFalse(signal.tryConsumeEscalation())
+
+        // A recognised command is another deliberate act, so it resets too.
+        signal.onCommandRecognized()
+        assertTrue(signal.tryConsumeEscalation())
+
+        // The privacy closes end the window; the next wake opens a new one.
+        signal.onAudioRouteChanged()
+        signal.onWakeWordDetected()
+        assertTrue(signal.tryConsumeEscalation())
+
+        signal.onAppBackgrounded()
+        signal.onWakeWordDetected()
+        assertTrue(signal.tryConsumeEscalation())
+    }
+
+    @Test
     fun `initially inactive`() {
         val signal = GracePeriodSignal()
         assertFalse(signal.isActive.value)

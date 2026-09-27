@@ -33,6 +33,15 @@ class GracePeriodSignal @Inject constructor() {
     private val _isActive = MutableStateFlow(false)
     val isActive: StateFlow<Boolean> = _isActive
 
+    /**
+     * One escalation to the cloud service is allowed per grace window: the
+     * window is the user-initiated act, and this bounds a routing failure (or a
+     * deliberate `no_match`) to a single dispatch per act rather than a stream.
+     * Reset by anything that opens or resets the window — a wake or a
+     * recognised command — never by the failure itself.
+     */
+    private var escalationUsed = false
+
     private var timerJob: Job? = null
     private val scope = CoroutineScope(Job() + Dispatchers.Main)
 
@@ -46,7 +55,15 @@ class GracePeriodSignal @Inject constructor() {
         startOrReset()
     }
 
+    /** Consumes the window's single escalation; false when it is already spent. */
+    fun tryConsumeEscalation(): Boolean {
+        if (escalationUsed) return false
+        escalationUsed = true
+        return true
+    }
+
     private fun startOrReset() {
+        escalationUsed = false
         _isActive.value = true
         timerJob?.cancel()
         timerJob = scope.launch {

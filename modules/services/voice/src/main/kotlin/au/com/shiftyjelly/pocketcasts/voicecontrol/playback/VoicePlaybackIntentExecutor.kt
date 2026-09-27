@@ -47,7 +47,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
 
             is VoiceIntent.StatsQuery -> executeStatsQuery(intent)
         }
-        gracePeriodSignal.onCommandRecognized(fromEscalation = intent.isEscalation())
+        gracePeriodSignal.onCommandRecognized(fromGeneration = intent.windowGenerationOf())
         return response
     }
 
@@ -282,8 +282,5 @@ interface VoiceStatsQuerySink {
     fun timeSinceLastListen(): VoiceResponse.Spoken
 }
 
-/**
- * True when this intent is the client's own fallback dispatch rather than the
- * router's decision — the one case that must not refresh the escalation budget.
- */
-internal fun VoiceIntent.isEscalation(): Boolean = this is VoiceIntent.CloudRoute && escalated
+/** The grace window a dispatched cloud turn belongs to, or null for a local command. */
+internal fun VoiceIntent.windowGenerationOf(): Long? = (this as? VoiceIntent.CloudRoute)?.windowGeneration

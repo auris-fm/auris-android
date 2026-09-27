@@ -9,6 +9,8 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -208,22 +210,22 @@ class VoicePlaybackIntentExecutorTest {
         val sinks = FakeSinks()
         val executor = sinks.executor(signal)
 
-        // A user act opens the window; its one dispatch is spent on this escalation.
+        // A user act opens the window; its one dispatch is spent on this turn.
         signal.onWakeWordDetected()
-        assertTrue(signal.tryConsumeEscalation())
+        val generation = signal.issueEscalation()!!
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "what did the guests say about sleep and memory",
                 tier = VoiceIntent.CloudTier.Unknown,
-                escalated = true,
+                windowGeneration = generation,
             ),
         )
 
-        // Handling it extends the window, but must not hand the fallback a new
-        // budget — otherwise one unclear question per turn re-arms it forever.
-        assertFalse(
-            "the fallback must not fund its own next attempt",
-            signal.tryConsumeEscalation(),
+        // Handling it extends the window, but must not hand the turn a new
+        // allowance — otherwise one unclear question per turn re-arms it forever.
+        assertNull(
+            "a dispatched turn must not fund its own next attempt",
+            signal.issueEscalation(),
         )
         assertEquals(
             listOf("routeToCloud:what did the guests say about sleep and memory:Unknown"),
@@ -238,7 +240,8 @@ class VoicePlaybackIntentExecutorTest {
         val executor = sinks.executor(signal)
 
         signal.onWakeWordDetected()
-        assertTrue(signal.tryConsumeEscalation())
+        val generation = signal.issueEscalation()!!
+        assertNotNull(generation)
 
         // The app is backgrounded while the cloud turn is still in flight.
         sinks.cloudRoute.whileInFlight = { signal.onAppBackgrounded() }
@@ -246,14 +249,14 @@ class VoicePlaybackIntentExecutorTest {
             VoiceIntent.CloudRoute(
                 request = "what did the guests say about sleep and memory",
                 tier = VoiceIntent.CloudTier.Unknown,
-                escalated = true,
+                windowGeneration = generation,
             ),
         )
 
         // The turn's completion must not bring the mic back: the privacy close
         // wins over an in-flight turn.
         assertFalse("a completion reopened a closed window", signal.isActive.value)
-        assertFalse(signal.tryConsumeEscalation())
+        assertNull(signal.issueEscalation())
     }
 
     @Test
@@ -263,13 +266,14 @@ class VoicePlaybackIntentExecutorTest {
         val executor = sinks.executor(signal)
 
         signal.onWakeWordDetected()
+        val generation = signal.currentGeneration
         sinks.cloudRoute.whileInFlight = { signal.onAppBackgrounded() }
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "summarize this episode",
                 tier = VoiceIntent.CloudTier.Premium,
-                // The router chose this one; the guard has to hold for it too.
-                escalated = false,
+                // The router chose this one; the rule has to hold for it too.
+                windowGeneration = generation,
             ),
         )
 
@@ -287,6 +291,7 @@ class VoicePlaybackIntentExecutorTest {
             VoiceIntent.CloudRoute(
                 request = "summarize this episode",
                 tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = signal.currentGeneration,
             ),
         )
 
@@ -300,11 +305,11 @@ class VoicePlaybackIntentExecutorTest {
         val executor = sinks.executor(signal)
 
         signal.onWakeWordDetected()
-        assertTrue(signal.tryConsumeEscalation())
+        assertNotNull(signal.issueEscalation())
         executor.execute(VoiceIntent.Playback.Pause)
 
-        // A deliberate command is a new act, so it earns a fresh allowance.
-        assertTrue(signal.tryConsumeEscalation())
+        // A locally handled command is a new act, so it earns a fresh allowance.
+        assertNotNull(signal.issueEscalation())
     }
 
     @Test

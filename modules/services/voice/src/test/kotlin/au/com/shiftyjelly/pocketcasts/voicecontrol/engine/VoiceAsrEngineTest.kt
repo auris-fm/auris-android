@@ -324,9 +324,9 @@ class VoiceAsrEngineTest {
                 VoiceIntent.CloudRoute(
                     request = "what did the guests say about sleep and memory",
                     tier = VoiceIntent.CloudTier.Unknown,
-                    // Marked as the fallback, so handling it cannot refresh the
-                    // window budget that funded it.
-                    escalated = true,
+                    // Issued under the open window the helper opened, so handling
+                    // it cannot re-arm that window's allowance or reopen a later one.
+                    windowGeneration = 1L,
                 ),
             ),
             intents,

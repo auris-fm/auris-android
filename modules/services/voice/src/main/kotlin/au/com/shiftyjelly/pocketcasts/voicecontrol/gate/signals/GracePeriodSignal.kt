@@ -34,6 +34,16 @@ class GracePeriodSignal @Inject constructor() {
     val isActive: StateFlow<Boolean> = _isActive
 
     /**
+     * Which window is current. A generation begins whenever a *new act* opens
+     * one — a wake, or a command the app handled locally — and identifies the
+     * window for anything that outlives it, such as a cloud turn still in
+     * flight. A completion that carries a stale generation extends nothing: a
+     * count of what has been spent in a window cannot tell one window from the
+     * next, so an old request could otherwise re-arm a new session's allowance.
+     */
+    private var generation = 0L
+
+    /**
      * True once a privacy event has closed the window and no wake has opened a
      * new one. A close is final: neither a completion that lands afterwards nor
      * a command can reopen it, because the whole point of the close is that
@@ -51,6 +61,9 @@ class GracePeriodSignal @Inject constructor() {
      */
     private var escalationUsed = false
 
+    /** The window the allowance was spent in, so it is spent once per generation. */
+    private var escalatedGeneration = -1L
+
     private var timerJob: Job? = null
     private val scope = CoroutineScope(Job() + Dispatchers.Main)
 
@@ -64,15 +77,20 @@ class GracePeriodSignal @Inject constructor() {
      * - this is an escalation (a network turn), which extends a window that is
      *   still open but never resurrects one that expired while it was in flight.
      *
-     * [fromEscalation] must be true when the command being handled *is* the
-     * cloud escalation, so that handling it does not refresh the escalation
-     * budget and fund the fallback's own next attempt.
+     * [fromGeneration] is the window the handled command was issued under, or
+     * null when the app handled a command locally as a fresh act.
      */
-    fun onCommandRecognized(fromEscalation: Boolean = false) {
+    fun onCommandRecognized(fromGeneration: Long? = null) {
+        // A completion that names its window may extend that window only while
+        // it is still the current one and still open. It never opens one, never
+        // refreshes the allowance, and never resurrects a window a privacy
+        // event ended — including when a later wake has since opened a new one.
+        if (fromGeneration != null) {
+            if (fromGeneration == generation && _isActive.value) startOrReset()
+            return
+        }
         if (closedByPrivacy) return
-        if (fromEscalation && !_isActive.value) return
-        startOrReset()
-        if (!fromEscalation) escalationUsed = false
+        openWindow()
     }
 
     /**
@@ -81,27 +99,37 @@ class GracePeriodSignal @Inject constructor() {
      */
     fun onWakeWordDetected() {
         closedByPrivacy = false
-        startOrReset()
-        escalationUsed = false
+        openWindow()
     }
 
+    /** The window a dispatch issued now would belong to. */
+    val currentGeneration: Long get() = generation
+
     /**
-     * Consumes the window's single escalation.
+     * Issues the window's single escalation, returning the generation it was
+     * issued under, or null when it is refused.
      *
-     * False when the budget is already spent, and false when no window is open:
-     * the bound is "one utterance per user-initiated act", so an utterance with
-     * no window has no act to spend against.
+     * Refused when no window is open — an utterance with no act behind it has
+     * nothing to spend against — and when this generation has already spent its
+     * one dispatch.
      *
      * This does **not** constrain a false wake. A false wake is a wake
      * detection, so it opens a window and its one utterance is the residual we
      * accepted knowingly; what this refuses is an utterance arriving with no
      * window at all.
      */
-    fun tryConsumeEscalation(): Boolean {
-        if (!_isActive.value) return false
-        if (escalationUsed) return false
+    fun issueEscalation(): Long? {
+        if (!_isActive.value || closedByPrivacy) return null
+        if (escalationUsed && escalatedGeneration == generation) return null
         escalationUsed = true
-        return true
+        escalatedGeneration = generation
+        return generation
+    }
+
+    /** A new act opens a window and begins its generation. */
+    private fun openWindow() {
+        generation += 1
+        startOrReset()
     }
 
     private fun startOrReset() {

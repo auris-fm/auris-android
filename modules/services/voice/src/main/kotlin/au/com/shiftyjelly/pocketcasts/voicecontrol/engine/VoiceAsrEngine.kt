@@ -321,7 +321,9 @@ class VoiceAsrEngine @Inject constructor(
                 elapsedMs,
                 input.routerTranscript,
             )
-            handler(intent)
+            // A cloud turn outlives the window it was issued in, so it carries
+            // that window's identity and cannot extend a later one.
+            handler(intent.stampedForWindow(gracePeriodSignal.currentGeneration))
             return
         }
 
@@ -349,7 +351,8 @@ class VoiceAsrEngine @Inject constructor(
             audioFeedbackRenderer.playEarcon(EarconId.ERROR)
             return
         }
-        if (!gracePeriodSignal.tryConsumeEscalation()) {
+        val issuedUnder = gracePeriodSignal.issueEscalation()
+        if (issuedUnder == null) {
             // This window's one dispatch is already spent. Say so rather than
             // fail quietly, for the same reason as above.
             // No open window, or this window's one dispatch is already spent.
@@ -362,7 +365,7 @@ class VoiceAsrEngine @Inject constructor(
             VoiceIntent.CloudRoute(
                 request = input.routerTranscript,
                 tier = VoiceIntent.CloudTier.Unknown,
-                escalated = true,
+                windowGeneration = issuedUnder,
             ),
         )
     }
@@ -561,6 +564,12 @@ class VoiceAsrEngine @Inject constructor(
             scoStarted = false
         }
     }
+
+    /**
+     * Stamps the window a cloud dispatch belongs to; local commands are left
+     * alone, since a locally handled command is itself a fresh act.
+     */
+    private fun VoiceIntent.stampedForWindow(generation: Long): VoiceIntent = if (this is VoiceIntent.CloudRoute) copy(windowGeneration = generation) else this
 
     companion object {
         private const val SCO_CONNECT_TIMEOUT_MS = 3_000L

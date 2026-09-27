@@ -102,13 +102,13 @@ sealed interface VoiceIntent {
         val tier: CloudTier,
         val context: PlaybackContext = PlaybackContext(),
         /**
-         * True when the client dispatched this because it could not route the
-         * utterance, rather than because the router chose a cloud question.
-         * The distinction is load-bearing in one place: handling an escalation
-         * must not refresh the window's escalation budget, or the fallback would
-         * fund its own next attempt.
+         * The grace window this dispatch was issued under, stamped by whoever
+         * dispatched it. Handling the command may extend that window only while
+         * it is still current and still open: the turn outlives the window, and
+         * without the identity an in-flight turn could re-arm a later session's
+         * allowance or reopen one a privacy event closed.
          */
-        val escalated: Boolean = false,
+        val windowGeneration: Long? = null,
     ) : VoiceIntent
 
     enum class CloudTier { Free, Premium, Unknown }

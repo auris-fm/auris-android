@@ -249,6 +249,15 @@ open class PlaybackManager @Inject constructor(
      * Counts play/pause/stop only. A seek or a scrub does not contest the pause,
      * and treating it as if it did would refuse a restore the user never asked
      * to skip.
+     *
+     * **Automatic transitions count too, deliberately** (focus loss, transient
+     * loss). An interruption this app did not cause is not evidence that a cloud
+     * turn's pause should be undone: resuming after a call, or after another app
+     * took audio, would be the turn deciding an interruption is over when it
+     * cannot know that. Leaving playback under the user's hand costs one press of
+     * play. This is a choice, not a side effect of those events sharing the
+     * command path — so don't "fix" audio that stays paused after a phone call by
+     * excluding them here.
      */
     private val playbackCommandCount = java.util.concurrent.atomic.AtomicLong(0)
 

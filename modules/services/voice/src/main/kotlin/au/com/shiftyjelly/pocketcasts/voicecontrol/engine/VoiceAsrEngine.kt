@@ -287,6 +287,23 @@ class VoiceAsrEngine @Inject constructor(
             return
         }
         val routingInput = routePrep.input!!
+        // Instrument for the wake-only rule (owner's directive: measure rather
+        // than guess). The rule should decide from *when* the wake fired instead
+        // of how ASR spelled the phrase, and these three numbers are what that
+        // needs: the detector's band end, the capture length, and where speech
+        // actually started. Diagnostic only — no transcript, no server text.
+        if (request.wakePositive) {
+            val rate = (segment.frames.firstOrNull()?.sampleRateHz ?: 16_000).coerceAtLeast(1)
+            val captureMs = (floatSamples.size * 1000L / rate)
+            val bandEndMs = ((request.completionSample.toLong() * 1000L) / rate) + WakeTranscriptTrimmer.PAD_MS
+            val onsetMs = (segment.speechOnsetSample * 1000L / rate)
+            Timber.i(
+                "[VoicePipeline] wake-only check bandEnd=%dms capture=%dms onset=%dms",
+                bandEndMs,
+                captureMs,
+                onsetMs,
+            )
+        }
         if (WakeOnlyTranscript.isWakeOnly(routingInput.routerTranscript)) {
             // The wake phrase on its own: the user started talking, they did not
             // ask anything. Routing it would classify `no_match` and (with

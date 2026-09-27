@@ -14,6 +14,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.mockito.Mockito
 
 class VoicePlaybackIntentExecutorTest {
 
@@ -215,6 +216,22 @@ class VoicePlaybackIntentExecutorTest {
         // turn's own pause — both carry the voice tag — so the executor reports
         // it, and that is what blocks a turn from restoring over the user.
         org.mockito.kotlin.verify(sinks.playbackManager).noteUserPlaybackCommand()
+    }
+
+    @Test
+    fun `the user's command is recorded before the action runs`() = runTest {
+        val order = mutableListOf<String>()
+        val sinks = FakeSinks()
+        sinks.playback.onCall = { order += "playback:$it" }
+        Mockito.doAnswer { order += "noteUserPlaybackCommand" }
+            .`when`(sinks.playbackManager).noteUserPlaybackCommand()
+        val executor = sinks.executor()
+
+        executor.execute(VoiceIntent.Playback.Pause)
+
+        // A pause that has reached the player but not the counter is the window
+        // where a cloud turn would resume over the user.
+        assertEquals(listOf("noteUserPlaybackCommand", "playback:pause"), order)
     }
 
     @Test
@@ -421,9 +438,12 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     private class FakePlaybackSink : VoicePlaybackSink {
+        var onCall: ((String) -> Unit)? = null
+
         val calls = mutableListOf<String>()
         override suspend fun pause(): VoiceResponse {
             calls += "pause"
+            onCall?.invoke("pause")
             return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override suspend fun resume(): VoiceResponse {

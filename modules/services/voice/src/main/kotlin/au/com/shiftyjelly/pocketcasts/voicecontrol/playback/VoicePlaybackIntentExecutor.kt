@@ -31,6 +31,11 @@ class VoicePlaybackIntentExecutor @Inject constructor(
     private val playbackManager: PlaybackManager,
 ) {
     suspend fun execute(intent: VoiceIntent): VoiceResponse {
+        // Recorded *before* the action runs: the revision is what a cloud turn
+        // compares at restore time, and a user's pause that has already reached
+        // the player but not this counter is exactly the window where the turn
+        // would resume over them.
+        if (intent.changesPlayPauseState()) playbackManager.noteUserPlaybackCommand()
         val response = when (intent) {
             is VoiceIntent.Playback -> executePlayback(intent)
 
@@ -55,7 +60,6 @@ class VoicePlaybackIntentExecutor @Inject constructor(
 
             is VoiceIntent.StatsQuery -> executeStatsQuery(intent)
         }
-        if (intent.changesPlayPauseState()) playbackManager.noteUserPlaybackCommand()
         gracePeriodSignal.onCommandRecognized(
             fromGeneration = intent.windowGenerationOf(),
             restoresAllowance = intent.restoresAllowance(),

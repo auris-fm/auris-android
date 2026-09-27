@@ -341,14 +341,17 @@ class VoiceAsrEngineTest {
     }
 
     @Test
-    fun `a deliberate no_match escalates too`() = runTest {
+    fun `a deliberate no_match stays local and silent`() = runTest {
         val (engine, intents) = startFailingEngine(
             reason = RouterStageDiagnostic.REASON_NO_MATCH,
-            transcript = "what is the weather going to be in Lisbon tomorrow",
+            transcript = "Hi, allri.",
         )
 
-        assertEquals(1, intents.size)
-        assertEquals(VoiceIntent.CloudTier.Unknown, (intents.single() as VoiceIntent.CloudRoute).tier)
+        // The router's own rejection — a bare wake phrase lands here. It must
+        // not spend the window (measured: it did, on every wake), and it must not
+        // beep at the user for ambient speech or podcast bleed either.
+        assertTrue(intents.isEmpty())
+        verify(audioFeedbackRenderer, never()).playEarcon(any())
 
         engine.stop()
     }
@@ -496,77 +499,33 @@ class VoiceAsrEngineTest {
     }
 
     @Test
-    fun `the wake phrase alone does not reach the router`() = runTest {
+    fun `a bare wake phrase is rejected silently`() = runTest {
+        // The router is consulted and rejects it (`no_match`), which is a
+        // deliberate rejection rather than a failure: nothing is dispatched, no
+        // window is spent, and nothing beeps. The guard that tried to keep the
+        // phrase out of the router measured the buffer rather than the words and
+        // was deleted; this is the behaviour that replaced it.
         val recognizer = RecordingRecognizer(null)
-        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
-        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
-        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
-            flowOf(
-                VoiceSegmenterResult.SpeechEnded(
-                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
-                    speechOnsetSample = 2,
-                ),
-            ),
-        )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
-        // A positive wake, as in the run: "hey aris。" was transcribed after a hit.
-        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
-            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
-                detected = true,
-                confidence = 0.9f,
-                completionSample = 4000,
-                threshold = 0.812f,
-            ),
-        )
+        val engine = startTokenless(recognizer, "Hi, allri.")
 
-        val intents = mutableListOf<VoiceIntent>()
-        val engine = VoiceAsrEngine(
-            voiceAudioProcessor = voiceAudioProcessor,
-            utteranceFilter = utteranceFilter,
-            intentRecognizer = recognizer,
-            wakeWordDetector = wakeWordDetector,
-            gracePeriodSignal = GracePeriodSignal(timeoutMs = 30_000L),
-            audioFeedbackRenderer = audioFeedbackRenderer,
-            translationStage = translationStage,
-            context = context,
-        )
-        engine.scope = this
-        engine.start(
-            backend = FakeAsrBackend("hey aris。"),
-            audioRoute = AudioRoute.Speaker,
-            listeningMode = ListeningMode.WakeWord,
-            playbackBufferProvider = { FloatArray(0) },
-            micExposureProvider = { MicExposure.Exposed },
-            onIntent = { intents += it },
-        )
-        advanceUntilIdle()
-
-        // Not routed, so nothing to escalate: the wake phrase is the user
-        // starting to talk, not a question, and it must not spend the window's
-        // dispatch on itself (which is why the real question was refused).
-        assertTrue("router must not be consulted", recognizer.calls.isEmpty())
-        assertTrue(intents.isEmpty())
+        assertTrue("the router may see it; the decision is what matters", recognizer.calls.isNotEmpty())
         verify(audioFeedbackRenderer, never()).playEarcon(EarconId.ERROR)
 
         engine.stop()
     }
 
-    /** One token-less, wake-positive utterance with the numbers under test. */
-    private suspend fun TestScope.startTokenlessEngine(
+    /** One wake-positive utterance, for the rejection cases. */
+    private suspend fun TestScope.startTokenless(
         recognizer: VoiceRecognizer,
-        samples: ShortArray,
-        frameSamples: Int,
-        speechEndSample: Int,
-        completionSample: Int,
+        transcript: String,
     ): VoiceAsrEngine {
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(
             flowOf(
                 VoiceSegmenterResult.SpeechEnded(
-                    listOf(PcmAudioFrame(samples, 16_000)).map { PcmAudioFrame(it.samples.copyOf(frameSamples), it.sampleRateHz) },
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16_000)),
                     speechOnsetSample = 2,
-                    speechEndSample = speechEndSample,
                 ),
             ),
         )
@@ -575,7 +534,7 @@ class VoiceAsrEngineTest {
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = true,
                 confidence = 0.95f,
-                completionSample = completionSample,
+                completionSample = 1_600,
                 threshold = 0.812f,
             ),
         )
@@ -592,7 +551,7 @@ class VoiceAsrEngineTest {
         )
         engine.scope = this
         engine.start(
-            backend = FakeAsrBackend("skip forward"),
+            backend = FakeAsrBackend(transcript),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.WakeWord,
             playbackBufferProvider = { FloatArray(0) },
@@ -1322,45 +1281,6 @@ class VoiceAsrEngineTest {
         verify(gracePeriodSignal, never()).onWakeWordDetected()
         verify(audioFeedbackRenderer, never()).playEarcon(any())
         assertTrue("Expected no ASR calls, got ${recognizer.calls}", recognizer.calls.isEmpty())
-
-        engine.stop()
-    }
-
-    @Test
-    fun `a token-less capture that ends at the wake is wake-only`() = runTest {
-        // The device backend gives no token timings, so "was anything spoken
-        // after the wake?" is answered from the detector's band and the
-        // segmenter's voiced end. 1600 samples at 16 kHz = 100 ms of voicing,
-        // inside a band ending at 220 ms (100 ms completion + 120 ms pad).
-        val recognizer = RecordingRecognizer(null)
-        val engine = startTokenlessEngine(
-            recognizer = recognizer,
-            samples = ShortArray(4_000),
-            frameSamples = 4_000,
-            speechEndSample = 1_600,
-            completionSample = 1_600,
-        )
-
-        assertTrue("nothing was asked after the wake", recognizer.calls.isEmpty())
-        verify(audioFeedbackRenderer, never()).playEarcon(EarconId.ERROR)
-
-        engine.stop()
-    }
-
-    @Test
-    fun `a token-less capture with speech after the wake routes`() = runTest {
-        // 6400 samples = 400 ms of voicing, well past a 220 ms band: a question
-        // followed the wake, so it must reach the router.
-        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
-        val engine = startTokenlessEngine(
-            recognizer = recognizer,
-            samples = ShortArray(8_000),
-            frameSamples = 8_000,
-            speechEndSample = 6_400,
-            completionSample = 1_600,
-        )
-
-        assertEquals(listOf("ensureReady", "recognize:skip forward"), recognizer.calls)
 
         engine.stop()
     }

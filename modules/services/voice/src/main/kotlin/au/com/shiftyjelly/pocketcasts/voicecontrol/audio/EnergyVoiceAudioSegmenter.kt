@@ -16,20 +16,6 @@ class EnergyVoiceAudioSegmenter @javax.inject.Inject constructor() : VoiceAudioS
     private var speechStartTimeMs: Long = 0L
     private var debugSampleCount = 0
 
-    /** Cumulative samples appended, voiced or not. */
-    private var appendedSamples = 0
-
-    /**
-     * Where voicing last stopped, in samples from the segment start.
-     *
-     * Tracked as it happens rather than derived from [speechFrames] at emit
-     * time: frames alternate speech and short pauses, so counting the first
-     * `speechFrames` frames would include an interior pause and miss the last
-     * voiced frame. Only this running value answers "did anything follow the
-     * wake?".
-     */
-    private var lastVoicedEndSample = 0
-
     override fun process(frame: PcmAudioFrame): VoiceSegmenterResult {
         val now = System.currentTimeMillis()
         if (now < cooldownUntilMs) return VoiceSegmenterResult.Silence
@@ -46,10 +32,9 @@ class EnergyVoiceAudioSegmenter @javax.inject.Inject constructor() : VoiceAudioS
         // Check for timeout if we're in speech mode
         if (speechFrames > 0 && now - speechStartTimeMs > maxSpeechDurationMs) {
             val segment = if (speechFrames >= minimumSpeechFrames) frames.toList() else null
-            val voicedEnd = lastVoicedEndSample
             reset()
             return if (segment != null) {
-                VoiceSegmenterResult.SpeechEnded(segment, speechEndSample = voicedEnd)
+                VoiceSegmenterResult.SpeechEnded(segment)
             } else {
                 VoiceSegmenterResult.Rejected(RejectionReason.Timeout)
             }
@@ -57,8 +42,6 @@ class EnergyVoiceAudioSegmenter @javax.inject.Inject constructor() : VoiceAudioS
 
         if (isSpeech) {
             frames += frame
-            appendedSamples += frame.samples.size
-            lastVoicedEndSample = appendedSamples
             speechFrames += 1
             silenceFrames = 0
             if (speechFrames == 1) {
@@ -69,14 +52,12 @@ class EnergyVoiceAudioSegmenter @javax.inject.Inject constructor() : VoiceAudioS
 
         if (speechFrames > 0) {
             frames += frame
-            appendedSamples += frame.samples.size
             silenceFrames += 1
             if (silenceFrames >= trailingSilenceFrames) {
                 val segment = if (speechFrames >= minimumSpeechFrames) frames.toList() else null
-                val voicedEnd = lastVoicedEndSample
                 reset()
                 return if (segment != null) {
-                    VoiceSegmenterResult.SpeechEnded(segment, speechEndSample = voicedEnd)
+                    VoiceSegmenterResult.SpeechEnded(segment)
                 } else {
                     VoiceSegmenterResult.Rejected(RejectionReason.TooShort)
                 }
@@ -88,8 +69,6 @@ class EnergyVoiceAudioSegmenter @javax.inject.Inject constructor() : VoiceAudioS
 
     private fun reset() {
         frames.clear()
-        appendedSamples = 0
-        lastVoicedEndSample = 0
         speechFrames = 0
         silenceFrames = 0
         speechStartTimeMs = 0L

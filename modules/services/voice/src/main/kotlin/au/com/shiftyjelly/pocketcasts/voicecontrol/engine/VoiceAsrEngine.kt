@@ -16,6 +16,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRendere
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalationPolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.IntentRoutingInput
@@ -26,7 +27,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeTranscriptTrimmer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
-import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordPhraseSet
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordSegmentCapture
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -286,56 +286,7 @@ class VoiceAsrEngine @Inject constructor(
             audioFeedbackRenderer.playEarcon(EarconId.ERROR)
             return
         }
-        val routingInput = routePrep.input!!
-        val tokenTimingsPresent = asrResult.tokens != null
-
-        // Was anything asked, or was that the wake phrase on its own?
-        //
-        // The decision comes from *when* the wake fired, not from how ASR spelled
-        // it: a phrase list is a record of the last mis-hearings we happened to
-        // see, which is why it kept growing ('hey aris。', 'Oace.'). The detector
-        // already knows where the wake ended, and the segmenter knows where
-        // voicing stopped — if nothing was spoken after the wake band, the
-        // capture was the wake and nothing else.
-        //
-        // The band comparison uses the *voiced* end, not the segment end: a VAD
-        // segment carries its trailing-silence window, so measuring that against
-        // the band would report speech that was never there.
-        val rate = (segment.frames.firstOrNull()?.sampleRateHz ?: 16_000).coerceAtLeast(1)
-        val captureMs = (floatSamples.size * 1000L / rate)
-        val bandEndMs = ((request.completionSample.toLong() * 1000L) / rate) + WakeTranscriptTrimmer.PAD_MS
-        val onsetMs = (segment.speechOnsetSample * 1000L / rate)
-        val voicedEndMs = if (segment.speechEndSample > 0) segment.speechEndSample * 1000L / rate else captureMs
-        // Which rule applies depends on what the backend gave us:
-        //  - with token timings, the trimmer already removed everything inside
-        //    the wake band, so surviving text means a command followed the wake
-        //    and empty text was already dropped upstream — nothing to add here;
-        //  - without them (SenseVoice, the device's backend) the trimmer cannot
-        //    attribute text to time, which is the case this decision exists for;
-        //  - with no wake in the utterance there is no timing at all, so the text
-        //    decides — conservatively, on the configured phrase alone.
-        val wakeOnly = when {
-            request.wakePositive -> !tokenTimingsPresent && voicedEndMs <= bandEndMs
-            else -> WakeWordPhraseSet.matches(routingInput.routerTranscript)
-        }
-        // Diagnostic only — no transcript, no server text. It is what tells us
-        // whether the rule ever classifies a real capture as wake-only.
-        Timber.i(
-            "[VoicePipeline] wake-only=%s bandEnd=%dms voicedEnd=%dms capture=%dms onset=%dms",
-            wakeOnly,
-            bandEndMs,
-            voicedEndMs,
-            captureMs,
-            onsetMs,
-        )
-        if (wakeOnly) {
-            Timber.i("[VoicePipeline] wake-only utterance → skip routing")
-            // Silent on purpose: the wake earcon already acknowledged detection,
-            // and a wake-only capture is the start of a session rather than a
-            // question that failed.
-            return
-        }
-        processUtterance(routingInput)
+        processUtterance(routePrep.input!!)
     }
 
     private suspend fun processUtterance(input: IntentRoutingInput) {
@@ -387,37 +338,42 @@ class VoiceAsrEngine @Inject constructor(
             input.routerTranscript,
         )
 
-        // No usable intent. A routing *failure* is not a decision — the pipeline
-        // produced no answer at all — and `no_match` is a decision the user can
-        // still be wrong about ("this wasn't addressed to us" is the router's
-        // judgment, not a fact). Both go to the service, bounded to one
-        // escalation per grace window, through the same handler a chosen
-        // `cloud_route` uses, so superseded-turn cancellation and the auto-pause
-        // obligation still apply. What stays local is the case with nothing to
-        // send or nothing that could answer: see [CloudEscalationPolicy].
-        if (!CloudEscalationPolicy.escalates(reason)) {
-            // Nothing was sent, so the user would otherwise get silence for a
-            // turn that did happen: the earcon table already requires this tone.
-            audioFeedbackRenderer.playEarcon(EarconId.ERROR)
-            return
+        // No usable intent: three outcomes, decided in one place
+        // (see [CloudEscalationPolicy] for which reason lands where).
+        when (CloudEscalationPolicy.decide(reason)) {
+            // A rejection, not a failure — a bare wake phrase lands here, which
+            // is why the window is no longer spent on the wake word.
+            CloudEscalation.SILENT -> Unit
+
+            // Nothing was sent, but a turn happened: the earcon table already
+            // requires a tone for this case.
+            CloudEscalation.SPEAK_ERROR -> audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+
+            // The client has no answer of its own, so the service gets asked —
+            // through the same handler a chosen `cloud_route` uses, so
+            // superseded-turn cancellation and the auto-pause obligation apply.
+            CloudEscalation.DISPATCH -> {
+                val issuedUnder = gracePeriodSignal.issueEscalation()
+                if (issuedUnder == null) {
+                    // No open window, or this window's one dispatch is spent.
+                    Timber.i(
+                        "[VoicePipeline] cloud escalation skipped (%s)",
+                        gracePeriodSignal.escalationRefusal(),
+                    )
+                    audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+                    return
+                }
+                Timber.i("[VoicePipeline] cloud escalation ← '%s' (reason=%s)", input.routerTranscript, reason)
+                handler(
+                    VoiceIntent.CloudRoute(
+                        request = input.routerTranscript,
+                        tier = VoiceIntent.CloudTier.Unknown,
+                        windowGeneration = issuedUnder,
+                        origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
+                    ),
+                )
+            }
         }
-        val issuedUnder = gracePeriodSignal.issueEscalation()
-        if (issuedUnder == null) {
-            // This window's one dispatch is already spent. Say so rather than
-            // fail quietly, for the same reason as above.
-            Timber.i("[VoicePipeline] cloud escalation skipped (%s)", gracePeriodSignal.escalationRefusal())
-            audioFeedbackRenderer.playEarcon(EarconId.ERROR)
-            return
-        }
-        Timber.i("[VoicePipeline] cloud escalation ← '%s' (reason=%s)", input.routerTranscript, reason)
-        handler(
-            VoiceIntent.CloudRoute(
-                request = input.routerTranscript,
-                tier = VoiceIntent.CloudTier.Unknown,
-                windowGeneration = issuedUnder,
-                origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
-            ),
-        )
     }
 
     /**

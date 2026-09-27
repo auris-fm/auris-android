@@ -546,7 +546,7 @@ class VoiceAsrEngineTest {
         // dispatch on itself (which is why the real question was refused).
         assertTrue("router must not be consulted", recognizer.calls.isEmpty())
         assertTrue(intents.isEmpty())
-        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer, never()).playEarcon(EarconId.ERROR)
 
         engine.stop()
     }
@@ -1211,7 +1211,7 @@ class VoiceAsrEngineTest {
     }
 
     @Test
-    fun `wake-only detection opens grace plays error earcon after empty command transcript`() = runTest {
+    fun `wake-only detection opens grace and stays silent after an empty command transcript`() = runTest {
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(
             recognizer = recognizer,
@@ -1237,7 +1237,9 @@ class VoiceAsrEngineTest {
 
         verify(gracePeriodSignal).onWakeWordDetected()
         verify(audioFeedbackRenderer).playEarcon(EarconId.WAKE_WORD)
-        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+        // Nothing was asked: a wake-only capture starts the session, it is not a
+        // question that failed, so it plays nothing beyond the wake earcon.
+        verify(audioFeedbackRenderer, never()).playEarcon(EarconId.ERROR)
         assertTrue("Expected no intent routing, got ${recognizer.calls}", recognizer.calls.isEmpty())
 
         engine.stop()

@@ -257,9 +257,9 @@ class VoiceAsrEngine @Inject constructor(
                 trimNote?.let { " $it" } ?: "",
                 if (request.wakePositive) "wake-only" else "empty",
             )
-            if (request.wakePositive) {
-                audioFeedbackRenderer.playEarcon(EarconId.ERROR)
-            }
+            // No leftover command after the wake: the session started and
+            // nothing was asked, so nothing is reported. (The WAKE_WORD earcon
+            // already acknowledged detection.)
             return
         }
         // Translate to English when the ASR backend did not already translate and
@@ -293,7 +293,9 @@ class VoiceAsrEngine @Inject constructor(
             // no_match escalating) spend the window's dispatch on the wake word,
             // leaving the question that follows unanswered.
             Timber.i("[VoicePipeline] wake-only utterance → skip routing")
-            audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+            // Silent on purpose: the wake earcon already acknowledged detection,
+            // and a wake-only capture is the start of a session rather than a
+            // question that failed.
             return
         }
         processUtterance(routingInput)

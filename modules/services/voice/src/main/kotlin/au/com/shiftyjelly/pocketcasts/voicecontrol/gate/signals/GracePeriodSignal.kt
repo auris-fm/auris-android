@@ -109,6 +109,19 @@ class GracePeriodSignal @Inject constructor() {
         openWindow()
     }
 
+    /**
+     * Why a dispatch would be refused right now, for the log line: the two
+     * causes are different problems (nothing is listening vs this window has
+     * already spent its one dispatch) and conflating them made a real run hard
+     * to read.
+     */
+    fun escalationRefusal(): String = when {
+        closedByPrivacy -> "no open window (closed by a privacy event)"
+        !_isActive.value -> "no open window"
+        escalationUsed && escalatedGeneration == generation -> "allowance spent in this window"
+        else -> "available"
+    }
+
     /** The window a dispatch issued now would belong to. */
     val currentGeneration: Long get() = generation
 

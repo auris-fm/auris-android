@@ -24,6 +24,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeOnlyTranscript
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeTranscriptTrimmer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordSegmentCapture
@@ -285,7 +286,17 @@ class VoiceAsrEngine @Inject constructor(
             audioFeedbackRenderer.playEarcon(EarconId.ERROR)
             return
         }
-        processUtterance(routePrep.input!!)
+        val routingInput = routePrep.input!!
+        if (WakeOnlyTranscript.isWakeOnly(routingInput.routerTranscript)) {
+            // The wake phrase on its own: the user started talking, they did not
+            // ask anything. Routing it would classify `no_match` and (with
+            // no_match escalating) spend the window's dispatch on the wake word,
+            // leaving the question that follows unanswered.
+            Timber.i("[VoicePipeline] wake-only utterance → skip routing")
+            audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+            return
+        }
+        processUtterance(routingInput)
     }
 
     private suspend fun processUtterance(input: IntentRoutingInput) {
@@ -355,8 +366,7 @@ class VoiceAsrEngine @Inject constructor(
         if (issuedUnder == null) {
             // This window's one dispatch is already spent. Say so rather than
             // fail quietly, for the same reason as above.
-            // No open window, or this window's one dispatch is already spent.
-            Timber.i("[VoicePipeline] cloud escalation skipped (no window or budget spent)")
+            Timber.i("[VoicePipeline] cloud escalation skipped (%s)", gracePeriodSignal.escalationRefusal())
             audioFeedbackRenderer.playEarcon(EarconId.ERROR)
             return
         }

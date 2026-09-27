@@ -822,10 +822,12 @@ class CloudRouteSinkTest {
         firstCancelled.await()
         first.join()
 
-        // Turn one paused; the successor paused and resumed once. The superseded
-        // turn must NOT resume — otherwise it resumes audio the newer turn
-        // paused, and the answer streams over playing audio.
-        assertEquals(listOf("pause", "pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
+        // Turn one paused; the successor inherited the already-paused player, so
+        // it does not pause again (pausing a paused player is the defect that
+        // started playback for the owner), and it restores once at the end. The
+        // superseded turn must NOT resume — otherwise it resumes audio the newer
+        // turn still needs quiet, and the answer streams over playing audio.
+        assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
     }
 
     @Test
@@ -962,6 +964,53 @@ class CloudRouteSinkTest {
         assertEquals(listOf("pause", "pause"), deps.playback.calls)
     }
 
+    @Test
+    fun `a turn while the host is paused neither pauses nor resumes`() = runTest {
+        // The owner's run: the player was not playing, the turn failed, and
+        // playback started — because the turn claimed a pause it never made.
+        val deps = TestDeps(hostPlaying = false, events = flowOf(CloudRouteEvent.Done(1, 0)))
+
+        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(
+            "a paused host must be left exactly as it was",
+            emptyList<String>(),
+            deps.playback.calls,
+        )
+    }
+
+    @Test
+    fun `a turn while the host is playing pauses and restores it`() = runTest {
+        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+
+        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(listOf("pause", "resume"), deps.playback.calls)
+        assertTrue("playback is where it started", deps.host.playing)
+    }
+
+    @Test
+    fun `a turn does not override playback the user resumed while it ran`() = runTest {
+        lateinit var deps: TestDeps
+        deps = TestDeps(
+            hostPlaying = true,
+            routeInvoker = {
+                kotlinx.coroutines.flow.flow {
+                    // The user presses play while the cloud turn is in flight.
+                    deps.host.playing = true
+                    emit(CloudRouteEvent.Done(1, 0))
+                }
+            },
+        )
+
+        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // The turn's own pause is not undone twice: resuming again would fight
+        // the user's decision, which is the same class of defect as resuming a
+        // player that was never playing.
+        assertEquals(listOf("pause"), deps.playback.calls)
+    }
+
     private class RecordingRenderer : CloudSearchResultsRenderer {
         val rendered = mutableListOf<CloudSearchResults>()
         val empties = mutableListOf<String>()
@@ -997,6 +1046,8 @@ class CloudRouteSinkTest {
         private val cloudPlaybackContextState: CloudPlaybackContextState = CloudPlaybackContextState(),
         private val events: kotlinx.coroutines.flow.Flow<CloudRouteEvent> = flowOf(CloudRouteEvent.Done(0, 0)),
         val renderer: CloudSearchResultsRenderer? = null,
+        /** Whether the host app is playing while this turn runs. */
+        var hostPlaying: Boolean = true,
         val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
         private val locale: java.util.Locale = java.util.Locale.ENGLISH,
         // Keys built from the same constant the sink uses, so renaming the
@@ -1010,7 +1061,9 @@ class CloudRouteSinkTest {
         ),
         routeInvoker: ((CloudRouteTurn) -> kotlinx.coroutines.flow.Flow<CloudRouteEvent>)? = null,
     ) {
-        val playback = FakePlaybackSink()
+        /** The host's playback state, moved by the fake sink the way a player would. */
+        val host = HostPlaybackState(hostPlaying)
+        val playback = FakePlaybackSink(host)
         val analytics = FakeCloudRouteAnalytics()
         val routeCalls = mutableListOf<String>()
         val routeContexts = mutableListOf<CloudRouteContext>()
@@ -1039,10 +1092,14 @@ class CloudRouteSinkTest {
             conversationMemory = conversationMemory,
             templateResolver = templateResolver,
             currentLocale = { locale },
+            isHostPlaying = { host.playing },
         )
     }
 
-    private class FakePlaybackSink : VoicePlaybackSink {
+    /** Models the host player's state so pause/resume can be observed, and moved. */
+    private class HostPlaybackState(var playing: Boolean)
+
+    private class FakePlaybackSink(private val host: HostPlaybackState? = null) : VoicePlaybackSink {
         val calls = mutableListOf<String>()
 
         /** When set, resume() suspends until released (models play-queue loads). */
@@ -1059,6 +1116,7 @@ class CloudRouteSinkTest {
 
         override suspend fun pause(): VoiceResponse {
             calls += "pause"
+            host?.playing = false
             pauseCalls += 1
             if (throwOnPauseCall == pauseCalls) error("pause failed")
             pauseStarted.complete(Unit)
@@ -1070,6 +1128,7 @@ class CloudRouteSinkTest {
             resumeStarted.complete(Unit)
             resumeGate?.await()
             calls += "resume"
+            host?.playing = true
             return VoiceResponse.Silent
         }
 

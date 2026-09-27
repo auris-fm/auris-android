@@ -495,6 +495,62 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
+    @Test
+    fun `the wake phrase alone does not reach the router`() = runTest {
+        val recognizer = RecordingRecognizer(null)
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        // A positive wake, as in the run: "hey aris。" was transcribed after a hit.
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = true,
+                confidence = 0.9f,
+                completionSample = 4000,
+                threshold = 0.812f,
+            ),
+        )
+
+        val intents = mutableListOf<VoiceIntent>()
+        val engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = GracePeriodSignal(timeoutMs = 30_000L),
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+        engine.start(
+            backend = FakeAsrBackend("hey aris。"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.WakeWord,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { intents += it },
+        )
+        advanceUntilIdle()
+
+        // Not routed, so nothing to escalate: the wake phrase is the user
+        // starting to talk, not a question, and it must not spend the window's
+        // dispatch on itself (which is why the real question was refused).
+        assertTrue("router must not be consulted", recognizer.calls.isEmpty())
+        assertTrue(intents.isEmpty())
+        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+
+        engine.stop()
+    }
+
     /**
      * Drives one failed utterance through the engine in an open window and
      * returns the intents the handler saw.

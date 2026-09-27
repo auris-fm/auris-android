@@ -79,14 +79,21 @@ class GracePeriodSignal @Inject constructor() {
      *
      * [fromGeneration] is the window the handled command was issued under, or
      * null when the app handled a command locally as a fresh act.
+     *
+     * [restoresAllowance] applies only to a dispatched turn: true for one the
+     * router chose, false for the routing-failure fallback.
      */
-    fun onCommandRecognized(fromGeneration: Long? = null) {
+    fun onCommandRecognized(fromGeneration: Long? = null, restoresAllowance: Boolean = true) {
         // A completion that names its window may extend that window only while
-        // it is still the current one and still open. It never opens one, never
-        // refreshes the allowance, and never resurrects a window a privacy
-        // event ended — including when a later wake has since opened a new one.
+        // it is still the current one and still open. It never opens one and
+        // never resurrects a window a privacy event ended — including when a
+        // later wake has opened a new one.
         if (fromGeneration != null) {
-            if (fromGeneration == generation && _isActive.value) startOrReset()
+            if (fromGeneration != generation || !_isActive.value) return
+            startOrReset()
+            // Restoring is a separate question from touching the window: a
+            // deliberate route earns the next dispatch, an escalation does not.
+            if (restoresAllowance) escalatedGeneration = -1L
             return
         }
         if (closedByPrivacy) return

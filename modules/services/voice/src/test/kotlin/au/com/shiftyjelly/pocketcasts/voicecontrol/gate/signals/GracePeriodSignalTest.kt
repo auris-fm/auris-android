@@ -52,6 +52,39 @@ class GracePeriodSignalTest {
     }
 
     @Test
+    fun `generation and origin are separate questions`() {
+        // Current × a route the router chose: it is a deliberate act, so the
+        // window earns its next dispatch.
+        val chosen = GracePeriodSignal(timeoutMs = 30_000L)
+        chosen.onWakeWordDetected()
+        val chosenGeneration = chosen.issueEscalation()!!
+        assertNull("the first dispatch spends the allowance", chosen.issueEscalation())
+        chosen.onCommandRecognized(fromGeneration = chosenGeneration, restoresAllowance = true)
+        assertNotNull("a deliberate route restores it", chosen.issueEscalation())
+
+        // Current × the routing-failure fallback: touching the window is fine,
+        // restoring the allowance is not — that is what the bound is for.
+        val failure = GracePeriodSignal(timeoutMs = 30_000L)
+        failure.onWakeWordDetected()
+        val failureGeneration = failure.issueEscalation()!!
+        failure.onCommandRecognized(fromGeneration = failureGeneration, restoresAllowance = false)
+        assertNull("the fallback must not fund its own next attempt", failure.issueEscalation())
+
+        // Stale × either origin: a completion from a window that is gone changes
+        // nothing — neither the window nor the allowance of the current one.
+        val stale = GracePeriodSignal(timeoutMs = 30_000L)
+        stale.onWakeWordDetected()
+        val superseded = stale.issueEscalation()!!
+        stale.onAppBackgrounded()
+        stale.onWakeWordDetected()
+        assertNotNull("the new window has its own dispatch", stale.issueEscalation())
+        stale.onCommandRecognized(fromGeneration = superseded, restoresAllowance = true)
+        assertNull("a stale completion restores nothing", stale.issueEscalation())
+        stale.onCommandRecognized(fromGeneration = superseded, restoresAllowance = false)
+        assertNull("a stale completion changes nothing", stale.issueEscalation())
+    }
+
+    @Test
     fun `a current completion extends the window through the timer`() = runTest {
         // Extending is observable through the timer: a completion that extends
         // pushes expiry past the original deadline.

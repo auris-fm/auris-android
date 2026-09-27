@@ -325,8 +325,10 @@ class VoiceAsrEngineTest {
                     request = "what did the guests say about sleep and memory",
                     tier = VoiceIntent.CloudTier.Unknown,
                     // Issued under the open window the helper opened, so handling
-                    // it cannot re-arm that window's allowance or reopen a later one.
+                    // it cannot re-arm that window's allowance or reopen a later
+                    // one; and marked as the fallback, which must not restore it.
                     windowGeneration = 1L,
+                    origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
                 ),
             ),
             intents,

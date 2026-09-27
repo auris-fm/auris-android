@@ -366,6 +366,7 @@ class VoiceAsrEngine @Inject constructor(
                 request = input.routerTranscript,
                 tier = VoiceIntent.CloudTier.Unknown,
                 windowGeneration = issuedUnder,
+                origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
             ),
         )
     }

@@ -218,6 +218,7 @@ class VoicePlaybackIntentExecutorTest {
                 request = "what did the guests say about sleep and memory",
                 tier = VoiceIntent.CloudTier.Unknown,
                 windowGeneration = generation,
+                origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
             ),
         )
 
@@ -241,7 +242,6 @@ class VoicePlaybackIntentExecutorTest {
 
         signal.onWakeWordDetected()
         val generation = signal.issueEscalation()!!
-        assertNotNull(generation)
 
         // The app is backgrounded while the cloud turn is still in flight.
         sinks.cloudRoute.whileInFlight = { signal.onAppBackgrounded() }
@@ -250,6 +250,7 @@ class VoicePlaybackIntentExecutorTest {
                 request = "what did the guests say about sleep and memory",
                 tier = VoiceIntent.CloudTier.Unknown,
                 windowGeneration = generation,
+                origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
             ),
         )
 
@@ -257,6 +258,26 @@ class VoicePlaybackIntentExecutorTest {
         // wins over an in-flight turn.
         assertFalse("a completion reopened a closed window", signal.isActive.value)
         assertNull(signal.issueEscalation())
+    }
+
+    @Test
+    fun `a model-chosen route completing in its window restores the allowance`() = runTest {
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
+        val sinks = FakeSinks()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        val generation = signal.issueEscalation()!!
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "summarize this episode",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = generation,
+                origin = VoiceIntent.CloudRouteOrigin.ModelCall,
+            ),
+        )
+
+        assertNotNull("a deliberate route earns the next dispatch", signal.issueEscalation())
     }
 
     @Test

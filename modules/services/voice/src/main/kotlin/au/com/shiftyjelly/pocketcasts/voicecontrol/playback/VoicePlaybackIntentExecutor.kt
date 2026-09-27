@@ -47,7 +47,10 @@ class VoicePlaybackIntentExecutor @Inject constructor(
 
             is VoiceIntent.StatsQuery -> executeStatsQuery(intent)
         }
-        gracePeriodSignal.onCommandRecognized(fromGeneration = intent.windowGenerationOf())
+        gracePeriodSignal.onCommandRecognized(
+            fromGeneration = intent.windowGenerationOf(),
+            restoresAllowance = intent.restoresAllowance(),
+        )
         return response
     }
 
@@ -284,3 +287,10 @@ interface VoiceStatsQuerySink {
 
 /** The grace window a dispatched cloud turn belongs to, or null for a local command. */
 internal fun VoiceIntent.windowGenerationOf(): Long? = (this as? VoiceIntent.CloudRoute)?.windowGeneration
+
+/**
+ * Whether handling this command earns the window another dispatch. A route the
+ * router chose is a deliberate act; the routing-failure fallback is not, since
+ * the allowance it is spending exists for exactly that case.
+ */
+internal fun VoiceIntent.restoresAllowance(): Boolean = (this as? VoiceIntent.CloudRoute)?.origin != VoiceIntent.CloudRouteOrigin.RoutingFailure

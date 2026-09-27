@@ -54,6 +54,12 @@ class CloudRouteSink internal constructor(
      * a player the user had deliberately stopped.
      */
     private val isHostPlaying: () -> Boolean,
+    /**
+     * Counts play/pause/stop commands from outside the voice path. Sampled when
+     * the turn takes its pause; if it moves, someone else now owns the player's
+     * play/pause state and the turn must not restore over them.
+     */
+    private val userPlaybackCommandRevision: () -> Long = { 0L },
 ) : VoiceCloudRouteSink {
 
     @Inject constructor(
@@ -81,6 +87,7 @@ class CloudRouteSink internal constructor(
         templateResolver = templateResolver,
         currentLocale = currentLocale,
         isHostPlaying = { playbackContextMonitor.isHostAudioActive.value },
+        userPlaybackCommandRevision = { playbackContextMonitor.userPlaybackCommandRevision.value },
     )
 
     /**
@@ -119,6 +126,9 @@ class CloudRouteSink internal constructor(
      * just a race).
      */
     private var playerAutoPaused = false
+
+    /** The command revision in force when this turn chain took the pause. */
+    private var pauseCommandRevision: Long = 0L
     private val turnCounter = AtomicLong(0)
 
     override suspend fun routeToCloud(
@@ -186,6 +196,7 @@ class CloudRouteSink internal constructor(
 
             turnMutex.withLock {
                 if (activeTurnId == myId && isHostPlaying()) {
+                    pauseCommandRevision = userPlaybackCommandRevision()
                     // Mark intent *before* the suspending pause: the player can
                     // already be paused when cancellation lands mid-call, and a
                     // flag set afterwards would leave the finally thinking there
@@ -363,9 +374,14 @@ class CloudRouteSink internal constructor(
     private suspend fun restoreTransientAudioState() {
         if (!playerAutoPaused) return
         playerAutoPaused = false
-        // The turn is a long suspension, and playback can move underneath it —
-        // the user can press play. Restoring then would override a decision they
-        // made while we were talking, so only the state we left is restored.
+        // The turn is a long suspension, and playback can move underneath it.
+        // Ownership is a question about commands, not state: a user who pressed
+        // pause leaves the player in the same state the turn left it, so only a
+        // command revision can tell their action from nobody acting.
+        if (userPlaybackCommandRevision() != pauseCommandRevision) {
+            Timber.i("[VoicePipeline] cloud turn left playback alone (someone else acted)")
+            return
+        }
         if (isHostPlaying()) {
             Timber.i("[VoicePipeline] cloud turn left playback alone (host is playing again)")
             return

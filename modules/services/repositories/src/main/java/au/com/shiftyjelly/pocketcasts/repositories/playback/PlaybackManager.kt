@@ -229,6 +229,31 @@ open class PlaybackManager @Inject constructor(
         .toLiveData()
     val playbackStateFlow: Flow<PlaybackState> = playbackStateRelay.asFlow()
 
+    /**
+     * Counts play/pause/stop commands issued by anyone *other than* the voice
+     * path, tagged by [SourceView].
+     *
+     * The voice cloud turn pauses the player to hold the user's place and later
+     * restores it. Whether that restore is still legitimate is a question about
+     * *ownership*, not about state: a user who presses pause while the turn runs
+     * leaves the player in exactly the state the turn left it, so a state sample
+     * cannot tell "nobody acted" from "the user acted". A command revision can,
+     * because it records who acted rather than what the result looks like.
+     *
+     * Deliberately counts only play/pause/stop: a seek or a scrub does not
+     * contest the pause the turn took, and treating it as if it did would refuse
+     * a restore the user never asked to skip.
+     */
+    private val userPlaybackCommandRevisionRelay: Relay<Long> by lazy {
+        BehaviorRelay.createDefault(0L).toSerialized()
+    }
+    val userPlaybackCommandRevision: Flow<Long> = userPlaybackCommandRevisionRelay.asFlow()
+
+    private fun notePlaybackCommand(sourceView: SourceView) {
+        if (sourceView == SourceView.VOICE_COMMANDS) return
+        userPlaybackCommandRevisionRelay.accept((userPlaybackCommandRevisionRelay.blockingFirst() ?: 0L) + 1L)
+    }
+
     private var updateCount = 0
     private var resettingPlayer = false
     private var episodeLastBufferStatus: EpisodeBufferStatus? = null
@@ -654,6 +679,7 @@ open class PlaybackManager @Inject constructor(
         sourceView: SourceView = SourceView.UNKNOWN,
         showedStreamWarning: Boolean = false,
     ) {
+        notePlaybackCommand(sourceView)
         if (upNextQueue.currentEpisode != null) {
             loadEpisodeWhenRequired(sourceView, showedStreamWarning)
         }
@@ -706,6 +732,7 @@ open class PlaybackManager @Inject constructor(
         showedStreamWarning: Boolean = false,
         sourceView: SourceView = SourceView.UNKNOWN,
     ) {
+        notePlaybackCommand(sourceView)
         LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Play now: ${episode.uuid} ${episode.title}")
 
         withContext(Dispatchers.IO) {
@@ -1002,6 +1029,7 @@ open class PlaybackManager @Inject constructor(
     }
 
     suspend fun pauseSuspend(transientLoss: Boolean = false, sourceView: SourceView = SourceView.UNKNOWN) {
+        notePlaybackCommand(sourceView)
         if (!transientLoss) {
             focusManager.giveUpAudioFocus()
             playbackStateRelay.blockingFirst().let { playbackState ->
@@ -1046,6 +1074,9 @@ open class PlaybackManager @Inject constructor(
     }
 
     suspend fun stop() {
+        // A stop is a play/pause-state change too: whoever asked for it, the
+        // turn's pause is no longer the reason the player is quiet.
+        notePlaybackCommand(SourceView.UNKNOWN)
         LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Stopping playback")
 
         flushPendingContentTypeEvents()

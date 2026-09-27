@@ -990,6 +990,27 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a turn does not override a user pause that changed nothing`() = runTest {
+        // The case a state sample cannot see: the player is already paused (by
+        // the turn), the user presses pause, and nothing about the state
+        // changes. Only the command revision records that they acted.
+        lateinit var deps: TestDeps
+        deps = TestDeps(
+            hostPlaying = true,
+            routeInvoker = {
+                kotlinx.coroutines.flow.flow {
+                    deps.commandRevision += 1
+                    emit(CloudRouteEvent.Done(1, 0))
+                }
+            },
+        )
+
+        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals("the user's pause stands", listOf("pause"), deps.playback.calls)
+    }
+
+    @Test
     fun `a turn does not override playback the user resumed while it ran`() = runTest {
         lateinit var deps: TestDeps
         deps = TestDeps(
@@ -1048,6 +1069,9 @@ class CloudRouteSinkTest {
         val renderer: CloudSearchResultsRenderer? = null,
         /** Whether the host app is playing while this turn runs. */
         var hostPlaying: Boolean = true,
+
+        /** Play/pause/stop commands issued from outside the voice path. */
+        var commandRevision: Long = 0,
         val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
         private val locale: java.util.Locale = java.util.Locale.ENGLISH,
         // Keys built from the same constant the sink uses, so renaming the
@@ -1093,6 +1117,7 @@ class CloudRouteSinkTest {
             templateResolver = templateResolver,
             currentLocale = { locale },
             isHostPlaying = { host.playing },
+            userPlaybackCommandRevision = { commandRevision },
         )
     }
 

@@ -551,6 +551,58 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
+    /** One token-less, wake-positive utterance with the numbers under test. */
+    private suspend fun TestScope.startTokenlessEngine(
+        recognizer: VoiceRecognizer,
+        samples: ShortArray,
+        frameSamples: Int,
+        speechEndSample: Int,
+        completionSample: Int,
+    ): VoiceAsrEngine {
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(samples, 16_000)).map { PcmAudioFrame(it.samples.copyOf(frameSamples), it.sampleRateHz) },
+                    speechOnsetSample = 2,
+                    speechEndSample = speechEndSample,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = true,
+                confidence = 0.95f,
+                completionSample = completionSample,
+                threshold = 0.812f,
+            ),
+        )
+
+        val engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = GracePeriodSignal(timeoutMs = 30_000L),
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+        engine.start(
+            backend = FakeAsrBackend("skip forward"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.WakeWord,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        advanceUntilIdle()
+        return engine
+    }
+
     /**
      * Drives one failed utterance through the engine in an open window and
      * returns the intents the handler saw.
@@ -1270,6 +1322,45 @@ class VoiceAsrEngineTest {
         verify(gracePeriodSignal, never()).onWakeWordDetected()
         verify(audioFeedbackRenderer, never()).playEarcon(any())
         assertTrue("Expected no ASR calls, got ${recognizer.calls}", recognizer.calls.isEmpty())
+
+        engine.stop()
+    }
+
+    @Test
+    fun `a token-less capture that ends at the wake is wake-only`() = runTest {
+        // The device backend gives no token timings, so "was anything spoken
+        // after the wake?" is answered from the detector's band and the
+        // segmenter's voiced end. 1600 samples at 16 kHz = 100 ms of voicing,
+        // inside a band ending at 220 ms (100 ms completion + 120 ms pad).
+        val recognizer = RecordingRecognizer(null)
+        val engine = startTokenlessEngine(
+            recognizer = recognizer,
+            samples = ShortArray(4_000),
+            frameSamples = 4_000,
+            speechEndSample = 1_600,
+            completionSample = 1_600,
+        )
+
+        assertTrue("nothing was asked after the wake", recognizer.calls.isEmpty())
+        verify(audioFeedbackRenderer, never()).playEarcon(EarconId.ERROR)
+
+        engine.stop()
+    }
+
+    @Test
+    fun `a token-less capture with speech after the wake routes`() = runTest {
+        // 6400 samples = 400 ms of voicing, well past a 220 ms band: a question
+        // followed the wake, so it must reach the router.
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        val engine = startTokenlessEngine(
+            recognizer = recognizer,
+            samples = ShortArray(8_000),
+            frameSamples = 8_000,
+            speechEndSample = 6_400,
+            completionSample = 1_600,
+        )
+
+        assertEquals(listOf("ensureReady", "recognize:skip forward"), recognizer.calls)
 
         engine.stop()
     }

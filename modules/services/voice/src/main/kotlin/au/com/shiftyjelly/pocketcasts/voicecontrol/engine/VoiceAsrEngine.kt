@@ -24,9 +24,9 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
-import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeOnlyTranscript
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeTranscriptTrimmer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
+import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordPhraseSet
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordSegmentCapture
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -287,30 +287,48 @@ class VoiceAsrEngine @Inject constructor(
             return
         }
         val routingInput = routePrep.input!!
-        // Instrument for the wake-only rule (owner's directive: measure rather
-        // than guess). The rule should decide from *when* the wake fired instead
-        // of how ASR spelled the phrase, and these three numbers are what that
-        // needs: the detector's band end, the capture length, and where speech
-        // actually started. Diagnostic only — no transcript, no server text.
-        if (request.wakePositive) {
-            val rate = (segment.frames.firstOrNull()?.sampleRateHz ?: 16_000).coerceAtLeast(1)
-            val captureMs = (floatSamples.size * 1000L / rate)
-            val bandEndMs = ((request.completionSample.toLong() * 1000L) / rate) + WakeTranscriptTrimmer.PAD_MS
-            val onsetMs = (segment.speechOnsetSample * 1000L / rate)
-            val voicedEndMs = if (segment.speechEndSample > 0) segment.speechEndSample * 1000L / rate else captureMs
-            Timber.i(
-                "[VoicePipeline] wake-only check bandEnd=%dms voicedEnd=%dms capture=%dms onset=%dms",
-                bandEndMs,
-                voicedEndMs,
-                captureMs,
-                onsetMs,
-            )
+        val tokenTimingsPresent = asrResult.tokens != null
+
+        // Was anything asked, or was that the wake phrase on its own?
+        //
+        // The decision comes from *when* the wake fired, not from how ASR spelled
+        // it: a phrase list is a record of the last mis-hearings we happened to
+        // see, which is why it kept growing ('hey aris。', 'Oace.'). The detector
+        // already knows where the wake ended, and the segmenter knows where
+        // voicing stopped — if nothing was spoken after the wake band, the
+        // capture was the wake and nothing else.
+        //
+        // The band comparison uses the *voiced* end, not the segment end: a VAD
+        // segment carries its trailing-silence window, so measuring that against
+        // the band would report speech that was never there.
+        val rate = (segment.frames.firstOrNull()?.sampleRateHz ?: 16_000).coerceAtLeast(1)
+        val captureMs = (floatSamples.size * 1000L / rate)
+        val bandEndMs = ((request.completionSample.toLong() * 1000L) / rate) + WakeTranscriptTrimmer.PAD_MS
+        val onsetMs = (segment.speechOnsetSample * 1000L / rate)
+        val voicedEndMs = if (segment.speechEndSample > 0) segment.speechEndSample * 1000L / rate else captureMs
+        // Which rule applies depends on what the backend gave us:
+        //  - with token timings, the trimmer already removed everything inside
+        //    the wake band, so surviving text means a command followed the wake
+        //    and empty text was already dropped upstream — nothing to add here;
+        //  - without them (SenseVoice, the device's backend) the trimmer cannot
+        //    attribute text to time, which is the case this decision exists for;
+        //  - with no wake in the utterance there is no timing at all, so the text
+        //    decides — conservatively, on the configured phrase alone.
+        val wakeOnly = when {
+            request.wakePositive -> !tokenTimingsPresent && voicedEndMs <= bandEndMs
+            else -> WakeWordPhraseSet.matches(routingInput.routerTranscript)
         }
-        if (WakeOnlyTranscript.isWakeOnly(routingInput.routerTranscript)) {
-            // The wake phrase on its own: the user started talking, they did not
-            // ask anything. Routing it would classify `no_match` and (with
-            // no_match escalating) spend the window's dispatch on the wake word,
-            // leaving the question that follows unanswered.
+        // Diagnostic only — no transcript, no server text. It is what tells us
+        // whether the rule ever classifies a real capture as wake-only.
+        Timber.i(
+            "[VoicePipeline] wake-only=%s bandEnd=%dms voicedEnd=%dms capture=%dms onset=%dms",
+            wakeOnly,
+            bandEndMs,
+            voicedEndMs,
+            captureMs,
+            onsetMs,
+        )
+        if (wakeOnly) {
             Timber.i("[VoicePipeline] wake-only utterance → skip routing")
             // Silent on purpose: the wake earcon already acknowledged detection,
             // and a wake-only capture is the start of a session rather than a

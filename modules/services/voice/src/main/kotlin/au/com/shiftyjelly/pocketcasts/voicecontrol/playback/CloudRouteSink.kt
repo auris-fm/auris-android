@@ -198,15 +198,20 @@ class CloudRouteSink internal constructor(
 
             turnMutex.withLock {
                 if (activeTurnId == myId && isHostPlaying()) {
-                    // Mark intent *before* the suspending pause: the player can
-                    // already be paused when cancellation lands mid-call, and a
-                    // flag set afterwards would leave the finally thinking there
-                    // is nothing to restore — audio stuck paused.
+                    // Everything here is decided *before* the suspending pause:
+                    //   - the flag, because the player can already be paused when
+                    //     cancellation lands mid-call and a flag set afterwards
+                    //     would leave the finally thinking there is nothing to
+                    //     restore — audio stuck paused;
+                    //   - the revision, because sampling after the suspension
+                    //     would swallow a command the user issued *during* it,
+                    //     and the restore would then pass over them.
+                    // Our own pause is filtered by source, so it does not appear
+                    // in this count either way; sampling early only ever makes
+                    // the restore more conservative.
                     playerAutoPaused = true
-                    playbackSink.pause()
-                    // Sampled after our own pause: that count is what a quiet
-                    // turn looks like at restore time.
                     pauseCommandRevision = playbackCommandRevision()
+                    playbackSink.pause()
                     Timber.i("[VoicePipeline] cloud turn paused playback (host was playing)")
                 }
             }

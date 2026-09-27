@@ -990,6 +990,25 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a user command during the pause suspension blocks the restore`() = runTest(UnconfinedTestDispatcher()) {
+        // The interleaving a post-pause sample would swallow: the user acts while
+        // the turn's own pause is still in flight, so the sample taken afterwards
+        // would already include their command and the restore would pass.
+        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
+
+        val route = launch { deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.pauseStarted.await()
+
+        // The user presses pause while our pause is suspended.
+        deps.commandRevision += 1
+        deps.playback.pauseGate?.complete(Unit)
+        route.join()
+
+        assertEquals("the user's command stands", listOf("pause"), deps.playback.calls)
+    }
+
+    @Test
     fun `a turn does not override a user pause that changed nothing`() = runTest {
         // The case a state sample cannot see: the player is already paused (by
         // the turn), the user presses pause, and nothing about the state

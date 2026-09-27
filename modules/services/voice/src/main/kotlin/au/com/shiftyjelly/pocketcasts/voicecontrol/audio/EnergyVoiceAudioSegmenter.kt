@@ -32,9 +32,10 @@ class EnergyVoiceAudioSegmenter @javax.inject.Inject constructor() : VoiceAudioS
         // Check for timeout if we're in speech mode
         if (speechFrames > 0 && now - speechStartTimeMs > maxSpeechDurationMs) {
             val segment = if (speechFrames >= minimumSpeechFrames) frames.toList() else null
+            val voicedSamples = frames.take(speechFrames).sumOf { it.samples.size }
             reset()
             return if (segment != null) {
-                VoiceSegmenterResult.SpeechEnded(segment)
+                VoiceSegmenterResult.SpeechEnded(segment, speechEndSample = voicedSamples)
             } else {
                 VoiceSegmenterResult.Rejected(RejectionReason.Timeout)
             }
@@ -55,9 +56,12 @@ class EnergyVoiceAudioSegmenter @javax.inject.Inject constructor() : VoiceAudioS
             silenceFrames += 1
             if (silenceFrames >= trailingSilenceFrames) {
                 val segment = if (speechFrames >= minimumSpeechFrames) frames.toList() else null
+                // Voiced frames are the ones accumulated before the trailing
+                // silence started; only the segmenter can tell them apart.
+                val voicedSamples = frames.take(speechFrames).sumOf { it.samples.size }
                 reset()
                 return if (segment != null) {
-                    VoiceSegmenterResult.SpeechEnded(segment)
+                    VoiceSegmenterResult.SpeechEnded(segment, speechEndSample = voicedSamples)
                 } else {
                     VoiceSegmenterResult.Rejected(RejectionReason.TooShort)
                 }

@@ -297,9 +297,11 @@ class VoiceAsrEngine @Inject constructor(
             val captureMs = (floatSamples.size * 1000L / rate)
             val bandEndMs = ((request.completionSample.toLong() * 1000L) / rate) + WakeTranscriptTrimmer.PAD_MS
             val onsetMs = (segment.speechOnsetSample * 1000L / rate)
+            val voicedEndMs = if (segment.speechEndSample > 0) segment.speechEndSample * 1000L / rate else captureMs
             Timber.i(
-                "[VoicePipeline] wake-only check bandEnd=%dms capture=%dms onset=%dms",
+                "[VoicePipeline] wake-only check bandEnd=%dms voicedEnd=%dms capture=%dms onset=%dms",
                 bandEndMs,
+                voicedEndMs,
                 captureMs,
                 onsetMs,
             )

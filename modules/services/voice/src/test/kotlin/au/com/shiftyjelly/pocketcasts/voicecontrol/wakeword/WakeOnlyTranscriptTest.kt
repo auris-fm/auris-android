@@ -39,6 +39,15 @@ class WakeOnlyTranscriptTest {
     }
 
     @Test
+    fun `the renderings the detector tolerates are wake-only too`() {
+        // Real run 2026-09-28: the classifier fired at 0.922 but ASR wrote
+        // "Oace." — a phrase set that only knows spellings would escalate the
+        // wake word and spend the window's dispatch on it.
+        assertTrue(WakeOnlyTranscript.isWakeOnly("Oace."))
+        assertTrue(WakeOnlyTranscript.isWakeOnly("oace"))
+    }
+
+    @Test
     fun `ordinary utterances are untouched`() {
         assertFalse(WakeOnlyTranscript.isWakeOnly("pause"))
         assertFalse(WakeOnlyTranscript.isWakeOnly("Explain what is AI."))

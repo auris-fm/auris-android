@@ -13,27 +13,11 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword
  * followed by words the router could not classify is still a question, and
  * follows the ordinary rules.
  *
- * [WAKE_PHRASES] is this client's configured set for the bundled classifier
- * (`assets/oww/auris.onnx`), including the renderings ASR is known to produce
- * for it. A different or localised wake word belongs in this list rather than in
- * a string literal at the call site.
+ * The phrases come from [WakeWordPhraseSet], which is the one place the client's
+ * wake configuration is stated, so this check cannot drift from it.
  */
 internal object WakeOnlyTranscript {
-    /** Common leading forms people say before the keyword. */
-    private val LEADING_WORDS = listOf("hey", "ok", "okay", "hi")
-
-    /** The configured wake phrases, and the renderings the detector tolerates. */
-    private val WAKE_PHRASES = setOf("auris", "aris")
-
-    fun isWakeOnly(transcript: String): Boolean {
-        val normalised = normalise(transcript)
-        if (normalised.isEmpty()) return true
-        // Any leading form that leaves exactly a wake phrase counts; matching
-        // the *first* prefix that fits would strip "ok" out of "okayauris" and
-        // miss a perfectly ordinary way of saying it.
-        return LEADING_WORDS.any { normalised.removePrefix(it) in WAKE_PHRASES && normalised != it } ||
-            normalised in WAKE_PHRASES
-    }
+    fun isWakeOnly(transcript: String): Boolean = WakeWordPhraseSet.isPhraseOnly(normalise(transcript))
 
     /** Lowercased, punctuation and spacing removed — 'Hey aris。' → "hey aris". */
     private fun normalise(transcript: String): String = transcript.lowercase().filter { it.isLetterOrDigit() }

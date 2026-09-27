@@ -34,6 +34,15 @@ class GracePeriodSignal @Inject constructor() {
     val isActive: StateFlow<Boolean> = _isActive
 
     /**
+     * True once a privacy event has closed the window and no wake has opened a
+     * new one. A close is final: neither a completion that lands afterwards nor
+     * a command can reopen it, because the whole point of the close is that
+     * nothing keeps listening after the app was backgrounded or the audio route
+     * changed. Only a new wake opens a window again.
+     */
+    private var closedByPrivacy = false
+
+    /**
      * One escalation to the cloud service is allowed per grace window: the
      * window is the user-initiated act, and this bounds a routing failure (or a
      * deliberate `no_match`) to a single dispatch per act rather than a stream.
@@ -48,27 +57,30 @@ class GracePeriodSignal @Inject constructor() {
     /**
      * Called when a command is recognized — starts/resets the grace period.
      *
+     * Refuses in two cases, and they live here rather than at each call site so
+     * no path — model-chosen route, fallback, ordinary command, or a wrapper
+     * added later — can express "start a window after a privacy close":
+     * - the window was closed by a privacy event and no wake has reopened it;
+     * - this is an escalation (a network turn), which extends a window that is
+     *   still open but never resurrects one that expired while it was in flight.
+     *
      * [fromEscalation] must be true when the command being handled *is* the
-     * cloud escalation: handling it extends the window (the turn happened), but
-     * it must not refresh the escalation budget, or the fallback would fund its
-     * own next attempt within the same window.
+     * cloud escalation, so that handling it does not refresh the escalation
+     * budget and fund the fallback's own next attempt.
      */
     fun onCommandRecognized(fromEscalation: Boolean = false) {
-        if (fromEscalation) {
-            // A fallback is a network turn: it can still be in flight when a
-            // privacy close (backgrounding, audio-route change) or expiry ends
-            // the window. Extending is for a window that is *still open* — a
-            // completion must never undo a close, or the mic would be live
-            // again after the app was backgrounded.
-            if (_isActive.value) startOrReset()
-            return
-        }
+        if (closedByPrivacy) return
+        if (fromEscalation && !_isActive.value) return
         startOrReset()
-        escalationUsed = false
+        if (!fromEscalation) escalationUsed = false
     }
 
-    /** Called when the wake word is detected — starts/resets the grace period. */
+    /**
+     * Called when the wake word is detected — opens a window, including after a
+     * privacy close, since a fresh wake is a new user act.
+     */
     fun onWakeWordDetected() {
+        closedByPrivacy = false
         startOrReset()
         escalationUsed = false
     }
@@ -102,14 +114,14 @@ class GracePeriodSignal @Inject constructor() {
     }
 
     /** Called when audio route changes — immediately ends grace period. */
-    fun onAudioRouteChanged() {
-        timerJob?.cancel()
-        _isActive.value = false
-    }
+    fun onAudioRouteChanged() = closeByPrivacy()
 
     /** Called when app goes to background — immediately ends grace period. */
-    fun onAppBackgrounded() {
+    fun onAppBackgrounded() = closeByPrivacy()
+
+    private fun closeByPrivacy() {
         timerJob?.cancel()
         _isActive.value = false
+        closedByPrivacy = true
     }
 }

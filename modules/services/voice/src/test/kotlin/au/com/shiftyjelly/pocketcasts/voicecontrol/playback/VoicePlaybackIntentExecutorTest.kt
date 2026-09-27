@@ -257,6 +257,43 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `a model-chosen route completing after a privacy close leaves the window closed`() = runTest {
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
+        val sinks = FakeSinks()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        sinks.cloudRoute.whileInFlight = { signal.onAppBackgrounded() }
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "summarize this episode",
+                tier = VoiceIntent.CloudTier.Premium,
+                // The router chose this one; the guard has to hold for it too.
+                escalated = false,
+            ),
+        )
+
+        assertFalse("a completion reopened a privacy-closed window", signal.isActive.value)
+    }
+
+    @Test
+    fun `a model-chosen route completing inside an open window extends it`() = runTest {
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 100L)
+        val sinks = FakeSinks()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "summarize this episode",
+                tier = VoiceIntent.CloudTier.Premium,
+            ),
+        )
+
+        assertTrue(signal.isActive.value)
+    }
+
+    @Test
     fun `a locally recognised command refreshes the window budget`() = runTest {
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
         val sinks = FakeSinks()

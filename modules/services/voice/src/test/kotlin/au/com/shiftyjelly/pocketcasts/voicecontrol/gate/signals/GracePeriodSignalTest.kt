@@ -91,6 +91,28 @@ class GracePeriodSignalTest {
     }
 
     @Test
+    fun `a privacy close is final until a new wake`() {
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+
+        signal.onWakeWordDetected()
+        signal.onAppBackgrounded()
+
+        // No caller can reopen it: not a command, not a completion.
+        signal.onCommandRecognized()
+        assertFalse(signal.isActive.value)
+        signal.onCommandRecognized(fromEscalation = true)
+        assertFalse(signal.isActive.value)
+
+        // A fresh wake is a new act, so it opens a window again.
+        signal.onWakeWordDetected()
+        assertTrue(signal.isActive.value)
+
+        signal.onAudioRouteChanged()
+        signal.onCommandRecognized()
+        assertFalse(signal.isActive.value)
+    }
+
+    @Test
     fun `an expired or closed window refuses the escalation`() = runTest {
         val signal = GracePeriodSignal(timeoutMs = 100L)
 

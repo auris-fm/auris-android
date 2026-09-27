@@ -28,6 +28,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.isEscalation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
@@ -340,7 +341,7 @@ class VoiceControlService : Service() {
         serviceScope.launch(Dispatchers.IO) {
             val response = voicePlaybackIntentExecutor.execute(intent)
             audioFeedbackRenderer.render(response)
-            gracePeriodSignal.onCommandRecognized()
+            gracePeriodSignal.onCommandRecognized(fromEscalation = intent.isEscalation())
         }
     }
 

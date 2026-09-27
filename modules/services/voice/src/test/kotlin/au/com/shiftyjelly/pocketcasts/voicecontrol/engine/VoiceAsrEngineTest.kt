@@ -324,6 +324,9 @@ class VoiceAsrEngineTest {
                 VoiceIntent.CloudRoute(
                     request = "what did the guests say about sleep and memory",
                     tier = VoiceIntent.CloudTier.Unknown,
+                    // Marked as the fallback, so handling it cannot refresh the
+                    // window budget that funded it.
+                    escalated = true,
                 ),
             ),
             intents,
@@ -428,6 +431,60 @@ class VoiceAsrEngineTest {
 
         // Two failures in one window: the second is refused, and says so.
         assertEquals(1, intents.size)
+        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+
+        engine.stop()
+    }
+
+    @Test
+    fun `a router that cannot load its model says so and does not escalate`() = runTest {
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = false,
+                confidence = 0f,
+                completionSample = 4000,
+            ),
+        )
+
+        val recognizer = NotReadyRecognizer()
+        val intents = mutableListOf<VoiceIntent>()
+        val engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = GracePeriodSignal(timeoutMs = 30_000L),
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+        engine.start(
+            backend = FakeAsrBackend("unclear question"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { intents += it },
+        )
+        advanceUntilIdle()
+
+        // Same class as the router's `model_not_loaded`: the turn happened, so
+        // it gets a tone rather than silence — and stays local, because a
+        // capability failure is not something to spend a server call on.
+        assertTrue(intents.isEmpty())
+        assertEquals(0, recognizer.recognizes)
         verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
 
         engine.stop()
@@ -1152,6 +1209,23 @@ class VoiceAsrEngineTest {
         assertTrue("Expected no ASR calls, got ${recognizer.calls}", recognizer.calls.isEmpty())
 
         engine.stop()
+    }
+
+    /** A router that cannot load its model at all. */
+    private class NotReadyRecognizer : VoiceRecognizer {
+        var recognizes = 0
+
+        override suspend fun ensureReady(): Result<Unit> = Result.failure(IllegalStateException("model missing"))
+
+        override suspend fun recognize(
+            input: IntentRoutingInput,
+            context: VoiceRecognitionContext,
+        ): VoiceRecognizeResult {
+            recognizes += 1
+            return VoiceRecognizeResult(intent = null)
+        }
+
+        override fun release() = Unit
     }
 
     /** Reports a routing failure the way the router does: no intent, plus why. */

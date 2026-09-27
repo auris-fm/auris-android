@@ -8,6 +8,8 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -201,6 +203,47 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `handling an escalation does not refresh the window budget`() = runTest {
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
+        val sinks = FakeSinks()
+        val executor = sinks.executor(signal)
+
+        // The window's one dispatch has been spent on this escalation.
+        assertTrue(signal.tryConsumeEscalation())
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "what did the guests say about sleep and memory",
+                tier = VoiceIntent.CloudTier.Unknown,
+                escalated = true,
+            ),
+        )
+
+        // Handling it extends the window, but must not hand the fallback a new
+        // budget — otherwise one unclear question per turn re-arms it forever.
+        assertFalse(
+            "the fallback must not fund its own next attempt",
+            signal.tryConsumeEscalation(),
+        )
+        assertEquals(
+            listOf("routeToCloud:what did the guests say about sleep and memory:Unknown"),
+            sinks.cloudRoute.calls,
+        )
+    }
+
+    @Test
+    fun `a locally recognised command refreshes the window budget`() = runTest {
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
+        val sinks = FakeSinks()
+        val executor = sinks.executor(signal)
+
+        assertTrue(signal.tryConsumeEscalation())
+        executor.execute(VoiceIntent.Playback.Pause)
+
+        // A deliberate command is a new act, so it earns a fresh allowance.
+        assertTrue(signal.tryConsumeEscalation())
+    }
+
+    @Test
     fun `playback query whats playing returns spoken`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
@@ -244,7 +287,7 @@ class VoicePlaybackIntentExecutorTest {
         val playbackQuery = FakePlaybackQuerySink()
         val statsQuery = FakeStatsQuerySink()
 
-        fun executor() = VoicePlaybackIntentExecutor(
+        fun executor(signal: au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()) = VoicePlaybackIntentExecutor(
             playbackSink = playback,
             effectsSink = effects,
             volumeSink = volume,
@@ -256,7 +299,7 @@ class VoicePlaybackIntentExecutorTest {
             queueSink = queue,
             playbackQuerySink = playbackQuery,
             statsQuerySink = statsQuery,
-            gracePeriodSignal = GracePeriodSignal(),
+            gracePeriodSignal = signal,
         )
     }
 

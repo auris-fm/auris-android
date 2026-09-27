@@ -101,6 +101,14 @@ sealed interface VoiceIntent {
         val request: String,
         val tier: CloudTier,
         val context: PlaybackContext = PlaybackContext(),
+        /**
+         * True when the client dispatched this because it could not route the
+         * utterance, rather than because the router chose a cloud question.
+         * The distinction is load-bearing in one place: handling an escalation
+         * must not refresh the window's escalation budget, or the fallback would
+         * fund its own next attempt.
+         */
+        val escalated: Boolean = false,
     ) : VoiceIntent
 
     enum class CloudTier { Free, Premium, Unknown }

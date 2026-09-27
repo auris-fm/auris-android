@@ -45,14 +45,23 @@ class GracePeriodSignal @Inject constructor() {
     private var timerJob: Job? = null
     private val scope = CoroutineScope(Job() + Dispatchers.Main)
 
-    /** Called when a command is recognized — starts/resets the grace period. */
-    fun onCommandRecognized() {
+    /**
+     * Called when a command is recognized — starts/resets the grace period.
+     *
+     * [fromEscalation] must be true when the command being handled *is* the
+     * cloud escalation: handling it extends the window (the turn happened), but
+     * it must not refresh the escalation budget, or the fallback would fund its
+     * own next attempt within the same window.
+     */
+    fun onCommandRecognized(fromEscalation: Boolean = false) {
         startOrReset()
+        if (!fromEscalation) escalationUsed = false
     }
 
     /** Called when the wake word is detected — starts/resets the grace period. */
     fun onWakeWordDetected() {
         startOrReset()
+        escalationUsed = false
     }
 
     /** Consumes the window's single escalation; false when it is already spent. */
@@ -63,7 +72,6 @@ class GracePeriodSignal @Inject constructor() {
     }
 
     private fun startOrReset() {
-        escalationUsed = false
         _isActive.value = true
         timerJob?.cancel()
         timerJob = scope.launch {

@@ -41,6 +41,20 @@ class GracePeriodSignalTest {
     }
 
     @Test
+    fun `handling the escalation extends the window without refreshing its budget`() {
+        val signal = GracePeriodSignal(timeoutMs = 100L)
+
+        assertTrue(signal.tryConsumeEscalation())
+        signal.onCommandRecognized(fromEscalation = true)
+        assertTrue(signal.isActive.value)
+        assertFalse(signal.tryConsumeEscalation())
+
+        // A locally recognised command is a different act and does refresh it.
+        signal.onCommandRecognized()
+        assertTrue(signal.tryConsumeEscalation())
+    }
+
+    @Test
     fun `initially inactive`() {
         val signal = GracePeriodSignal()
         assertFalse(signal.isActive.value)

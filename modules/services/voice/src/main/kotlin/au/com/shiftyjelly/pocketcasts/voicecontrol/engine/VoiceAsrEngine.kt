@@ -295,6 +295,12 @@ class VoiceAsrEngine @Inject constructor(
         val ready = recognizer.ensureReady()
         if (ready.isFailure) {
             Timber.e(ready.exceptionOrNull(), "[VoicePipeline] intent not ready")
+            // The router never ran, which is the same class as the router's own
+            // `model_not_loaded`: a turn happened and nothing an answer it. Say
+            // so — silence here is the complaint this change exists to remove.
+            // Deliberately not escalated: a capability failure would turn a
+            // broken install into cloud traffic (see CloudEscalationPolicy).
+            audioFeedbackRenderer.playEarcon(EarconId.ERROR)
             return
         }
 
@@ -351,7 +357,13 @@ class VoiceAsrEngine @Inject constructor(
             return
         }
         Timber.i("[VoicePipeline] cloud escalation ← '%s' (reason=%s)", input.routerTranscript, reason)
-        handler(VoiceIntent.CloudRoute(request = input.routerTranscript, tier = VoiceIntent.CloudTier.Unknown))
+        handler(
+            VoiceIntent.CloudRoute(
+                request = input.routerTranscript,
+                tier = VoiceIntent.CloudTier.Unknown,
+                escalated = true,
+            ),
+        )
     }
 
     /**

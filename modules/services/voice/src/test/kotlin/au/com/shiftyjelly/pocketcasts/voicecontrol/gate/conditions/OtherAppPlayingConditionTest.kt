@@ -177,6 +177,7 @@ class OtherAppPlayingConditionTest {
         assertFalse(condition.otherAppPlaying(isMusicActive = true))
     }
 
+    @Test
     fun `host paused beyond window does not own audio (no false negative)`() {
         // Host holds a paused, loaded episode but did not play within the window; a
         // genuinely different app playing is correctly blocked (avoids the open-mic-

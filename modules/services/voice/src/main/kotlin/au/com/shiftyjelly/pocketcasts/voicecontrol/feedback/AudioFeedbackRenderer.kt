@@ -9,6 +9,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -59,28 +62,43 @@ class AudioFeedbackRenderer(
             when (response) {
                 is VoiceResponse.Silent -> { /* no-op */ }
 
-                is VoiceResponse.Earcon -> {
-                    noteEmitted()
-                    earconPlayer.play(response.id)
-                }
+                is VoiceResponse.Earcon -> playEarcon(response.id)
 
-                is VoiceResponse.Spoken -> {
-                    noteEmitted()
-                    ttsEngine.speak(response.text, language)
-                }
+                is VoiceResponse.Spoken -> speakWithHeartbeat(response.text, language)
 
                 is VoiceResponse.Combined -> {
-                    noteEmitted()
-                    earconPlayer.play(response.earcon)
-                    ttsEngine.speak(response.spokenText, language)
+                    playEarcon(response.earcon)
+                    speakWithHeartbeat(response.spokenText, language)
                 }
             }
         }
     }
 
-    fun playEarcon(id: EarconId) {
-        if (released) return
-        earconPlayer.play(id)
+    /**
+     * Plays an earcon directly, outside a rendered response.
+     *
+     * This is the path the wake and listening cues take, and they are the two earcons that sound
+     * while the microphone is open — so this is where the gate has to know the sound is ours.
+     */
+    fun playEarcon(id: EarconId): Boolean {
+        if (released) return false
+        val played = earconPlayer.play(id)
+        if (played) noteEmitted()
+        return played
+    }
+
+    /**
+     * Speaks while refreshing what we last emitted, because speech outlasts the gate's attribution
+     * window: a reply longer than it would otherwise read as a foreign app for the rest of its own
+     * duration, and the microphone would be closed mid-answer.
+     */
+    private suspend fun speakWithHeartbeat(text: String, language: String) = coroutineScope {
+        noteEmitted()
+        val utterance = launch { ttsEngine.speak(text, language) }
+        while (utterance.isActive) {
+            delay(EMISSION_HEARTBEAT_MS)
+            if (utterance.isActive) noteEmitted()
+        }
     }
 
     fun release() {
@@ -91,6 +109,9 @@ class AudioFeedbackRenderer(
     }
 
     internal companion object {
+        /** Shorter than the gate's attribution window, so a long reply never falls out of it. */
+        private const val EMISSION_HEARTBEAT_MS = 1_000L
+
         /**
          * One line describing what is about to be spoken, including the text itself, its length
          * and a digest. The length and digest answer "is this the same response" without having

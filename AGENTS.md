@@ -87,7 +87,7 @@ Shared infrastructure and business logic. Core services include:
 - `ui` - Shared UI theming and components
 - `analytics` - Analytics tracking
 - `localization` - Strings and translations
-- `voice` - Voice control: ASR/backends, the cloud assistant client (`CloudRouteSink`), the gate, earcons and TTS. Carries the whole cloud contract on this side; see "Where the contract lives" below.
+- `voice` - Voice control: ASR/backends, the gate, earcons and TTS, and the client-side cloud sink (`CloudRouteSink`) that consumes the cloud contract. The contract types themselves (`CloudRouteClient`, `CloudRouteErrorCodes`, `CloudRouteEvent`, `CloudRouteModels`, the prefetch clients) live in the `cloud` package of `repositories`; see "Where the contract lives" below.
 
 **Dependency Flow**:
 ```
@@ -227,7 +227,7 @@ The codebase uses a `FeatureFlag` system for A/B testing and gradual rollout. Ch
 
 ### Database Migrations
 
-The Room database has an extensive migration history — `modules/services/model/schemas/` holds one JSON per version (91 at the time of writing; treat that directory as the count, not this number). When modifying entities:
+The Room database has an extensive migration history — `modules/services/model/schemas/` holds one JSON per version, one level down in `au.com.shiftyjelly.pocketcasts.models.db.AppDatabase/` (91 at the time of writing; treat `find modules/services/model/schemas -name '*.json' | wc -l` as the count, not this number). When modifying entities:
 - Always provide a migration path
 - Export schema is enabled (`modules/services/model/schemas/`)
 - Test migrations thoroughly
@@ -301,8 +301,8 @@ does.
 Routes, event types, error codes, capabilities and the spoken-fallback rules are defined there
 and implemented here. When the contract changes, the spec changes first and this repo follows
 it. When code and a spec disagree, the spec wins, and the disagreement is a bug to report rather
-than to reinterpret. Comments in `CloudRouteSink` and `CloudRouteErrorCodes` cite the specs they
-implement — keep those citations true.
+than to reinterpret. Comments cite the spec sections they implement (grep for
+`cloud-assistant.md`) — keep those citations true.
 
 ## Verification and cleanup discipline
 

@@ -53,6 +53,14 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
             loadedDir = null
             previous?.release()
             val created = OfflineRecognizer(config = config)
+            // A stop can land while this load is in flight and release the backend; assigning
+            // here would leave a live recogniser on a released backend, retaining the model
+            // (hundreds of MB of native memory) for the life of the process with no service
+            // left to release it. Release what was built and report.
+            if (!currentCoroutineContext().isActive) {
+                created.release()
+                return@withContext Result.failure(CancellationException("cancelled during model load"))
+            }
             recognizer = created
             loadedDir = dir
             Timber.i("SenseVoiceBackend ready")

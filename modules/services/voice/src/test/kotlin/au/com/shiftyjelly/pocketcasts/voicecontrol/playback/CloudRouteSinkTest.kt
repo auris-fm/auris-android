@@ -1015,9 +1015,10 @@ class CloudRouteSinkTest {
 
         val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        // The whole point: an unknown code speaks the client's generic line, and the server's
-        // message is not spoken at all — it can carry upstream detail, as the captured turn did.
-        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
+        // The whole point: the server's message is not spoken at all — it can carry upstream
+        // detail, as the captured turn did — even when it is a sentence written for the user.
+        // The code's own local line is spoken instead.
+        assertEquals(VoiceResponse.Spoken("You've reached today's free limit."), response)
     }
 
     @Test
@@ -1217,6 +1218,10 @@ class CloudRouteSinkTest {
         // Keys built from the same constant the sink uses, so renaming the
         // wire code breaks these tests rather than silently detaching the
         // template from it.
+        //
+        // This map is a hand copy of strings_voice_templates.xml. When a code gains a line
+        // there, it needs one here too, or the suite stays green while the shipped app speaks
+        // something else — which is how the quota lines nearly landed untested.
         private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(
             mapOf(
                 "general.cloud_coming_soon" to "Cloud processing is coming soon",
@@ -1226,6 +1231,8 @@ class CloudRouteSinkTest {
                 "cloud_error_generic" to "Sorry, I couldn't complete that request.",
                 "cloud_error_" + CloudRouteErrorCodes.UNAUTHORIZED to "Service is unavailable at the moment.",
                 "cloud_error_" + CloudRouteErrorCodes.PROVIDER_ERROR to "The assistant couldn't finish that request.",
+                "cloud_error_limit_exceeded" to "You've reached today's free limit.",
+                "cloud_error_budget_exceeded" to "The assistant has reached its limit right now.",
                 "cloud_error_" + CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE to "I can't reach the podcast evidence right now.",
             ),
         ),

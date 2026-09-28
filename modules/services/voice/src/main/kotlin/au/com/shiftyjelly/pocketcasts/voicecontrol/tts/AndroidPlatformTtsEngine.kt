@@ -43,6 +43,10 @@ class AndroidPlatformTtsEngine @Inject constructor(
     override suspend fun speak(text: String, language: String) {
         if (released || tts == null || !initialized) return
         suspendCancellableCoroutine { continuation ->
+            // Cancelling the caller stops the utterance with it. The render job is cancelled before
+            // every response, so without this a superseded reply keeps talking — audible, and,
+            // since it rides the media stream, indistinguishable from a foreign app to our own gate.
+            continuation.invokeOnCancellation { tts?.stop() }
             val locale = localeForLanguageTag(language)
             tts?.let { engine ->
                 val result = engine.setLanguage(locale)

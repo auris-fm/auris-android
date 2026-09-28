@@ -19,7 +19,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.mockito.Mockito.clearInvocations
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.never
+import org.mockito.Mockito.verify
 import org.mockito.kotlin.whenever
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
@@ -37,19 +40,21 @@ import org.robolectric.annotation.Config
 class LiveConditionMonitorTest {
     private lateinit var context: Application
     private val castManager = mock<CastManager>()
+    private val notCastingCondition = mock<NotCastingCondition>()
+    private val castFlow = MutableStateFlow(false)
     private lateinit var monitor: LiveConditionMonitor
 
     @Before
     fun setUp() {
         Dispatchers.setMain(UnconfinedTestDispatcher())
         context = RuntimeEnvironment.getApplication()
-        whenever(castManager.isConnectedFlow).thenReturn(MutableStateFlow(false))
+        whenever(castManager.isConnectedFlow).thenReturn(castFlow)
         monitor = LiveConditionMonitor(
             context = context,
             castManager = castManager,
             notOnCallCondition = mock<NotOnCallCondition>(),
             batteryOkCondition = mock<BatteryOkCondition>(),
-            notCastingCondition = mock<NotCastingCondition>(),
+            notCastingCondition = notCastingCondition,
         )
     }
 
@@ -60,6 +65,22 @@ class LiveConditionMonitorTest {
 
     private fun powerSaveReceiverRegistered(): Boolean = shadowOf(context).registeredReceivers.any { holder ->
         holder.intentFilter.hasAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+    }
+
+    @Test
+    fun `a stopped monitor no longer follows the cast state`() {
+        monitor.start()
+        castFlow.value = true
+        verify(notCastingCondition).updateCasting(true)
+
+        monitor.stop()
+        clearInvocations(notCastingCondition)
+        castFlow.value = false
+
+        verify(
+            notCastingCondition,
+            never(),
+        ).updateCasting(false)
     }
 
     @Test

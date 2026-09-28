@@ -17,6 +17,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -37,6 +38,7 @@ class LiveConditionMonitor @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val callbackExecutor = Executors.newSingleThreadExecutor()
     private var started = false
+    private var castJob: Job? = null
 
     private val powerSaveReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -73,8 +75,9 @@ class LiveConditionMonitor @Inject constructor(
             IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED),
         )
 
-        // Cast state
-        castManager.isConnectedFlow
+        // Cast state. Held so stop() can cancel it: a service lifetime can now start more than
+        // once, and an uncancelled collector would accumulate one per lifetime.
+        castJob = castManager.isConnectedFlow
             .onEach { isCasting -> notCastingCondition.updateCasting(isCasting) }
             .launchIn(scope)
     }
@@ -92,6 +95,8 @@ class LiveConditionMonitor @Inject constructor(
         } catch (_: IllegalArgumentException) {
             // not registered
         }
+        castJob?.cancel()
+        castJob = null
         // A later service lifetime starts this again. Leaving `started` set made the second start
         // return early, so the call and power-save conditions stayed frozen at their last value —
         // and a lifetime that ended during a call or in power save left voice control blocked for

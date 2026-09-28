@@ -17,6 +17,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.EnabledByUserCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.LiveConditionMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
@@ -164,7 +165,7 @@ class VoiceControlService : Service() {
                                 val reasons = blockedRules.entries
                                     .joinToString(";") { "${it.key}=${it.value}" }
                                 val isUserRequested = blockedRules.keys.any {
-                                    it == "voice_control_user_enabled"
+                                    it == EnabledByUserCondition.ID
                                 }
                                 val msg = "mic_capture_stopped: reasons=%s setup=%b conflicts=%b context=%b micExposure=%s route=%s mode=%s priorCaptureActive=true"
                                 if (isUserRequested) {

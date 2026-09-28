@@ -320,7 +320,8 @@ class VoiceControlService : Service() {
             )
             engineStarted = true
 
-            if (mode == ListeningMode.WakeWord) {
+            // Only when the microphone opens where the user cannot see it: see ListeningStartCue.
+            if (ListeningStartCue.shouldPlay(mode, gate.state.value.rules)) {
                 audioFeedbackRenderer.playEarcon(EarconId.LISTENING_START)
             }
 

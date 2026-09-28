@@ -27,13 +27,9 @@
             android:exported="false"
             tools:node="merge">
             <meta-data
-                android:name="au.com.shiftyjelly.pocketcasts.repositories.playlist.DefaultPlaylistsStartupInitializer"
-                android:value="androidx.startup" />
-            <meta-data
                 android:name="au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudPrefetchStartupInitializer"
                 android:value="androidx.startup" />
         </provider>
-
         <!-- Workers -->
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"

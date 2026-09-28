@@ -484,7 +484,10 @@ class VoiceAsrEngine @Inject constructor(
     fun stop() {
         processingJob?.cancel()
         processingJob = null
-        backend?.release()
+        // Listening pauses are frequent (gate conflicts, route changes), so the backend is
+        // deliberately kept warm here rather than released: releasing it would force a full
+        // model reload on the next start, and everything spoken during that reload is lost.
+        // The ASR backend is owned by VoiceControlService and released in its teardown.
         backend = null
         closeBluetoothSco()
         Timber.i("[VoicePipeline] engine stopped")

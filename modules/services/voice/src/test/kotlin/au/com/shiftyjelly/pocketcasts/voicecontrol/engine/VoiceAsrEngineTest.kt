@@ -173,6 +173,21 @@ class VoiceAsrEngineTest {
     }
 
     @Test
+    fun `stop keeps the backend warm rather than releasing it`() = runTest {
+        // Listening pauses are frequent (gate conflicts, route changes). Releasing here would
+        // force a full model reload on the next start, and everything said during that reload
+        // is lost. The service owns teardown and releases the backend there.
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
+
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+        engine.stop()
+
+        verify(backend, never()).release()
+    }
+
+    @Test
     fun `an unprepared backend does not consume audio`() = runTest {
         createEngine()
         `when`(backend.ensureReady()).thenReturn(Result.failure(IllegalStateException("model missing")))
@@ -283,7 +298,7 @@ class VoiceAsrEngineTest {
     }
 
     @Test
-    fun `stop after capture started closes SCO and releases backend`() = runTest {
+    fun `stop after capture started closes SCO and keeps the backend warm`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
         runCurrent()
@@ -296,7 +311,9 @@ class VoiceAsrEngineTest {
         advanceUntilIdle()
 
         verify(audioManager).stopBluetoothSco()
-        verify(backend).release()
+        // Deliberately not released: a listening pause must not cost a model reload on the
+        // next start. VoiceControlService releases the backend in its teardown.
+        verify(backend, never()).release()
     }
 
     @Test

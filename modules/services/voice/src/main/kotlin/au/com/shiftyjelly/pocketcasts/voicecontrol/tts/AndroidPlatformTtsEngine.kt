@@ -75,6 +75,11 @@ class AndroidPlatformTtsEngine @Inject constructor(
 
                 val utteranceId = System.currentTimeMillis().toString()
                 engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+                // A cancellation can land between registering the handler above and this call, in
+                // which case tts?.stop() ran against nothing and this utterance would be orphaned:
+                // nothing stops it and no heartbeat vouches for it, so the gate reads our own voice
+                // as a foreign app a few seconds later.
+                if (!continuation.isActive) tts?.stop()
             } ?: continuation.resume(Unit)
         }
     }

@@ -4,7 +4,9 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -76,5 +78,38 @@ class AudioFeedbackRendererTest {
     fun `release disposes both earcon and TTS resources`() {
         renderer.release()
         verify(earconPlayer).release()
+    }
+
+    // ── The pre-TTS diagnostic line ────────────────────────────────────
+
+    @Test
+    fun `a spoken response is described with its text, length and digest`() {
+        val described = AudioFeedbackRenderer.describeForLog(
+            VoiceResponse.Spoken("Cloud processing is coming soon"),
+            language = "en",
+        )
+
+        assertTrue(described, described.contains("Cloud processing is coming soon"))
+        assertTrue(described, described.contains("len=31"))
+        assertTrue(described, described.contains("digest=${AudioFeedbackRenderer.digest("Cloud processing is coming soon")}"))
+        assertTrue(described, described.contains("lang=en"))
+    }
+
+    @Test
+    fun `the digest separates different responses and is stable for the same one`() {
+        val first = AudioFeedbackRenderer.digest("here is one answer")
+        val second = AudioFeedbackRenderer.digest("here is a different answer")
+
+        assertNotEquals("different text must not look like the same response", first, second)
+        assertEquals("the same text must digest the same way", first, AudioFeedbackRenderer.digest("here is one answer"))
+    }
+
+    @Test
+    fun `responses that speak nothing say so rather than looking empty`() {
+        val silent = AudioFeedbackRenderer.describeForLog(VoiceResponse.Silent, language = "en")
+        val earcon = AudioFeedbackRenderer.describeForLog(VoiceResponse.Earcon(EarconId.SUCCESS), language = "en")
+
+        assertTrue(silent, silent.contains("kind=silent"))
+        assertTrue(earcon, earcon.contains("nothing_spoken"))
     }
 }

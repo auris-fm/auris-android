@@ -368,7 +368,8 @@ class CloudRouteSinkTest {
         assertNotEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
     }
 
-        fun `error clears token buffer restores auto pause and speaks message`() = runTest {
+    @Test
+    fun `error clears token buffer restores auto pause and speaks message`() = runTest {
         val deps = TestDeps(
             events = flowOf(
                 CloudRouteEvent.Token("partial"),

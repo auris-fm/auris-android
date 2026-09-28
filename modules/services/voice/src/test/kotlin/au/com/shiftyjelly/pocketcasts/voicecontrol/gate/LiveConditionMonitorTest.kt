@@ -14,14 +14,12 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import org.junit.After
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mockito.clearInvocations
 import org.mockito.Mockito.mock
-import org.mockito.Mockito.never
 import org.mockito.Mockito.verify
 import org.mockito.kotlin.whenever
 import org.robolectric.RobolectricTestRunner
@@ -30,10 +28,10 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
- * The service can stop and start more than once in a process lifetime now that it retries after a
- * refusal or a kill. If a later start is ignored, the call and power-save conditions stay frozen at
- * whatever they were when the earlier lifetime ended — so a lifetime that ended during a call or in
- * power save leaves voice control blocked for the rest of the process.
+ * The monitor bridges Android system callbacks into the gate's transient conditions. It is started
+ * once for the process (see PocketCastsApplication), because these conditions decide whether the
+ * service may run at all — registering them per service lifetime meant a condition blocked when a
+ * lifetime ended could never clear.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -63,40 +61,28 @@ class LiveConditionMonitorTest {
         Dispatchers.resetMain()
     }
 
-    private fun powerSaveReceiverRegistered(): Boolean = shadowOf(context).registeredReceivers.any { holder ->
-        holder.intentFilter.hasAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
-    }
-
     @Test
-    fun `a stopped monitor no longer follows the cast state`() {
-        monitor.start()
-        castFlow.value = true
-        verify(notCastingCondition).updateCasting(true)
-
-        monitor.stop()
-        clearInvocations(notCastingCondition)
-        castFlow.value = false
-
-        verify(
-            notCastingCondition,
-            never(),
-        ).updateCasting(false)
-    }
-
-    @Test
-    fun `a later lifetime registers the conditions again`() {
-        monitor.start()
-        assertTrue(powerSaveReceiverRegistered())
-
-        monitor.stop()
-        assertFalse(powerSaveReceiverRegistered())
-
-        // A second lifetime: this is the start that used to return early.
+    fun `start registers for power save changes`() {
         monitor.start()
 
         assertTrue(
-            "a start after a stop must re-register, or the conditions stay frozen at their last value",
-            powerSaveReceiverRegistered(),
+            shadowOf(context).registeredReceivers.any { holder ->
+                holder.intentFilter.hasAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+            },
         )
+    }
+
+    @Test
+    fun `start bridges the cast state into its condition`() {
+        monitor.start()
+
+        // Subscribing to the StateFlow delivers its current value, so clear between phases to
+        // assert that changes are delivered rather than counting the initial one.
+        castFlow.value = true
+        verify(notCastingCondition).updateCasting(true)
+        clearInvocations(notCastingCondition)
+
+        castFlow.value = false
+        verify(notCastingCondition).updateCasting(false)
     }
 }

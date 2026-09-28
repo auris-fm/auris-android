@@ -137,8 +137,6 @@ class VoiceControlService : Service() {
             mediaSession?.isActive = true
         }
 
-        // Start monitoring transient conflict conditions
-
         // Handle models first: defer mode observation until readiness completes.
         // This avoids lazy init on first utterance — both whisper and the
         // LFM inference runtime are fully prepared before audio capture.

@@ -36,7 +36,9 @@ object CloudRouteErrorCodes {
     )
 
     /** `http_<3-digit status>` is minted locally from the response code. */
-    private val HTTP_STATUS_CODE = Regex("http_\\d{3}")
+    // Internal rather than private so the contract check can assert the declaration against the
+    // shape this object actually mints, instead of against the declaration's own copy of it.
+    internal val HTTP_STATUS_CODE = Regex("http_\\d{3}")
 
     /**
      * Log-safe form of a server-supplied code: a known code is logged as

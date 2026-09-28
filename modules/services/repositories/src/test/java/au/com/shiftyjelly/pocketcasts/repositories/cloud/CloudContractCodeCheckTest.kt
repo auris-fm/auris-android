@@ -71,22 +71,29 @@ class CloudContractCodeCheckTest {
         val overlap = unhandled intersect CloudRouteErrorCodes.KNOWN
         assertTrue("declared as unhandled but present in KNOWN: $overlap", overlap.isEmpty())
 
-        // And the two halves must account for the spec's table between them, so a code cannot be
-        // quietly dropped from both.
-        assertEquals(
-            "the declaration's handled and unhandled sets must not share a code",
-            emptySet<String>(),
-            (contract.recognisedFromServer.toSet() + contract.mintedByClient.toSet()) intersect unhandled,
+        // The two halves are a classification, so a code in both would be ambiguous. (Nothing here
+        // can see the spec's own table, so `specCodesNotHandled` is not checked for completeness —
+        // only the code and the declaration are checked against each other.)
+        val inBothHalves = contract.recognisedFromServer.toSet() intersect contract.mintedByClient.toSet()
+        assertTrue(
+            "a code cannot be both recognised from the server and minted by the client: $inBothHalves",
+            inBothHalves.isEmpty(),
         )
     }
 
     @Test
     fun `declared bounded shapes are the shapes the code mints`() {
         // `http_<status>` carries the status of an unparseable error body; it is a shape rather
-        // than a code, so it cannot be enumerated and is asserted as a pattern instead.
-        val shapes = contract.boundedShapes.map { Regex(it) }
-        assertTrue("http_503 should match a declared shape", shapes.any { it.matches("http_503") })
-        assertFalse("http_5 is not a status code", shapes.any { it.matches("http_5") })
+        // than a code, so it cannot be enumerated and is asserted as a pattern instead. Both the
+        // stored pattern and its meaning are read from the code, so editing the code's shape
+        // without editing the declaration fails here.
+        assertEquals(
+            "the declaration must name exactly the bounded shapes the client mints",
+            listOf(CloudRouteErrorCodes.HTTP_STATUS_CODE.pattern),
+            contract.boundedShapes,
+        )
+        assertTrue("http_503 is the shape the code mints", CloudRouteErrorCodes.HTTP_STATUS_CODE.matches("http_503"))
+        assertFalse("http_5 is not a status code", CloudRouteErrorCodes.HTTP_STATUS_CODE.matches("http_5"))
     }
 
     @Test

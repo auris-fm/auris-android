@@ -18,7 +18,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.EnabledByUserCondition
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.LiveConditionMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition
@@ -62,8 +61,6 @@ class VoiceControlService : Service() {
     @Inject lateinit var audioRouteMonitor: AndroidAudioRouteMonitor
 
     @Inject lateinit var listeningModePolicy: ListeningModePolicy
-
-    @Inject lateinit var liveConditionMonitor: LiveConditionMonitor
 
     @Inject lateinit var voiceAsrEngine: dagger.Lazy<VoiceAsrEngine>
 
@@ -141,7 +138,6 @@ class VoiceControlService : Service() {
         }
 
         // Start monitoring transient conflict conditions
-        liveConditionMonitor.start()
 
         // Handle models first: defer mode observation until readiness completes.
         // This avoids lazy init on first utterance — both whisper and the
@@ -411,7 +407,6 @@ class VoiceControlService : Service() {
         mediaSession?.release()
         mediaSession = null
         voiceRecognizer.release()
-        liveConditionMonitor.stop()
         audioFeedbackRenderer.release()
         notificationManager.cancelNotification()
         stopForeground(STOP_FOREGROUND_REMOVE)

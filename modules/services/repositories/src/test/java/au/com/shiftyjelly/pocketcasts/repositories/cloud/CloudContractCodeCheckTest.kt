@@ -15,8 +15,9 @@ import org.junit.Test
  * spec living only in another repo — meant nothing failed when the two drifted. This is the
  * client's half of the fix: [CloudRouteErrorCodes.KNOWN] is re-derived here and compared with the
  * declaration in `cloud-contract-codes.json`, which names the spec revision it was last checked
- * against. A code added, removed or reclassified without touching that file fails this test and
- * names the code.
+ * against. A code added or removed without touching that file fails this test and names the code.
+ * A change of classification is not caught: which half a code belongs to is declared in the file
+ * rather than derived from the code, so listing one in both halves is all that is guarded.
  *
  * What this does *not* do, deliberately: reach across repos into the spec. A per-side check plus a
  * revision pin catches drift within this repo and makes a stale pin visible; failing automatically

@@ -165,7 +165,8 @@ class CloudRouteSink internal constructor(
         val myId = turnCounter.incrementAndGet()
         val turnState = TurnState()
         var tokenBuffer = ""
-        var acted = false
+        var executedAction = false
+        var handledResult = false
         var outcome: VoiceResponse? = null
 
         // Everything from registration onward sits inside the cleanup path: a
@@ -222,11 +223,11 @@ class CloudRouteSink internal constructor(
                 if (outcome != null) return@collect
                 when (event) {
                     is CloudRouteEvent.Action -> {
-                        // Remembered so a turn that acted but said nothing stays silent: the action
-                        // *is* its answer, and only a turn that neither spoke nor acted is a
-                        // failure the user must hear about.
-                        acted = true
-                        executeAction(event.tool, event.action, event.params, turnState, myId)
+                        // Only a *performed* action counts: executeAction ignores an unknown tool,
+                        // an unknown action, missing parameters and superseded turns, and an ignored
+                        // action followed by a blank Done must not pass for a turn that delivered
+                        // something.
+                        executedAction = executeAction(event.tool, event.action, event.params, turnState, myId) || executedAction
                     }
 
                     is CloudRouteEvent.Token -> tokenBuffer += event.text
@@ -246,9 +247,9 @@ class CloudRouteSink internal constructor(
                         outcome = when {
                             tokenBuffer.isNotBlank() -> VoiceResponse.Spoken(tokenBuffer)
 
-                            // An action with nothing said: the action is the answer, so silence is
-                            // correct (the server sends a follow-up summary for this case).
-                            acted -> VoiceResponse.Silent
+                            // The turn delivered something else — an action it actually performed,
+                            // or a result it rendered. Silence is right: that was the answer.
+                            executedAction || handledResult -> VoiceResponse.Silent
 
                             else -> {
                                 // No tokens and nothing done: an unexpected empty turn, not a search
@@ -275,6 +276,9 @@ class CloudRouteSink internal constructor(
                             } else {
                                 renderer.renderResults(event.results)
                             }
+                            // Rendered is delivered: the no-match state is the answer, so a blank
+                            // Done after it must not also speak the incomplete-turn line.
+                            handledResult = true
                         }
                     }
 
@@ -290,6 +294,9 @@ class CloudRouteSink internal constructor(
                             event.code == CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE
                         ) {
                             searchResultsRenderer.renderUnavailable()
+                            // Rendered, so the user has been told; a spoken line on top of it would
+                            // say the same thing twice in different words.
+                            handledResult = true
                         }
                         // Code only: the server's message can carry upstream
                         // detail derived from the user's request or account,
@@ -302,27 +309,24 @@ class CloudRouteSink internal constructor(
                             CloudRouteErrorCodes.normalizeForLog(event.code),
                         )
                         analytics.recordTurn(outcome = "error")
-                        // A server-supplied message passes through as-is. Note
-                        // this is not "the server's job" in any actionable
-                        // sense yet: the turn carries no language field, so the
-                        // server cannot choose a language — server-side text
-                        // localisation is a recorded limitation, not a contract.
-                        // When the code came from this
-                        // client it carries no prose: resolve a localized
-                        // template for it if one exists, and fall back to the
-                        // error earcon when it doesn't — an internal diagnostic
-                        // is a sound, not a foreign sentence.
-                        // ifBlank, not ifEmpty: a whitespace-only server message
-                        // would otherwise be "present" and get spoken as
-                        // silence instead of falling through to the localized
-                        // template or the earcon.
-                        val spoken = event.message.ifBlank {
-                            localizedTemplate(KEY_CLOUD_ERROR_PREFIX + event.code)
-                        }
-                        outcome = if (spoken.isBlank()) {
-                            VoiceResponse.Earcon(EarconId.ERROR)
+                        // The client speaks its own words for every failure and never the server's
+                        // `message`. That field is user-facing on the edge and upstream detail on the
+                        // assistant ("catalog provider: status 401 for
+                        // /api/catalog/podcasts/<uuid>/episodes"), and no client can tell those two
+                        // apart without knowing which service it reached. So: a template for the
+                        // code, then a generic local line, then the earcon — untrusted text is never
+                        // spoken, and a code nobody has seen yet still says something.
+                        val spoken = if (handledResult) {
+                            ""
                         } else {
-                            VoiceResponse.Spoken(spoken)
+                            localizedTemplate(KEY_CLOUD_ERROR_PREFIX + event.code)
+                                .ifBlank { localizedTemplate(KEY_CLOUD_ERROR_GENERIC) }
+                        }
+                        // Rendered already means the user was told; adding a sound would say it again.
+                        outcome = when {
+                            handledResult -> VoiceResponse.Silent
+                            spoken.isBlank() -> VoiceResponse.Earcon(EarconId.ERROR)
+                            else -> VoiceResponse.Spoken(spoken)
                         }
                     }
                 }
@@ -417,28 +421,30 @@ class CloudRouteSink internal constructor(
         Timber.i("[VoicePipeline] cloud turn restored playback (resumed what it paused)")
     }
 
+    /** Returns true only when an action was actually performed: an ignored action is not a delivery. */
     private suspend fun executeAction(
         tool: String,
         action: String,
         params: Map<String, Any?>,
         turnState: TurnState,
         myId: Long,
-    ) {
-        if (tool != "playback") return
+    ): Boolean {
+        if (tool != "playback") return false
 
         // Player-state changes are serialized with ownership: a superseded
         // turn must not seek/resume/pause the player its successor now owns.
-        turnMutex.withLock {
-            if (activeTurnId != myId) return@withLock
+        return turnMutex.withLock {
+            if (activeTurnId != myId) return@withLock false
             when (action) {
                 "seek_to" -> {
-                    val referenceMs = params.referencePositionMs() ?: return
+                    val referenceMs = params.referencePositionMs() ?: return@withLock false
                     capturePreActionPosition(referenceMs, turnState)
                     seekToReference(referenceMs)
+                    true
                 }
 
                 "play_quote" -> {
-                    val referenceMs = params.referencePositionMs() ?: return
+                    val referenceMs = params.referencePositionMs() ?: return@withLock false
                     capturePreActionPosition(referenceMs, turnState)
                     seekToReference(referenceMs)
                     // Cleared before the suspending call so the flag never
@@ -447,11 +453,13 @@ class CloudRouteSink internal constructor(
                     // wanted anyway — the reorder is for uniformity, not safety.)
                     playerAutoPaused = false
                     playbackSink.resume()
+                    true
                 }
 
                 "stop_quote" -> {
-                    val restoreMs = turnState.preQuotePositionMs ?: return
+                    val restoreMs = turnState.preQuotePositionMs ?: return@withLock false
                     playbackSink.seekTo(restoreMs.toInt())
+                    true
                 }
 
                 "pause" -> {
@@ -460,6 +468,7 @@ class CloudRouteSink internal constructor(
                     // leave us thinking we still own a pause the user asked for.
                     playerAutoPaused = false
                     playbackSink.pause()
+                    true
                 }
 
                 "resume" -> {
@@ -467,7 +476,12 @@ class CloudRouteSink internal constructor(
                     // cannot leave the flag describing a state we failed to reach.
                     playerAutoPaused = false
                     playbackSink.resume()
+                    true
                 }
+
+                // An action this build does not know: nothing happened, and the turn must not be
+                // counted as delivered on the strength of it.
+                else -> false
             }
         }
     }
@@ -508,6 +522,7 @@ class CloudRouteSink internal constructor(
     companion object {
         private const val KEY_CLOUD_COMING_SOON = "general.cloud_coming_soon"
         private const val KEY_CLOUD_ERROR_PREFIX = "cloud_error_"
+        private const val KEY_CLOUD_ERROR_GENERIC = "cloud_error_generic"
         private const val KEY_CLOUD_INCOMPLETE_TURN = "general.cloud_incomplete_turn"
     }
 }

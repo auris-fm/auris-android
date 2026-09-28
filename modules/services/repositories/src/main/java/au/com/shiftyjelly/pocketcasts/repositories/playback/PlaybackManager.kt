@@ -229,6 +229,55 @@ open class PlaybackManager @Inject constructor(
         .toLiveData()
     val playbackStateFlow: Flow<PlaybackState> = playbackStateRelay.asFlow()
 
+    /**
+     * Counts every play/pause/stop command, whoever issued it — including the
+     * cloud turn's own and including the user's voice.
+     *
+     * A voice cloud turn pauses the player to hold the user's place and later
+     * restores it. Whether the restore is still legitimate is a question about
+     * *ownership*, not state: a user who pauses while the turn runs leaves the
+     * player in exactly the state the turn left it, so a state sample cannot
+     * tell "nobody acted" from "the user acted". Counting commands can, because
+     * the turn knows how many of them were its own.
+     *
+     * The voice path's own commands are filtered out by source, so the turn's
+     * pause and restore never count themselves; a user's *spoken* pause would
+     * carry the same tag, so the executor reports that one explicitly through
+     * [noteUserPlaybackCommand]. Without that, excluding `VOICE_COMMANDS` would
+     * excuse exactly the case this exists to catch.
+     *
+     * Counts play/pause/stop only. A seek or a scrub does not contest the pause,
+     * and treating it as if it did would refuse a restore the user never asked
+     * to skip.
+     *
+     * **Automatic transitions count too, deliberately** (focus loss, transient
+     * loss). An interruption this app did not cause is not evidence that a cloud
+     * turn's pause should be undone: resuming after a call, or after another app
+     * took audio, would be the turn deciding an interruption is over when it
+     * cannot know that. Leaving playback under the user's hand costs one press of
+     * play. This is a choice, not a side effect of those events sharing the
+     * command path — so don't "fix" audio that stays paused after a phone call by
+     * excluding them here.
+     */
+    private val playbackCommandCount = java.util.concurrent.atomic.AtomicLong(0)
+
+    /** Synchronous, so a caller can compare it without a flow's lag. */
+    fun playbackCommandRevision(): Long = playbackCommandCount.get()
+
+    /**
+     * Records a playback command the user issued by voice. The executor knows a
+     * command was the user's; the playback layer cannot tell that from the
+     * `VOICE_COMMANDS` tag alone, which the cloud turn's own pause also carries.
+     */
+    fun noteUserPlaybackCommand() {
+        playbackCommandCount.incrementAndGet()
+    }
+
+    private fun notePlaybackCommand(sourceView: SourceView) {
+        if (sourceView == SourceView.VOICE_COMMANDS) return
+        playbackCommandCount.incrementAndGet()
+    }
+
     private var updateCount = 0
     private var resettingPlayer = false
     private var episodeLastBufferStatus: EpisodeBufferStatus? = null
@@ -654,6 +703,7 @@ open class PlaybackManager @Inject constructor(
         sourceView: SourceView = SourceView.UNKNOWN,
         showedStreamWarning: Boolean = false,
     ) {
+        notePlaybackCommand(sourceView)
         if (upNextQueue.currentEpisode != null) {
             loadEpisodeWhenRequired(sourceView, showedStreamWarning)
         }
@@ -706,6 +756,7 @@ open class PlaybackManager @Inject constructor(
         showedStreamWarning: Boolean = false,
         sourceView: SourceView = SourceView.UNKNOWN,
     ) {
+        notePlaybackCommand(sourceView)
         LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Play now: ${episode.uuid} ${episode.title}")
 
         withContext(Dispatchers.IO) {
@@ -1002,6 +1053,7 @@ open class PlaybackManager @Inject constructor(
     }
 
     suspend fun pauseSuspend(transientLoss: Boolean = false, sourceView: SourceView = SourceView.UNKNOWN) {
+        notePlaybackCommand(sourceView)
         if (!transientLoss) {
             focusManager.giveUpAudioFocus()
             playbackStateRelay.blockingFirst().let { playbackState ->
@@ -1046,6 +1098,9 @@ open class PlaybackManager @Inject constructor(
     }
 
     suspend fun stop() {
+        // A stop is a play/pause-state change too: whoever asked for it, the
+        // turn's pause is no longer the reason the player is quiet.
+        notePlaybackCommand(SourceView.UNKNOWN)
         LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Stopping playback")
 
         flushPendingContentTypeEvents()

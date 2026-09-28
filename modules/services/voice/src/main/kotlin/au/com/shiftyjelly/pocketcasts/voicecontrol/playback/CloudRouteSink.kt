@@ -47,6 +47,21 @@ class CloudRouteSink internal constructor(
     private val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
     private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(emptyMap()),
     private val currentLocale: () -> Locale = { Locale.getDefault() },
+    /**
+     * Whether the app is playing audio right now. The turn pauses the player to
+     * hold the user's place, and restoring that pause is only legitimate if
+     * there was playback to pause: claiming a pause that never happened resumes
+     * a player the user had deliberately stopped.
+     */
+    private val isHostPlaying: () -> Boolean,
+    /**
+     * How many play/pause/stop commands the playback layer has seen. Sampled
+     * *after* the turn takes its own pause, so the value expected at restore
+     * accounts for that pause; any further command — a user's tap or their voice
+     * — means someone else now owns the player's state and the turn must not
+     * restore over them.
+     */
+    private val playbackCommandRevision: () -> Long = { 0L },
 ) : VoiceCloudRouteSink {
 
     @Inject constructor(
@@ -59,6 +74,7 @@ class CloudRouteSink internal constructor(
         analytics: CloudRouteAnalytics,
         templateResolver: SpokenTemplateResolver,
         currentLocale: () -> Locale,
+        playbackContextMonitor: PlaybackContextMonitor,
     ) : this(
         resolveBaseUrl = cloudConfig::baseUrl,
         resolveUserId = cloudIdentity::userId,
@@ -72,6 +88,8 @@ class CloudRouteSink internal constructor(
         conversationMemory = CloudConversationMemory(),
         templateResolver = templateResolver,
         currentLocale = currentLocale,
+        isHostPlaying = { playbackContextMonitor.isHostAudioActive.value },
+        playbackCommandRevision = playbackContextMonitor::playbackCommandRevision,
     )
 
     /**
@@ -110,6 +128,9 @@ class CloudRouteSink internal constructor(
      * just a race).
      */
     private var playerAutoPaused = false
+
+    /** The command revision in force when this turn chain took the pause. */
+    private var pauseCommandRevision: Long = 0L
     private val turnCounter = AtomicLong(0)
 
     override suspend fun routeToCloud(
@@ -176,13 +197,22 @@ class CloudRouteSink internal constructor(
             val events = openRoute(turn)
 
             turnMutex.withLock {
-                if (activeTurnId == myId) {
-                    // Mark intent *before* the suspending pause: the player can
-                    // already be paused when cancellation lands mid-call, and a
-                    // flag set afterwards would leave the finally thinking there
-                    // is nothing to restore — audio stuck paused.
+                if (activeTurnId == myId && isHostPlaying()) {
+                    // Everything here is decided *before* the suspending pause:
+                    //   - the flag, because the player can already be paused when
+                    //     cancellation lands mid-call and a flag set afterwards
+                    //     would leave the finally thinking there is nothing to
+                    //     restore — audio stuck paused;
+                    //   - the revision, because sampling after the suspension
+                    //     would swallow a command the user issued *during* it,
+                    //     and the restore would then pass over them.
+                    // Our own pause is filtered by source, so it does not appear
+                    // in this count either way; sampling early only ever makes
+                    // the restore more conservative.
                     playerAutoPaused = true
+                    pauseCommandRevision = playbackCommandRevision()
                     playbackSink.pause()
+                    Timber.i("[VoicePipeline] cloud turn paused playback (host was playing)")
                 }
             }
 
@@ -351,10 +381,22 @@ class CloudRouteSink internal constructor(
 
     /** Owner-only: resume the player if this turn chain auto-paused it. */
     private suspend fun restoreTransientAudioState() {
-        if (playerAutoPaused) {
-            playbackSink.resume()
-            playerAutoPaused = false
+        if (!playerAutoPaused) return
+        playerAutoPaused = false
+        // The turn is a long suspension, and playback can move underneath it.
+        // Ownership is a question about commands, not state: a user who pressed
+        // pause leaves the player in the same state the turn left it, so only a
+        // command revision can tell their action from nobody acting.
+        if (playbackCommandRevision() != pauseCommandRevision) {
+            Timber.i("[VoicePipeline] cloud turn left playback alone (someone else acted)")
+            return
         }
+        if (isHostPlaying()) {
+            Timber.i("[VoicePipeline] cloud turn left playback alone (host is playing again)")
+            return
+        }
+        playbackSink.resume()
+        Timber.i("[VoicePipeline] cloud turn restored playback (resumed what it paused)")
     }
 
     private suspend fun executeAction(

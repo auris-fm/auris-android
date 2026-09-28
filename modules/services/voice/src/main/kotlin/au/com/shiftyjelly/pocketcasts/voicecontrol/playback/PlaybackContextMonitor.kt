@@ -17,13 +17,21 @@ sealed interface PlaybackContext {
 
 @Singleton
 class PlaybackContextMonitor @javax.inject.Inject constructor(
-    playbackManager: PlaybackManager,
+    private val playbackManager: PlaybackManager,
     @ApplicationScope
     scope: CoroutineScope,
 ) {
     val context: StateFlow<PlaybackContext> = playbackManager.playbackStateFlow
         .map(::toPlaybackContext)
         .stateIn(scope, SharingStarted.Eagerly, PlaybackContext.Inactive)
+
+    /**
+     * How many play/pause/stop commands the playback layer has seen, including
+     * this app's own. Read synchronously rather than through a flow: a caller
+     * compares it before and after its own command, and a `stateIn` value can
+     * lag the command it is meant to describe.
+     */
+    fun playbackCommandRevision(): Long = playbackManager.playbackCommandRevision()
 
     /**
      * True when the host app (Pocket Casts) is actively playing audio. Used by

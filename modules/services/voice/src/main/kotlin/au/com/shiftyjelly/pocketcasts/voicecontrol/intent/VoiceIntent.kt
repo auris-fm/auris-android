@@ -101,7 +101,26 @@ sealed interface VoiceIntent {
         val request: String,
         val tier: CloudTier,
         val context: PlaybackContext = PlaybackContext(),
+        /**
+         * The grace window this dispatch was issued under, stamped by whoever
+         * dispatched it. Handling the command may extend that window only while
+         * it is still current and still open: the turn outlives the window, and
+         * without the identity an in-flight turn could hold a later session open
+         * or spend its allowance.
+         */
+        val windowGeneration: Long? = null,
+        /**
+         * Who issued this dispatch. Separate from [windowGeneration] on purpose:
+         * the generation decides whether the window is touched at all, the
+         * origin decides whether the window's allowance is restored. A
+         * model-chosen route is a deliberate act and restores it; a
+         * routing-failure escalation is what the allowance exists for and does
+         * not, or the fallback would fund its own next attempt.
+         */
+        val origin: CloudRouteOrigin = CloudRouteOrigin.ModelCall,
     ) : VoiceIntent
+
+    enum class CloudRouteOrigin { ModelCall, RoutingFailure }
 
     enum class CloudTier { Free, Premium, Unknown }
 }

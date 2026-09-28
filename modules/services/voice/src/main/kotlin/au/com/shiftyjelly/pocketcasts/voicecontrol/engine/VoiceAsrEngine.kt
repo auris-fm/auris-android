@@ -16,6 +16,8 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRendere
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalation
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalationPolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.IntentRoutingInput
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.TranslationKind
@@ -255,9 +257,9 @@ class VoiceAsrEngine @Inject constructor(
                 trimNote?.let { " $it" } ?: "",
                 if (request.wakePositive) "wake-only" else "empty",
             )
-            if (request.wakePositive) {
-                audioFeedbackRenderer.playEarcon(EarconId.ERROR)
-            }
+            // No leftover command after the wake: the session started and
+            // nothing was asked, so nothing is reported. (The WAKE_WORD earcon
+            // already acknowledged detection.)
             return
         }
         // Translate to English when the ASR backend did not already translate and
@@ -294,6 +296,12 @@ class VoiceAsrEngine @Inject constructor(
         val ready = recognizer.ensureReady()
         if (ready.isFailure) {
             Timber.e(ready.exceptionOrNull(), "[VoicePipeline] intent not ready")
+            // The router never ran, which is the same class as the router's own
+            // `model_not_loaded`: a turn happened and nothing an answer it. Say
+            // so — silence here is the complaint this change exists to remove.
+            // Deliberately not escalated: a capability failure would turn a
+            // broken install into cloud traffic (see CloudEscalationPolicy).
+            audioFeedbackRenderer.playEarcon(EarconId.ERROR)
             return
         }
 
@@ -314,17 +322,57 @@ class VoiceAsrEngine @Inject constructor(
                 elapsedMs,
                 input.routerTranscript,
             )
-            handler(intent)
-        } else {
-            val stage = diagnostic?.failedStage ?: "unknown"
-            val reason = diagnostic?.reason ?: "none"
-            Timber.i(
-                "[VoicePipeline] intent none %dms stage=%s reason=%s ← '%s'",
-                elapsedMs,
-                stage,
-                reason,
-                input.routerTranscript,
-            )
+            // A cloud turn outlives the window it was issued in, so it carries
+            // that window's identity and cannot extend a later one.
+            handler(intent.stampedForWindow(gracePeriodSignal.currentGeneration))
+            return
+        }
+
+        val stage = diagnostic?.failedStage ?: "unknown"
+        val reason = diagnostic?.reason ?: "none"
+        Timber.i(
+            "[VoicePipeline] intent none %dms stage=%s reason=%s ← '%s'",
+            elapsedMs,
+            stage,
+            reason,
+            input.routerTranscript,
+        )
+
+        // No usable intent: three outcomes, decided in one place
+        // (see [CloudEscalationPolicy] for which reason lands where).
+        when (CloudEscalationPolicy.decide(reason)) {
+            // A rejection, not a failure — a bare wake phrase lands here, which
+            // is why the window is no longer spent on the wake word.
+            CloudEscalation.SILENT -> Unit
+
+            // Nothing was sent, but a turn happened: the earcon table already
+            // requires a tone for this case.
+            CloudEscalation.SPEAK_ERROR -> audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+
+            // The client has no answer of its own, so the service gets asked —
+            // through the same handler a chosen `cloud_route` uses, so
+            // superseded-turn cancellation and the auto-pause obligation apply.
+            CloudEscalation.DISPATCH -> {
+                val issuedUnder = gracePeriodSignal.issueEscalation()
+                if (issuedUnder == null) {
+                    // No open window, or this window's one dispatch is spent.
+                    Timber.i(
+                        "[VoicePipeline] cloud escalation skipped (%s)",
+                        gracePeriodSignal.escalationRefusal(),
+                    )
+                    audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+                    return
+                }
+                Timber.i("[VoicePipeline] cloud escalation ← '%s' (reason=%s)", input.routerTranscript, reason)
+                handler(
+                    VoiceIntent.CloudRoute(
+                        request = input.routerTranscript,
+                        tier = VoiceIntent.CloudTier.Unknown,
+                        windowGeneration = issuedUnder,
+                        origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
+                    ),
+                )
+            }
         }
     }
 
@@ -522,6 +570,12 @@ class VoiceAsrEngine @Inject constructor(
             scoStarted = false
         }
     }
+
+    /**
+     * Stamps the window a cloud dispatch belongs to; local commands are left
+     * alone, since a locally handled command is itself a fresh act.
+     */
+    private fun VoiceIntent.stampedForWindow(generation: Long): VoiceIntent = if (this is VoiceIntent.CloudRoute) copy(windowGeneration = generation) else this
 
     companion object {
         private const val SCO_CONNECT_TIMEOUT_MS = 3_000L

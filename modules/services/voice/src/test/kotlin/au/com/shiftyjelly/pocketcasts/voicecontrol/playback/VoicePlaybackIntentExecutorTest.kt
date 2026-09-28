@@ -8,8 +8,13 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.mockito.Mockito
 
 class VoicePlaybackIntentExecutorTest {
 
@@ -201,6 +206,175 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `a spoken pause is reported as a user command`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+
+        executor.execute(VoiceIntent.Playback.Pause)
+
+        // The playback layer cannot tell the user's spoken pause from the cloud
+        // turn's own pause — both carry the voice tag — so the executor reports
+        // it, and that is what blocks a turn from restoring over the user.
+        org.mockito.kotlin.verify(sinks.playbackManager).noteUserPlaybackCommand()
+    }
+
+    @Test
+    fun `the user's command is recorded before the action runs`() = runTest {
+        val order = mutableListOf<String>()
+        val sinks = FakeSinks()
+        sinks.playback.onCall = { order += "playback:$it" }
+        Mockito.doAnswer { order += "noteUserPlaybackCommand" }
+            .`when`(sinks.playbackManager).noteUserPlaybackCommand()
+        val executor = sinks.executor()
+
+        executor.execute(VoiceIntent.Playback.Pause)
+
+        // A pause that has reached the player but not the counter is the window
+        // where a cloud turn would resume over the user.
+        assertEquals(listOf("noteUserPlaybackCommand", "playback:pause"), order)
+    }
+
+    @Test
+    fun `a spoken seek is not a play-pause command`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+
+        executor.execute(VoiceIntent.Playback.SeekRelative(30_000))
+
+        // A seek does not contest the turn's pause, so it must not invalidate it.
+        org.mockito.kotlin.verify(sinks.playbackManager, org.mockito.kotlin.never()).noteUserPlaybackCommand()
+    }
+
+    @Test
+    fun `handling an escalation does not refresh the window budget`() = runTest {
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
+        val sinks = FakeSinks()
+        val executor = sinks.executor(signal)
+
+        // A user act opens the window; its one dispatch is spent on this turn.
+        signal.onWakeWordDetected()
+        val generation = signal.issueEscalation()!!
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "what did the guests say about sleep and memory",
+                tier = VoiceIntent.CloudTier.Unknown,
+                windowGeneration = generation,
+                origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
+            ),
+        )
+
+        // Handling it extends the window, but must not hand the turn a new
+        // allowance — otherwise one unclear question per turn re-arms it forever.
+        assertNull(
+            "a dispatched turn must not fund its own next attempt",
+            signal.issueEscalation(),
+        )
+        assertEquals(
+            listOf("routeToCloud:what did the guests say about sleep and memory:Unknown"),
+            sinks.cloudRoute.calls,
+        )
+    }
+
+    @Test
+    fun `a fallback completing after a privacy close leaves the window closed`() = runTest {
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
+        val sinks = FakeSinks()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        val generation = signal.issueEscalation()!!
+
+        // The app is backgrounded while the cloud turn is still in flight.
+        sinks.cloudRoute.whileInFlight = { signal.onAppBackgrounded() }
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "what did the guests say about sleep and memory",
+                tier = VoiceIntent.CloudTier.Unknown,
+                windowGeneration = generation,
+                origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
+            ),
+        )
+
+        // The turn's completion must not bring the mic back: the privacy close
+        // wins over an in-flight turn.
+        assertFalse("a completion reopened a closed window", signal.isActive.value)
+        assertNull(signal.issueEscalation())
+    }
+
+    @Test
+    fun `a model-chosen route completing in its window restores the allowance`() = runTest {
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
+        val sinks = FakeSinks()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        val generation = signal.issueEscalation()!!
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "summarize this episode",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = generation,
+                origin = VoiceIntent.CloudRouteOrigin.ModelCall,
+            ),
+        )
+
+        assertNotNull("a deliberate route earns the next dispatch", signal.issueEscalation())
+    }
+
+    @Test
+    fun `a model-chosen route completing after a privacy close leaves the window closed`() = runTest {
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
+        val sinks = FakeSinks()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        val generation = signal.currentGeneration
+        sinks.cloudRoute.whileInFlight = { signal.onAppBackgrounded() }
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "summarize this episode",
+                tier = VoiceIntent.CloudTier.Premium,
+                // The router chose this one; the rule has to hold for it too.
+                windowGeneration = generation,
+            ),
+        )
+
+        assertFalse("a completion reopened a privacy-closed window", signal.isActive.value)
+    }
+
+    @Test
+    fun `a model-chosen route completing inside an open window extends it`() = runTest {
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 100L)
+        val sinks = FakeSinks()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "summarize this episode",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = signal.currentGeneration,
+            ),
+        )
+
+        assertTrue(signal.isActive.value)
+    }
+
+    @Test
+    fun `a locally recognised command refreshes the window budget`() = runTest {
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
+        val sinks = FakeSinks()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        assertNotNull(signal.issueEscalation())
+        executor.execute(VoiceIntent.Playback.Pause)
+
+        // A locally handled command is a new act, so it earns a fresh allowance.
+        assertNotNull(signal.issueEscalation())
+    }
+
+    @Test
     fun `playback query whats playing returns spoken`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
@@ -244,7 +418,9 @@ class VoicePlaybackIntentExecutorTest {
         val playbackQuery = FakePlaybackQuerySink()
         val statsQuery = FakeStatsQuerySink()
 
-        fun executor() = VoicePlaybackIntentExecutor(
+        val playbackManager: au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager = org.mockito.kotlin.mock()
+
+        fun executor(signal: au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()) = VoicePlaybackIntentExecutor(
             playbackSink = playback,
             effectsSink = effects,
             volumeSink = volume,
@@ -256,14 +432,18 @@ class VoicePlaybackIntentExecutorTest {
             queueSink = queue,
             playbackQuerySink = playbackQuery,
             statsQuerySink = statsQuery,
-            gracePeriodSignal = GracePeriodSignal(),
+            gracePeriodSignal = signal,
+            playbackManager = playbackManager,
         )
     }
 
     private class FakePlaybackSink : VoicePlaybackSink {
+        var onCall: ((String) -> Unit)? = null
+
         val calls = mutableListOf<String>()
         override suspend fun pause(): VoiceResponse {
             calls += "pause"
+            onCall?.invoke("pause")
             return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
         override suspend fun resume(): VoiceResponse {
@@ -400,12 +580,17 @@ class VoicePlaybackIntentExecutorTest {
 
     private class FakeCloudRouteSink : VoiceCloudRouteSink {
         val calls = mutableListOf<String>()
+
+        /** Runs while the turn is in flight, to land a privacy event mid-turn. */
+        var whileInFlight: (() -> Unit)? = null
+
         override suspend fun routeToCloud(
             request: String,
             tier: VoiceIntent.CloudTier,
             context: PlaybackContext,
         ): VoiceResponse {
             calls += "routeToCloud:$request:${tier.name}"
+            whileInFlight?.invoke()
             return VoiceResponse.Silent
         }
     }

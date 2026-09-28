@@ -6,7 +6,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import au.com.shiftyjelly.pocketcasts.repositories.playback.AppLifecycleProvider
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.EnabledByUserCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -113,9 +115,13 @@ class VoiceControlServiceController @Inject constructor(
         combine(gate.state, appLifecycleProvider.isInForeground) { gateState, foreground ->
             gateState to foreground
         }.onEach { (gateState, foreground) ->
-            // A switching-off by the user re-arms the service: the stop they asked for is no
-            // longer what is being contradicted by a restart.
-            if (!gateState.allowed) stoppedByUser = false
+            // Re-arm only on the user's own switch. The gate also goes disallowed for transient
+            // reasons — the app backgrounded, an incoming call, another app playing — and keying
+            // the re-arm to `allowed` meant an ordinary background trip cleared the suppression
+            // and brought the microphone back after the user had turned listening off.
+            if (gateState.rules[EnabledByUserCondition.ID] is VoiceControlRuleState.Blocked) {
+                stoppedByUser = false
+            }
             // Foreground is not decoration here. A microphone foreground service started while the
             // app is not in an eligible foreground state is refused by Android: startForeground
             // throws, the service stops itself, and nothing asks again while it believes the

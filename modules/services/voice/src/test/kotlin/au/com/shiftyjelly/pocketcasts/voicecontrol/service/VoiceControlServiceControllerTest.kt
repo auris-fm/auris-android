@@ -48,18 +48,24 @@ class VoiceControlServiceControllerTest {
     private lateinit var controller: VoiceControlServiceController
 
     // A rule-backed gate rather than an empty rule list, so the re-arm path can be exercised.
-    private val userRule = FakeRule()
+    private val userRule = FakeRule("user_not_disabled", VoiceControlRuleGroup.Setup)
+
+    // Stands in for the conditions a background trip blocks together (app_in_foreground,
+    // playback_context, grace_period_active): blocking them all makes the gate disallowed for a
+    // reason that has nothing to do with the user switching the feature off.
+    private val backgroundRule = FakeRule("app_in_foreground", VoiceControlRuleGroup.Context)
 
     // The gate is given an unconfined scope so a rule change propagates eagerly: waiting on its
     // default dispatcher would make these assertions race the gate rather than test the controller.
     private val gate = VoiceControlGate(
-        rules = listOf(userRule),
+        rules = listOf(userRule, backgroundRule),
         scope = CoroutineScope(UnconfinedTestDispatcher()),
     )
 
-    private class FakeRule : VoiceControlRule {
-        override val id: String = "user_not_disabled"
-        override val group: VoiceControlRuleGroup = VoiceControlRuleGroup.Setup
+    private class FakeRule(
+        override val id: String,
+        override val group: VoiceControlRuleGroup,
+    ) : VoiceControlRule {
         private val stateFlow = MutableStateFlow<VoiceControlRuleState>(VoiceControlRuleState.Allowed)
         override val state: StateFlow<VoiceControlRuleState> = stateFlow
 
@@ -205,6 +211,22 @@ class VoiceControlServiceControllerTest {
         lifecycle.set(true)
 
         assertTrue("switching the feature off and on again is a fresh decision", startRequested())
+    }
+
+    @Test
+    fun `a background trip does not undo the user's stop`() {
+        lifecycle.set(true)
+        controller.onServiceStarted()
+        controller.onServiceStoppedByUser()
+        clearStarts()
+
+        // Backgrounding blocks the context conditions; none of that is the user re-arming.
+        backgroundRule.block()
+        lifecycle.set(false)
+        lifecycle.set(true)
+        backgroundRule.allow()
+
+        assertFalse("only the user's own switch re-arms a stop they asked for", startRequested())
     }
 
     @Test

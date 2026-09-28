@@ -92,5 +92,10 @@ class LiveConditionMonitor @Inject constructor(
         } catch (_: IllegalArgumentException) {
             // not registered
         }
+        // A later service lifetime starts this again. Leaving `started` set made the second start
+        // return early, so the call and power-save conditions stayed frozen at their last value —
+        // and a lifetime that ended during a call or in power save left voice control blocked for
+        // the rest of the process.
+        started = false
     }
 }

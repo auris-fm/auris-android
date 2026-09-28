@@ -10,7 +10,7 @@ class EnabledByUserCondition(
     settings: Settings,
     scope: kotlinx.coroutines.CoroutineScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default),
 ) : VoiceControlRule {
-    override val id = "user_not_disabled"
+    override val id = ID
     override val group = VoiceControlRuleGroup.Setup
 
     override val state: StateFlow<VoiceControlRuleState> = settings.voiceControlUserDisabled.flow
@@ -22,4 +22,9 @@ class EnabledByUserCondition(
             }
         }
         .stateIn(scope, SharingStarted.Eagerly, VoiceControlRuleState.Allowed)
+
+    companion object {
+        /** The user's own switch. A stop they asked for is re-armed when this goes Blocked. */
+        const val ID = "user_not_disabled"
+    }
 }

@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts
 import android.app.Application
 import androidx.hilt.work.HiltWorkerFactory
 import androidx.work.Configuration
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudPrefetchObserver
 import au.com.shiftyjelly.pocketcasts.repositories.notification.NotificationHelper
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackServiceToggle
@@ -29,6 +30,8 @@ class TvApplication :
 
     @Inject lateinit var playbackManager: PlaybackManager
 
+    @Inject lateinit var cloudPrefetchObserver: CloudPrefetchObserver
+
     @Inject lateinit var notificationHelper: NotificationHelper
 
     @Inject lateinit var defaultReleaseFeatureProvider: DefaultReleaseFeatureProvider
@@ -48,6 +51,7 @@ class TvApplication :
         setupFeatureFlags()
         notificationHelper.setupNotificationChannels()
         PlaybackServiceToggle.ensureCorrectServiceEnabled(this)
+        cloudPrefetchObserver.start()
         // setup() subscribes the Up Next queue's sync pipeline itself, so there must be no
         // separate UpNextQueue.setupBlocking() call on TV.
         applicationScope.launch {

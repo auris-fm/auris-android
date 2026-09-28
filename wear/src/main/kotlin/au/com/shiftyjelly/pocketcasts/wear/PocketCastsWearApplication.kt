@@ -9,6 +9,7 @@ import au.com.shiftyjelly.pocketcasts.analytics.experiments.ExperimentProvider
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.crashlogging.InitializeRemoteLogging
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudPrefetchObserver
 import au.com.shiftyjelly.pocketcasts.repositories.download.DownloadStatusObserver
 import au.com.shiftyjelly.pocketcasts.repositories.file.StorageOptions
 import au.com.shiftyjelly.pocketcasts.repositories.jobs.VersionMigrationsWorker
@@ -55,6 +56,8 @@ class PocketCastsWearApplication :
 
     @Inject lateinit var playbackManager: PlaybackManager
 
+    @Inject lateinit var cloudPrefetchObserver: CloudPrefetchObserver
+
     @Inject lateinit var podcastManager: PodcastManager
 
     @Inject lateinit var settings: Settings
@@ -87,6 +90,7 @@ class PocketCastsWearApplication :
         setupLogging()
         setupAnalytics()
         setupApp()
+        cloudPrefetchObserver.start()
     }
 
     private fun setupCrashLogging() {

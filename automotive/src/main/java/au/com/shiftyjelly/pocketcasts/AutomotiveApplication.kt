@@ -12,6 +12,7 @@ import au.com.shiftyjelly.pocketcasts.analytics.experiments.ExperimentProvider
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.crashlogging.InitializeRemoteLogging
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudPrefetchObserver
 import au.com.shiftyjelly.pocketcasts.repositories.download.DownloadStatusObserver
 import au.com.shiftyjelly.pocketcasts.repositories.jobs.VersionMigrationsWorker
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
@@ -52,6 +53,8 @@ class AutomotiveApplication :
 
     @Inject lateinit var playbackManager: PlaybackManager
 
+    @Inject lateinit var cloudPrefetchObserver: CloudPrefetchObserver
+
     @Inject lateinit var downloadStatusObserver: DownloadStatusObserver
 
     @Inject lateinit var userEpisodeManager: UserEpisodeManager
@@ -89,6 +92,7 @@ class AutomotiveApplication :
         setupLogging()
         setupAnalytics()
         setupApp()
+        cloudPrefetchObserver.start()
     }
 
     override val workManagerConfiguration: Configuration

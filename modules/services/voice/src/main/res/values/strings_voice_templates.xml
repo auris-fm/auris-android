@@ -18,6 +18,8 @@
              template; internal ones deliberately fall back to the error earcon
              (parity with the iOS half). -->
         <item>general.cloud_coming_soon|Cloud processing is coming soon</item>
+        <item>general.cloud_incomplete_turn|Sorry, I couldn't complete that request.</item>
+        <item>cloud_error_no_answer|Sorry, I couldn't complete that request.</item>
         <item>cloud_error_connection_lost|Connection lost. Please try again.</item>
     </string-array>
 </resources>

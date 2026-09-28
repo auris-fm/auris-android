@@ -17,6 +17,9 @@ object CloudRouteErrorCodes {
     const val PROVIDER_ERROR = "provider_error"
     const val INVALID_REQUEST = "invalid_request"
 
+    /** A turn that produced nothing: adopted from the service, which ends a blank turn this way. */
+    const val NO_ANSWER = "no_answer"
+
     private val KNOWN = setOf(
         RETRIEVAL_UNAVAILABLE,
         INVALID_RESPONSE,
@@ -27,6 +30,7 @@ object CloudRouteErrorCodes {
         DUPLICATE_REQUEST,
         PROVIDER_ERROR,
         INVALID_REQUEST,
+        NO_ANSWER,
     )
 
     /** `http_<3-digit status>` is minted locally from the response code. */

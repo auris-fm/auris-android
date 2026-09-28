@@ -165,6 +165,7 @@ class CloudRouteSink internal constructor(
         val myId = turnCounter.incrementAndGet()
         val turnState = TurnState()
         var tokenBuffer = ""
+        var acted = false
         var outcome: VoiceResponse? = null
 
         // Everything from registration onward sits inside the cleanup path: a
@@ -220,8 +221,13 @@ class CloudRouteSink internal constructor(
             events.collect { event ->
                 if (outcome != null) return@collect
                 when (event) {
-                    is CloudRouteEvent.Action ->
+                    is CloudRouteEvent.Action -> {
+                        // Remembered so a turn that acted but said nothing stays silent: the action
+                        // *is* its answer, and only a turn that neither spoke nor acted is a
+                        // failure the user must hear about.
+                        acted = true
                         executeAction(event.tool, event.action, event.params, turnState, myId)
+                    }
 
                     is CloudRouteEvent.Token -> tokenBuffer += event.text
 
@@ -237,10 +243,22 @@ class CloudRouteSink internal constructor(
                         if (tokenBuffer.isNotBlank()) {
                             conversationMemory.record(request, tokenBuffer)
                         }
-                        outcome = if (tokenBuffer.isBlank()) {
-                            VoiceResponse.Silent
-                        } else {
-                            VoiceResponse.Spoken(tokenBuffer)
+                        outcome = when {
+                            tokenBuffer.isNotBlank() -> VoiceResponse.Spoken(tokenBuffer)
+
+                            // An action with nothing said: the action is the answer, so silence is
+                            // correct (the server sends a follow-up summary for this case).
+                            acted -> VoiceResponse.Silent
+
+                            else -> {
+                                // No tokens and nothing done: an unexpected empty turn, not a search
+                                // that found nothing. The server's guard should make this
+                                // unreachable, so this covers old servers and regressions. Same
+                                // localized-or-earcon rule as the other spoken fallbacks: never
+                                // speak base-language prose on a device set to another language.
+                                val line = localizedTemplate(KEY_CLOUD_INCOMPLETE_TURN)
+                                if (line.isBlank()) VoiceResponse.Earcon(EarconId.ERROR) else VoiceResponse.Spoken(line)
+                            }
                         }
                     }
 
@@ -490,5 +508,6 @@ class CloudRouteSink internal constructor(
     companion object {
         private const val KEY_CLOUD_COMING_SOON = "general.cloud_coming_soon"
         private const val KEY_CLOUD_ERROR_PREFIX = "cloud_error_"
+        private const val KEY_CLOUD_INCOMPLETE_TURN = "general.cloud_incomplete_turn"
     }
 }

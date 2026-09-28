@@ -174,6 +174,49 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a no-answer error from the service is spoken rather than left silent`() = runTest {
+        // The service ends with `error no_answer`; the existing code-to-template mapping carries it.
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Error(code = CloudRouteErrorCodes.NO_ANSWER, message = ""),
+                CloudRouteEvent.Done(inputTokens = 1, outputTokens = 0),
+            ),
+        )
+
+        val response = deps.sink().routeToCloud("what?", VoiceIntent.CloudTier.Free, playbackContext)
+
+        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
+    }
+
+    @Test
+    fun `a turn that neither speaks nor acts says the request could not be completed`() = runTest {
+        // No tokens and no action: an unexpected empty turn, not a search that found nothing.
+        // The server's guard should make this unreachable; this covers old servers and regressions.
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(inputTokens = 1, outputTokens = 0)),
+        )
+        val sink = deps.sink()
+
+        val response = sink.routeToCloud("what?", VoiceIntent.CloudTier.Free, playbackContext)
+
+        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
+    }
+
+    @Test
+    fun `an empty turn on a non-English device falls back to the error earcon`() = runTest {
+        // Templates are English-only by design: base-language prose is never spoken on a device
+        // set to another language, so the earcon carries the same message.
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(inputTokens = 1, outputTokens = 0)),
+            locale = java.util.Locale.FRENCH,
+        )
+
+        val response = deps.sink().routeToCloud("quoi?", VoiceIntent.CloudTier.Free, playbackContext)
+
+        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
+    }
+
+    @Test
     fun `action-only stream returns silent on done`() = runTest {
         val deps = TestDeps(
             events = flowOf(
@@ -904,7 +947,7 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `a whitespace-only answer is silent rather than spoken`() = runTest {
+    fun `a whitespace-only answer is not spoken as whitespace but reports the incomplete turn`() = runTest {
         val deps = TestDeps(
             events = flowOf(
                 CloudRouteEvent.Token("   "),
@@ -915,9 +958,11 @@ class CloudRouteSinkTest {
         val sink = deps.sink()
         val response = sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        // Same rule as the error path: blank is not speech. Speaking "   " would
-        // send a whitespace utterance to the TTS engine instead of a no-op.
-        assertEquals(VoiceResponse.Silent, response)
+        // Deliberately changed: the rule that blank is not *speech* still holds — "   " is never
+        // sent to the TTS engine — but a turn that delivers no usable answer no longer leaves the
+        // user in silence. It reports the turn as incomplete, which is a different concern from
+        // speaking the whitespace itself.
+        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
 
         // And it is not worth remembering either: what follows carries no
         // conversation context, which is only true if nothing was recorded.
@@ -1102,6 +1147,8 @@ class CloudRouteSinkTest {
             mapOf(
                 "general.cloud_coming_soon" to "Cloud processing is coming soon",
                 "cloud_error_" + CloudRouteErrorCodes.CONNECTION_LOST to "Connection lost. Please try again.",
+                "general.cloud_incomplete_turn" to "Sorry, I couldn't complete that request.",
+                "cloud_error_" + CloudRouteErrorCodes.NO_ANSWER to "Sorry, I couldn't complete that request.",
             ),
         ),
         routeInvoker: ((CloudRouteTurn) -> kotlinx.coroutines.flow.Flow<CloudRouteEvent>)? = null,

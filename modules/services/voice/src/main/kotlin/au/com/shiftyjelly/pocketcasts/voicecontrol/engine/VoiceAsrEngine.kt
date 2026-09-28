@@ -84,6 +84,15 @@ class VoiceAsrEngine @Inject constructor(
 
         processingJob = scope.launch {
             Timber.i("[VoicePipeline] start route=%s sco=%b", audioRoute, audioRoute is AudioRoute.BluetoothA2dpOnly)
+            // Prepare the backend on every start, not only the first. stop() releases the
+            // backend and drops it, so a restart is handed a released instance whose
+            // recogniser is null — and its transcribe() then returns an empty result
+            // immediately, which looks exactly like speech the ASR could not read.
+            val backendReady = backend.ensureReady()
+            if (backendReady.isFailure) {
+                Timber.e(backendReady.exceptionOrNull(), "[VoicePipeline] ASR backend not ready — not listening")
+                return@launch
+            }
             if (audioRoute is AudioRoute.BluetoothA2dpOnly) {
                 awaitBluetoothSco()
             }

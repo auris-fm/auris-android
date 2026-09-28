@@ -138,6 +138,51 @@ class VoiceAsrEngineTest {
         capturedReceiver?.onReceive(context, intent)
     }
 
+    // ── The backend must be prepared on every start, not just the first ──
+
+    @Test
+    fun `start prepares the ASR backend`() = runTest {
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
+
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+
+        verify(backend, times(1)).ensureReady()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `a restarted engine prepares the ASR backend again`() = runTest {
+        // stop() releases the backend and drops it, leaving the recogniser null.
+        // If a restart does not prepare it again, every later transcription returns
+        // empty in ~0ms and voice recognition is silently dead for the whole process.
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
+
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+        engine.stop()
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+
+        verify(backend, times(2)).ensureReady()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `an unprepared backend does not consume audio`() = runTest {
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.failure(IllegalStateException("model missing")))
+
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+
+        verify(voiceAudioProcessor, never()).startProcessing()
+    }
+
     // ── Speaker / WiredHeadset routes: no SCO ──────────────────────────
 
     @Test

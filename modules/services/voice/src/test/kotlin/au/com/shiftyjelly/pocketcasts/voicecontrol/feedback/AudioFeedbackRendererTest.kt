@@ -37,6 +37,23 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `an audible response is reported as emitted audio`() = runTest {
+        assertFalse(renderer.hasEmittedAudio.value)
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
+
+        renderer.render(VoiceResponse.Earcon(EarconId.SUCCESS))
+
+        assertTrue(renderer.hasEmittedAudio.value)
+    }
+
+    @Test
+    fun `a silent response is not reported as emitted audio`() = runTest {
+        renderer.render(VoiceResponse.Silent)
+
+        assertFalse(renderer.hasEmittedAudio.value)
+    }
+
+    @Test
     fun `Earcon response plays via EarconPlayer`() = runTest {
         whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
         renderer.render(VoiceResponse.Earcon(EarconId.SUCCESS))

@@ -13,6 +13,7 @@ object CloudRouteErrorCodes {
     const val UNAUTHORIZED = "unauthorized"
     const val INTERNAL_ERROR = "internal_error"
     const val BUDGET_EXCEEDED = "budget_exceeded"
+    const val LIMIT_EXCEEDED = "limit_exceeded"
     const val DUPLICATE_REQUEST = "duplicate_request"
     const val PROVIDER_ERROR = "provider_error"
     const val INVALID_REQUEST = "invalid_request"
@@ -30,6 +31,7 @@ object CloudRouteErrorCodes {
         UNAUTHORIZED,
         INTERNAL_ERROR,
         BUDGET_EXCEEDED,
+        LIMIT_EXCEEDED,
         DUPLICATE_REQUEST,
         PROVIDER_ERROR,
         INVALID_REQUEST,

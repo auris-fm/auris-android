@@ -9,7 +9,8 @@
     "budget_exceeded",
     "duplicate_request",
     "provider_error",
-    "invalid_request"
+    "invalid_request",
+    "limit_exceeded"
   ],
   "mintedByClient": [
     "invalid_response",
@@ -19,7 +20,6 @@
     "http_\\d{3}"
   ],
   "specCodesNotHandled": [
-    "limit_exceeded",
     "no_answer"
   ]
 }

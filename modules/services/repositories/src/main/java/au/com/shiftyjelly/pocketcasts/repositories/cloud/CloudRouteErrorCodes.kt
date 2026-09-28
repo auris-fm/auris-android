@@ -17,7 +17,13 @@ object CloudRouteErrorCodes {
     const val PROVIDER_ERROR = "provider_error"
     const val INVALID_REQUEST = "invalid_request"
 
-    private val KNOWN = setOf(
+    /**
+     * Every code this client recognises — those it adopts from the server and those it mints
+     * itself. Internal rather than private so the contract check can re-derive it from code
+     * instead of restating it: a code added here without updating the checked-in contract
+     * declaration is exactly the drift that check exists to catch.
+     */
+    internal val KNOWN = setOf(
         RETRIEVAL_UNAVAILABLE,
         INVALID_RESPONSE,
         CONNECTION_LOST,

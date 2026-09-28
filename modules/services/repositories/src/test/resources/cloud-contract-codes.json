@@ -1,0 +1,25 @@
+{
+  "specDocument": "core/docs/specs/cloud-assistant.md#error-codes",
+  "specRevision": "2f4e4b2a754054afc110ba05e411d4d44d174aaa",
+  "note": "The client's claim about itself. specRevision is the revision of the spec table this claim was last checked against; bumping it is a deliberate act, not a side effect of an edit.",
+  "recognisedFromServer": [
+    "retrieval_unavailable",
+    "unauthorized",
+    "internal_error",
+    "budget_exceeded",
+    "duplicate_request",
+    "provider_error",
+    "invalid_request"
+  ],
+  "mintedByClient": [
+    "invalid_response",
+    "connection_lost"
+  ],
+  "boundedShapes": [
+    "http_\\d{3}"
+  ],
+  "specCodesNotHandled": [
+    "limit_exceeded",
+    "no_answer"
+  ]
+}

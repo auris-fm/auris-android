@@ -16,6 +16,7 @@ import au.com.shiftyjelly.pocketcasts.models.type.EpisodeDownloadStatus
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.repositories.appreview.AppReviewExceptionHandler
 import au.com.shiftyjelly.pocketcasts.repositories.appreview.AppReviewManager
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudPrefetchObserver
 import au.com.shiftyjelly.pocketcasts.repositories.download.DownloadStatusObserver
 import au.com.shiftyjelly.pocketcasts.repositories.endofyear.EndOfYearSync
 import au.com.shiftyjelly.pocketcasts.repositories.file.FileStorage
@@ -147,6 +148,8 @@ class PocketCastsApplication :
 
     @Inject lateinit var voiceControlServiceController: VoiceControlServiceController
 
+    @Inject lateinit var cloudPrefetchObserver: CloudPrefetchObserver
+
     @Inject lateinit var voiceControlGate: VoiceControlGate
 
     override fun onCreate() {
@@ -210,6 +213,14 @@ class PocketCastsApplication :
             .setJobSchedulerJobIdRange(1000, 20000)
             .build()
 
+    private fun setupCloudPrefetch() {
+        // Flag-gated inside the observer, so this is a no-op until the prefetch
+        // flag is on. Started here rather than from an androidx.startup
+        // initializer: the app's startup convention is Hilt-injected singletons
+        // on onCreate, and ours was the only Initializer in the codebase.
+        cloudPrefetchObserver.start()
+    }
+
     private fun setupVoiceControl() {
         voiceControlServiceController.startMonitoring(voiceControlGate)
     }
@@ -239,6 +250,7 @@ class PocketCastsApplication :
             appLifecycleObserver.setup()
             PlaybackServiceToggle.ensureCorrectServiceEnabled(this@PocketCastsApplication)
             setupVoiceControl()
+            setupCloudPrefetch()
 
             SingletonImageLoader.setSafe { coilImageLoader }
 

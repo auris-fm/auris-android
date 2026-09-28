@@ -100,6 +100,9 @@ class VoiceControlService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == STOP_ACTION) {
+            // Stop came from the user, not from Android: the controller must not bring the service
+            // back on the next foreground, or the button would silently do nothing.
+            voiceControlServiceController.onServiceStoppedByUser()
             stopVoiceControl()
             return START_NOT_STICKY
         }

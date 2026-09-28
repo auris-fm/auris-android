@@ -27,6 +27,14 @@ class VoiceControlServiceController @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var isMonitoring = false
     private var serviceStarted = false
+    private var startInFlight = false
+
+    /**
+     * Set when the user stops listening from the notification. Their action stands until the gate
+     * is re-armed (the feature switched off and back on); otherwise the next foreground would
+     * quietly undo it and bring the microphone back.
+     */
+    private var stoppedByUser = false
 
     /**
      * True only while the service itself has confirmed it is running. A start can be refused by
@@ -36,7 +44,7 @@ class VoiceControlServiceController @Inject constructor(
     val isServiceRunning: Boolean get() = serviceStarted
 
     fun start() {
-        if (serviceStarted) return
+        if (serviceStarted || startInFlight) return
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
@@ -51,11 +59,22 @@ class VoiceControlServiceController @Inject constructor(
         // Deliberately not marking it started: the service confirms below once it is genuinely
         // running. Believing a refused start had succeeded is what left voice recognition dead
         // for the rest of the process, because the only retry condition is !serviceStarted.
-        context.startForegroundService(Intent(context, VoiceControlService::class.java))
+        // In flight, though, so that a second gate or foreground emission before the service
+        // reports in cannot start it twice.
+        startInFlight = true
+        try {
+            context.startForegroundService(Intent(context, VoiceControlService::class.java))
+        } catch (e: Exception) {
+            // Including the system refusing a foreground start outright; not in flight, so the
+            // next foreground can try again.
+            startInFlight = false
+            Timber.w(e, "VoiceControlServiceController: could not start the service")
+        }
     }
 
     /** Called by the service once it is really running and holding the microphone. */
     fun onServiceStarted() {
+        startInFlight = false
         if (serviceStarted) return
         serviceStarted = true
         Timber.i("VoiceControlServiceController: service confirmed running")
@@ -66,9 +85,18 @@ class VoiceControlServiceController @Inject constructor(
      * system killing it. Clearing the flag here is what lets the next foreground start it again.
      */
     fun onServiceStopped() {
+        startInFlight = false
         if (!serviceStarted) return
         serviceStarted = false
         Timber.i("VoiceControlServiceController: service stopped")
+    }
+
+    /** The user stopped listening from the notification: do not restart until the gate re-arms. */
+    fun onServiceStoppedByUser() {
+        startInFlight = false
+        serviceStarted = false
+        stoppedByUser = true
+        Timber.i("VoiceControlServiceController: stopped by the user; will not restart until re-armed")
     }
 
     fun stop() {
@@ -85,12 +113,15 @@ class VoiceControlServiceController @Inject constructor(
         combine(gate.state, appLifecycleProvider.isInForeground) { gateState, foreground ->
             gateState to foreground
         }.onEach { (gateState, foreground) ->
+            // A switching-off by the user re-arms the service: the stop they asked for is no
+            // longer what is being contradicted by a restart.
+            if (!gateState.allowed) stoppedByUser = false
             // Foreground is not decoration here. A microphone foreground service started while the
             // app is not in an eligible foreground state is refused by Android: startForeground
             // throws, the service stops itself, and nothing asks again while it believes the
             // service is running. Starting only when the app is genuinely foreground is what
             // keeps this out of that state.
-            if (gateState.allowed && foreground && !serviceStarted) {
+            if (gateState.allowed && foreground && !serviceStarted && !startInFlight && !stoppedByUser) {
                 Timber.i("VoiceControlServiceController: gate allowed, starting service")
                 start()
             }

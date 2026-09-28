@@ -6,6 +6,10 @@ import android.Manifest
 import android.app.Application
 import au.com.shiftyjelly.pocketcasts.repositories.playback.AppLifecycleProvider
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRule
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleGroup
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -13,6 +17,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -42,8 +47,30 @@ class VoiceControlServiceControllerTest {
     private lateinit var lifecycle: FakeAppLifecycleProvider
     private lateinit var controller: VoiceControlServiceController
 
-    // An empty rule list allows, so these tests exercise the lifecycle, not the gate.
-    private val allowedGate = VoiceControlGate(rules = emptyList())
+    // A rule-backed gate rather than an empty rule list, so the re-arm path can be exercised.
+    private val userRule = FakeRule()
+
+    // The gate is given an unconfined scope so a rule change propagates eagerly: waiting on its
+    // default dispatcher would make these assertions race the gate rather than test the controller.
+    private val gate = VoiceControlGate(
+        rules = listOf(userRule),
+        scope = CoroutineScope(UnconfinedTestDispatcher()),
+    )
+
+    private class FakeRule : VoiceControlRule {
+        override val id: String = "user_not_disabled"
+        override val group: VoiceControlRuleGroup = VoiceControlRuleGroup.Setup
+        private val stateFlow = MutableStateFlow<VoiceControlRuleState>(VoiceControlRuleState.Allowed)
+        override val state: StateFlow<VoiceControlRuleState> = stateFlow
+
+        fun block() {
+            stateFlow.value = VoiceControlRuleState.Blocked("disabled by the user")
+        }
+
+        fun allow() {
+            stateFlow.value = VoiceControlRuleState.Allowed
+        }
+    }
 
     private class FakeAppLifecycleProvider : AppLifecycleProvider {
         private val state = MutableStateFlow(false)
@@ -61,7 +88,7 @@ class VoiceControlServiceControllerTest {
         shadowOf(context).grantPermissions(Manifest.permission.RECORD_AUDIO)
         lifecycle = FakeAppLifecycleProvider()
         controller = VoiceControlServiceController(context, lifecycle)
-        controller.startMonitoring(allowedGate)
+        controller.startMonitoring(gate)
     }
 
     @After
@@ -148,5 +175,49 @@ class VoiceControlServiceControllerTest {
     @Test
     fun `a start is not requested while the app is in the background`() {
         assertFalse("a microphone service cannot start from the background", startRequested())
+    }
+
+    @Test
+    fun `a stop the user asked for is not undone by the next foreground`() {
+        lifecycle.set(true)
+        controller.onServiceStarted()
+        clearStarts()
+
+        // Stop tapped in the listening notification.
+        controller.onServiceStoppedByUser()
+        lifecycle.set(false)
+        lifecycle.set(true)
+
+        assertFalse("the user's own stop must stand until the feature is re-armed", startRequested())
+        assertFalse(controller.isServiceRunning)
+    }
+
+    @Test
+    fun `the user's stop is re-armed when the feature is switched off and on`() {
+        lifecycle.set(true)
+        controller.onServiceStarted()
+        controller.onServiceStoppedByUser()
+        clearStarts()
+
+        userRule.block()
+        userRule.allow()
+        lifecycle.set(false)
+        lifecycle.set(true)
+
+        assertTrue("switching the feature off and on again is a fresh decision", startRequested())
+    }
+
+    @Test
+    fun `a second emission during the start handshake does not start the service twice`() {
+        lifecycle.set(true)
+        // Still no confirmation from the service: another foreground emission lands here.
+        lifecycle.set(false)
+        lifecycle.set(true)
+
+        assertEquals(
+            "one start while the first is still in flight",
+            1,
+            shadowOf(context).allStartedServices.size,
+        )
     }
 }

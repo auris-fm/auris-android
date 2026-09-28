@@ -18,12 +18,12 @@
              template; internal ones deliberately fall back to the error earcon
              (parity with the iOS half). -->
         <item>general.cloud_coming_soon|Cloud processing is coming soon</item>
-        <item>general.cloud_incomplete_turn|Sorry, I couldn't complete that request.</item>
-        <item>cloud_error_no_answer|Sorry, I couldn't complete that request.</item>
+        <item>general.cloud_incomplete_turn|Sorry, I couldn\'t complete that request.</item>
+        <item>cloud_error_no_answer|Sorry, I couldn\'t complete that request.</item>
         <item>cloud_error_unauthorized|Service is unavailable at the moment.</item>
-        <item>cloud_error_generic|Sorry, I couldn't complete that request.</item>
-        <item>cloud_error_retrieval_unavailable|I can't reach the podcast evidence right now.</item>
-        <item>cloud_error_provider_error|The assistant couldn't finish that request.</item>
+        <item>cloud_error_generic|Sorry, I couldn\'t complete that request.</item>
+        <item>cloud_error_retrieval_unavailable|I can\'t reach the podcast evidence right now.</item>
+        <item>cloud_error_provider_error|The assistant couldn\'t finish that request.</item>
         <item>cloud_error_connection_lost|Connection lost. Please try again.</item>
     </string-array>
 </resources>

@@ -4,6 +4,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -102,6 +103,21 @@ class AudioFeedbackRendererTest {
 
         assertNotEquals("different text must not look like the same response", first, second)
         assertEquals("the same text must digest the same way", first, AudioFeedbackRenderer.digest("here is one answer"))
+    }
+
+    @Test
+    fun `an answer containing a newline or a quote stays on one line`() {
+        // An answer spanning lines would otherwise push its remainder onto continuation lines
+        // with no prefix, so a grep would compare only the first line of each response and two
+        // different answers could look identical.
+        val described = AudioFeedbackRenderer.describeForLog(
+            VoiceResponse.Spoken("First line.\nSecond line, with a \"quote\"."),
+            language = "en",
+        )
+
+        assertFalse("no raw newline may survive into the log line", described.contains('\n'))
+        assertFalse("no raw carriage return either", described.contains('\r'))
+        assertTrue(described, described.contains("First line.\\nSecond line, with a \\\"quote\\\"."))
     }
 
     @Test

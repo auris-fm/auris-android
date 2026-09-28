@@ -80,8 +80,19 @@ class AudioFeedbackRenderer(
             )
         }
 
-        private fun spokenForLog(prefix: String, text: String, language: String): String = "kind=$prefix lang=$language len=${text.length} digest=${digest(text)} text=\"$text\""
+        private fun spokenForLog(prefix: String, text: String, language: String): String = "kind=$prefix lang=$language len=${text.length} digest=${digest(text)} text=\"${escapeForLog(text)}\""
 
         internal fun digest(text: String): String = text.hashCode().toUInt().toString(16)
+
+        /**
+         * Keeps one response on one line. An answer containing a newline would otherwise push the
+         * rest of itself onto continuation lines that carry no prefix, so grepping responses would
+         * compare only the first line of each and two different answers could look identical.
+         */
+        internal fun escapeForLog(text: String): String = text
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
     }
 }

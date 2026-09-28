@@ -8,7 +8,10 @@ import com.k2fsa.sherpa.onnx.OfflineSenseVoiceModelConfig
 import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
@@ -17,6 +20,7 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
 
     private var recognizer: OfflineRecognizer? = null
     private var modelDir: File? = null
+    private var loadedDir: File? = null
 
     override suspend fun ensureReady(): Result<Unit> = withContext(Dispatchers.IO) {
         val dir = modelDir
@@ -27,6 +31,12 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
         val tokensFile = File(dir, SENSEVOICE_TOKENS_FILENAME)
         if (!modelFile.exists() || !tokensFile.exists()) {
             return@withContext Result.failure(IllegalStateException("SenseVoice model files missing"))
+        }
+        // Called on every engine start now, and a start can be frequent (route and
+        // gate transitions). Reloading the model each time would be pure cost, so a
+        // recogniser already built from this same directory is reused.
+        if (recognizer != null && loadedDir == dir) {
+            return@withContext Result.success(Unit)
         }
         try {
             val config = OfflineRecognizerConfig(
@@ -40,9 +50,19 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
             )
             val previous = recognizer
             recognizer = null
+            loadedDir = null
             previous?.release()
             val created = OfflineRecognizer(config = config)
+            // A stop can land while this load is in flight and release the backend; assigning
+            // here would leave a live recogniser on a released backend, retaining the model
+            // (hundreds of MB of native memory) for the life of the process with no service
+            // left to release it. Release what was built and report.
+            if (!currentCoroutineContext().isActive) {
+                created.release()
+                return@withContext Result.failure(CancellationException("cancelled during model load"))
+            }
             recognizer = created
+            loadedDir = dir
             Timber.i("SenseVoiceBackend ready")
             Result.success(Unit)
         } catch (e: Exception) {
@@ -113,6 +133,7 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
     override fun release() {
         recognizer?.release()
         recognizer = null
+        loadedDir = null
     }
 
     companion object {

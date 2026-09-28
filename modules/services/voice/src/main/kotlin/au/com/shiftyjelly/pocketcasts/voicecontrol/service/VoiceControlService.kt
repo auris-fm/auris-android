@@ -83,6 +83,7 @@ class VoiceControlService : Service() {
     private var lastIntentType: String? = null
     private var lastCommandTime: Long = 0L
     private var engineStarted = false
+    private var wiredBackend: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend? = null
     private var captureWasEverActive = false
     private var acquisitionLogged = false
     private var mediaSession: MediaSession? = null
@@ -241,6 +242,10 @@ class VoiceControlService : Service() {
             return
         }
         wireBackend(backend)
+        // The backend outlives individual listening sessions: the engine keeps it warm across
+        // stop/start (releasing it there would force a model reload on every resume), so the
+        // service holds it and releases it once, in teardown.
+        wiredBackend = backend
 
         if (backend.ensureReady().isFailure) {
             Timber.e("Backend not ready")
@@ -285,13 +290,22 @@ class VoiceControlService : Service() {
     }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    private fun startEngine(mode: ListeningMode) {
+    private suspend fun startEngine(mode: ListeningMode) {
         if (engineStarted) return
         val backend = asrBackendSelector.select()
         if (backend == null) {
             Timber.w(
                 "[VoicePipeline] ASR locale unsupported — refusing to start engine",
             )
+            return
+        }
+
+        // Prepare the model before telling the user we are listening. The engine also checks
+        // this (it refuses to run a pipeline that would only ever return empty results), but
+        // by then the listening earcon and notification have already gone out, leaving the
+        // user told "listening" with a microphone that never opens.
+        if (backend.ensureReady().isFailure) {
+            Timber.e("[VoicePipeline] engine not started: ASR backend not ready")
             return
         }
 
@@ -382,6 +396,8 @@ class VoiceControlService : Service() {
         Timber.i("Stopping voice control service")
         modeJob?.cancel()
         stopEngine()
+        wiredBackend?.release()
+        wiredBackend = null
         mediaSession?.isActive = false
         mediaSession?.release()
         mediaSession = null

@@ -84,6 +84,16 @@ class VoiceAsrEngine @Inject constructor(
 
         processingJob = scope.launch {
             Timber.i("[VoicePipeline] start route=%s sco=%b", audioRoute, audioRoute is AudioRoute.BluetoothA2dpOnly)
+            // Prepare the backend on every start. Not because a pause releases it — stop()
+            // deliberately keeps it warm — but because the engine can be handed a backend that
+            // was never prepared, and because a start that cannot be prepared must not run a
+            // pipeline: an unprepared backend returns an empty result for every utterance
+            // instead of failing, which is indistinguishable from speech it could not read.
+            val backendReady = backend.ensureReady()
+            if (backendReady.isFailure) {
+                Timber.e(backendReady.exceptionOrNull(), "[VoicePipeline] ASR backend not ready — not listening")
+                return@launch
+            }
             if (audioRoute is AudioRoute.BluetoothA2dpOnly) {
                 awaitBluetoothSco()
             }
@@ -475,7 +485,10 @@ class VoiceAsrEngine @Inject constructor(
     fun stop() {
         processingJob?.cancel()
         processingJob = null
-        backend?.release()
+        // Listening pauses are frequent (gate conflicts, route changes), so the backend is
+        // deliberately kept warm here rather than released: releasing it would force a full
+        // model reload on the next start, and everything spoken during that reload is lost.
+        // The ASR backend is owned by VoiceControlService and released in its teardown.
         backend = null
         closeBluetoothSco()
         Timber.i("[VoicePipeline] engine stopped")

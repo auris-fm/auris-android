@@ -10,7 +10,10 @@ import java.io.File
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
@@ -34,6 +37,7 @@ class CanaryFlashBackend @Inject constructor(
     /** Source language baked into the currently loaded recognizer config. */
     private var loadedSrcLang: String? = null
     private var modelDir: File? = null
+    private var loadedDir: File? = null
 
     override suspend fun ensureReady(): Result<Unit> = withContext(Dispatchers.IO) {
         val dir = modelDir
@@ -51,6 +55,12 @@ class CanaryFlashBackend @Inject constructor(
         // locale Canary does not cover) rather than passing an invalid config to the runtime.
         if (srcLang !in SUPPORTED_SOURCE_LANGUAGES) {
             return@withContext Result.failure(IllegalArgumentException("Unsupported Canary source language: $srcLang"))
+        }
+        // Prepared on every engine start now, and a start can be frequent (route and gate
+        // transitions), so a recogniser already built for this directory and language is reused
+        // instead of reloading the model and losing whatever is said while it loads.
+        if (recognizer != null && loadedSrcLang == srcLang && loadedDir == dir) {
+            return@withContext Result.success(Unit)
         }
         try {
             val config = OfflineRecognizerConfig(
@@ -71,10 +81,19 @@ class CanaryFlashBackend @Inject constructor(
             val previous = recognizer
             recognizer = null
             loadedSrcLang = null
+            loadedDir = null
             previous?.release()
             val created = OfflineRecognizer(config = config)
+            // A stop can land while this load is in flight and release the backend; assigning
+            // here would leave a live recogniser on a released backend, retaining the model for
+            // as long as the service runs. Release what was built and report.
+            if (!currentCoroutineContext().isActive) {
+                created.release()
+                return@withContext Result.failure(CancellationException("cancelled during model load"))
+            }
             recognizer = created
             loadedSrcLang = srcLang
+            loadedDir = dir
             Timber.i("CanaryFlashBackend ready (src=%s, tgt=en)", srcLang)
             Result.success(Unit)
         } catch (e: Exception) {
@@ -134,6 +153,7 @@ class CanaryFlashBackend @Inject constructor(
         recognizer?.release()
         recognizer = null
         loadedSrcLang = null
+        loadedDir = null
     }
 
     private fun canarySourceLanguage(): String = currentLocale().language

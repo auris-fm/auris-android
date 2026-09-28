@@ -138,6 +138,66 @@ class VoiceAsrEngineTest {
         capturedReceiver?.onReceive(context, intent)
     }
 
+    // ── The backend must be prepared on every start, not just the first ──
+
+    @Test
+    fun `start prepares the ASR backend`() = runTest {
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
+
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+
+        verify(backend, times(1)).ensureReady()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `a restarted engine prepares the ASR backend again`() = runTest {
+        // stop() releases the backend and drops it, leaving the recogniser null.
+        // If a restart does not prepare it again, every later transcription returns
+        // empty in ~0ms and voice recognition is silently dead for the whole process.
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
+
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+        engine.stop()
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+
+        verify(backend, times(2)).ensureReady()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `stop keeps the backend warm rather than releasing it`() = runTest {
+        // Listening pauses are frequent (gate conflicts, route changes). Releasing here would
+        // force a full model reload on the next start, and everything said during that reload
+        // is lost. The service owns teardown and releases the backend there.
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
+
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+        engine.stop()
+
+        verify(backend, never()).release()
+    }
+
+    @Test
+    fun `an unprepared backend does not consume audio`() = runTest {
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.failure(IllegalStateException("model missing")))
+
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+
+        verify(voiceAudioProcessor, never()).startProcessing()
+    }
+
     // ── Speaker / WiredHeadset routes: no SCO ──────────────────────────
 
     @Test
@@ -238,7 +298,7 @@ class VoiceAsrEngineTest {
     }
 
     @Test
-    fun `stop after capture started closes SCO and releases backend`() = runTest {
+    fun `stop after capture started closes SCO and keeps the backend warm`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
         runCurrent()
@@ -251,7 +311,9 @@ class VoiceAsrEngineTest {
         advanceUntilIdle()
 
         verify(audioManager).stopBluetoothSco()
-        verify(backend).release()
+        // Deliberately not released: a listening pause must not cost a model reload on the
+        // next start. VoiceControlService releases the backend in its teardown.
+        verify(backend, never()).release()
     }
 
     @Test

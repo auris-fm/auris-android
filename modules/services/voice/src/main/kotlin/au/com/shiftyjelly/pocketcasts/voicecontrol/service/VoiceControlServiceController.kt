@@ -28,6 +28,13 @@ class VoiceControlServiceController @Inject constructor(
     private var isMonitoring = false
     private var serviceStarted = false
 
+    /**
+     * True only while the service itself has confirmed it is running. A start can be refused by
+     * Android (a microphone foreground service started from an ineligible app state throws from
+     * `startForeground`), so the request is not treated as success.
+     */
+    val isServiceRunning: Boolean get() = serviceStarted
+
     fun start() {
         if (serviceStarted) return
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO)
@@ -41,8 +48,27 @@ class VoiceControlServiceController @Inject constructor(
             return
         }
         Timber.i("VoiceControlServiceController: starting service")
-        serviceStarted = true
+        // Deliberately not marking it started: the service confirms below once it is genuinely
+        // running. Believing a refused start had succeeded is what left voice recognition dead
+        // for the rest of the process, because the only retry condition is !serviceStarted.
         context.startForegroundService(Intent(context, VoiceControlService::class.java))
+    }
+
+    /** Called by the service once it is really running and holding the microphone. */
+    fun onServiceStarted() {
+        if (serviceStarted) return
+        serviceStarted = true
+        Timber.i("VoiceControlServiceController: service confirmed running")
+    }
+
+    /**
+     * Called whenever the service stops, for any reason — its own decision, a refusal, or the
+     * system killing it. Clearing the flag here is what lets the next foreground start it again.
+     */
+    fun onServiceStopped() {
+        if (!serviceStarted) return
+        serviceStarted = false
+        Timber.i("VoiceControlServiceController: service stopped")
     }
 
     fun stop() {
@@ -59,7 +85,12 @@ class VoiceControlServiceController @Inject constructor(
         combine(gate.state, appLifecycleProvider.isInForeground) { gateState, foreground ->
             gateState to foreground
         }.onEach { (gateState, foreground) ->
-            if (gateState.allowed && !serviceStarted) {
+            // Foreground is not decoration here. A microphone foreground service started while the
+            // app is not in an eligible foreground state is refused by Android: startForeground
+            // throws, the service stops itself, and nothing asks again while it believes the
+            // service is running. Starting only when the app is genuinely foreground is what
+            // keeps this out of that state.
+            if (gateState.allowed && foreground && !serviceStarted) {
                 Timber.i("VoiceControlServiceController: gate allowed, starting service")
                 start()
             }

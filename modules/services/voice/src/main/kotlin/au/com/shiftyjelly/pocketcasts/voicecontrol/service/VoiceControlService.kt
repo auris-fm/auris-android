@@ -74,6 +74,8 @@ class VoiceControlService : Service() {
 
     @Inject lateinit var modelsReadyCondition: ModelsReadyCondition
 
+    @Inject lateinit var voiceControlServiceController: VoiceControlServiceController
+
     @Inject lateinit var audioFeedbackRenderer: AudioFeedbackRenderer
 
     @Inject lateinit var gracePeriodSignal: GracePeriodSignal
@@ -120,6 +122,9 @@ class VoiceControlService : Service() {
         try {
             val notification = notificationManager.createDownloadingNotification()
             startForeground(notificationManager.notificationId, notification)
+            // Only now is the service really running: Android refuses a microphone foreground
+            // service started from an ineligible app state, and that refusal throws below.
+            voiceControlServiceController.onServiceStarted()
         } catch (e: SecurityException) {
             Timber.e(e, "Cannot start foreground — mic permission not granted")
             stopSelf()
@@ -420,5 +425,8 @@ class VoiceControlService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopVoiceControl()
+        // The controller keeps its own record of whether this service is running; without this it
+        // would believe a service that the system killed is still alive and never start it again.
+        voiceControlServiceController.onServiceStopped()
     }
 }

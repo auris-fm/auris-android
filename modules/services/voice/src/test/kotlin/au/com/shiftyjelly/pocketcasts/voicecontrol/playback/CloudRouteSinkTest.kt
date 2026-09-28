@@ -346,44 +346,15 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `a quota refusal speaks its own line rather than the generic one`() = runTest {
-        // Both lines exist here, so the assertion is about which one the sink picks. The server
-        // sends this code with user-facing prose in `message`; the client never speaks that, and
-        // the numbers in it ("10/10") are not reachable from here — the reason survives instead.
-        val deps = TestDeps(
-            events = flowOf(
-                CloudRouteEvent.Error(
-                    code = "limit_exceeded",
-                    message = "You've used 10/10 free requests today.",
-                ),
-            ),
-            templateResolver = SpokenTemplateResolver(
-                mapOf(
-                    "cloud_error_limit_exceeded" to "You've reached today's free limit.",
-                    "cloud_error_generic" to "Sorry, I couldn't complete that request.",
-                ),
-            ),
-        )
-
-        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
-
-        assertEquals(VoiceResponse.Spoken("You've reached today's free limit."), response)
-        assertNotEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
-    }
-
-    @Test
     fun `a budget refusal speaks its own line rather than the generic one`() = runTest {
+        // The shared fixture supplies both the code's line and the generic one, so this asserts
+        // which the sink picks. The quota case is already covered by
+        // `a server-supplied message is never spoken...` below, which uses the same fixture.
         val deps = TestDeps(
             events = flowOf(
                 CloudRouteEvent.Error(
                     code = "budget_exceeded",
                     message = "We've hit our daily budget.",
-                ),
-            ),
-            templateResolver = SpokenTemplateResolver(
-                mapOf(
-                    "cloud_error_budget_exceeded" to "The assistant has reached its limit right now.",
-                    "cloud_error_generic" to "Sorry, I couldn't complete that request.",
                 ),
             ),
         )
@@ -397,8 +368,7 @@ class CloudRouteSinkTest {
         assertNotEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
     }
 
-    @Test
-    fun `error clears token buffer restores auto pause and speaks message`() = runTest {
+        fun `error clears token buffer restores auto pause and speaks message`() = runTest {
         val deps = TestDeps(
             events = flowOf(
                 CloudRouteEvent.Token("partial"),

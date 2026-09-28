@@ -21,9 +21,36 @@ internal abstract class CloudPrefetchModule {
     abstract fun bindPrefetchFlag(impl: CloudPrefetchSettings): CloudPrefetchFlag
 
     @Binds
-    abstract fun bindCloudTokenProviding(impl: CloudStaticIdentityTokenProvider): CloudTokenProviding
+    abstract fun bindAurisAccountCredentialProviding(
+        impl: AurisSessionCredentialProvider,
+    ): AurisAccountCredentialProviding
 
     companion object {
+        /**
+         * The credential every cloud call presents.
+         *
+         * Config-gated *per call*: with no configured cutover the static
+         * identity token is used exactly as before, and the moment an Auris
+         * environment is configured the Auris-issued token takes over — no
+         * restart, and no legacy bearer reaching the edge.
+         */
+        @Provides
+        @Singleton
+        fun provideCloudTokenProviding(
+            cloudConfig: CloudConfig,
+            staticIdentity: CloudStaticIdentityTokenProvider,
+            credentialProvider: AurisAccountCredentialProviding,
+        ): CloudTokenProviding = RoutingCloudTokenProviding(
+            isAurisActive = { cloudConfig.baseUrl().isNotBlank() },
+            auris = AurisTokenProvider(
+                clientProvider = {
+                    cloudConfig.baseUrl().takeIf { it.isNotBlank() }?.let(::AurisAuthClient)
+                },
+                credentialProvider = credentialProvider,
+            ),
+            legacy = staticIdentity,
+        )
+
         @Provides
         @Singleton
         fun providePrefetchHinter(

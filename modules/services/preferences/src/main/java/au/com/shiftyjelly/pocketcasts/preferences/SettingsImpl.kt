@@ -1287,6 +1287,12 @@ class SettingsImpl @Inject constructor(
         sharedPrefs = sharedPreferences,
     )
 
+    override val cloudContextPrefetch = UserSetting.BoolPref(
+        sharedPrefKey = "cloudContextPrefetch",
+        defaultValue = false,
+        sharedPrefs = sharedPreferences,
+    )
+
     override val cloudDownloadOnlyOnWifi = UserSetting.BoolPref(
         sharedPrefKey = "cloudOnlyWifi",
         defaultValue = true,

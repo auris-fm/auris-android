@@ -14,5 +14,10 @@
         <item>sleep.query|Sleep timer {remaining}</item>
         <item>bookmark.add|Bookmarked at {position}</item>
         <item>playback.next_episode|Playing {episode title}</item>
+        <!-- Cloud diagnostics. Only the codes with a user-facing meaning get a
+             template; internal ones deliberately fall back to the error earcon
+             (parity with the iOS half). -->
+        <item>general.cloud_coming_soon|Cloud processing is coming soon</item>
+        <item>cloud_error_connection_lost|Connection lost. Please try again.</item>
     </string-array>
 </resources>

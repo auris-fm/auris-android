@@ -484,6 +484,9 @@ interface Settings {
     val deleteCloudFileAfterPlaying: UserSetting<Boolean>
     val cloudAutoUpload: UserSetting<Boolean>
     val cloudAutoDownload: ReadWriteSetting<Boolean>
+
+    /** Optional playback-start prefetch hint (edge-particle Item 5). Default off. */
+    val cloudContextPrefetch: UserSetting<Boolean>
     val cloudDownloadOnlyOnWifi: UserSetting<Boolean>
     val cachedMembership: UserSetting<Membership>
     val cachedSubscription: ReadSetting<Subscription?>

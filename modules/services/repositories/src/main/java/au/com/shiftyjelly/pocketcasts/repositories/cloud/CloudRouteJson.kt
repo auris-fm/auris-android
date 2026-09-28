@@ -4,6 +4,7 @@ import com.squareup.moshi.JsonAdapter
 import com.squareup.moshi.JsonReader
 import com.squareup.moshi.JsonWriter
 import com.squareup.moshi.Moshi
+import com.squareup.moshi.Types
 import java.lang.reflect.Type
 
 internal object CloudRouteJson {
@@ -15,6 +16,13 @@ internal object CloudRouteJson {
     val errorAdapter: JsonAdapter<CloudRouteErrorPayload> = CloudRouteErrorPayloadJsonAdapter(moshi)
     val httpErrorAdapter: JsonAdapter<CloudRouteHttpErrorPayload> = CloudRouteHttpErrorPayloadJsonAdapter(moshi)
     val flexibleMapAdapter: JsonAdapter<Map<String, Any?>> = FlexibleMapAdapter()
+
+    /** Measures the serialized conversation for the client-side byte bound. */
+    val conversationListAdapter: JsonAdapter<List<CloudRouteConversationEntry>> =
+        moshi.adapter(Types.newParameterizedType(List::class.java, CloudRouteConversationEntry::class.java))
+    val resultAdapter: JsonAdapter<CloudSearchResults> = CloudSearchResultsJsonAdapter(moshi)
+    val prefetchRequestAdapter: JsonAdapter<CloudPrefetchRequest> = CloudPrefetchRequestJsonAdapter(moshi)
+    val prefetchResponseAdapter: JsonAdapter<CloudPrefetchResponse> = CloudPrefetchResponseJsonAdapter(moshi)
 }
 
 /**

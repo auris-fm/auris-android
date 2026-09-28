@@ -133,6 +133,11 @@ abstract class VoiceControlModule {
         fun provideEmbeddingTokenizerFile(manager: ModelManager): File = manager.tokenizerModelFile
 
         @Provides @Singleton
+        fun provideSpokenTemplateResolver(
+            @ApplicationContext context: android.content.Context,
+        ): au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver(context)
+
+        @Provides @Singleton
         fun provideDeviceProbe(): au.com.shiftyjelly.pocketcasts.voicecontrol.asr.DeviceProbe = au.com.shiftyjelly.pocketcasts.voicecontrol.asr.DeviceProbe()
 
         @Provides @Singleton

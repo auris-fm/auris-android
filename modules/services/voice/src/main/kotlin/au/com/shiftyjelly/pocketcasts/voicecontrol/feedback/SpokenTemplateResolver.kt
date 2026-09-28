@@ -7,7 +7,7 @@ class SpokenTemplateResolver(
 ) {
     constructor(context: Context) : this(loadTemplatesFromResources(context))
 
-    fun resolve(intentKey: String, params: Map<String, String>): String {
+    fun resolve(intentKey: String, params: Map<String, String> = emptyMap()): String {
         val template = templates[intentKey] ?: return ""
         return params.entries.fold(template) { acc, (key, value) ->
             acc.replace("{$key}", value)

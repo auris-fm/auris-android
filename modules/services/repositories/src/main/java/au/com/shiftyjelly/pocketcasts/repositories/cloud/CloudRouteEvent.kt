@@ -18,4 +18,7 @@ sealed class CloudRouteEvent {
         val code: String,
         val message: String,
     ) : CloudRouteEvent()
+
+    /** Negotiated structured discovery results (only when advertised). */
+    data class Result(val results: CloudSearchResults) : CloudRouteEvent()
 }

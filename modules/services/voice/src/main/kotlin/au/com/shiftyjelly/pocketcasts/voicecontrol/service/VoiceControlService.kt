@@ -17,7 +17,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.LiveConditionMonitor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.EnabledByUserCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition
@@ -62,8 +62,6 @@ class VoiceControlService : Service() {
 
     @Inject lateinit var listeningModePolicy: ListeningModePolicy
 
-    @Inject lateinit var liveConditionMonitor: LiveConditionMonitor
-
     @Inject lateinit var voiceAsrEngine: dagger.Lazy<VoiceAsrEngine>
 
     @Inject lateinit var asrBackendSelector: AsrBackendSelector
@@ -73,6 +71,8 @@ class VoiceControlService : Service() {
     @Inject lateinit var modelManager: au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 
     @Inject lateinit var modelsReadyCondition: ModelsReadyCondition
+
+    @Inject lateinit var voiceControlServiceController: VoiceControlServiceController
 
     @Inject lateinit var audioFeedbackRenderer: AudioFeedbackRenderer
 
@@ -98,6 +98,9 @@ class VoiceControlService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == STOP_ACTION) {
+            // Stop came from the user, not from Android: the controller must not bring the service
+            // back on the next foreground, or the button would silently do nothing.
+            voiceControlServiceController.onServiceStoppedByUser()
             stopVoiceControl()
             return START_NOT_STICKY
         }
@@ -120,6 +123,9 @@ class VoiceControlService : Service() {
         try {
             val notification = notificationManager.createDownloadingNotification()
             startForeground(notificationManager.notificationId, notification)
+            // Only now is the service really running: Android refuses a microphone foreground
+            // service started from an ineligible app state, and that refusal throws below.
+            voiceControlServiceController.onServiceStarted()
         } catch (e: SecurityException) {
             Timber.e(e, "Cannot start foreground — mic permission not granted")
             stopSelf()
@@ -130,9 +136,6 @@ class VoiceControlService : Service() {
             mediaSession = MediaSession(this, "VoiceControl MediaSession")
             mediaSession?.isActive = true
         }
-
-        // Start monitoring transient conflict conditions
-        liveConditionMonitor.start()
 
         // Handle models first: defer mode observation until readiness completes.
         // This avoids lazy init on first utterance — both whisper and the
@@ -156,7 +159,7 @@ class VoiceControlService : Service() {
                                 val reasons = blockedRules.entries
                                     .joinToString(";") { "${it.key}=${it.value}" }
                                 val isUserRequested = blockedRules.keys.any {
-                                    it == "voice_control_user_enabled"
+                                    it == EnabledByUserCondition.ID
                                 }
                                 val msg = "mic_capture_stopped: reasons=%s setup=%b conflicts=%b context=%b micExposure=%s route=%s mode=%s priorCaptureActive=true"
                                 if (isUserRequested) {
@@ -402,7 +405,6 @@ class VoiceControlService : Service() {
         mediaSession?.release()
         mediaSession = null
         voiceRecognizer.release()
-        liveConditionMonitor.stop()
         audioFeedbackRenderer.release()
         notificationManager.cancelNotification()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -420,5 +422,8 @@ class VoiceControlService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopVoiceControl()
+        // The controller keeps its own record of whether this service is running; without this it
+        // would believe a service that the system killed is still alive and never start it again.
+        voiceControlServiceController.onServiceStopped()
     }
 }

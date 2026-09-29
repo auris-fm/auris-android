@@ -164,8 +164,12 @@ class CloudRouteClientTest {
                     .setResponseCode(401)
                     .setBody("""{"message":"unauthorized"}"""),
             )
-            server.enqueue(sseResponse("""event: done
-data: {"input_tokens":1,"output_tokens":0}"""))
+            server.enqueue(
+                sseResponse(
+                    """event: done
+data: {"input_tokens":1,"output_tokens":0}""",
+                ),
+            )
             server.start()
 
             var refreshes = 0
@@ -198,8 +202,7 @@ data: {"input_tokens":1,"output_tokens":0}"""))
         }
     }
 
-    private fun requestIdIn(body: String): String =
-        body.substringAfter("\"request_id\":\"").substringBefore("\"")
+    private fun requestIdIn(body: String): String = body.substringAfter("\"request_id\":\"").substringBefore("\"")
 
     @Test
     fun `401 emits Error before stream`() = runBlocking {

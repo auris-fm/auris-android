@@ -1,7 +1,7 @@
 {
   "specDocument": "core/docs/specs/cloud-assistant.md#error-codes",
   "specRevision": "2f4e4b2a754054afc110ba05e411d4d44d174aaa",
-  "note": "The client's claim about itself. Each code appears in exactly one half: the half that mints it \u2014 `recognisedFromServer` for codes the edge sends, `mintedByClient` for codes the client derives itself (a bare 400/401 with no JSON body becomes invalid_request / unauthorized; an unparseable response becomes invalid_response). specRevision is the revision of the spec table this claim was last checked against; bumping it is a deliberate act, not a side effect of an edit.",
+  "note": "The client's claim about itself. Each code appears in exactly one half, split by where it comes from: `recognisedFromServer` holds the codes the edge authors and sends, and `mintedByClient` holds the codes the client derives from the response it got back or from the absence of one \u2014 a bare 400/401 with no JSON body becomes invalid_request / unauthorized, an unparseable body becomes invalid_response, and a stream that dies becomes connection_lost. `internal_error` stays server-recognised: the client does raise it for a local failure, but it is also the code the assistant sends for its own, which is what it names. specRevision is the revision of the spec table this claim was last checked against; bumping it is a deliberate act, not a side effect of an edit.",
   "recognisedFromServer": [
     "retrieval_unavailable",
     "internal_error",

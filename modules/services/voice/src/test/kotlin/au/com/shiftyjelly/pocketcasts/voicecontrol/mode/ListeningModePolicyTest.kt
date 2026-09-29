@@ -8,10 +8,13 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGateState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRule
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleGroup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.AppInForegroundCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ListeningModePolicyTest {
@@ -136,5 +139,47 @@ class ListeningModePolicyTest {
         initialState: VoiceControlRuleState,
     ) : VoiceControlRule {
         override val state = MutableStateFlow(initialState)
+    }
+
+    @Test
+    fun `no cue while the user can see the app`() {
+        val rules = mapOf(AppInForegroundCondition.ID to VoiceControlRuleState.Allowed)
+
+        assertFalse(
+            "the microphone opening is visible in the app, so the cue only adds noise",
+            shouldPlayListeningStartCue(ListeningMode.WakeWord, rules),
+        )
+    }
+
+    @Test
+    fun `a cue when the microphone opens in the background`() {
+        val rules = mapOf(
+            AppInForegroundCondition.ID to VoiceControlRuleState.Blocked("app_in_foreground"),
+        )
+
+        assertTrue(
+            "this is the case the spec names: the microphone turns on where the user cannot see it",
+            shouldPlayListeningStartCue(ListeningMode.WakeWord, rules),
+        )
+    }
+
+    @Test
+    fun `no cue for a mode that does not require a wake word`() {
+        val rules = mapOf(
+            AppInForegroundCondition.ID to VoiceControlRuleState.Blocked("app_in_foreground"),
+        )
+
+        assertFalse(
+            "the cue marks listening that awaits a wake word; continuous listening is not that",
+            shouldPlayListeningStartCue(ListeningMode.Continuous, rules),
+        )
+    }
+
+    @Test
+    fun `no cue when the gate says nothing about the foreground`() {
+        assertFalse(
+            "an unknown foreground state is not evidence of a background start",
+            shouldPlayListeningStartCue(ListeningMode.WakeWord, emptyMap()),
+        )
     }
 }

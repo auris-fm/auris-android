@@ -16,7 +16,7 @@ class AppInForegroundCondition(
     scope: CoroutineScope = CoroutineScope(Dispatchers.Default),
 ) : VoiceControlRule {
 
-    override val id = "app_in_foreground"
+    override val id = ID
     override val group = VoiceControlRuleGroup.Context
 
     override val state: StateFlow<VoiceControlRuleState> = foregroundState.isInForeground
@@ -31,5 +31,10 @@ class AppInForegroundCondition(
         } else {
             VoiceControlRuleState.Blocked("not_foreground")
         }
+    }
+
+    companion object {
+        /** The user can see the app, so the microphone opening is visible without a cue. */
+        const val ID = "app_in_foreground"
     }
 }

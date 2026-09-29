@@ -24,6 +24,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCo
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningModePolicy
+import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.shouldPlayListeningStartCue
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
@@ -323,7 +324,11 @@ class VoiceControlService : Service() {
             )
             engineStarted = true
 
-            if (mode == ListeningMode.WakeWord) {
+            // Only when the microphone opens where the user cannot see it: the decision is
+            // shouldPlayListeningStartCue in ListeningModePolicy. Nothing under test drives this
+            // service's start path, so this call site is untested by design — the predicate it
+            // calls is covered in ListeningModePolicyTest.
+            if (shouldPlayListeningStartCue(mode, gate.state.value.rules)) {
                 audioFeedbackRenderer.playEarcon(EarconId.LISTENING_START)
             }
 

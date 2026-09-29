@@ -30,6 +30,38 @@ class AurisTokenProviderTest {
     }
 
     @Test
+    fun `refreshToken re-acquires even while the cached token is still fresh`() = runTest {
+        MockWebServer().use { server ->
+            val minted = AtomicInteger(0)
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = MockResponse()
+                    .setResponseCode(200)
+                    .setBody(tokensResponse("access-${minted.incrementAndGet()}"))
+            }
+            server.start()
+
+            val provider = AurisTokenProvider(
+                clientProvider = { AurisAuthClient(server.url("/").toString().trimEnd('/')) },
+                credentialProvider = FakeCredential("pc-session"),
+            )
+
+            // Warm the cache: the second call is served from it, so only one exchange has happened.
+            assertEquals("access-1", provider.currentToken())
+            assertEquals("access-1", provider.currentToken())
+            assertEquals(1, server.requestCount)
+
+            // refreshToken exists for the case where the route has told us the cached token is bad,
+            // so a still-fresh cache must not satisfy it.
+            assertEquals("access-2", provider.refreshToken())
+            assertEquals(2, server.requestCount)
+
+            // And the replacement is what later calls serve.
+            assertEquals("access-2", provider.currentToken())
+            assertEquals(2, server.requestCount)
+        }
+    }
+
+    @Test
     fun `exchanges the credential once and caches the access token`() = runTest {
         MockWebServer().use { server ->
             server.dispatcher = object : Dispatcher() {

@@ -30,14 +30,21 @@ class CloudRouteClient(
     private val tokenProvider: CloudTokenProviding,
     private val okHttpClient: OkHttpClient = defaultOkHttpClient(),
 ) {
-    /** Convenience for today's static identity (tests and legacy call sites). */
+    /**
+     * Convenience for the static identity, used by tests.
+     *
+     * [CloudFixedTokenProvider] cannot mint a replacement, so a turn sent through this overload
+     * **forfeits the 401 retry**: `refreshToken` falls back to the interface's no-op and the caller
+     * pays one byte-identical re-send before failing. Production builds the client with an injected
+     * [CloudTokenProviding] instead, so this shape exists only in tests.
+     */
     constructor(
         baseUrl: String,
         userId: String,
         okHttpClient: OkHttpClient = defaultOkHttpClient(),
     ) : this(baseUrl, CloudFixedTokenProvider(userId), okHttpClient)
 
-    /** Static-identity token; the issuer integration replaces this seam. */
+    /** A fixed identity token. Cannot mint a replacement, so it forfeits the 401 retry. */
     internal class CloudFixedTokenProvider(private val token: String) : CloudTokenProviding {
         override suspend fun currentToken(): String? = token.takeIf { it.isNotBlank() }
     }

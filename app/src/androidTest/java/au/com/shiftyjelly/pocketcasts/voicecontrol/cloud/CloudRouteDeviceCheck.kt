@@ -44,7 +44,7 @@ class CloudRouteDeviceCheck {
     }
 
     @Test
-    fun aTurnFromThisDeviceIsAcceptedOnTheRoutedPath() = runBlocking {
+    fun aTurnFromThisDeviceIsAcceptedOnTheRoutedPath() = runBlocking<Unit> {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val entry = EntryPointAccessors.fromApplication(context, CheckEntryPoint::class.java)
         val baseUrl = entry.gatewayUrlProvider().configuredGatewayUrl()

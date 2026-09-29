@@ -1,20 +1,20 @@
 {
   "specDocument": "core/docs/specs/cloud-assistant.md#error-codes",
   "specRevision": "2f4e4b2a754054afc110ba05e411d4d44d174aaa",
-  "note": "The client's claim about itself. specRevision is the revision of the spec table this claim was last checked against; bumping it is a deliberate act, not a side effect of an edit.",
+  "note": "The client's claim about itself. Each code appears in exactly one half: the half that mints it \u2014 `recognisedFromServer` for codes the edge sends, `mintedByClient` for codes the client derives itself (a bare 400/401 with no JSON body becomes invalid_request / unauthorized; an unparseable response becomes invalid_response). specRevision is the revision of the spec table this claim was last checked against; bumping it is a deliberate act, not a side effect of an edit.",
   "recognisedFromServer": [
     "retrieval_unavailable",
-    "unauthorized",
     "internal_error",
     "budget_exceeded",
     "duplicate_request",
     "provider_error",
-    "invalid_request",
     "limit_exceeded"
   ],
   "mintedByClient": [
     "invalid_response",
-    "connection_lost"
+    "connection_lost",
+    "invalid_request",
+    "unauthorized"
   ],
   "boundedShapes": [
     "http_\\d{3}"

@@ -1,0 +1,24 @@
+name: "Compile the Android test source set"
+
+# `app/src/androidTest` had no compiler in front of it: no job in this repo built it, so it had
+# rotted to the point that it did not compile on main (a constructor gained a parameter and a test
+# kept calling the old shape). A source set with no compiler is a check that cannot fail, so this
+# job is deliberately just a compilation — it needs no emulator and no secrets.
+on:
+  push:
+  pull_request:
+
+jobs:
+  compile:
+    name: "androidTest compiles"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Compile the instrumented test source set
+        run: ./gradlew :app:compileDebugAndroidTestKotlin --no-daemon

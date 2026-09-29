@@ -176,9 +176,8 @@ data: {"input_tokens":1,"output_tokens":0}""",
             val provider = object : CloudTokenProviding {
                 override suspend fun currentToken(): String? = if (refreshes == 0) "first" else "refreshed"
 
-                override suspend fun refreshToken(): String? {
+                override suspend fun refreshToken() {
                     refreshes++
-                    return currentToken()
                 }
             }
             val client = CloudRouteClient(server.url("/").toString().trimEnd('/'), provider)

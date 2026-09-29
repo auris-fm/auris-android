@@ -44,7 +44,9 @@ class AurisTokenProvider(
      * entry: an inconclusive answer (an auth service 5xx) leaves the still-valid token in place
      * instead of dropping it, which a cache-clear would have done before the fallback could use it.
      */
-    override suspend fun refreshToken(): String? = token(force = true)
+    override suspend fun refreshToken() {
+        token(force = true)
+    }
 
     override suspend fun currentToken(): String? = token(force = false)
 

@@ -55,7 +55,7 @@ class AurisTokenProviderTest {
             // The route refused what we hold, so we ask for a replacement and upstream cannot say:
             // the token we have is still inside its lifetime and must survive the attempt. A
             // cache-clear here would discard it and fail every path closed until the service returns.
-            assertEquals("access-1", provider.refreshToken())
+            provider.refreshToken()
             assertEquals("access-1", provider.currentToken())
         }
     }
@@ -83,7 +83,9 @@ class AurisTokenProviderTest {
 
             // refreshToken exists for the case where the route has told us the cached token is bad,
             // so a still-fresh cache must not satisfy it.
-            assertEquals("access-2", provider.refreshToken())
+            provider.refreshToken()
+            // Read it the way a caller does: the contract is about what currentToken serves next.
+            assertEquals("access-2", provider.currentToken())
             assertEquals(2, server.requestCount)
 
             // And the replacement is what later calls serve.

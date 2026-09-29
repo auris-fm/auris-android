@@ -22,5 +22,7 @@ class RoutingCloudTokenProviding(
 
     // Forwarded, not inherited: the interface's default is currentToken(), which for this router
     // would hand back the very token the route just refused, making the caller's retry a no-op.
-    override suspend fun refreshToken(): String? = if (isAurisActive()) auris.refreshToken() else legacy.refreshToken()
+    override suspend fun refreshToken() {
+        if (isAurisActive()) auris.refreshToken() else legacy.refreshToken()
+    }
 }

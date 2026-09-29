@@ -8,6 +8,15 @@ internal enum class CloudEscalation {
     /** Nothing to say and nothing to send — a rejection, not a failure. */
     SILENT,
 
+    /**
+     * Nothing to send and no line to speak, but the user should hear *something*: they spoke to us
+     * and we did not understand, so silence alone would read as being ignored.
+     */
+    EARCON,
+
+    /** Nothing to send, and the user should hear that we did not catch what they said. */
+    SPEAK_UNROUTED,
+
     /** Nothing to send, but the user should hear that the turn happened. */
     SPEAK_ERROR,
 }
@@ -25,17 +34,17 @@ internal enum class CloudEscalation {
  *   never formed an answer; the list below is only the reasons that are *not*
  *   failures, so it cannot drift into a second copy of the vocabulary.
  * - **`no_match` is a decision, not a failure** — the router's own label for a
- *   non-command (ambient speech, podcast bleed, a bare wake word). It stays
- *   local and silent, which is what the label exists for. Widening it to
- *   escalate was tried and measured: a bare wake phrase is `no_match` on every
- *   capture, so it spent the window and errored on the service each time, while
- *   the one question we have observed the client could not route came back as a
- *   *failure* (`mapper_or_dialog_failed`), which still dispatches. That is one
- *   observation, not a guarantee: a real question that receives `no_match` stays
- *   local, and that is the accepted cost of not firing on every wake-only
- *   capture. `docs/specs/voice-intents.md`
- *   states the same contract: "Cloud-assistant questions should select
- *   `cloud_route`, not `no_match`".
+ *   non-command. It stays local, and what the user hears depends on whether they
+ *   were addressing us: an utterance they aimed at us gets a short line, while
+ *   ambient speech or podcast bleed gets the error earcon alone, because
+ *   answering the room is worse than a soft tone. Escalating it was tried and
+ *   measured and is not what happens here: a bare wake phrase is `no_match` on
+ *   every capture, so it spent the window and errored on the service each time,
+ *   while the one question we have observed the client could not route came back
+ *   as a *failure* (`mapper_or_dialog_failed`), which still dispatches. A
+ *   wake-word-only capture never reaches this decision at all — the engine drops
+ *   an empty transcript before routing — so silence for it needs nothing here.
+ *   `docs/specs/voice-intents.md` states the contract.
  * - **Nothing to send, or nothing that could answer, speaks and stays local:**
  *   `blank_transcript` would post an empty question, and `model_not_loaded` /
  *   `unsupported_input_format` are capability failures — dispatching them would
@@ -44,14 +53,23 @@ internal enum class CloudEscalation {
  */
 internal object CloudEscalationPolicy {
     private val SPEAK_LOCALLY = setOf(
-        RouterStageDiagnostic.REASON_BLANK_TRANSCRIPT,
         RouterStageDiagnostic.REASON_MODEL_NOT_LOADED,
         RouterStageDiagnostic.REASON_UNSUPPORTED_INPUT_FORMAT,
     )
 
-    fun decide(reason: String?): CloudEscalation = when {
+    /**
+     * @param addressed whether the user was speaking to us rather than the microphone catching the
+     * room. Callers know this from the grace window; it only changes the `no_match` outcome.
+     */
+    fun decide(reason: String?, addressed: Boolean = false): CloudEscalation = when {
+        // Addressed but unroutable: the user asked us something, so say we did not catch it.
+        reason == RouterStageDiagnostic.REASON_NO_MATCH ->
+            if (addressed) CloudEscalation.SPEAK_UNROUTED else CloudEscalation.EARCON
+        // An addressed capture with no text is a bare wake word, and the spec is that it stays
+        // silent; anywhere else a blank transcript is a fault worth a tone.
+        reason == RouterStageDiagnostic.REASON_BLANK_TRANSCRIPT ->
+            if (addressed) CloudEscalation.SILENT else CloudEscalation.SPEAK_ERROR
         reason in SPEAK_LOCALLY -> CloudEscalation.SPEAK_ERROR
-        reason == RouterStageDiagnostic.REASON_NO_MATCH -> CloudEscalation.SILENT
         else -> CloudEscalation.DISPATCH
     }
 }

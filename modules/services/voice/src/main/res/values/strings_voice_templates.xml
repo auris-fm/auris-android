@@ -30,5 +30,6 @@
              generic one; the numbers in the server's own sentence are not available here. -->
         <item>cloud_error_limit_exceeded|You\'ve reached today\'s free limit.</item>
         <item>cloud_error_budget_exceeded|The assistant has reached its limit right now.</item>
-    </string-array>
+            <item>pipeline.unclear_command|I didn\'t catch that.</item>
+</string-array>
 </resources>

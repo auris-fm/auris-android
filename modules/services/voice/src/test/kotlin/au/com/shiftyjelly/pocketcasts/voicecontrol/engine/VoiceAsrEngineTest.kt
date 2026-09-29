@@ -403,17 +403,18 @@ class VoiceAsrEngineTest {
     }
 
     @Test
-    fun `a deliberate no_match stays local and silent`() = runTest {
+    fun `a no_match from the room keeps the earcon and stays local`() = runTest {
+        // A wake-negative capture: the microphone caught the room, not a request to us. It must not
+        // spend the window (measured: it did, on every wake), it must not be answered with words,
+        // and a soft tone is what the spec asks for instead of silence.
         val (engine, intents) = startFailingEngine(
             reason = RouterStageDiagnostic.REASON_NO_MATCH,
             transcript = "Hi, allri.",
         )
 
-        // The router's own rejection — a bare wake phrase lands here. It must
-        // not spend the window (measured: it did, on every wake), and it must not
-        // beep at the user for ambient speech or podcast bleed either.
         assertTrue(intents.isEmpty())
-        verify(audioFeedbackRenderer, never()).playEarcon(any())
+        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer, never()).render(any(), any())
 
         engine.stop()
     }

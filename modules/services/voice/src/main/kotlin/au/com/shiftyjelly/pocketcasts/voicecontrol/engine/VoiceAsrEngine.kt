@@ -1,5 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.engine
 
+import java.util.Locale
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -14,6 +16,8 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalation
@@ -49,6 +53,9 @@ class VoiceAsrEngine @Inject constructor(
     private val wakeWordDetector: WakeWordDetector,
     private val gracePeriodSignal: GracePeriodSignal,
     private val audioFeedbackRenderer: AudioFeedbackRenderer,
+    private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(emptyMap()),
+    // Defaulted so Hilt needs no provider for it and tests can still substitute one, as the sink does.
+    private val currentLocale: () -> Locale = { Locale.getDefault() },
     private val translationStage: TranslationStage,
     @ApplicationContext private val context: Context,
 ) {
@@ -296,10 +303,10 @@ class VoiceAsrEngine @Inject constructor(
             audioFeedbackRenderer.playEarcon(EarconId.ERROR)
             return
         }
-        processUtterance(routePrep.input!!)
+        processUtterance(routePrep.input!!, addressed = request.wakePositive)
     }
 
-    private suspend fun processUtterance(input: IntentRoutingInput) {
+    private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean) {
         val recognizer = intentRecognizer
         val handler = onIntent ?: return
 
@@ -350,10 +357,24 @@ class VoiceAsrEngine @Inject constructor(
 
         // No usable intent: three outcomes, decided in one place
         // (see [CloudEscalationPolicy] for which reason lands where).
-        when (CloudEscalationPolicy.decide(reason)) {
+        when (CloudEscalationPolicy.decide(reason, addressed)) {
             // A rejection, not a failure — a bare wake phrase lands here, which
             // is why the window is no longer spent on the wake word.
             CloudEscalation.SILENT -> Unit
+
+            // Nothing sent and no line to speak, but a tone says we heard something.
+            CloudEscalation.EARCON -> audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+
+            // They addressed us and we could not place it: say so in their language, falling back
+            // to the earcon in a locale this build has no line for.
+            CloudEscalation.SPEAK_UNROUTED -> {
+                val line = SpokenLine.forKey(KEY_CLOUD_UNROUTED, templateResolver, currentLocale())
+                if (line.isBlank()) {
+                    audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+                } else {
+                    audioFeedbackRenderer.render(VoiceResponse.Spoken(line))
+                }
+            }
 
             // Nothing was sent, but a turn happened: the earcon table already
             // requires a tone for this case.
@@ -591,6 +612,9 @@ class VoiceAsrEngine @Inject constructor(
     private fun VoiceIntent.stampedForWindow(generation: Long): VoiceIntent = if (this is VoiceIntent.CloudRoute) copy(windowGeneration = generation) else this
 
     companion object {
+        /** Client-owned wording, resolved through [SpokenLine] so a foreign locale hears the earcon. */
+        private const val KEY_CLOUD_UNROUTED = "pipeline.unclear_command"
+
         private const val SCO_CONNECT_TIMEOUT_MS = 3_000L
     }
 }

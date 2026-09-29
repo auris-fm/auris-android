@@ -13,6 +13,7 @@ object CloudRouteErrorCodes {
     const val UNAUTHORIZED = "unauthorized"
     const val INTERNAL_ERROR = "internal_error"
     const val BUDGET_EXCEEDED = "budget_exceeded"
+    const val LIMIT_EXCEEDED = "limit_exceeded"
     const val DUPLICATE_REQUEST = "duplicate_request"
     const val PROVIDER_ERROR = "provider_error"
     const val INVALID_REQUEST = "invalid_request"
@@ -20,13 +21,20 @@ object CloudRouteErrorCodes {
     /** A turn that produced nothing: adopted from the service, which ends a blank turn this way. */
     const val NO_ANSWER = "no_answer"
 
-    private val KNOWN = setOf(
+    /**
+     * Every code this client recognises — those it adopts from the server and those it mints
+     * itself. Internal rather than private so the contract check can re-derive it from code
+     * instead of restating it: a code added here without updating the checked-in contract
+     * declaration is exactly the drift that check exists to catch.
+     */
+    internal val KNOWN = setOf(
         RETRIEVAL_UNAVAILABLE,
         INVALID_RESPONSE,
         CONNECTION_LOST,
         UNAUTHORIZED,
         INTERNAL_ERROR,
         BUDGET_EXCEEDED,
+        LIMIT_EXCEEDED,
         DUPLICATE_REQUEST,
         PROVIDER_ERROR,
         INVALID_REQUEST,
@@ -34,7 +42,9 @@ object CloudRouteErrorCodes {
     )
 
     /** `http_<3-digit status>` is minted locally from the response code. */
-    private val HTTP_STATUS_CODE = Regex("http_\\d{3}")
+    // Internal rather than private so the contract check can assert the declaration against the
+    // shape this object actually mints, instead of against the declaration's own copy of it.
+    internal val HTTP_STATUS_CODE = Regex("http_\\d{3}")
 
     /**
      * Log-safe form of a server-supplied code: a known code is logged as

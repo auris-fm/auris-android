@@ -1,0 +1,24 @@
+{
+  "specDocument": "core/docs/specs/cloud-assistant.md#error-codes",
+  "specRevision": "2f4e4b2a754054afc110ba05e411d4d44d174aaa",
+  "note": "The client's claim about itself. Each code appears in exactly one half, split by whether the client can construct it without reading one from the edge's body: `mintedByClient` holds those it constructs (a bare 400 becomes invalid_request, a bare 401 or a missing token becomes unauthorized, an unparseable body becomes invalid_response, a dead stream becomes connection_lost, and a throw around the stream becomes internal_error), and `recognisedFromServer` holds those it only ever reads from a body. Every entry can be checked against CloudRouteClient. specRevision is the revision of the spec table this claim was last checked against; bumping it is a deliberate act, not a side effect of an edit.",
+  "recognisedFromServer": [
+    "retrieval_unavailable",
+    "budget_exceeded",
+    "duplicate_request",
+    "provider_error",
+    "limit_exceeded",
+    "no_answer"
+  ],
+  "mintedByClient": [
+    "invalid_response",
+    "connection_lost",
+    "invalid_request",
+    "unauthorized",
+    "internal_error"
+  ],
+  "boundedShapes": [
+    "http_\\d{3}"
+  ],
+  "specCodesNotHandled": []
+}

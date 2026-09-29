@@ -8,12 +8,15 @@ import kotlinx.coroutines.sync.withLock
  * already holds (task #33 client half).
  *
  * Postures, all pinned by tests:
- * - **Single-flight:** concurrent callers share one refresh. A double refresh
- *   would rotate twice, and the replayed token revokes the whole chain
- *   (`refresh_reused`) — so exactly one call must leave the client.
- * - **Reactive, not proactive:** a token is refreshed when it is needed, once.
- *   No same-turn retry: a request that observed a stale token fails and the
- *   *next* call uses the fresh one.
+ * - **Single-flight for [currentToken]:** concurrent callers share one refresh,
+ *   because a double refresh would rotate twice and the replayed token revokes
+ *   the whole chain (`refresh_reused`) — so exactly one call must leave the
+ *   client. [refreshToken] is deliberately not single-flight: it is a caller
+ *   saying the token it holds is bad, so each caller gets its own exchange.
+ * - **Reactive, not proactive:** a token is refreshed when it is needed, once —
+ *   [currentToken] never retries by itself. A token the route refused is
+ *   re-sent once inside the same turn, but only because the caller asked for a
+ *   replacement through [refreshToken] and repeats the turn's `request_id`.
  * - **Bound to the current account:** the credential is read before *every*
  *   return, and a cached token is only served while it was acquired from that
  *   same credential. After a logout or an account switch the previous user's

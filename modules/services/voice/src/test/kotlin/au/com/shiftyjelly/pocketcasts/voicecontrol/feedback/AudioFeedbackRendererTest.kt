@@ -37,6 +37,44 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `an audible response is reported as emitted audio`() = runTest {
+        assertFalse(renderer.hasEmittedAudio.value)
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
+
+        renderer.render(VoiceResponse.Earcon(EarconId.SUCCESS))
+
+        assertTrue(renderer.hasEmittedAudio.value)
+    }
+
+    @Test
+    fun `an earcon played outside a response is reported as emitted audio`() = runTest {
+        // The wake and listening cues take this path, and they are the two earcons that sound
+        // while the microphone is open.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        assertFalse(renderer.hasEmittedAudio.value)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+
+        assertTrue(renderer.hasEmittedAudio.value)
+    }
+
+    @Test
+    fun `an earcon the player refuses is not reported as emitted audio`() = runTest {
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(false)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+
+        assertFalse(renderer.hasEmittedAudio.value)
+    }
+
+    @Test
+    fun `a silent response is not reported as emitted audio`() = runTest {
+        renderer.render(VoiceResponse.Silent)
+
+        assertFalse(renderer.hasEmittedAudio.value)
+    }
+
+    @Test
     fun `Earcon response plays via EarconPlayer`() = runTest {
         whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
         renderer.render(VoiceResponse.Earcon(EarconId.SUCCESS))

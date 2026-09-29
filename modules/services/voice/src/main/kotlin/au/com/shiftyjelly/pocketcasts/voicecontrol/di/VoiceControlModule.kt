@@ -190,10 +190,15 @@ abstract class VoiceControlModule {
         fun provideOtherAppPlayingCondition(
             @ApplicationContext context: Context,
             playbackContextMonitor: PlaybackContextMonitor,
+            audioFeedbackRenderer: AudioFeedbackRenderer,
             @ApplicationScope scope: CoroutineScope,
         ): OtherAppPlayingCondition = OtherAppPlayingCondition(
             audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager,
             hostIsPlaying = playbackContextMonitor.isHostAudioActive,
+            // Our own feedback audio is host audio: without this the gate reads an earcon as a
+            // foreign app and closes the microphone seconds after acknowledging a wake word.
+            hasEmittedAudio = audioFeedbackRenderer.hasEmittedAudio,
+            lastEmittedAtMs = audioFeedbackRenderer.lastEmittedAtMs,
             scope = scope,
         )
 

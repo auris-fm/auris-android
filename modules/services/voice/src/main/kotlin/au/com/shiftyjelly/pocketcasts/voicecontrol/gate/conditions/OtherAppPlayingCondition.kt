@@ -18,6 +18,10 @@ import kotlinx.coroutines.withContext
 class OtherAppPlayingCondition(
     private val audioManager: AudioManager? = null,
     private val hostIsPlaying: StateFlow<Boolean> = MutableStateFlow(false),
+    // Our own earcons and speech ride the media stream, so isMusicActive is true while we are the
+    // ones making the sound. Without this the app reads its own acknowledgement as a foreign app.
+    private val hasEmittedAudio: StateFlow<Boolean> = MutableStateFlow(false),
+    private val lastEmittedAtMs: StateFlow<Long> = MutableStateFlow(0L),
     private val nowMs: () -> Long = { SystemClock.elapsedRealtime() },
     private val transitionWindowMs: Long = 5_000,
     private val debounceMs: Long = 500,
@@ -38,6 +42,9 @@ class OtherAppPlayingCondition(
     // permanently treating a long-paused loaded episode as host-owned.
     private var lastHostPlayingMs: Long = Long.MIN_VALUE
 
+    // Our own last audible feedback, in the same monotonic clock as `nowMs`.
+    private var lastSelfEmittedMs: Long = Long.MIN_VALUE
+
     init {
         if (audioManager != null) {
             scope.launch { pollLoop() }
@@ -48,7 +55,7 @@ class OtherAppPlayingCondition(
         while (true) {
             val hasOtherApp = withContext(Dispatchers.IO) {
                 val am = audioManager ?: return@withContext false
-                otherAppPlaying(am.isMusicActive, hostIsPlaying.value, nowMs() - lastHostPlayingMs, transitionWindowMs)
+                otherAppPlaying(am.isMusicActive)
             }
             if (hostIsPlaying.value) {
                 lastHostPlayingMs = nowMs()
@@ -79,10 +86,27 @@ class OtherAppPlayingCondition(
     }
 
     fun evaluate(): VoiceControlRuleState {
-        val hasOtherApp = audioManager?.let { am ->
-            otherAppPlaying(am.isMusicActive, hostIsPlaying.value, nowMs() - lastHostPlayingMs, transitionWindowMs)
-        } ?: false
+        val hasOtherApp = audioManager?.let { am -> otherAppPlaying(am.isMusicActive) } ?: false
         return evaluate(hasOtherApp)
+    }
+
+    /**
+     * One place that assembles the attribution arguments, so the polled path and an on-demand
+     * evaluation cannot disagree about them.
+     */
+    internal fun otherAppPlaying(isMusicActive: Boolean): Boolean {
+        if (hasEmittedAudio.value) lastSelfEmittedMs = lastEmittedAtMs.value
+        return otherAppPlaying(
+            isMusicActive = isMusicActive,
+            hostCurrentlyPlaying = hostIsPlaying.value,
+            msSinceHostPlaying = nowMs() - lastHostPlayingMs,
+            msSinceSelfEmitted = if (lastSelfEmittedMs == Long.MIN_VALUE) {
+                -1L
+            } else {
+                nowMs() - lastSelfEmittedMs
+            },
+            transitionWindowMs = transitionWindowMs,
+        )
     }
 
     internal fun evaluate(otherAppPlaying: Boolean): VoiceControlRuleState {
@@ -109,9 +133,15 @@ internal fun otherAppPlaying(
     isMusicActive: Boolean,
     hostCurrentlyPlaying: Boolean,
     msSinceHostPlaying: Long,
+    msSinceSelfEmitted: Long,
     transitionWindowMs: Long,
 ): Boolean {
     if (!isMusicActive) return false
-    val hostOwnsAudio = hostCurrentlyPlaying || (msSinceHostPlaying >= 0 && msSinceHostPlaying < transitionWindowMs)
+    val hostOwnsAudio = hostCurrentlyPlaying ||
+        (msSinceHostPlaying >= 0 && msSinceHostPlaying < transitionWindowMs) ||
+        // Our own feedback is not a foreign app. Earcons ride the media stream and are 0.15-0.4s
+        // long, so a 1 Hz poll can land inside one; without this term the app blocks its own gate
+        // and stops listening in the middle of a session, having just played the acknowledgement.
+        (msSinceSelfEmitted >= 0 && msSinceSelfEmitted < transitionWindowMs)
     return !hostOwnsAudio
 }

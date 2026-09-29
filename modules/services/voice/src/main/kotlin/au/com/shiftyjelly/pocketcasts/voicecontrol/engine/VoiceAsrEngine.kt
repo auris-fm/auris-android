@@ -1,7 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.engine
 
-import java.util.Locale
-import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import android.Manifest
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -20,6 +18,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalationPolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
@@ -33,6 +32,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeTranscriptTrimme
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordSegmentCapture
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
@@ -149,7 +149,8 @@ class VoiceAsrEngine @Inject constructor(
      *   time-band trim happens on timed ASR tokens after ASR, not by cutting audio.
      * - Negative outside grace (WakeWord): drops the segment.
      * - Negative during grace (Continuous): forwards the full segment.
-     * - Wake-only is decided after ASR: empty leftover after time-band trim plays ERROR.
+     * - Wake-only is decided after ASR: an empty leftover after trim is dropped before
+     *   routing, so it stays silent rather than spending the grace window.
      */
     private data class TranscribeRequest(
         val samples: FloatArray,
@@ -303,7 +304,10 @@ class VoiceAsrEngine @Inject constructor(
             audioFeedbackRenderer.playEarcon(EarconId.ERROR)
             return
         }
-        processUtterance(routePrep.input!!, addressed = request.wakePositive)
+        // "Addressed" is the open grace window, not this segment's wake flag: a follow-up after
+        // the wake word is wake-negative but is still someone talking to us, which is the case
+        // this line exists for. The window is open because a wake fired.
+        processUtterance(routePrep.input!!, addressed = gracePeriodSignal.isActive.value)
     }
 
     private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean) {

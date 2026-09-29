@@ -71,6 +71,12 @@ class VoiceAsrEngineTest {
     private val backend = mock<AsrBackend>()
     private val translationStage = mock<TranslationStage>()
 
+    init {
+        // The engine reads the grace window to decide whether the user was addressing us, so the
+        // mock has to answer. Default false = the window is shut: a capture from the room.
+        `when`(gracePeriodSignal.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(false))
+    }
+
     private var capturedReceiver: BroadcastReceiver? = null
 
     private val captureFlow: Flow<VoiceSegmenterResult> = MutableStateFlow(VoiceSegmenterResult.Silence)

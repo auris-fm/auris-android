@@ -65,11 +65,14 @@ internal object CloudEscalationPolicy {
         // Addressed but unroutable: the user asked us something, so say we did not catch it.
         reason == RouterStageDiagnostic.REASON_NO_MATCH ->
             if (addressed) CloudEscalation.SPEAK_UNROUTED else CloudEscalation.EARCON
+
         // An addressed capture with no text is a bare wake word, and the spec is that it stays
         // silent; anywhere else a blank transcript is a fault worth a tone.
         reason == RouterStageDiagnostic.REASON_BLANK_TRANSCRIPT ->
             if (addressed) CloudEscalation.SILENT else CloudEscalation.SPEAK_ERROR
+
         reason in SPEAK_LOCALLY -> CloudEscalation.SPEAK_ERROR
+
         else -> CloudEscalation.DISPATCH
     }
 }

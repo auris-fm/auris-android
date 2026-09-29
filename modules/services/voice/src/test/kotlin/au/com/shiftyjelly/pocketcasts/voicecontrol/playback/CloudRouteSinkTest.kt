@@ -5,6 +5,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteConversationEntry
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteErrorCodes
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteLimits
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn
@@ -1224,7 +1225,11 @@ class CloudRouteSinkTest {
 
         fun sink(): CloudRouteSink = CloudRouteSink(
             resolveBaseUrl = { baseUrl },
-            resolveUserId = { userId },
+            tokenProvider = object : CloudTokenProviding {
+                // Mirrors what the legacy identity path returned, so the suite keeps asserting the
+                // same requests while the sink takes its credential from the injected provider.
+                override suspend fun currentToken(): String? = userId.takeIf { it.isNotBlank() }
+            },
             playbackSink = playback,
             fingerprintTimingManager = fingerprintTimingManager,
             playbackContextProvider = playbackContextProvider,

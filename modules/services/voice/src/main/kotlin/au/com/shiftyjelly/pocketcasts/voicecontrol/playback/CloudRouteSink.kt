@@ -10,6 +10,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteLimits
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudSearchResults
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudIdentity
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
@@ -35,7 +36,7 @@ import timber.log.Timber
 @Singleton
 class CloudRouteSink internal constructor(
     private val resolveBaseUrl: () -> String,
-    private val resolveUserId: () -> String,
+    private val tokenProvider: CloudTokenProviding,
     private val playbackSink: VoicePlaybackSink,
     private val fingerprintTimingManager: FingerprintTimingManager,
     private val playbackContextProvider: PlaybackContextProvider,
@@ -66,7 +67,7 @@ class CloudRouteSink internal constructor(
 
     @Inject constructor(
         cloudConfig: CloudConfig,
-        cloudIdentity: CloudIdentity,
+        tokenProvider: CloudTokenProviding,
         playbackSink: VoicePlaybackSink,
         fingerprintTimingManager: FingerprintTimingManager,
         playbackContextProvider: PlaybackContextProvider,
@@ -77,7 +78,7 @@ class CloudRouteSink internal constructor(
         playbackContextMonitor: PlaybackContextMonitor,
     ) : this(
         resolveBaseUrl = cloudConfig::baseUrl,
-        resolveUserId = cloudIdentity::userId,
+        tokenProvider = tokenProvider,
         playbackSink = playbackSink,
         fingerprintTimingManager = fingerprintTimingManager,
         playbackContextProvider = playbackContextProvider,
@@ -356,7 +357,7 @@ class CloudRouteSink internal constructor(
 
     private fun openRoute(turn: CloudRouteTurn): Flow<CloudRouteEvent> {
         routeInvoker?.let { return it(turn) }
-        return CloudRouteClient(resolveBaseUrl(), resolveUserId()).route(turn)
+        return CloudRouteClient(resolveBaseUrl(), tokenProvider).route(turn)
     }
 
     /** Advertise a capability only when its renderer is actually available. */

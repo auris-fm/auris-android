@@ -74,19 +74,36 @@ class CloudRouteClient(
     private suspend fun ProducerScope<CloudRouteEvent>.routeInto(
         turn: CloudRouteTurn,
     ) {
+        // One refresh and one re-send when the route refuses the credential we sent, then give up.
+        // The spec also withholds the retry from a client that sent no `request_id`; that cannot
+        // arise here, because [CloudRouteTurn.requestId] is not nullable and every turn carries one.
+        var retried = false
+        while (true) {
+            val refusal = tryRoute(turn)
+            if (refusal == null || retried || refusal.code != CloudRouteErrorCodes.UNAUTHORIZED) {
+                // Only the final failure is spoken: sending it earlier would tell the user the turn
+                // failed and then answer anyway.
+                refusal?.let { send(it) }
+                return
+            }
+            retried = true
+            tokenProvider.refreshToken()
+        }
+    }
+
+    /**
+     * One attempt. Emits everything the stream produced, except a pre-stream refusal, which it
+     * returns so [routeInto] can choose between refreshing and telling the user. Mid-stream
+     * failures are emitted here and are never retried.
+     */
+    private suspend fun ProducerScope<CloudRouteEvent>.tryRoute(
+        turn: CloudRouteTurn,
+    ): CloudRouteEvent.Error? {
+        var refusal: CloudRouteEvent.Error? = null
         // Fail closed: no token means no request is attempted.
         val token = tokenProvider.currentToken()
         if (token.isNullOrBlank()) {
-            send(
-                CloudRouteEvent.Error(
-                    code = CloudRouteErrorCodes.UNAUTHORIZED,
-                    // No prose: the code is the diagnostic and the sink
-                    // localises it (template where one exists, earcon
-                    // otherwise). Server-supplied messages still pass through.
-                    message = "",
-                ),
-            )
-            return
+            return CloudRouteEvent.Error(code = CloudRouteErrorCodes.UNAUTHORIZED, message = "")
         }
         val bodyJson = CloudRouteJson.requestBodyAdapter.toJson(
             CloudRouteRequestBody(
@@ -112,7 +129,8 @@ class CloudRouteClient(
             try {
                 call.execute().use { response ->
                     if (!response.isSuccessful) {
-                        send(preStreamError(response.code, response.body.string()))
+                        // Handed back rather than sent: the caller decides.
+                        refusal = preStreamError(response.code, response.body.string())
                         return@withContext
                     }
 
@@ -176,6 +194,7 @@ class CloudRouteClient(
                 }
             }
         }
+        return refusal
     }
 
     private fun preStreamError(httpStatus: Int, body: String): CloudRouteEvent.Error {

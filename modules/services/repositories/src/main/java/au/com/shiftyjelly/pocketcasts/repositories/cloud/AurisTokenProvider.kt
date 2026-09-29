@@ -35,6 +35,16 @@ class AurisTokenProvider(
     private val mutex = Mutex()
     private var cached: CachedTokens? = null
 
+    /**
+     * Drops the cache and re-acquires, so a token the server has already rejected is never served
+     * again. The single-flight guard inside [currentToken] still applies, so concurrent callers
+     * share one exchange.
+     */
+    override suspend fun refreshToken(): String? {
+        mutex.withLock { cached = null }
+        return currentToken()
+    }
+
     override suspend fun currentToken(): String? {
         // Read the credential first, before any return: a cached token that came
         // from a different credential belongs to a previous account (logout, or

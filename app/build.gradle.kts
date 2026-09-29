@@ -65,6 +65,9 @@ android {
 dependencies {
     ksp(libs.dagger.hilt.compiler)
     ksp(libs.hilt.compiler)
+    // Without this the instrumented source set is never processed, so a Hilt @EntryPoint
+    // declared in a test has no generated accessor and the runner fails to initialise.
+    kspAndroidTest(libs.dagger.hilt.compiler)
 
     implementation(platform(libs.compose.bom))
     implementation(platform(libs.firebase.bom))

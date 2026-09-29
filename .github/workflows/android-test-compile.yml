@@ -18,7 +18,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - uses: android-actions/setup-android@v3
+      # No SDK setup step: ubuntu-latest already ships the Android SDK with ANDROID_HOME set,
+      # and android-actions/setup-android@v3 fails on current runners because it tries to
+      # install the obsolete 'tools' package — seen in this job's first run, not assumed.
       - uses: gradle/actions/setup-gradle@v4
       - name: Compile the instrumented test source set
         run: ./gradlew :app:compileDebugAndroidTestKotlin --no-daemon

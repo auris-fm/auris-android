@@ -43,6 +43,10 @@ class AndroidPlatformTtsEngine @Inject constructor(
     override suspend fun speak(text: String, language: String) {
         if (released || tts == null || !initialized) return
         suspendCancellableCoroutine { continuation ->
+            // Cancelling the caller stops the utterance with it. The render job is cancelled before
+            // every response, so without this a superseded reply keeps talking — audible, and,
+            // since it rides the media stream, indistinguishable from a foreign app to our own gate.
+            continuation.invokeOnCancellation { tts?.stop() }
             val locale = localeForLanguageTag(language)
             tts?.let { engine ->
                 val result = engine.setLanguage(locale)
@@ -71,6 +75,11 @@ class AndroidPlatformTtsEngine @Inject constructor(
 
                 val utteranceId = System.currentTimeMillis().toString()
                 engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+                // A cancellation can land between registering the handler above and this call, in
+                // which case tts?.stop() ran against nothing and this utterance would be orphaned:
+                // nothing stops it and no heartbeat vouches for it, so the gate reads our own voice
+                // as a foreign app a few seconds later.
+                if (!continuation.isActive) tts?.stop()
             } ?: continuation.resume(Unit)
         }
     }

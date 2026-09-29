@@ -17,6 +17,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -73,24 +74,10 @@ class LiveConditionMonitor @Inject constructor(
             IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED),
         )
 
-        // Cast state
+        // Cast state. Started once for the process (see PocketCastsApplication), so this collector
+        // has the process's lifetime and nothing accumulates.
         castManager.isConnectedFlow
             .onEach { isCasting -> notCastingCondition.updateCasting(isCasting) }
             .launchIn(scope)
-    }
-
-    fun stop() {
-        if (!started) return
-        try {
-            val tm = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
-            tm?.unregisterTelephonyCallback(callStateCallback)
-        } catch (_: SecurityException) {
-            // ignore
-        }
-        try {
-            context.unregisterReceiver(powerSaveReceiver)
-        } catch (_: IllegalArgumentException) {
-            // not registered
-        }
     }
 }

@@ -26,6 +26,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.kotlin.any
@@ -174,6 +175,54 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a no-answer error from the service is spoken rather than left silent`() = runTest {
+        // The service ends with `error no_answer`; the existing code-to-template mapping carries it.
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Error(code = CloudRouteErrorCodes.NO_ANSWER, message = ""),
+                CloudRouteEvent.Done(inputTokens = 1, outputTokens = 0),
+            ),
+        )
+
+        val response = deps.sink().routeToCloud("what?", VoiceIntent.CloudTier.Free, playbackContext)
+
+        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
+    }
+
+    @Test
+    fun `a turn that neither speaks nor acts says the request could not be completed`() = runTest {
+        // No tokens and no action: an unexpected empty turn, not a search that found nothing.
+        // The server's guard should make this unreachable; this covers old servers and regressions.
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(inputTokens = 1, outputTokens = 0)),
+        )
+        val sink = deps.sink()
+
+        val response = sink.routeToCloud("what?", VoiceIntent.CloudTier.Free, playbackContext)
+
+        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
+    }
+
+    @Test
+    fun `an empty turn on a non-English device falls back to the error earcon`() = runTest {
+        // Templates are English-only by design: base-language prose is never spoken on a device
+        // set to another language, so the earcon carries the same message.
+        val deps = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(inputTokens = 1, outputTokens = 0)),
+            locale = java.util.Locale.FRENCH,
+        )
+
+        val response = deps.sink().routeToCloud("quoi?", VoiceIntent.CloudTier.Free, playbackContext)
+
+        // Deliberately changed: the earcon was the fallback when the client had nothing to say.
+        // It now has its own words for a code it doesn't know, so the user hears which happened
+        // rather than guessing from a tone.
+        // Templates are English-only, so another locale keeps the earcon: base-language prose is
+        // never spoken on a device set to another language.
+        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
+    }
+
+    @Test
     fun `action-only stream returns silent on done`() = runTest {
         val deps = TestDeps(
             events = flowOf(
@@ -278,7 +327,7 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `unknown tool and action are ignored`() = runTest {
+    fun `unknown tool and action are ignored, so a blank done still reports the turn`() = runTest {
         val deps = TestDeps(
             events = flowOf(
                 CloudRouteEvent.Action("effects", "set_speed", mapOf("speed" to 2.0)),
@@ -290,8 +339,33 @@ class CloudRouteSinkTest {
 
         val response = sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        assertEquals(VoiceResponse.Silent, response)
+        // Deliberately changed: an *ignored* action is not a delivery, so this turn neither spoke
+        // nor did anything and must report that rather than stay silent.
+        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
         assertEquals(listOf("pause", "resume"), deps.playback.calls)
+    }
+
+    @Test
+    fun `a budget refusal speaks its own line rather than the generic one`() = runTest {
+        // The shared fixture supplies both the code's line and the generic one, so this asserts
+        // which the sink picks. The quota case is already covered by
+        // `a server-supplied message is never spoken...` below, which uses the same fixture.
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Error(
+                    code = "budget_exceeded",
+                    message = "We've hit our daily budget.",
+                ),
+            ),
+        )
+
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(
+            VoiceResponse.Spoken("The assistant has reached its limit right now."),
+            response,
+        )
+        assertNotEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
     }
 
     @Test
@@ -306,13 +380,15 @@ class CloudRouteSinkTest {
 
         val response = sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        assertEquals(VoiceResponse.Spoken("Connection lost"), response)
+        // Deliberately changed: "Connection lost" was the server's message; the client now
+        // speaks its own line for the code.
+        assertEquals(VoiceResponse.Spoken("Connection lost. Please try again."), response)
         assertEquals(listOf("pause", "resume"), deps.playback.calls)
         assertEquals(listOf(CloudRouteAnalyticsCall("error", null, null)), deps.analytics.calls)
     }
 
     @Test
-    fun `error with empty message returns earcon`() = runTest {
+    fun `error with empty message speaks the client generic line`() = runTest {
         val deps = TestDeps(
             events = flowOf(
                 CloudRouteEvent.Error(code = "invalid_request", message = ""),
@@ -322,7 +398,9 @@ class CloudRouteSinkTest {
 
         val response = sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
+        // Deliberately changed: an empty message is no longer a reason to fall silent; the
+        // client now has its own words for a code it doesn't know.
+        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
     }
 
     @Test
@@ -571,7 +649,9 @@ class CloudRouteSinkTest {
 
         // The executed seek is not rolled back; the partial speech is dropped.
         assertTrue(deps.playback.calls.contains("seekTo:500000"))
-        assertEquals(VoiceResponse.Spoken("The assistant hit an error."), response)
+        // Deliberately changed: the client speaks its own words for the code, never the
+        // server's message (which here was the same sentence by coincidence).
+        assertEquals(VoiceResponse.Spoken("The assistant couldn't finish that request."), response)
         // Auto-pause is restored exactly once.
         assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
     }
@@ -616,7 +696,7 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `retrieval_unavailable renders as speech without actions`() = runTest {
+    fun `retrieval_unavailable renders once and is not also spoken`() = runTest {
         val renderer = RecordingRenderer()
         val deps = TestDeps(
             renderer = renderer,
@@ -630,7 +710,9 @@ class CloudRouteSinkTest {
 
         val response = deps.sink().routeToCloud("what did she mean?", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        assertEquals(VoiceResponse.Spoken("I can't reach the podcast evidence right now."), response)
+        // Deliberately changed: the rendered state has already told the user, so no sound or
+        // sentence follows it. A spoken line on top said the same thing twice.
+        assertEquals(VoiceResponse.Silent, response)
         assertTrue(deps.playback.calls.none { it.startsWith("seekTo") })
         assertTrue(renderer.rendered.isEmpty())
         // Unavailable evidence is a rendered state too, not only spoken.
@@ -664,7 +746,9 @@ class CloudRouteSinkTest {
         token = null
         val second = sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), second)
+        // Deliberately changed: a rejected credential is the service being unavailable, which the
+        // owner asked to hear as words rather than a tone.
+        assertEquals(VoiceResponse.Spoken("Service is unavailable at the moment."), second)
         assertTrue(deps.playback.calls.none { it.startsWith("seekTo") })
     }
 
@@ -880,7 +964,7 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `a client code without a template falls back to the error earcon`() = runTest {
+    fun `a client code without a template falls back to the client generic line`() = runTest {
         val deps = TestDeps(
             events = flowOf(CloudRouteEvent.Error(code = "invalid_response", message = "")),
         )
@@ -889,22 +973,27 @@ class CloudRouteSinkTest {
 
         // Internal diagnostics are a sound, never English prose to a
         // non-English user.
-        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
+        // Deliberately changed: this is the fallback the owner asked for — the client's own
+        // words for a code it doesn't know, rather than a tone the user has to interpret.
+        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
     }
 
     @Test
-    fun `a server-supplied message still passes through untouched`() = runTest {
+    fun `a server-supplied message is never spoken, only a template or the generic line`() = runTest {
         val deps = TestDeps(
             events = flowOf(CloudRouteEvent.Error(code = "limit_exceeded", message = "You've used 10/10 free requests today.")),
         )
 
         val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        assertEquals(VoiceResponse.Spoken("You've used 10/10 free requests today."), response)
+        // The whole point: the server's message is not spoken at all — it can carry upstream
+        // detail, as the captured turn did — even when it is a sentence written for the user.
+        // The code's own local line is spoken instead.
+        assertEquals(VoiceResponse.Spoken("You've reached today's free limit."), response)
     }
 
     @Test
-    fun `a whitespace-only answer is silent rather than spoken`() = runTest {
+    fun `a whitespace-only answer is not spoken as whitespace but reports the incomplete turn`() = runTest {
         val deps = TestDeps(
             events = flowOf(
                 CloudRouteEvent.Token("   "),
@@ -915,9 +1004,11 @@ class CloudRouteSinkTest {
         val sink = deps.sink()
         val response = sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        // Same rule as the error path: blank is not speech. Speaking "   " would
-        // send a whitespace utterance to the TTS engine instead of a no-op.
-        assertEquals(VoiceResponse.Silent, response)
+        // Deliberately changed: the rule that blank is not *speech* still holds — "   " is never
+        // sent to the TTS engine — but a turn that delivers no usable answer no longer leaves the
+        // user in silence. It reports the turn as incomplete, which is a different concern from
+        // speaking the whitespace itself.
+        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
 
         // And it is not worth remembering either: what follows carries no
         // conversation context, which is only true if nothing was recorded.
@@ -1098,10 +1189,22 @@ class CloudRouteSinkTest {
         // Keys built from the same constant the sink uses, so renaming the
         // wire code breaks these tests rather than silently detaching the
         // template from it.
+        //
+        // This map is a hand copy of strings_voice_templates.xml. When a code gains a line
+        // there, it needs one here too, or the suite stays green while the shipped app speaks
+        // something else — which is how the quota lines nearly landed untested.
         private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(
             mapOf(
                 "general.cloud_coming_soon" to "Cloud processing is coming soon",
                 "cloud_error_" + CloudRouteErrorCodes.CONNECTION_LOST to "Connection lost. Please try again.",
+                "general.cloud_incomplete_turn" to "Sorry, I couldn't complete that request.",
+                "cloud_error_" + CloudRouteErrorCodes.NO_ANSWER to "Sorry, I couldn't complete that request.",
+                "cloud_error_generic" to "Sorry, I couldn't complete that request.",
+                "cloud_error_" + CloudRouteErrorCodes.UNAUTHORIZED to "Service is unavailable at the moment.",
+                "cloud_error_" + CloudRouteErrorCodes.PROVIDER_ERROR to "The assistant couldn't finish that request.",
+                "cloud_error_limit_exceeded" to "You've reached today's free limit.",
+                "cloud_error_budget_exceeded" to "The assistant has reached its limit right now.",
+                "cloud_error_" + CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE to "I can't reach the podcast evidence right now.",
             ),
         ),
         routeInvoker: ((CloudRouteTurn) -> kotlinx.coroutines.flow.Flow<CloudRouteEvent>)? = null,

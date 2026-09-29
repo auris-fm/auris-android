@@ -47,6 +47,7 @@ import au.com.shiftyjelly.pocketcasts.utils.featureflag.FeatureFlag
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBufferUncaughtExceptionHandler
 import au.com.shiftyjelly.pocketcasts.utils.log.RxJavaUncaughtExceptionHandling
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.LiveConditionMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlServiceController
 import au.com.shiftyjelly.pocketcasts.widget.PlayerWidgetManager
@@ -150,6 +151,8 @@ class PocketCastsApplication :
 
     @Inject lateinit var cloudPrefetchObserver: CloudPrefetchObserver
 
+    @Inject lateinit var liveConditionMonitor: LiveConditionMonitor
+
     @Inject lateinit var voiceControlGate: VoiceControlGate
 
     override fun onCreate() {
@@ -222,6 +225,11 @@ class PocketCastsApplication :
     }
 
     private fun setupVoiceControl() {
+        // The live conditions (a call in progress, power save, casting) gate voice control, and the
+        // gate gates the service that would otherwise keep them current. Registering them for the
+        // process lifetime breaks that circle: a condition that was blocked when a service lifetime
+        // ended still clears itself, so the gate can allow again.
+        liveConditionMonitor.start()
         voiceControlServiceController.startMonitoring(voiceControlGate)
     }
 

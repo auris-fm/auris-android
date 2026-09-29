@@ -10,10 +10,7 @@ class EarconPlayer(context: Context) {
     private var released = false
 
     init {
-        val attrs = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-            .build()
+        val attrs = earconAudioAttributes()
         soundPool = SoundPool.Builder()
             .setMaxStreams(1)
             .setAudioAttributes(attrs)
@@ -40,5 +37,24 @@ class EarconPlayer(context: Context) {
     fun release() {
         released = true
         soundPool.release()
+    }
+    internal companion object {
+        /**
+         * The stream earcons ride.
+         *
+         * Deliberately **media** rather than sonification. Sonification maps to the system stream, which
+         * this family of devices aliases to the ring stream, so Do Not Disturb silenced every earcon
+         * while ordinary playback was perfectly audible — a user speaking to an app they deliberately
+         * opened heard no confirmation. Media follows the audio the user is already listening to, which
+         * is also where the spoken responses go through platform TTS, so the two feedback channels agree.
+         *
+         * Reported from a device where `STREAM_SYSTEM` was `Muted: true / streamVolume: 0` under
+         * `zen_mode: 1` while every earcon play attempt was logged `usage:13 muted`. If this is ever
+         * changed back, the reason it must not be is that sentence.
+         */
+        internal fun earconAudioAttributes(): AudioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
     }
 }

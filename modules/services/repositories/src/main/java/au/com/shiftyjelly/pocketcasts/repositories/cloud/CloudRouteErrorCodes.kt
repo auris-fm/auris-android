@@ -18,6 +18,9 @@ object CloudRouteErrorCodes {
     const val PROVIDER_ERROR = "provider_error"
     const val INVALID_REQUEST = "invalid_request"
 
+    /** A turn that produced nothing: adopted from the service, which ends a blank turn this way. */
+    const val NO_ANSWER = "no_answer"
+
     /**
      * Every code this client recognises — those it adopts from the server and those it mints
      * itself. Internal rather than private so the contract check can re-derive it from code
@@ -35,6 +38,7 @@ object CloudRouteErrorCodes {
         DUPLICATE_REQUEST,
         PROVIDER_ERROR,
         INVALID_REQUEST,
+        NO_ANSWER,
     )
 
     /** `http_<3-digit status>` is minted locally from the response code. */

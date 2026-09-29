@@ -14,10 +14,21 @@
         <item>sleep.query|Sleep timer {remaining}</item>
         <item>bookmark.add|Bookmarked at {position}</item>
         <item>playback.next_episode|Playing {episode title}</item>
-        <!-- Cloud diagnostics. Only the codes with a user-facing meaning get a
-             template; internal ones deliberately fall back to the error earcon
-             (parity with the iOS half). -->
+        <!-- Cloud diagnostics. A code with a user-facing meaning gets its own line
+             here; anything else gets cloud_error_generic below, and the error earcon
+             only if even that is missing. -->
         <item>general.cloud_coming_soon|Cloud processing is coming soon</item>
+        <item>general.cloud_incomplete_turn|Sorry, I couldn\'t complete that request.</item>
+        <item>cloud_error_no_answer|Sorry, I couldn\'t complete that request.</item>
+        <item>cloud_error_unauthorized|Service is unavailable at the moment.</item>
+        <item>cloud_error_generic|Sorry, I couldn\'t complete that request.</item>
+        <item>cloud_error_retrieval_unavailable|I can\'t reach the podcast evidence right now.</item>
+        <item>cloud_error_provider_error|The assistant couldn\'t finish that request.</item>
         <item>cloud_error_connection_lost|Connection lost. Please try again.</item>
+        <!-- The edge mints these two with user-facing prose in `message`, which the client
+             never speaks. These lines keep the reason instead of collapsing it into the
+             generic one; the numbers in the server's own sentence are not available here. -->
+        <item>cloud_error_limit_exceeded|You\'ve reached today\'s free limit.</item>
+        <item>cloud_error_budget_exceeded|The assistant has reached its limit right now.</item>
     </string-array>
 </resources>

@@ -7,7 +7,8 @@
     "budget_exceeded",
     "duplicate_request",
     "provider_error",
-    "limit_exceeded"
+    "limit_exceeded",
+    "no_answer"
   ],
   "mintedByClient": [
     "invalid_response",
@@ -19,7 +20,5 @@
   "boundedShapes": [
     "http_\\d{3}"
   ],
-  "specCodesNotHandled": [
-    "no_answer"
-  ]
+  "specCodesNotHandled": []
 }

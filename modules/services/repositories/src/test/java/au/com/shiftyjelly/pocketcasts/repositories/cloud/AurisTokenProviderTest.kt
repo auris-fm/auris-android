@@ -30,6 +30,37 @@ class AurisTokenProviderTest {
     }
 
     @Test
+    fun `a forced refresh answered inconclusively keeps the still-valid token`() = runTest {
+        MockWebServer().use { server ->
+            var responses = 0
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    responses++
+                    return if (responses == 1) {
+                        MockResponse().setResponseCode(200).setBody(tokensResponse("access-1", expiresIn = 60))
+                    } else {
+                        // Upstream is unwell: inconclusive, not a rejection.
+                        MockResponse().setResponseCode(503)
+                    }
+                }
+            }
+            server.start()
+
+            val provider = AurisTokenProvider(
+                clientProvider = { AurisAuthClient(server.url("/").toString().trimEnd('/')) },
+                credentialProvider = FakeCredential("pc-session"),
+            )
+
+            assertEquals("access-1", provider.currentToken())
+            // The route refused what we hold, so we ask for a replacement and upstream cannot say:
+            // the token we have is still inside its lifetime and must survive the attempt. A
+            // cache-clear here would discard it and fail every path closed until the service returns.
+            assertEquals("access-1", provider.refreshToken())
+            assertEquals("access-1", provider.currentToken())
+        }
+    }
+
+    @Test
     fun `refreshToken re-acquires even while the cached token is still fresh`() = runTest {
         MockWebServer().use { server ->
             val minted = AtomicInteger(0)

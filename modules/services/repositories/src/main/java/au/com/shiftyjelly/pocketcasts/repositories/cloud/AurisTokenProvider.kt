@@ -36,16 +36,19 @@ class AurisTokenProvider(
     private var cached: CachedTokens? = null
 
     /**
-     * Drops the cache and re-acquires, so a token the server has already rejected is never served
-     * again. The single-flight guard inside [currentToken] still applies, so concurrent callers
-     * share one exchange.
+     * Acquires a replacement even when the cached token is still fresh, for the case where the route
+     * has already told us that token is no good.
+     *
+     * Forced unlike [currentToken], so two concurrent callers each acquire rather than sharing one
+     * exchange — asking for a *new* token means asking again. What it does keep is the previous
+     * entry: an inconclusive answer (an auth service 5xx) leaves the still-valid token in place
+     * instead of dropping it, which a cache-clear would have done before the fallback could use it.
      */
-    override suspend fun refreshToken(): String? {
-        mutex.withLock { cached = null }
-        return currentToken()
-    }
+    override suspend fun refreshToken(): String? = token(force = true)
 
-    override suspend fun currentToken(): String? {
+    override suspend fun currentToken(): String? = token(force = false)
+
+    private suspend fun token(force: Boolean): String? {
         // Read the credential first, before any return: a cached token that came
         // from a different credential belongs to a previous account (logout, or
         // a switch) and must not be served.
@@ -54,7 +57,7 @@ class AurisTokenProvider(
             cached = null
             return null
         }
-        cached?.let { if (it.matches(identity) && it.isFresh()) return it.tokens.accessToken }
+        cached?.let { if (!force && it.matches(identity) && it.isFresh()) return it.tokens.accessToken }
         return mutex.withLock {
             // Re-check under the lock: a concurrent caller may have refreshed,
             // or the account may have changed while we waited.
@@ -63,7 +66,7 @@ class AurisTokenProvider(
                 cached = null
                 return@withLock null
             }
-            cached?.let { if (it.matches(lockedIdentity) && it.isFresh()) return@withLock it.tokens.accessToken }
+            cached?.let { if (!force && it.matches(lockedIdentity) && it.isFresh()) return@withLock it.tokens.accessToken }
             val client = clientProvider() ?: run {
                 cached = null
                 return@withLock null

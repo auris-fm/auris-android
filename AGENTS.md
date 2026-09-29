@@ -18,7 +18,11 @@ This file provides guidance to AI coding assistants (Claude Code, Cursor, Windsu
 # Build release APK
 ./gradlew :app:assembleRelease
 
-# Install debug build on connected device
+# Install the debug build (Pocket Casts staging servers; see the gateway note below
+# for what the cloud/voice path points at — that is a stored preference, not the build)
+./gradlew :app:installDebug
+
+# Install the debugProd build (points at production servers)
 ./gradlew :app:installDebugProd
 ```
 
@@ -65,9 +69,10 @@ This file provides guidance to AI coding assistants (Claude Code, Cursor, Windsu
 
 ### Multi-Module Structure
 
-**Application Modules** (3):
+**Application Modules** (4):
 - `app/` - Main mobile Android application
 - `automotive/` - Android Automotive OS variant
+- `tv/` - Android TV variant
 - `wear/` - Wear OS variant
 
 **Feature Modules** (`modules/features/`):
@@ -82,6 +87,7 @@ Shared infrastructure and business logic. Core services include:
 - `ui` - Shared UI theming and components
 - `analytics` - Analytics tracking
 - `localization` - Strings and translations
+- `voice` - Voice control: ASR/backends, the gate, earcons and TTS, and the client-side cloud sink (`CloudRouteSink`) that consumes the cloud contract. The contract types themselves (`CloudRouteClient`, `CloudRouteErrorCodes`, `CloudRouteEvent`, `CloudRouteModels`, the prefetch clients) live in the `cloud` package of `repositories`; see "Where the contract lives" below.
 
 **Dependency Flow**:
 ```
@@ -221,7 +227,7 @@ The codebase uses a `FeatureFlag` system for A/B testing and gradual rollout. Ch
 
 ### Database Migrations
 
-The Room database has 122 migration versions. When modifying entities:
+The Room database has an extensive migration history — `modules/services/model/schemas/` holds one JSON per version, one level down in `au.com.shiftyjelly.pocketcasts.models.db.AppDatabase/` (91 at the time of writing; treat `find modules/services/model/schemas -name '*.json' | wc -l` as the count, not this number). When modifying entities:
 - Always provide a migration path
 - Export schema is enabled (`modules/services/model/schemas/`)
 - Test migrations thoroughly
@@ -260,6 +266,43 @@ Combine both into a grep alternation. **Exclude noisy tags:** use logcat's `OkHt
 ```bash
 adb logcat -v time --pid=$PID OkHttp:S
 ```
+
+### Cloud/voice gateway environment
+
+The Auris gateway base URL is a **stored preference**, not the build. It resolves through
+`GatewayUrlProvider` (`modules/services/preferences/src/main/java/.../preferences/gateway/`),
+whose implementation reads preferences; the compile-time `AURIS_GATEWAY_URL` `buildConfigField`
+only supplies the default. **A replace-install keeps the stored value**, so a device can keep
+talking to a previous backend while the build looks correct.
+
+To find out which backend a phone is actually using, read the device's preference rather than
+the source. The debug build installs as `fm.auris.debug`; the release build drops the `.debug`
+suffix (`applicationIdSuffix` in the root build script):
+
+```bash
+adb shell run-as <applicationId> cat /data/data/<applicationId>/shared_prefs/auris_cloud.xml
+```
+
+- `base_url` — the gateway in use (staging is `https://api-staging.auris.fm`).
+- `direct_upstream` — the local kill switch (`GatewayUrlProvider.isDirectUpstreamForced()`;
+  the cloud path is active when cutover is on, i.e. this is `false`).
+
+Staging's gateway serves the app's ordinary API paths as well as the cloud route. The
+`auris-edge-turn` Cloudflare Worker serves **only** the cloud routes and 404s everything else,
+so pointing an app's base URL at the Worker breaks sign-in before a turn can run.
+
+## Where the contract lives
+
+The authority for the cloud assistant and voice-control contract is **core's specs**, not this
+repo — `docs/specs/cloud-assistant.md` and the edge/particle plan in the `core` checkout. This
+file deliberately does not restate them: a copy here would drift exactly the way a stale count
+does.
+
+Routes, event types, error codes, capabilities and the spoken-fallback rules are defined there
+and implemented here. When the contract changes, the spec changes first and this repo follows
+it. When code and a spec disagree, the spec wins, and the disagreement is a bug to report rather
+than to reinterpret. Comments cite the spec sections they implement (grep for
+`cloud-assistant.md`) — keep those citations true.
 
 ## Verification and cleanup discipline
 

@@ -23,6 +23,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
+import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.shouldPlayListeningStartCue
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningModePolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
@@ -321,7 +322,7 @@ class VoiceControlService : Service() {
             engineStarted = true
 
             // Only when the microphone opens where the user cannot see it: see ListeningStartCue.
-            if (ListeningStartCue.shouldPlay(mode, gate.state.value.rules)) {
+            if (shouldPlayListeningStartCue(mode, gate.state.value.rules)) {
                 audioFeedbackRenderer.playEarcon(EarconId.LISTENING_START)
             }
 

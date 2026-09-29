@@ -1,8 +1,8 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.mode
 
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGateState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.AppInForegroundCondition
@@ -36,6 +36,11 @@ import kotlinx.coroutines.flow.stateIn
  * unregistered or unknown foreground rule is not evidence that the microphone opened where the user
  * cannot see it, and guessing "background" would produce the audible noise this exists to avoid.
  * Silence is not evidence — the same rule this codebase applies to a check.
+ *
+ * Coverage: the cases above are tested here. The *use* of this function is not — it is called from
+ * `VoiceControlService`'s start path, which no test drives — so reverting that call site would still
+ * leave the suite green. That gap is accepted rather than closed; closing it needs a service-level
+ * test, and this note is the record.
  */
 internal fun shouldPlayListeningStartCue(
     mode: ListeningMode,

@@ -56,7 +56,8 @@ class OboeAudioCapture : public oboe::AudioStreamDataCallback,
                           public oboe::AudioStreamErrorCallback {
 public:
     OboeAudioCapture();
-    ~OboeAudioCapture();
+    // Virtual so a test can substitute a capture and drive the VAD loop deterministically.
+    virtual ~OboeAudioCapture();
 
     // Open an input stream. Returns true on success.
     bool open();
@@ -76,7 +77,7 @@ public:
     // Block until data is available, then read from the ring buffer.
     // This is the sole consumer path for the VAD processing thread.
     // Returns number of samples read, 0 on timeout, -1 if stream is not active.
-    int32_t readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs);
+    virtual int32_t readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs);
 
     // Stop the stream.
     void stop();

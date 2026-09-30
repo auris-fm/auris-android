@@ -441,15 +441,23 @@ class VoiceAsrEngineTest {
         // The timing path: the transcript is not empty, so nothing else drops this capture — the
         // detector's completion band covering the speech is what says the user only said the wake
         // word. 120ms at 16kHz is 1920 samples, so 5000 is inside 4000 + 1920.
+        // The resolver matters: with an empty one, a capture that escaped the drop would fall back
+        // to the earcon and never call render — so the test would pass even with the predicate gone.
         val (engine, intents) = startFailingEngine(
             reason = RouterStageDiagnostic.REASON_NO_MATCH,
             transcript = "Hi, allri.",
             wakeDetected = true,
             speechEndSample = 5000,
+            templateResolver = SpokenTemplateResolver(
+                mapOf("pipeline.unclear_command" to "I didn't catch that."),
+            ),
         )
 
         assertTrue(intents.isEmpty())
         verify(audioFeedbackRenderer, never()).render(any(), any())
+        // No ERROR tone either: that is what the missing-line fallback would play if this capture
+        // had reached the router. The WAKE_WORD cue is expected and not asserted against.
+        verify(audioFeedbackRenderer, never()).playEarcon(EarconId.ERROR)
 
         engine.stop()
     }

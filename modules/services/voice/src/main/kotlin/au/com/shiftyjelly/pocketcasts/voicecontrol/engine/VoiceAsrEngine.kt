@@ -57,7 +57,9 @@ class VoiceAsrEngine @Inject constructor(
     private val gracePeriodSignal: GracePeriodSignal,
     private val audioFeedbackRenderer: AudioFeedbackRenderer,
     private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(emptyMap()),
-    // Defaulted so Hilt needs no provider for it and tests can still substitute one, as the sink does.
+    // Tests can substitute one. Production does not rely on this default: Dagger supplies every
+    // constructor parameter (Kotlin defaults apply only at Kotlin call sites), and the real resolver
+    // comes from VoiceControlModule.provideSpokenTemplateResolver.
     private val currentLocale: () -> Locale = { Locale.getDefault() },
     private val translationStage: TranslationStage,
     @ApplicationContext private val context: Context,
@@ -324,7 +326,7 @@ class VoiceAsrEngine @Inject constructor(
         // "Addressed" is the open grace window, not this segment's wake flag: a follow-up after
         // the wake word is wake-negative but is still someone talking to us, which is the case
         // this line exists for. The window is open because a wake fired.
-        processUtterance(routePrep.input!!, addressed = gracePeriodSignal.isActive.value)
+        processUtterance(routePrep.input!!, addressed = request.wakePositive)
     }
 
     private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean) {
@@ -381,6 +383,10 @@ class VoiceAsrEngine @Inject constructor(
         when (CloudEscalationPolicy.decide(reason, addressed)) {
             // A rejection, not a failure — a bare wake phrase lands here, which
             // is why the window is no longer spent on the wake word.
+            // Heard something we could not route and the user was not addressing us: a tone is
+            // all that is warranted.
+            CloudEscalation.EARCON -> audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+
             CloudEscalation.SILENT -> Unit
 
             // They addressed us and we could not place it: say so in their language, falling back

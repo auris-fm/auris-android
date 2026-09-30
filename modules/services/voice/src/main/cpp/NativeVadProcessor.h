@@ -72,8 +72,6 @@ private:
     std::vector<int16_t> mSnapshotBuffer;
     int32_t mSnapshotSpeechOnsetSample = 0;
     int32_t mSnapshotSpeechEndSample = 0;
-    // Counts every processed frame, so speech end and onset share one coordinate system.
-    int32_t mFrameCursor = 0;
     std::mutex mSpeechMutex;
 
     int32_t mConsecutiveSilentFrames = 0;

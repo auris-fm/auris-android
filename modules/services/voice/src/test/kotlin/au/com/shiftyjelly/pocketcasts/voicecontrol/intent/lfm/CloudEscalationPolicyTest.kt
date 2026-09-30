@@ -24,17 +24,6 @@ class CloudEscalationPolicyTest {
     }
 
     @Test
-    fun `a no_match from an utterance aimed at us speaks a line`() {
-        // Widening no_match to *escalate* was tried and measured and still does not
-        // happen; saying something locally is the other answer to the same problem,
-        // and it costs no wall-clock window.
-        assertEquals(
-            CloudEscalation.SPEAK_UNROUTED,
-            CloudEscalationPolicy.decide(RouterStageDiagnostic.REASON_NO_MATCH, addressed = true),
-        )
-    }
-
-    @Test
     fun `a blank transcript speaks only when the user was not the one talking`() {
         // An addressed capture with no text is a bare wake word: the spec says silence, and the
         // engine drops the tidier version of this before routing. Anywhere else it is a fault.
@@ -49,16 +38,20 @@ class CloudEscalationPolicyTest {
     }
 
     @Test
-    fun `a no_match that reaches routing is spoken, not toned`() {
-        // The accepted reading, stated in the policy's KDoc: a segment reaches routing only inside
-        // the grace window, so whoever it is, they are addressing us. Separating a follow-up from
-        // unrelated in-window speech needs a signal this call site does not have.
+    fun `a no_match is spoken only for a wake-detected segment`() {
+        // core voice-intents.md: the short line is for a Detected segment. A NotDetected one is a
+        // grace-period capture from the room, where a tone is all that is warranted — and the
+        // default is the not-detected side, so the bare call must tone rather than speak.
         assertEquals(
             CloudEscalation.SPEAK_UNROUTED,
             CloudEscalationPolicy.decide(RouterStageDiagnostic.REASON_NO_MATCH, addressed = true),
         )
         assertEquals(
-            CloudEscalation.SPEAK_UNROUTED,
+            CloudEscalation.EARCON,
+            CloudEscalationPolicy.decide(RouterStageDiagnostic.REASON_NO_MATCH, addressed = false),
+        )
+        assertEquals(
+            CloudEscalation.EARCON,
             CloudEscalationPolicy.decide(RouterStageDiagnostic.REASON_NO_MATCH),
         )
     }

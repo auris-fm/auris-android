@@ -203,7 +203,6 @@ void NativeVadProcessor::runLoop() {
             continue; // timeout — retry
         }
 
-        mFrameCursor++;
 
         // 2. Cooldown gate — discard frames while cooldown is active.
         int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -279,8 +278,10 @@ void NativeVadProcessor::runLoop() {
                 mEventCv.notify_one();
             }
 
-            // The last frame the VAD called speech — drain excluded.
-            mSpeechEndSample = mFrameCursor * kVadFrameSize;
+            // Bytes accumulated for this segment so far, retained pre-roll included — the segment's
+            // own coordinates, which is what speechOnsetSample and the detector's completionSample
+            // are in. Written only on speech frames, so the drain never moves it.
+            mSpeechEndSample = static_cast<int32_t>(mSpeechBuffer.size());
 
             // Accumulate current frame.
             mSpeechBuffer.insert(mSpeechBuffer.end(), chunk, chunk + kVadFrameSize);

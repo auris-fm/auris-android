@@ -11,6 +11,12 @@ sealed interface VoiceSegmenterResult {
     data class SpeechEnded(
         val frames: List<PcmAudioFrame>,
         val speechOnsetSample: Int = 0,
+        /**
+         * The last sample the VAD classified as speech, drain excluded — not the sample at which
+         * the segment closed. Defaults to 0 for segmenters that do not report it, which the engine
+         * reads as "unknown" rather than "no speech".
+         */
+        val speechEndSample: Int = 0,
     ) : VoiceSegmenterResult
     data class Rejected(val reason: RejectionReason) : VoiceSegmenterResult
 }

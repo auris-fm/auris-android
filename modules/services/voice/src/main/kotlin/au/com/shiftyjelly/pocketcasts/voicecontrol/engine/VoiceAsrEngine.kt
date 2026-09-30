@@ -45,6 +45,9 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 
+/** How close the completion band must sit to speech end for a capture to be the wake word alone. */
+private const val WAKE_ONLY_TOLERANCE_MS = 120
+
 @Singleton
 class VoiceAsrEngine @Inject constructor(
     private val voiceAudioProcessor: VoiceAudioProcessor,
@@ -156,7 +159,19 @@ class VoiceAsrEngine @Inject constructor(
         val samples: FloatArray,
         val wakePositive: Boolean,
         val completionSample: Int = 0,
+        val speechEndSample: Int = 0,
+        val sampleRateHz: Int = 16000,
     )
+
+    /**
+     * Whether the utterance is the wake word and nothing else, from the detector's timing rather
+     * than from the text: if the completion band covers the speech, nothing was said after the
+     * wake. `speechEndSample` is 0 when the segmenter does not report it, and 0 must read as
+     * unknown — otherwise every capture would look wake-only and every turn would go silent.
+     */
+    private fun isWakeOnly(request: TranscribeRequest): Boolean = request.speechEndSample > 0 &&
+        request.completionSample + (request.sampleRateHz * WAKE_ONLY_TOLERANCE_MS / 1000) >=
+        request.speechEndSample
 
     private suspend fun shouldTranscribe(segment: VoiceSegmenterResult.SpeechEnded): TranscribeRequest? {
         // Build float samples from the segment
@@ -211,6 +226,8 @@ class VoiceAsrEngine @Inject constructor(
             Timber.i("[VoicePipeline] wake %s → ASR (hit, mode=%s)", wakeCmp, mode)
             return TranscribeRequest(
                 samples = floatSamples,
+                speechEndSample = segment.speechEndSample,
+                sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000,
                 wakePositive = true,
                 completionSample = wwResult.completionSample,
             )
@@ -265,7 +282,7 @@ class VoiceAsrEngine @Inject constructor(
             asrResult.text != transcript -> "trim '${asrResult.text}' → '$transcript'"
             else -> null
         }
-        if (transcript.isBlank()) {
+        if (transcript.isBlank() || isWakeOnly(request)) {
             Timber.i(
                 "[VoicePipeline] asr %s %dms lang=%s '%s'%s → drop (%s)",
                 b::class.simpleName,

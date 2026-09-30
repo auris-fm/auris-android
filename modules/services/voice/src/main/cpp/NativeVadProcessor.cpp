@@ -278,14 +278,16 @@ void NativeVadProcessor::runLoop() {
                 mEventCv.notify_one();
             }
 
-            // Bytes accumulated for this segment so far, retained pre-roll included — the segment's
-            // own coordinates, which is what speechOnsetSample and the detector's completionSample
-            // are in. Written only on speech frames, so the drain never moves it.
-            mSpeechEndSample = static_cast<int32_t>(mSpeechBuffer.size());
-
             // Accumulate current frame.
             mSpeechBuffer.insert(mSpeechBuffer.end(), chunk, chunk + kVadFrameSize);
             mSpeechFrames++;
+
+            // The end of the last frame classified as speech, in the segment's own coordinates:
+            // the buffer after this append is retained pre-roll plus every speech frame, which is the
+            // same timeline speechOnsetSample and the detector's completionSample use. Taken AFTER
+            // the append, or it lands one frame early. Only speech frames write it, so the drain
+            // cannot move it.
+            mSpeechEndSample = static_cast<int32_t>(mSpeechBuffer.size());
             continue;
         }
 

@@ -323,9 +323,9 @@ class VoiceAsrEngine @Inject constructor(
             audioFeedbackRenderer.playEarcon(EarconId.ERROR)
             return
         }
-        // "Addressed" is the open grace window, not this segment's wake flag: a follow-up after
-        // the wake word is wake-negative but is still someone talking to us, which is the case
-        // this line exists for. The window is open because a wake fired.
+        // "Addressed" is this segment's own wake detection, per core voice-intents.md: a Detected
+        // segment that we could not route gets the spoken line, a NotDetected one keeps the earcon.
+        // The grace window is true for both, so it cannot make that distinction.
         processUtterance(routePrep.input!!, addressed = request.wakePositive)
     }
 

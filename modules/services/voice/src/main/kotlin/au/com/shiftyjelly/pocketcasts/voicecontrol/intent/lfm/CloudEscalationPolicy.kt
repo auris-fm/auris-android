@@ -56,8 +56,9 @@ internal object CloudEscalationPolicy {
     )
 
     /**
-     * @param addressed whether the user was speaking to us rather than the microphone catching the
-     * room. Callers know this from the grace window; it only changes the `no_match` outcome.
+     * @param addressed whether this segment's own wake detection was positive — the user speaking
+     * to us rather than the microphone catching the room. It changes the `no_match` outcome and the
+     * defence-only `blank_transcript` one.
      */
     fun decide(reason: String?, addressed: Boolean = false): CloudEscalation = when {
         // Unroutable. Per core's voice-intents.md the short line is for a wake-*Detected* segment;

@@ -20,8 +20,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.RouterStageDiagnostic
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.IntentRoutingInput
@@ -33,6 +35,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult
+import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -409,6 +412,31 @@ class VoiceAsrEngineTest {
     }
 
     @Test
+    fun `a no_match from a wake-detected segment speaks the unclear-command line`() = runTest {
+        // The other side of the spec's rule: the user was addressing us and we could not route it,
+        // so they hear the line rather than a tone. Without a resolver holding the key the engine
+        // falls back to that same earcon, which is what made this path untestable before.
+        val resolver = SpokenTemplateResolver(
+            // The engine's KEY_CLOUD_UNROUTED is private to its companion, so the key is spelled out.
+            mapOf("pipeline.unclear_command" to "I didn't catch that."),
+        )
+        val (engine, intents) = startFailingEngine(
+            reason = RouterStageDiagnostic.REASON_NO_MATCH,
+            transcript = "Hi, allri.",
+            wakeDetected = true,
+            templateResolver = resolver,
+        )
+
+        assertTrue(intents.isEmpty())
+        verify(audioFeedbackRenderer).render(VoiceResponse.Spoken("I didn't catch that."))
+        // The WAKE_WORD cue is expected here — it acknowledges the detection. What must not happen
+        // is the error tone, because that would mean the engine had no line to speak.
+        verify(audioFeedbackRenderer, never()).playEarcon(EarconId.ERROR)
+
+        engine.stop()
+    }
+
+    @Test
     fun `a no_match from the room keeps the earcon and stays local`() = runTest {
         // A wake-negative capture: the microphone caught the room, not a request to us. It must not
         // spend the window (measured: it did, on every wake), it must not be answered with words,
@@ -638,6 +666,10 @@ class VoiceAsrEngineTest {
     private suspend fun TestScope.startFailingEngine(
         reason: String,
         transcript: String,
+        wakeDetected: Boolean = false,
+        templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(emptyMap()),
+        // SpokenLine only speaks for an English locale, so a test that expects speech must say so.
+        currentLocale: () -> Locale = { Locale.ENGLISH },
     ): Pair<VoiceAsrEngine, MutableList<VoiceIntent>> {
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -652,7 +684,7 @@ class VoiceAsrEngineTest {
         `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
-                detected = false,
+                detected = wakeDetected,
                 confidence = 0f,
                 completionSample = 4000,
             ),
@@ -671,6 +703,8 @@ class VoiceAsrEngineTest {
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
             context = context,
+            templateResolver = templateResolver,
+            currentLocale = currentLocale,
         )
         engine.scope = this
         engine.start(

@@ -15,6 +15,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudIdentity
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
@@ -384,23 +385,9 @@ class CloudRouteSink internal constructor(
         )
     }
 
-    /**
-     * Speaks a template only when it is actually in the user's language.
-     *
-     * The templates live in `res/values` (the source locale) and Android falls
-     * back to those for every locale, so resolving one under a non-English
-     * locale would speak English. This module ships no language-qualified
-     * resource directory at all (translations live in the localization module,
-     * and nothing below is wired into it), so the guard is a durable behaviour
-     * rather than a temporary shim: only the source locale speaks, and every
-     * other locale gets the error earcon instead of a foreign sentence. If a
-     * `values-<lang>` set is ever added here, this condition is what has to
-     * change to per-locale presence.
-     */
-    private fun localizedTemplate(key: String): String {
-        if (!currentLocale().language.equals(Locale.ENGLISH.language, ignoreCase = true)) return ""
-        return templateResolver.resolve(key)
-    }
+    /** A client-owned line for [key], or empty when this locale must not be spoken to: [SpokenLine]. */
+    private fun localizedTemplate(key: String): String =
+        SpokenLine.forKey(key, templateResolver, currentLocale())
 
     /** Owner-only: resume the player if this turn chain auto-paused it. */
     private suspend fun restoreTransientAudioState() {

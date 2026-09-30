@@ -19,6 +19,20 @@ import javax.inject.Singleton
  */
 interface CloudTokenProviding {
     suspend fun currentToken(): String?
+
+    /**
+     * Ensures the next [currentToken] returns a replacement, ignoring a still-fresh cache.
+     *
+     * Called after a `401` from the cloud route, where the cached token is known to be bad rather
+     * than merely old. It returns nothing on purpose: callers read [currentToken] again, so returning
+     * the value here would invite a caller to use it and bypass any provider-specific caching.
+     *
+     * A provider that cannot mint a replacement leaves this doing nothing, which is honest — the
+     * caller then sends one identical request and gives up rather than pretending it recovered.
+     */
+    suspend fun refreshToken() {
+        currentToken()
+    }
 }
 
 /**

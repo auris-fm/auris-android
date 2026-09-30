@@ -8,12 +8,15 @@ import kotlinx.coroutines.sync.withLock
  * already holds (task #33 client half).
  *
  * Postures, all pinned by tests:
- * - **Single-flight:** concurrent callers share one refresh. A double refresh
- *   would rotate twice, and the replayed token revokes the whole chain
- *   (`refresh_reused`) — so exactly one call must leave the client.
- * - **Reactive, not proactive:** a token is refreshed when it is needed, once.
- *   No same-turn retry: a request that observed a stale token fails and the
- *   *next* call uses the fresh one.
+ * - **Single-flight for [currentToken]:** concurrent callers share one refresh,
+ *   because a double refresh would rotate twice and the replayed token revokes
+ *   the whole chain (`refresh_reused`) — so exactly one call must leave the
+ *   client. [refreshToken] is deliberately not single-flight: it is a caller
+ *   saying the token it holds is bad, so each caller gets its own exchange.
+ * - **Reactive, not proactive:** a token is refreshed when it is needed, once —
+ *   [currentToken] never retries by itself. A token the route refused is
+ *   re-sent once inside the same turn, but only because the caller asked for a
+ *   replacement through [refreshToken] and repeats the turn's `request_id`.
  * - **Bound to the current account:** the credential is read before *every*
  *   return, and a cached token is only served while it was acquired from that
  *   same credential. After a logout or an account switch the previous user's
@@ -35,7 +38,22 @@ class AurisTokenProvider(
     private val mutex = Mutex()
     private var cached: CachedTokens? = null
 
-    override suspend fun currentToken(): String? {
+    /**
+     * Acquires a replacement even when the cached token is still fresh, for the case where the route
+     * has already told us that token is no good.
+     *
+     * Forced unlike [currentToken], so two concurrent callers each acquire rather than sharing one
+     * exchange — asking for a *new* token means asking again. What it does keep is the previous
+     * entry: an inconclusive answer (an auth service 5xx) leaves the still-valid token in place
+     * instead of dropping it, which a cache-clear would have done before the fallback could use it.
+     */
+    override suspend fun refreshToken() {
+        token(force = true)
+    }
+
+    override suspend fun currentToken(): String? = token(force = false)
+
+    private suspend fun token(force: Boolean): String? {
         // Read the credential first, before any return: a cached token that came
         // from a different credential belongs to a previous account (logout, or
         // a switch) and must not be served.
@@ -44,7 +62,7 @@ class AurisTokenProvider(
             cached = null
             return null
         }
-        cached?.let { if (it.matches(identity) && it.isFresh()) return it.tokens.accessToken }
+        cached?.let { if (!force && it.matches(identity) && it.isFresh()) return it.tokens.accessToken }
         return mutex.withLock {
             // Re-check under the lock: a concurrent caller may have refreshed,
             // or the account may have changed while we waited.
@@ -53,7 +71,7 @@ class AurisTokenProvider(
                 cached = null
                 return@withLock null
             }
-            cached?.let { if (it.matches(lockedIdentity) && it.isFresh()) return@withLock it.tokens.accessToken }
+            cached?.let { if (!force && it.matches(lockedIdentity) && it.isFresh()) return@withLock it.tokens.accessToken }
             val client = clientProvider() ?: run {
                 cached = null
                 return@withLock null

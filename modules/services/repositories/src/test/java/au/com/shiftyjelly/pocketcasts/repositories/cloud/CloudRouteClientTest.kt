@@ -157,13 +157,64 @@ class CloudRouteClientTest {
     }
 
     @Test
-    fun `401 emits Error before stream`() = runBlocking {
+    fun `a refused credential is refreshed and the same turn re-sent once`() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(
                 MockResponse()
                     .setResponseCode(401)
                     .setBody("""{"message":"unauthorized"}"""),
             )
+            server.enqueue(
+                sseResponse(
+                    """event: done
+data: {"input_tokens":1,"output_tokens":0}""",
+                ),
+            )
+            server.start()
+
+            var refreshes = 0
+            val provider = object : CloudTokenProviding {
+                override suspend fun currentToken(): String? = if (refreshes == 0) "first" else "refreshed"
+
+                override suspend fun refreshToken() {
+                    refreshes++
+                }
+            }
+            val client = CloudRouteClient(server.url("/").toString().trimEnd('/'), provider)
+
+            client.route(turn("hello")).test {
+                assertTrue(awaitItem() is CloudRouteEvent.Done)
+                awaitComplete()
+            }
+
+            // One refresh, one re-send, and the second attempt carries the replacement token.
+            assertEquals(1, refreshes)
+            val first = server.takeRequest()
+            val second = server.takeRequest()
+            assertEquals("Bearer first", first.getHeader("Authorization"))
+            assertEquals("Bearer refreshed", second.getHeader("Authorization"))
+            // The same logical turn: dedup is what makes re-sending safe, so the id must repeat.
+            assertEquals(
+                requestIdIn(first.body.readUtf8()),
+                requestIdIn(second.body.readUtf8()),
+            )
+        }
+    }
+
+    private fun requestIdIn(body: String): String = body.substringAfter("\"request_id\":\"").substringBefore("\"")
+
+    @Test
+    fun `401 emits Error before stream`() = runBlocking {
+        MockWebServer().use { server ->
+            // Twice: a 401 now buys one refresh and one re-send, so the error only surfaces once
+            // the retry has also been refused. The next test covers the retry that succeeds.
+            repeat(2) {
+                server.enqueue(
+                    MockResponse()
+                        .setResponseCode(401)
+                        .setBody("""{"message":"unauthorized"}"""),
+                )
+            }
             server.start()
 
             CloudRouteClient(server.url("/").toString().trimEnd('/'), userId)

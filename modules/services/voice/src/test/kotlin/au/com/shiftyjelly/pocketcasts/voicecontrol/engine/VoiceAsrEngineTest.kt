@@ -437,6 +437,65 @@ class VoiceAsrEngineTest {
     }
 
     @Test
+    fun `a capture inside the completion band is dropped as the wake word alone`() = runTest {
+        // The timing path: the transcript is not empty, so nothing else drops this capture — the
+        // detector's completion band covering the speech is what says the user only said the wake
+        // word. 120ms at 16kHz is 1920 samples, so 5000 is inside 4000 + 1920.
+        val (engine, intents) = startFailingEngine(
+            reason = RouterStageDiagnostic.REASON_NO_MATCH,
+            transcript = "Hi, allri.",
+            wakeDetected = true,
+            speechEndSample = 5000,
+        )
+
+        assertTrue(intents.isEmpty())
+        verify(audioFeedbackRenderer, never()).render(any(), any())
+
+        engine.stop()
+    }
+
+    @Test
+    fun `a capture outside the completion band routes, because speech followed the wake word`() = runTest {
+        // Same shape with the speech ending well past the band: someone said something.
+        val (engine, intents) = startFailingEngine(
+            reason = RouterStageDiagnostic.REASON_NO_MATCH,
+            transcript = "Hi, allri.",
+            wakeDetected = true,
+            speechEndSample = 8000,
+            templateResolver = SpokenTemplateResolver(
+                mapOf("pipeline.unclear_command" to "I didn't catch that."),
+            ),
+        )
+
+        assertTrue(intents.isEmpty())
+        verify(audioFeedbackRenderer).render(VoiceResponse.Spoken("I didn't catch that."))
+
+        engine.stop()
+    }
+
+    @Test
+    fun `a segment with no end sample is unknown, not wake-only`() = runTest {
+        // speechEndSample 0 means the segmenter does not report it (the energy path). Treating that
+        // as "nothing was said" would silence every turn it produces, so the guard must keep it
+        // out of the wake-only branch even with an empty-looking band.
+        val (engine, intents) = startFailingEngine(
+            reason = RouterStageDiagnostic.REASON_NO_MATCH,
+            transcript = "Hi, allri.",
+            wakeDetected = true,
+            speechEndSample = 0,
+            completionSample = 0,
+            templateResolver = SpokenTemplateResolver(
+                mapOf("pipeline.unclear_command" to "I didn't catch that."),
+            ),
+        )
+
+        assertTrue(intents.isEmpty())
+        verify(audioFeedbackRenderer).render(VoiceResponse.Spoken("I didn't catch that."))
+
+        engine.stop()
+    }
+
+    @Test
     fun `a no_match from the room keeps the earcon and stays local`() = runTest {
         // A wake-negative capture: the microphone caught the room, not a request to us. It must not
         // spend the window (measured: it did, on every wake), it must not be answered with words,
@@ -670,6 +729,8 @@ class VoiceAsrEngineTest {
         templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(emptyMap()),
         // SpokenLine only speaks for an English locale, so a test that expects speech must say so.
         currentLocale: () -> Locale = { Locale.ENGLISH },
+        speechEndSample: Int = 0,
+        completionSample: Int = 4000,
     ): Pair<VoiceAsrEngine, MutableList<VoiceIntent>> {
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -678,6 +739,7 @@ class VoiceAsrEngineTest {
                 VoiceSegmenterResult.SpeechEnded(
                     listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
                     speechOnsetSample = 2,
+                    speechEndSample = speechEndSample,
                 ),
             ),
         )
@@ -686,7 +748,7 @@ class VoiceAsrEngineTest {
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = wakeDetected,
                 confidence = 0f,
-                completionSample = 4000,
+                completionSample = completionSample,
             ),
         )
 

@@ -49,15 +49,16 @@ class CloudEscalationPolicyTest {
     }
 
     @Test
-    fun `a no_match from the room keeps the earcon alone`() {
-        // Ambient speech and podcast bleed are not addressed to us, so a line would
-        // be answering the room; a soft tone is not.
+    fun `a no_match that reaches routing is spoken, not toned`() {
+        // The accepted reading, stated in the policy's KDoc: a segment reaches routing only inside
+        // the grace window, so whoever it is, they are addressing us. Separating a follow-up from
+        // unrelated in-window speech needs a signal this call site does not have.
         assertEquals(
-            CloudEscalation.EARCON,
-            CloudEscalationPolicy.decide(RouterStageDiagnostic.REASON_NO_MATCH, addressed = false),
+            CloudEscalation.SPEAK_UNROUTED,
+            CloudEscalationPolicy.decide(RouterStageDiagnostic.REASON_NO_MATCH, addressed = true),
         )
         assertEquals(
-            CloudEscalation.EARCON,
+            CloudEscalation.SPEAK_UNROUTED,
             CloudEscalationPolicy.decide(RouterStageDiagnostic.REASON_NO_MATCH),
         )
     }

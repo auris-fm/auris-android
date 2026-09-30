@@ -8,12 +8,6 @@ internal enum class CloudEscalation {
     /** Nothing to say and nothing to send — a rejection, not a failure. */
     SILENT,
 
-    /**
-     * Nothing to send and no line to speak, but the user should hear *something*: they spoke to us
-     * and we did not understand, so silence alone would read as being ignored.
-     */
-    EARCON,
-
     /** Nothing to send, and the user should hear that we did not catch what they said. */
     SPEAK_UNROUTED,
 
@@ -62,12 +56,15 @@ internal object CloudEscalationPolicy {
      * room. Callers know this from the grace window; it only changes the `no_match` outcome.
      */
     fun decide(reason: String?, addressed: Boolean = false): CloudEscalation = when {
-        // Addressed but unroutable: the user asked us something, so say we did not catch it.
-        reason == RouterStageDiagnostic.REASON_NO_MATCH ->
-            if (addressed) CloudEscalation.SPEAK_UNROUTED else CloudEscalation.EARCON
+        // Unroutable: the user asked us something, so say we did not catch it. There is no way to
+        // separate this from unrelated speech at this call site — a segment reaches routing either
+        // because its own wake fired or because the mode is Continuous, which is granted only while
+        // the window is open — so the accepted reading is that inside the window the user is
+        // addressing us. The room case needs a signal from further upstream, not a guess here.
+        reason == RouterStageDiagnostic.REASON_NO_MATCH -> CloudEscalation.SPEAK_UNROUTED
 
-        // An addressed capture with no text is a bare wake word, and the spec is that it stays
-        // silent; anywhere else a blank transcript is a fault worth a tone.
+        // Defence only: production drops a blank transcript before routing, so this arm is not
+        // reached by the engine today. Kept so the policy is total over the reasons it is given.
         reason == RouterStageDiagnostic.REASON_BLANK_TRANSCRIPT ->
             if (addressed) CloudEscalation.SILENT else CloudEscalation.SPEAK_ERROR
 

@@ -366,9 +366,6 @@ class VoiceAsrEngine @Inject constructor(
             // is why the window is no longer spent on the wake word.
             CloudEscalation.SILENT -> Unit
 
-            // Nothing sent and no line to speak, but a tone says we heard something.
-            CloudEscalation.EARCON -> audioFeedbackRenderer.playEarcon(EarconId.ERROR)
-
             // They addressed us and we could not place it: say so in their language, falling back
             // to the earcon in a locale this build has no line for.
             CloudEscalation.SPEAK_UNROUTED -> {

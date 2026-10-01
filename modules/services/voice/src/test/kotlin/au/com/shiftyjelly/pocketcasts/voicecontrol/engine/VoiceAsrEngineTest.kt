@@ -508,9 +508,14 @@ class VoiceAsrEngineTest {
         // A wake-negative capture: the microphone caught the room, not a request to us. It must not
         // spend the window (measured: it did, on every wake), it must not be answered with words,
         // and a soft tone is what the spec asks for instead of silence.
+        // The resolver matters here too: with an empty one, an inverted `addressed` flag would take
+        // the missing-line earcon fallback and still pass. A real line makes inversion observable.
         val (engine, intents) = startFailingEngine(
             reason = RouterStageDiagnostic.REASON_NO_MATCH,
             transcript = "Hi, allri.",
+            templateResolver = SpokenTemplateResolver(
+                mapOf("pipeline.unclear_command" to "I didn't catch that."),
+            ),
         )
 
         assertTrue(intents.isEmpty())

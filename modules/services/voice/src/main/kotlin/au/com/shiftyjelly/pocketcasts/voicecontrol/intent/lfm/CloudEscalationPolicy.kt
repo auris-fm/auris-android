@@ -32,9 +32,10 @@ internal enum class CloudEscalation {
  *   failures, so it cannot drift into a second copy of the vocabulary.
  * - **`no_match` is a decision, not a failure** — the router's own label for a
  *   non-command. It stays local, and what the user hears depends on whether they
- *   were addressing us: a wake-*Detected* segment gets a short line, while a
- *   NotDetected one — a grace-period capture from the room — keeps the error earcon
- *   alone, because answering the room is worse than a soft tone. Escalating it was tried and
+ *   were addressing us: a wake-*Detected* segment gets a short line, while a NotDetected
+ *   one keeps the error earcon. That includes a follow-up after the wake word, since only
+ *   the segment that physically contained the wake is Detected — words would be the wrong
+ *   answer there, and the tone is the honest signal. Escalating it was tried and
  *   measured and is not what happens here: a bare wake phrase is `no_match` on
  *   every capture, so it spent the window and errored on the service each time,
  *   while the one question we have observed the client could not route came back

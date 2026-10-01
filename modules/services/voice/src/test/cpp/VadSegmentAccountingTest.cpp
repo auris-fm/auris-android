@@ -5,6 +5,8 @@
 // the second utterance or after a long idle stretch. An engine test with fabricated sample values
 // cannot catch that, so this drives the real NativeVadProcessor frame loop instead.
 //
+// Run it with:  src/test/cpp/run.sh            (optionally: run.sh <build-dir>)
+//
 // How it works without Oboe or Silero: NativeVadProcessor only ever calls readRingBuffer on its
 // capture, so a fake subclass supplies the audio; and sileroVadPredict / sileroVadResetState are
 // extern, so this translation unit defines them.
@@ -75,8 +77,8 @@ public:
         (void)timeoutMs;
         if (maxSamples < kFrame || script.empty()) return 0;  // stream inactive, like a timeout
         // Sleep on every read from pauseAfterFrames onward, so the wall-clock cooldown elapses no
-        // matter where the segment happens to close (it closes inside the silent gap, not at the
-        // end of the burst).
+        // matter where the segment happens to close. The cost is wall time — the pause stretches
+        // the whole script — which is why waitForEvent's timeout has to be generous above.
         if (pauseAfterFrames >= 0 && served >= pauseAfterFrames) {
             std::this_thread::sleep_for(pauseFor);
         }
@@ -112,11 +114,19 @@ std::vector<Segment> run(const std::deque<bool>& script, int pauseAfter = -1,
     if (!processor.start()) return segments;
     // waitForEvent: 1 = speech started, 2 = speech ended, 0 = timeout, -1 = stopped.
     while (true) {
-        const int event = processor.waitForEvent(8000);  // a close is followed by a 1.5s cooldown;
+        const int event = // Generous on purpose: the per-read pause stretches the script to ~10s, and a timeout here
+        // aborts mid-script rather than failing a check — which is exactly what an 8s value did.
+        processor.waitForEvent(30000);;
         if (event == 2) {
             segments.push_back({processor.getSpeechOnsetSample(), processor.getSpeechEndSample(),
                                 processor.getSpeechPcmSize()});
+            std::printf("      close #%zu onset=%d end=%d pcm=%d\n", segments.size(),
+                        segments.back().onset, segments.back().end, segments.back().pcmSize);
         } else if (event <= 0) {
+            // 0 = timeout, -1 = stopped. A timeout means the loop is still spinning without an event,
+            // which points at the frame script rather than the VAD.
+            std::printf("      waitForEvent returned %d after %zu segment(s); %zu script frames unserved\n",
+                        event, segments.size(), capture.script.size());
             break;
         }
     }
@@ -190,7 +200,7 @@ int main() {
         // ~20ms per read from after the burst: enough for the 1500ms cooldown to elapse while the
         // gap plays out, without encoding where the segment closes.
         const std::vector<Segment> segs = run(script, /*pauseAfter=*/5,
-                                             std::chrono::milliseconds(20));
+                                             std::chrono::milliseconds(50));
         check(segs.size() >= 2, "a second utterance after a long gap produces a second segment");
         if (segs.size() >= 2) {
             const Segment& s = segs[1];

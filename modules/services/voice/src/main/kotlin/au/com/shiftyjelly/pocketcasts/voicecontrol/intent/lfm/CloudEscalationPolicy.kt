@@ -63,8 +63,9 @@ internal object CloudEscalationPolicy {
      */
     fun decide(reason: String?, addressed: Boolean = false): CloudEscalation = when {
         // Unroutable. Per core's voice-intents.md the short line is for a wake-*Detected* segment;
-        // a NotDetected one — a grace-period capture from the room — keeps the earcon, because
-        // answering the room is worse than a tone.
+        // a NotDetected one keeps the earcon. That is broader than "room speech": only the segment
+        // that physically contained the wake is Detected, so a follow-up after the wake word is
+        // NotDetected too and tones as well — words would be the wrong answer for it.
         reason == RouterStageDiagnostic.REASON_NO_MATCH ->
             if (addressed) CloudEscalation.SPEAK_UNROUTED else CloudEscalation.EARCON
 

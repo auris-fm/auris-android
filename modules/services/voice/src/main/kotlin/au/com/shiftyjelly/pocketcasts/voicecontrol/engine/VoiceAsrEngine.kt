@@ -381,8 +381,9 @@ class VoiceAsrEngine @Inject constructor(
         // No usable intent: three outcomes, decided in one place
         // (see [CloudEscalationPolicy] for which reason lands where).
         when (CloudEscalationPolicy.decide(reason, addressed)) {
-            // A rejection, not a failure — a bare wake phrase lands here, which
-            // is why the window is no longer spent on the wake word.
+            // A rejection, not a failure. A wake-negative capture lands here — a follow-up the wake
+            // did not cover in its own segment, or speech caught from the room — which is why the
+            // window is no longer spent on the wake word.
             // Heard something we could not route and the user was not addressing us: a tone is
             // all that is warranted.
             CloudEscalation.EARCON -> audioFeedbackRenderer.playEarcon(EarconId.ERROR)

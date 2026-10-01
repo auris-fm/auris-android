@@ -197,7 +197,7 @@ int main() {
         const std::deque<bool> trailing = frames(80, false);
         script.insert(script.end(), trailing.begin(), trailing.end());
 
-        // ~20ms per read from after the burst: enough for the 1500ms cooldown to elapse while the
+        // ~50ms per read from after the burst: enough for the 1500ms cooldown to elapse while the
         // gap plays out, without encoding where the segment closes.
         const std::vector<Segment> segs = run(script, /*pauseAfter=*/5,
                                              std::chrono::milliseconds(50));

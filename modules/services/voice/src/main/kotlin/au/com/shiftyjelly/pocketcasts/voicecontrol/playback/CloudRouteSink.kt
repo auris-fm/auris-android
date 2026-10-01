@@ -386,8 +386,7 @@ class CloudRouteSink internal constructor(
     }
 
     /** A client-owned line for [key], or empty when this locale must not be spoken to: [SpokenLine]. */
-    private fun localizedTemplate(key: String): String =
-        SpokenLine.forKey(key, templateResolver, currentLocale())
+    private fun localizedTemplate(key: String): String = SpokenLine.forKey(key, templateResolver, currentLocale())
 
     /** Owner-only: resume the player if this turn chain auto-paused it. */
     private suspend fun restoreTransientAudioState() {

@@ -14,8 +14,11 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalationPolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
@@ -29,6 +32,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeTranscriptTrimme
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordSegmentCapture
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CancellationException
@@ -41,6 +45,9 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 
+/** How close the completion band must sit to speech end for a capture to be the wake word alone. */
+private const val WAKE_ONLY_TOLERANCE_MS = 120
+
 @Singleton
 class VoiceAsrEngine @Inject constructor(
     private val voiceAudioProcessor: VoiceAudioProcessor,
@@ -49,6 +56,11 @@ class VoiceAsrEngine @Inject constructor(
     private val wakeWordDetector: WakeWordDetector,
     private val gracePeriodSignal: GracePeriodSignal,
     private val audioFeedbackRenderer: AudioFeedbackRenderer,
+    private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(emptyMap()),
+    // Tests can substitute one. Production does not rely on this default: Dagger supplies every
+    // constructor parameter (Kotlin defaults apply only at Kotlin call sites), and the real resolver
+    // comes from VoiceControlModule.provideSpokenTemplateResolver.
+    private val currentLocale: () -> Locale = { Locale.getDefault() },
     private val translationStage: TranslationStage,
     @ApplicationContext private val context: Context,
 ) {
@@ -142,13 +154,26 @@ class VoiceAsrEngine @Inject constructor(
      *   time-band trim happens on timed ASR tokens after ASR, not by cutting audio.
      * - Negative outside grace (WakeWord): drops the segment.
      * - Negative during grace (Continuous): forwards the full segment.
-     * - Wake-only is decided after ASR: empty leftover after time-band trim plays ERROR.
+     * - Wake-only is decided after ASR: an empty leftover after trim is dropped before
+     *   routing, so it stays silent rather than spending the grace window.
      */
     private data class TranscribeRequest(
         val samples: FloatArray,
         val wakePositive: Boolean,
         val completionSample: Int = 0,
+        val speechEndSample: Int = 0,
+        val sampleRateHz: Int = 16000,
     )
+
+    /**
+     * Whether the utterance is the wake word and nothing else, from the detector's timing rather
+     * than from the text: if the completion band covers the speech, nothing was said after the
+     * wake. `speechEndSample` is 0 when the segmenter does not report it, and 0 must read as
+     * unknown — otherwise every capture would look wake-only and every turn would go silent.
+     */
+    private fun isWakeOnly(request: TranscribeRequest): Boolean = request.speechEndSample > 0 &&
+        request.completionSample + (request.sampleRateHz * WAKE_ONLY_TOLERANCE_MS / 1000) >=
+        request.speechEndSample
 
     private suspend fun shouldTranscribe(segment: VoiceSegmenterResult.SpeechEnded): TranscribeRequest? {
         // Build float samples from the segment
@@ -203,6 +228,8 @@ class VoiceAsrEngine @Inject constructor(
             Timber.i("[VoicePipeline] wake %s → ASR (hit, mode=%s)", wakeCmp, mode)
             return TranscribeRequest(
                 samples = floatSamples,
+                speechEndSample = segment.speechEndSample,
+                sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000,
                 wakePositive = true,
                 completionSample = wwResult.completionSample,
             )
@@ -257,7 +284,7 @@ class VoiceAsrEngine @Inject constructor(
             asrResult.text != transcript -> "trim '${asrResult.text}' → '$transcript'"
             else -> null
         }
-        if (transcript.isBlank()) {
+        if (transcript.isBlank() || isWakeOnly(request)) {
             Timber.i(
                 "[VoicePipeline] asr %s %dms lang=%s '%s'%s → drop (%s)",
                 b::class.simpleName,
@@ -296,10 +323,13 @@ class VoiceAsrEngine @Inject constructor(
             audioFeedbackRenderer.playEarcon(EarconId.ERROR)
             return
         }
-        processUtterance(routePrep.input!!)
+        // "Addressed" is this segment's own wake detection, per core voice-intents.md: a Detected
+        // segment that we could not route gets the spoken line, a NotDetected one keeps the earcon.
+        // The grace window is true for both, so it cannot make that distinction.
+        processUtterance(routePrep.input!!, addressed = request.wakePositive)
     }
 
-    private suspend fun processUtterance(input: IntentRoutingInput) {
+    private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean) {
         val recognizer = intentRecognizer
         val handler = onIntent ?: return
 
@@ -350,10 +380,25 @@ class VoiceAsrEngine @Inject constructor(
 
         // No usable intent: three outcomes, decided in one place
         // (see [CloudEscalationPolicy] for which reason lands where).
-        when (CloudEscalationPolicy.decide(reason)) {
-            // A rejection, not a failure — a bare wake phrase lands here, which
-            // is why the window is no longer spent on the wake word.
+        when (CloudEscalationPolicy.decide(reason, addressed)) {
+            // A rejection, not a failure. A wake-negative capture lands here — a follow-up the wake
+            // did not cover in its own segment, or speech caught from the room.
+            // Heard something we could not route and the user was not addressing us: a tone is
+            // all that is warranted.
+            CloudEscalation.EARCON -> audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+
             CloudEscalation.SILENT -> Unit
+
+            // They addressed us and we could not place it: say so in their language, falling back
+            // to the earcon in a locale this build has no line for.
+            CloudEscalation.SPEAK_UNROUTED -> {
+                val line = SpokenLine.forKey(KEY_CLOUD_UNROUTED, templateResolver, currentLocale())
+                if (line.isBlank()) {
+                    audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+                } else {
+                    audioFeedbackRenderer.render(VoiceResponse.Spoken(line))
+                }
+            }
 
             // Nothing was sent, but a turn happened: the earcon table already
             // requires a tone for this case.
@@ -591,6 +636,9 @@ class VoiceAsrEngine @Inject constructor(
     private fun VoiceIntent.stampedForWindow(generation: Long): VoiceIntent = if (this is VoiceIntent.CloudRoute) copy(windowGeneration = generation) else this
 
     companion object {
+        /** Client-owned wording, resolved through [SpokenLine] so a foreign locale hears the earcon. */
+        private const val KEY_CLOUD_UNROUTED = "pipeline.unclear_command"
+
         private const val SCO_CONNECT_TIMEOUT_MS = 3_000L
     }
 }

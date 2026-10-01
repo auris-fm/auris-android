@@ -32,6 +32,7 @@ internal object OboeNative {
     external fun nativeGetSpeechPcm(buffer: ShortArray): Int
     external fun nativeGetSpeechPcmSize(): Int
     external fun nativeGetSpeechOnsetSample(): Int
+    external fun nativeGetSpeechEndSample(): Int
 }
 
 /** Configuration constants shared between Kotlin capture loop and native code. */
@@ -75,6 +76,12 @@ internal class OboeCaptureEngine(
                             val copied = OboeNative.nativeGetSpeechPcm(buffer)
                             if (copied > 0) {
                                 val speechOnsetSample = OboeNative.nativeGetSpeechOnsetSample()
+                                // 0 means the segmenter does not report it, which the engine reads as
+                                // unknown — so unlike onset, 0 is a legal value here and must not throw.
+                                val speechEndSample = OboeNative.nativeGetSpeechEndSample()
+                                require(speechEndSample in 0..copied) {
+                                    "Native VAD speech end $speechEndSample outside 0..$copied"
+                                }
                                 require(speechOnsetSample in 0 until copied) {
                                     "Native VAD speech onset $speechOnsetSample outside 0 until $copied"
                                 }
@@ -90,6 +97,7 @@ internal class OboeCaptureEngine(
                                     VoiceSegmenterResult.SpeechEnded(
                                         frames = frames,
                                         speechOnsetSample = speechOnsetSample,
+                                        speechEndSample = speechEndSample,
                                     ),
                                 )
                             }

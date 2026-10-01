@@ -24,11 +24,36 @@ class CloudEscalationPolicyTest {
     }
 
     @Test
-    fun `a deliberate no_match stays local and silent`() {
-        // Widening this was tried and measured: a bare wake phrase is no_match on
-        // every capture, so it spent the window and errored on the service each
-        // time. The spec says a question selects cloud_route, not no_match.
-        assertEquals(CloudEscalation.SILENT, CloudEscalationPolicy.decide(RouterStageDiagnostic.REASON_NO_MATCH))
+    fun `a blank transcript speaks only when the user was not the one talking`() {
+        // An addressed capture with no text is a bare wake word: the spec says silence, and the
+        // engine drops the tidier version of this before routing. Anywhere else it is a fault.
+        assertEquals(
+            CloudEscalation.SILENT,
+            CloudEscalationPolicy.decide(RouterStageDiagnostic.REASON_BLANK_TRANSCRIPT, addressed = true),
+        )
+        assertEquals(
+            CloudEscalation.SPEAK_ERROR,
+            CloudEscalationPolicy.decide(RouterStageDiagnostic.REASON_BLANK_TRANSCRIPT, addressed = false),
+        )
+    }
+
+    @Test
+    fun `a no_match is spoken only for a wake-detected segment`() {
+        // core voice-intents.md: the short line is for a Detected segment. A NotDetected one is a
+        // grace-period capture from the room, where a tone is all that is warranted — and the
+        // default is the not-detected side, so the bare call must tone rather than speak.
+        assertEquals(
+            CloudEscalation.SPEAK_UNROUTED,
+            CloudEscalationPolicy.decide(RouterStageDiagnostic.REASON_NO_MATCH, addressed = true),
+        )
+        assertEquals(
+            CloudEscalation.EARCON,
+            CloudEscalationPolicy.decide(RouterStageDiagnostic.REASON_NO_MATCH, addressed = false),
+        )
+        assertEquals(
+            CloudEscalation.EARCON,
+            CloudEscalationPolicy.decide(RouterStageDiagnostic.REASON_NO_MATCH),
+        )
     }
 
     @Test

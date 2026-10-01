@@ -33,6 +33,7 @@ public:
     int32_t getSpeechPcmSize();
     int32_t getSpeechPcm(int16_t* outBuffer, int32_t maxSamples);
     int32_t getSpeechOnsetSample();
+    int32_t getSpeechEndSample();
 
 private:
     void runLoop();
@@ -64,11 +65,13 @@ private:
     std::vector<int16_t> mSpeechBuffer;
     int32_t mSpeechFrames = 0;
     int32_t mSpeechOnsetSample = 0;
+    int32_t mSpeechEndSample = 0;
     bool mSpeechActive = false;
 
     // Snapshot of mSpeechBuffer for safe cross-thread access from Kotlin.
     std::vector<int16_t> mSnapshotBuffer;
     int32_t mSnapshotSpeechOnsetSample = 0;
+    int32_t mSnapshotSpeechEndSample = 0;
     std::mutex mSpeechMutex;
 
     int32_t mConsecutiveSilentFrames = 0;

@@ -67,6 +67,7 @@ void NativeVadProcessor::stop() {
     mSpeechBuffer.clear();
     mSpeechFrames = 0;
     mSpeechOnsetSample = 0;
+                    mSpeechEndSample = 0;
     mSpeechActive = false;
     mConsecutiveSilentFrames = 0;
     mDrainRemaining = 0;
@@ -110,6 +111,11 @@ int32_t NativeVadProcessor::getSpeechPcm(int16_t* outBuffer, int32_t maxSamples)
         : static_cast<int32_t>(mSnapshotBuffer.size());
     std::memcpy(outBuffer, mSnapshotBuffer.data(), static_cast<size_t>(count) * sizeof(int16_t));
     return count;
+}
+
+int32_t NativeVadProcessor::getSpeechEndSample() {
+    std::lock_guard<std::mutex> lock(mSpeechMutex);
+    return mSnapshotSpeechEndSample;
 }
 
 int32_t NativeVadProcessor::getSpeechOnsetSample() {
@@ -197,6 +203,7 @@ void NativeVadProcessor::runLoop() {
             continue; // timeout — retry
         }
 
+
         // 2. Cooldown gate — discard frames while cooldown is active.
         int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
             Clock::now().time_since_epoch()).count();
@@ -217,11 +224,13 @@ void NativeVadProcessor::runLoop() {
                 std::lock_guard<std::mutex> lock(mSpeechMutex);
                 mSnapshotBuffer = std::move(mSpeechBuffer);
                 mSnapshotSpeechOnsetSample = mSpeechOnsetSample;
+                        mSnapshotSpeechEndSample = mSpeechEndSample;
                 mSpeechBuffer.clear();
             }
 
             mSpeechFrames = 0;
             mSpeechOnsetSample = 0;
+                    mSpeechEndSample = 0;
             mSpeechActive = false;
             mConsecutiveSilentFrames = 0;
             mDrainRemaining = 0;
@@ -272,6 +281,13 @@ void NativeVadProcessor::runLoop() {
             // Accumulate current frame.
             mSpeechBuffer.insert(mSpeechBuffer.end(), chunk, chunk + kVadFrameSize);
             mSpeechFrames++;
+
+            // The end of the last frame classified as speech, in the segment's own coordinates:
+            // the buffer after this append is retained pre-roll plus every speech frame, which is the
+            // same timeline speechOnsetSample and the detector's completionSample use. Taken AFTER
+            // the append, or it lands one frame early. Only speech frames write it, so the drain
+            // cannot move it.
+            mSpeechEndSample = static_cast<int32_t>(mSpeechBuffer.size());
             continue;
         }
 
@@ -314,11 +330,13 @@ void NativeVadProcessor::runLoop() {
                         std::lock_guard<std::mutex> lock(mSpeechMutex);
                         mSnapshotBuffer = std::move(mSpeechBuffer);
                         mSnapshotSpeechOnsetSample = mSpeechOnsetSample;
+                        mSnapshotSpeechEndSample = mSpeechEndSample;
                         mSpeechBuffer.clear();
                     }
 
                     mSpeechFrames = 0;
                     mSpeechOnsetSample = 0;
+                    mSpeechEndSample = 0;
                     mSpeechActive = false;
                     mConsecutiveSilentFrames = 0;
                     mDrainRemaining = 0;

@@ -29,15 +29,16 @@ class ToolCallMapper @Inject constructor() {
         "resume" -> VoiceIntent.Playback.Resume
 
         "seek_relative" -> {
-            // Last-resort magnitude when SlotRepair did not fill a signed default.
-            // Prefer SlotRepair's utterance-aware ±30s; this is not the user skip setting.
-            val seconds = call.intParam("delta_seconds") ?: 30
-            VoiceIntent.Playback.SeekRelative(seconds * 1000)
+            // The cloud provides delta_seconds in seconds with the sign.
+            // SlotRepair fills a signed default when absent; if still absent,
+            // let the sink apply the app's configured interval.
+            val seconds = call.intParam("delta_seconds")
+            VoiceIntent.Playback.SeekRelative(seconds ?: 0)
         }
 
         "seek_to" -> {
             val seconds = call.intParam("position_seconds") ?: return null
-            VoiceIntent.Playback.SeekAbsolute(seconds * 1000)
+            VoiceIntent.Playback.SeekAbsolute(seconds)
         }
 
         "next_episode" -> VoiceIntent.Playback.NextEpisode

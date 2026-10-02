@@ -1289,8 +1289,8 @@ class CloudRouteSinkTest {
         override suspend fun skipForward(seconds: Int): VoiceResponse = VoiceResponse.Silent
         override suspend fun skipBackward(seconds: Int): VoiceResponse = VoiceResponse.Silent
 
-        override suspend fun seekTo(positionMs: Int): VoiceResponse {
-            calls += "seekTo:$positionMs"
+        override suspend fun seekTo(positionSeconds: Int): VoiceResponse {
+            calls += "seekTo:$positionSeconds"
             return VoiceResponse.Silent
         }
 

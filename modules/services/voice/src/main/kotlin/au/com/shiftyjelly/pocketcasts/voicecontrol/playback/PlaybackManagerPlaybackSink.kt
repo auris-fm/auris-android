@@ -31,8 +31,8 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         return VoiceResponse.Silent
     }
 
-    override suspend fun seekTo(positionMs: Int): VoiceResponse {
-        playbackManager.seekToTimeMsSuspend(positionMs)
+    override suspend fun seekTo(positionSeconds: Int): VoiceResponse {
+        playbackManager.seekToTimeMsSuspend(positionSeconds * 1000)
         return VoiceResponse.Silent
     }
 

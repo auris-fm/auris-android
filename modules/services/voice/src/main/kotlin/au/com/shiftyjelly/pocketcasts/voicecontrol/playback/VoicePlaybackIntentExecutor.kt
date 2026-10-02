@@ -73,17 +73,17 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         VoiceIntent.Playback.Resume -> playbackSink.resume()
 
         is VoiceIntent.Playback.SeekRelative -> {
-            val seconds = abs(intent.deltaMs / 1000)
-            if (seconds == 0) {
+            // deltaSeconds is in seconds; 0 means "use sink's configured interval".
+            if (intent.deltaSeconds == 0) {
                 VoiceResponse.Silent
-            } else if (intent.deltaMs >= 0) {
-                playbackSink.skipForward(seconds)
+            } else if (intent.deltaSeconds > 0) {
+                playbackSink.skipForward(intent.deltaSeconds)
             } else {
-                playbackSink.skipBackward(seconds)
+                playbackSink.skipBackward(abs(intent.deltaSeconds))
             }
         }
 
-        is VoiceIntent.Playback.SeekAbsolute -> playbackSink.seekTo(intent.positionMs.coerceAtLeast(0))
+        is VoiceIntent.Playback.SeekAbsolute -> playbackSink.seekTo(intent.positionSeconds.coerceAtLeast(0))
 
         VoiceIntent.Playback.NextEpisode -> playbackSink.nextEpisode()
     }
@@ -189,7 +189,7 @@ interface VoicePlaybackSink {
     suspend fun resume(): VoiceResponse
     suspend fun skipForward(seconds: Int): VoiceResponse
     suspend fun skipBackward(seconds: Int): VoiceResponse
-    suspend fun seekTo(positionMs: Int): VoiceResponse
+    suspend fun seekTo(positionSeconds: Int): VoiceResponse
     fun nextEpisode(): VoiceResponse
 }
 

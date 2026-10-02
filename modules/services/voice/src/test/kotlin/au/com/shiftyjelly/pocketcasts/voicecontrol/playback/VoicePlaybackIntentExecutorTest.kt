@@ -48,7 +48,7 @@ class VoicePlaybackIntentExecutorTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
 
-        val response = executor.execute(VoiceIntent.Playback.SeekRelative(30_000))
+        val response = executor.execute(VoiceIntent.Playback.SeekRelative(30))
 
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(listOf("skipForward:30"), sinks.playback.calls)
@@ -59,18 +59,18 @@ class VoicePlaybackIntentExecutorTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
 
-        val response = executor.execute(VoiceIntent.Playback.SeekRelative(-10_000))
+        val response = executor.execute(VoiceIntent.Playback.SeekRelative(-10))
 
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(listOf("skipBackward:10"), sinks.playback.calls)
     }
 
     @Test
-    fun `relative positive sub-second seek does nothing`() = runTest {
+    fun `relative zero seek does nothing`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
 
-        val response = executor.execute(VoiceIntent.Playback.SeekRelative(999))
+        val response = executor.execute(VoiceIntent.Playback.SeekRelative(0))
 
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(emptyList<String>(), sinks.playback.calls)
@@ -239,7 +239,7 @@ class VoicePlaybackIntentExecutorTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
 
-        executor.execute(VoiceIntent.Playback.SeekRelative(30_000))
+        executor.execute(VoiceIntent.Playback.SeekRelative(30))
 
         // A seek does not contest the turn's pause, so it must not invalidate it.
         org.mockito.kotlin.verify(sinks.playbackManager, org.mockito.kotlin.never()).noteUserPlaybackCommand()
@@ -458,8 +458,8 @@ class VoicePlaybackIntentExecutorTest {
             calls += "skipBackward:$seconds"
             return VoiceResponse.Silent
         }
-        override suspend fun seekTo(positionMs: Int): VoiceResponse {
-            calls += "seekTo:$positionMs"
+        override suspend fun seekTo(positionSeconds: Int): VoiceResponse {
+            calls += "seekTo:$positionSeconds"
             return VoiceResponse.Silent
         }
         override fun nextEpisode(): VoiceResponse {

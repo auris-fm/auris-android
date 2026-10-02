@@ -12,6 +12,13 @@ class VoiceIntentTest {
     }
 
     @Test
+    fun `seek relative stores null when no amount stated`() {
+        val intent = VoiceIntent.Playback.SeekRelative(null)
+
+        assertEquals(null, intent.deltaSeconds)
+    }
+
+    @Test
     fun `chapter title trims query`() {
         val intent = VoiceIntent.Chapter.ByTitle(query = "  interview  ")
 

@@ -66,11 +66,16 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
-    fun `relative zero seek does nothing`() = runTest {
+    fun `relative null seek does nothing`() = runTest {
+        // null deltaSeconds means "no amount stated — sink should apply its own
+        // interval in direction". The executor cannot act without direction info,
+        // so it returns Silent. This path is for the local matcher which always
+        // provides a non-null value; null is only reachable from the cloud path
+        // where the sink handles the null case in executeAction.
         val sinks = FakeSinks()
         val executor = sinks.executor()
 
-        val response = executor.execute(VoiceIntent.Playback.SeekRelative(0))
+        val response = executor.execute(VoiceIntent.Playback.SeekRelative(null))
 
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(emptyList<String>(), sinks.playback.calls)

@@ -31,9 +31,9 @@ class ToolCallMapper @Inject constructor() {
         "seek_relative" -> {
             // The cloud provides delta_seconds in seconds with the sign.
             // SlotRepair fills a signed default when absent; if still absent,
-            // let the sink apply the app's configured interval.
+            // null signals the sink to apply its own interval in direction.
             val seconds = call.intParam("delta_seconds")
-            VoiceIntent.Playback.SeekRelative(seconds ?: 0)
+            VoiceIntent.Playback.SeekRelative(seconds)
         }
 
         "seek_to" -> {

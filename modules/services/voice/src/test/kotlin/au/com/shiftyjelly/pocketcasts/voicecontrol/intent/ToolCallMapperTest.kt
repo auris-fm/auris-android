@@ -48,9 +48,9 @@ class ToolCallMapperTest {
     }
 
     @Test
-    fun `playback seek relative without delta uses default skip`() {
+    fun `playback seek relative without delta carries null`() {
         val result = mapper.map(ToolCall("playback", "seek_relative", emptyMap()))
-        assertEquals(VoiceIntent.Playback.SeekRelative(0), result)
+        assertEquals(VoiceIntent.Playback.SeekRelative(null), result)
     }
 
     @Test

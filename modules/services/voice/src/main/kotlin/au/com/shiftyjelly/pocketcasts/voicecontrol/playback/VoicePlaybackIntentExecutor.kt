@@ -73,13 +73,13 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         VoiceIntent.Playback.Resume -> playbackSink.resume()
 
         is VoiceIntent.Playback.SeekRelative -> {
-            // deltaSeconds is in seconds; 0 means "use sink's configured interval".
-            if (intent.deltaSeconds == 0) {
-                VoiceResponse.Silent
-            } else if (intent.deltaSeconds > 0) {
-                playbackSink.skipForward(intent.deltaSeconds)
+            // deltaSeconds is in seconds; null means "no amount stated —
+            // the sink should apply its configured interval in direction".
+            val delta = intent.deltaSeconds ?: return VoiceResponse.Silent
+            if (delta > 0) {
+                playbackSink.skipForward(delta)
             } else {
-                playbackSink.skipBackward(abs(intent.deltaSeconds))
+                playbackSink.skipBackward(abs(delta))
             }
         }
 

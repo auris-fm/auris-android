@@ -27,8 +27,7 @@ sealed class CloudRouteEvent {
         val codec: String,
         val bytes: ByteArray,
     ) : CloudRouteEvent() {
-        override fun equals(other: Any?): Boolean =
-            this === other || (other is AudioFrame && codec == other.codec && bytes.contentEquals(other.bytes))
+        override fun equals(other: Any?): Boolean = this === other || (other is AudioFrame && codec == other.codec && bytes.contentEquals(other.bytes))
 
         override fun hashCode(): Int = 31 * codec.hashCode() + bytes.contentHashCode()
 
@@ -37,4 +36,10 @@ sealed class CloudRouteEvent {
 
     /** Negotiated structured discovery results (only when advertised). */
     data class Result(val results: CloudSearchResults) : CloudRouteEvent()
+
+    /** WebSocket handshake acknowledgement — the server is ready for the auth frame. */
+    object Connected : CloudRouteEvent()
+
+    /** Server's auth response carrying the negotiated binary audio codec. */
+    data class AuthResponse(val codec: String) : CloudRouteEvent()
 }

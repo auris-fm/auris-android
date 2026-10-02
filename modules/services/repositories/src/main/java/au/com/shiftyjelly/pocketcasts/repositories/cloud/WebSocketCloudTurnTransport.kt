@@ -1,6 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
-import java.io.IOException
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -25,21 +25,36 @@ class WebSocketCloudTurnTransport(
 ) : CloudTurnTransport {
 
     override fun exchange(frame: CloudTurnFrame): Flow<CloudRouteEvent> = callbackFlow {
-        // The negotiated codec arrives in the handshake; the binary frames carry no codec of their
-        // own, so the client remembers what it offered and asks for the first it can play.
+        // The requested codec is a fallback; the server's auth response supplies the
+        // negotiated codec that binary frames should carry.
         val requestedCodec = (frame as CloudTurnFrame.Authenticate).codecs.firstOrNull().orEmpty()
+        val negotiatedCodec = AtomicReference<String>(requestedCodec)
         val request = Request.Builder()
             .url(baseUrl.trimEnd('/') + ROUTE_PATH)
             .build()
 
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                // A non-101 response means the server rejected the upgrade; send an error
+                // and close so the caller knows the transport failed.
+                if (response.code != 101) {
+                    Timber.w("Cloud route WebSocket rejected: %d %s", response.code, response.message)
+                    trySend(
+                        CloudRouteEvent.Error(
+                            code = CloudRouteErrorCodes.CONNECTION_LOST,
+                            message = "",
+                        ),
+                    )
+                    close()
+                    return
+                }
                 // The authentication frame is the whole request, so it goes first and alone.
                 webSocket.send(frame.toJson())
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                trySend(CloudRouteEvent.AudioFrame(codec = requestedCodec, bytes = bytes.toByteArray()))
+                val codec = negotiatedCodec.get()
+                trySend(CloudRouteEvent.AudioFrame(codec = codec, bytes = bytes.toByteArray()))
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -47,6 +62,10 @@ class WebSocketCloudTurnTransport(
                 if (event == null) {
                     Timber.w("Cloud route frame could not be decoded")
                     trySend(CloudRouteEvent.Error(code = CloudRouteErrorCodes.INVALID_RESPONSE, message = ""))
+                } else if (event is CloudRouteEvent.AuthResponse) {
+                    // Capture the server's negotiated codec for binary audio frames.
+                    negotiatedCodec.set(event.codec.ifBlank { requestedCodec })
+                    trySend(event)
                 } else {
                     trySend(event)
                 }

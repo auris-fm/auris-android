@@ -66,19 +66,28 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
-    fun `relative null seek does nothing`() = runTest {
+    fun `relative null seek with direction uses sink interval`() = runTest {
         // null deltaSeconds means "no amount stated — sink should apply its own
-        // interval in direction". The executor cannot act without direction info,
-        // so it returns Silent. This path is for the local matcher which always
-        // provides a non-null value; null is only reachable from the cloud path
-        // where the sink handles the null case in executeAction.
+        // interval in direction". The executor passes null so the sink uses the
+        // app's configured interval rather than a manufactured value.
         val sinks = FakeSinks()
         val executor = sinks.executor()
 
-        val response = executor.execute(VoiceIntent.Playback.SeekRelative(null))
+        val response = executor.execute(VoiceIntent.Playback.SeekRelative(null, "backward"))
 
         assertEquals(VoiceResponse.Silent, response)
-        assertEquals(emptyList<String>(), sinks.playback.calls)
+        assertEquals(listOf("skipBackward:null"), sinks.playback.calls)
+    }
+
+    @Test
+    fun `relative null seek without direction uses forward interval`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+
+        val response = executor.execute(VoiceIntent.Playback.SeekRelative(null, null))
+
+        assertEquals(VoiceResponse.Silent, response)
+        assertEquals(listOf("skipForward:null"), sinks.playback.calls)
     }
 
     @Test
@@ -455,11 +464,11 @@ class VoicePlaybackIntentExecutorTest {
             calls += "resume"
             return VoiceResponse.Silent
         }
-        override suspend fun skipForward(seconds: Int): VoiceResponse {
+        override suspend fun skipForward(seconds: Int?): VoiceResponse {
             calls += "skipForward:$seconds"
             return VoiceResponse.Silent
         }
-        override suspend fun skipBackward(seconds: Int): VoiceResponse {
+        override suspend fun skipBackward(seconds: Int?): VoiceResponse {
             calls += "skipBackward:$seconds"
             return VoiceResponse.Silent
         }

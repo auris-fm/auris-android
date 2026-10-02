@@ -31,13 +31,21 @@ internal object CloudRouteEvents {
                             params = (map["params"] as? Map<String, Any?>).orEmpty(),
                         )
                     }
+
                 "result" -> CloudRouteJson.resultAdapter.fromJson(payload)
                     ?.let { CloudRouteEvent.Result(it) }
+
                 "done" -> CloudRouteJson.doneAdapter.fromJson(payload)
                     ?.let { CloudRouteEvent.Done(inputTokens = it.inputTokens, outputTokens = it.outputTokens) }
+
+                "auth" -> CloudRouteJson.authResponseAdapter.fromJson(payload)
+                    ?.let { CloudRouteEvent.AuthResponse(codec = it.codec.orEmpty()) }
+
                 "error" -> CloudRouteJson.errorAdapter.fromJson(payload)
                     ?.let { CloudRouteEvent.Error(code = it.code, message = it.message) }
-                "connected" -> null // Handshake acknowledgement; nothing to surface.
+
+                "connected" -> CloudRouteEvent.Connected
+
                 else -> null
             }
         }.getOrNull()

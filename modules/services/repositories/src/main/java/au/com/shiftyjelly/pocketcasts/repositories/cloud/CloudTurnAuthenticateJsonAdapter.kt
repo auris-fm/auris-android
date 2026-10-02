@@ -4,6 +4,7 @@ import com.squareup.moshi.JsonAdapter
 import com.squareup.moshi.JsonReader
 import com.squareup.moshi.JsonWriter
 import com.squareup.moshi.Moshi
+import okio.Buffer
 
 /**
  * Serialises the authentication frame, the first message on a turn.
@@ -15,7 +16,13 @@ import com.squareup.moshi.Moshi
 internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<CloudTurnFrame.Authenticate>() {
     private val contextAdapter = moshi.adapter(CloudRouteContext::class.java)
     private val options = JsonReader.Options.of(
-        "type", "access_token", "request_id", "request", "context", "capabilities", "codecs",
+        "type",
+        "access_token",
+        "request_id",
+        "request",
+        "context",
+        "capabilities",
+        "codecs",
     )
 
     override fun toJson(writer: JsonWriter, value: CloudTurnFrame.Authenticate?) {
@@ -28,7 +35,11 @@ internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<Clou
         writer.name("access_token").value(value.accessToken)
         writer.name("request_id").value(value.requestId)
         writer.name("request").value(value.request)
-        writer.name("context").jsonValue(contextAdapter.toJson(value.context))
+        val contextJson = contextAdapter.toJson(value.context)
+        if (contextJson.isNotEmpty()) {
+            writer.name("context")
+                .jsonValue(JsonReader.of(Buffer().writeUtf8(contextJson)))
+        }
         if (value.capabilities.isNotEmpty()) {
             writer.name("capabilities")
             writer.beginArray()

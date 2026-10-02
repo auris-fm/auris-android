@@ -8,9 +8,9 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
-import timber.log.Timber
 import java.nio.ByteBuffer
 import kotlin.math.max
+import timber.log.Timber
 
 /**
  * Plays binary audio frames from the cloud route.
@@ -47,6 +47,14 @@ class CloudAudioPlayer(
     /** Negotiated codec name; empty means PCM. */
     var codec: String = ""
         internal set
+
+    /** Update the codec after the server's auth response, before any audio frames arrive. */
+    fun setCodec(name: String) {
+        if (name != codec) {
+            codec = name
+            Timber.i("[CloudAudio] negotiated codec: %s", name)
+        }
+    }
 
     /** True while audio is actively being played (not paused, not idle). */
     val isPlaying: Boolean get() = playing && !paused
@@ -104,6 +112,20 @@ class CloudAudioPlayer(
                 Timber.i("[CloudAudio] paused")
             }
         }
+    }
+
+    /**
+     * Drain remaining buffered frames to the audio track, then stop and discard.
+     *
+     * Use this on turn completion so the last audio frames land before the player
+     * resets. Call [stop] when a turn is superseded and stale frames must not play.
+     */
+    fun drainAndStop() {
+        if (released) return
+        synchronized(frameBuffer) {
+            drainFrames()
+        }
+        stop()
     }
 
     /**
@@ -208,8 +230,10 @@ class CloudAudioPlayer(
                 sampleRateHz,
                 if (channelConfig == AudioFormat.CHANNEL_OUT_STEREO) 2 else 1,
             )
-            format.setString(MediaFormat.KEY_CHANNEL_COUNT,
-                if (channelConfig == AudioFormat.CHANNEL_OUT_STEREO) "2" else "1")
+            format.setString(
+                MediaFormat.KEY_CHANNEL_COUNT,
+                if (channelConfig == AudioFormat.CHANNEL_OUT_STEREO) "2" else "1",
+            )
             format.setInteger(MediaFormat.KEY_SAMPLE_RATE, sampleRateHz)
 
             try {
@@ -236,7 +260,7 @@ class CloudAudioPlayer(
                 0,
                 input.size,
                 0,
-                MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+                0,
             )
         }
 

@@ -251,7 +251,6 @@ abstract class VoiceControlModule {
         @Singleton
         fun provideCloudAudioPlayer(
             @ApplicationContext context: Context,
-        ): au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer =
-            au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer(context)
+        ): au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer(context)
     }
 }

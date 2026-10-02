@@ -230,6 +230,16 @@ class CloudRouteSink internal constructor(
             events.collect { event ->
                 if (outcome != null) return@collect
                 when (event) {
+                    is CloudRouteEvent.Connected -> {
+                        // Handshake acknowledgement; the server is ready for the auth frame.
+                    }
+
+                    is CloudRouteEvent.AuthResponse -> {
+                        // Server chose a codec; propagate it to the audio player so
+                        // it creates the correct decoder.
+                        audioPlayer?.setCodec(event.codec)
+                    }
+
                     is CloudRouteEvent.Action -> {
                         // Only a *performed* action counts: executeAction ignores an unknown tool,
                         // an unknown action, missing parameters and superseded turns, and an ignored
@@ -257,9 +267,9 @@ class CloudRouteSink internal constructor(
                             inputTokens = event.inputTokens,
                             outputTokens = event.outputTokens,
                         )
-                        // Stop playback after the last audio frame lands.
+                        // Drain queued frames so the last audio lands, then stop.
                         if (audioPlayed) {
-                            audioPlayer?.stop()
+                            audioPlayer?.drainAndStop()
                         }
                         // Not redundant with the memory's own blank check: a
                         // blank answer is not an exchange, and record() would
@@ -269,6 +279,12 @@ class CloudRouteSink internal constructor(
                         }
                         outcome = when {
                             audioPlayed -> VoiceResponse.Silent
+
+                            audioPlayer != null -> {
+                                // WebSocket path expected audio but none arrived —
+                                // explicit failure rather than speaking leftover tokens.
+                                VoiceResponse.Earcon(EarconId.ERROR)
+                            }
 
                             tokenBuffer.isNotBlank() -> VoiceResponse.Spoken(tokenBuffer)
 
@@ -473,7 +489,7 @@ class CloudRouteSink internal constructor(
 
                 "stop_quote" -> {
                     val restoreMs = turnState.preQuotePositionMs ?: return@withLock false
-                    playbackSink.seekTo(restoreMs.toInt())
+                    playbackSink.seekTo(restoreMs.toInt() / 1000)
                     true
                 }
 
@@ -491,6 +507,25 @@ class CloudRouteSink internal constructor(
                     // cannot leave the flag describing a state we failed to reach.
                     playerAutoPaused = false
                     playbackSink.resume()
+                    true
+                }
+
+                "seek_relative" -> {
+                    val delta = (params["delta_seconds"] as? Number)?.toInt()
+                    val direction = params["direction"] as? String
+                    when {
+                        delta != null && delta != 0 -> {
+                            if (delta > 0) {
+                                playbackSink.skipForward(delta)
+                            } else {
+                                playbackSink.skipBackward(-delta)
+                            }
+                        }
+
+                        direction == "backward" -> playbackSink.skipBackward(null)
+
+                        else -> playbackSink.skipForward(null)
+                    }
                     true
                 }
 
@@ -523,7 +558,7 @@ class CloudRouteSink internal constructor(
         val referenceSeconds = referenceMs / 1000.0
         val playbackMs = fingerprintTimingManager.playbackTimeMs(referenceSeconds)
             ?: referenceMs.toInt()
-        playbackSink.seekTo(playbackMs.coerceAtLeast(0))
+        playbackSink.seekTo((playbackMs / 1000).coerceAtLeast(0))
     }
 
     private fun Map<String, Any?>.referencePositionMs(): Long? {

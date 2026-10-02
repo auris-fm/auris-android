@@ -4,7 +4,10 @@ sealed interface VoiceIntent {
     sealed interface Playback : VoiceIntent {
         data object Pause : Playback
         data object Resume : Playback
-        data class SeekRelative(val deltaSeconds: Int?) : Playback  // null when the request stated no amount; the sink applies its own interval in direction
+        data class SeekRelative(
+            val deltaSeconds: Int?,
+            val direction: String? = null,
+        ) : Playback // deltaSeconds: null = no amount; direction: the requested direction; sink applies its own interval
         data class SeekAbsolute(val positionSeconds: Int) : Playback
         data object NextEpisode : Playback
     }

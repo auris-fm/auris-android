@@ -175,8 +175,11 @@ object SlotRepair {
                     // negative into a positive or the reverse.
                     // A zero has no sign to preserve — fill from utterance.
                     val existingSign = when (existing) {
-                        is Int -> existing.compareTo(0) // 1, 0, -1
+                        is Int -> existing.compareTo(0)
+
+                        // 1, 0, -1
                         is Long -> existing.compareTo(0)
+
                         else -> 0
                     }
                     val extractedValue = when (rawValue) {
@@ -185,15 +188,19 @@ object SlotRepair {
                         else -> 0
                     }
                     out[key] = when {
-                        existingSign == 0 -> extractedValue // fill absent / zero from utterance
+                        existingSign == 0 -> extractedValue
+
+                        // fill absent / zero from utterance
                         existingSign != 0 -> {
                             // Keep existing sign, apply extracted magnitude
                             val magnitude = kotlin.math.abs(extractedValue)
                             existingSign * magnitude
                         }
+
                         else -> extractedValue
                     }
                 }
+
                 else -> {
                     // For other numeric params, overwrite as before.
                     out[key] = rawValue
@@ -236,11 +243,16 @@ object SlotRepair {
         val direction = params["direction"] as? String
         val signed = when {
             direction == "backward" -> -DEFAULT_SKIP_SECONDS
+
             direction == "forward" -> DEFAULT_SKIP_SECONDS
+
             else -> {
                 // Fallback to utterance wording for cases like "skip" or "jump".
-                if (BACK_REGEX.containsMatchIn(utterance.lowercase())) -DEFAULT_SKIP_SECONDS
-                else DEFAULT_SKIP_SECONDS
+                if (BACK_REGEX.containsMatchIn(utterance.lowercase())) {
+                    -DEFAULT_SKIP_SECONDS
+                } else {
+                    DEFAULT_SKIP_SECONDS
+                }
             }
         }
         return params + ("delta_seconds" to signed)

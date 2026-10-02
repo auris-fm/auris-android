@@ -141,7 +141,7 @@ class CloudRouteSinkTest {
         // reference-timeline conversion (45s reference == 60s playback here).
         assertEquals(45_000L, state.snapshot().previousReferencePositionMs)
         // stop_quote recovery still uses the playback-timeline position.
-        assertTrue(deps.playback.calls.contains("seekTo:45000"))
+        assertTrue(deps.playback.calls.contains("seekTo:45"))
         assertTrue(deps.playback.calls.contains("resume"))
     }
 
@@ -258,7 +258,7 @@ class CloudRouteSinkTest {
 
         sink.routeToCloud("go back", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        assertTrue(deps.playback.calls.contains("seekTo:45000"))
+        assertTrue(deps.playback.calls.contains("seekTo:45"))
     }
 
     @Test
@@ -280,7 +280,7 @@ class CloudRouteSinkTest {
 
         sink.routeToCloud("go back", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        assertTrue(deps.playback.calls.contains("seekTo:1130000"))
+        assertTrue(deps.playback.calls.contains("seekTo:1130"))
     }
 
     @Test
@@ -301,7 +301,7 @@ class CloudRouteSinkTest {
         sink.routeToCloud("play quote", VoiceIntent.CloudTier.Premium, playbackContext)
 
         assertEquals(
-            listOf("pause", "seekTo:900000", "resume"),
+            listOf("pause", "seekTo:900", "resume"),
             deps.playback.calls,
         )
     }
@@ -324,7 +324,7 @@ class CloudRouteSinkTest {
 
         sink.routeToCloud("quote", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        assertTrue(deps.playback.calls.contains("seekTo:60000"))
+        assertTrue(deps.playback.calls.contains("seekTo:60"))
     }
 
     @Test
@@ -420,8 +420,8 @@ class CloudRouteSinkTest {
 
         sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        assertTrue(deps.playback.calls.contains("seekTo:500000"))
-        assertTrue(!deps.playback.calls.contains("seekTo:50000"))
+        assertTrue(deps.playback.calls.contains("seekTo:500"))
+        assertTrue(!deps.playback.calls.contains("seekTo:50"))
     }
 
     @Test
@@ -649,7 +649,7 @@ class CloudRouteSinkTest {
         val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
 
         // The executed seek is not rolled back; the partial speech is dropped.
-        assertTrue(deps.playback.calls.contains("seekTo:500000"))
+        assertTrue(deps.playback.calls.contains("seekTo:500"))
         // Deliberately changed: the client speaks its own words for the code, never the
         // server's message (which here was the same sentence by coincidence).
         assertEquals(VoiceResponse.Spoken("The assistant couldn't finish that request."), response)
@@ -1286,11 +1286,11 @@ class CloudRouteSinkTest {
             return VoiceResponse.Silent
         }
 
-        override suspend fun skipForward(seconds: Int): VoiceResponse = VoiceResponse.Silent
-        override suspend fun skipBackward(seconds: Int): VoiceResponse = VoiceResponse.Silent
+        override suspend fun skipForward(seconds: Int?): VoiceResponse = VoiceResponse.Silent
+        override suspend fun skipBackward(seconds: Int?): VoiceResponse = VoiceResponse.Silent
 
-        override suspend fun seekTo(positionMs: Int): VoiceResponse {
-            calls += "seekTo:$positionMs"
+        override suspend fun seekTo(positionSeconds: Int): VoiceResponse {
+            calls += "seekTo:$positionSeconds"
             return VoiceResponse.Silent
         }
 

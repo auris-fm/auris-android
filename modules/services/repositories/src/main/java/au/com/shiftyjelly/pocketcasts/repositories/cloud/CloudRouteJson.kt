@@ -11,8 +11,11 @@ internal object CloudRouteJson {
     val moshi: Moshi = Moshi.Builder().build()
 
     val requestBodyAdapter = CloudRouteRequestBodyJsonAdapter(moshi)
+    val authenticateAdapter: JsonAdapter<CloudTurnFrame.Authenticate> =
+        CloudTurnAuthenticateJsonAdapter(moshi)
     val tokenAdapter: JsonAdapter<CloudRouteTokenPayload> = CloudRouteTokenPayloadJsonAdapter(moshi)
     val doneAdapter: JsonAdapter<CloudRouteDonePayload> = CloudRouteDonePayloadJsonAdapter(moshi)
+    val authResponseAdapter: JsonAdapter<CloudRouteAuthResponse> = CloudRouteAuthResponseJsonAdapter(moshi)
     val errorAdapter: JsonAdapter<CloudRouteErrorPayload> = CloudRouteErrorPayloadJsonAdapter(moshi)
     val httpErrorAdapter: JsonAdapter<CloudRouteHttpErrorPayload> = CloudRouteHttpErrorPayloadJsonAdapter(moshi)
     val flexibleMapAdapter: JsonAdapter<Map<String, Any?>> = FlexibleMapAdapter()

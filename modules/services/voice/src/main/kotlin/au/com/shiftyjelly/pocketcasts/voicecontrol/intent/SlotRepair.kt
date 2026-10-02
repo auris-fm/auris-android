@@ -66,7 +66,7 @@ object SlotRepair {
     private val ACTION_PARAMS: Map<Pair<String, String>, Set<String>> = mapOf(
         "playback" to "pause" to emptySet(),
         "playback" to "resume" to emptySet(),
-        "playback" to "seek_relative" to setOf("delta_seconds"),
+        "playback" to "seek_relative" to setOf("delta_seconds", "direction"),
         "playback" to "seek_to" to setOf("position_seconds"),
         "playback" to "next_episode" to emptySet(),
         "effects" to "set_speed" to setOf("speed"),
@@ -165,9 +165,46 @@ object SlotRepair {
         val allowed = allowedParams(tool, action)
         val extracted = extractNumericSlots(tool, action, utterance)
         val out = params.toMutableMap()
-        for ((key, value) in extracted) {
-            if (key in allowed) {
-                out[key] = value
+        for ((key, rawValue) in extracted) {
+            if (key !in allowed) continue
+            val existing = out[key]
+            when (key) {
+                "delta_seconds" -> {
+                    // Preserve the sign the call produced; repair may correct a
+                    // magnitude (0, a wrong unit count) but must never turn a
+                    // negative into a positive or the reverse.
+                    // A zero has no sign to preserve — fill from utterance.
+                    val existingSign = when (existing) {
+                        is Int -> existing.compareTo(0)
+
+                        // 1, 0, -1
+                        is Long -> existing.compareTo(0)
+
+                        else -> 0
+                    }
+                    val extractedValue = when (rawValue) {
+                        is Int -> rawValue
+                        is Long -> rawValue.toInt()
+                        else -> 0
+                    }
+                    out[key] = when {
+                        existingSign == 0 -> extractedValue
+
+                        // fill absent / zero from utterance
+                        existingSign != 0 -> {
+                            // Keep existing sign, apply extracted magnitude
+                            val magnitude = kotlin.math.abs(extractedValue)
+                            existingSign * magnitude
+                        }
+
+                        else -> extractedValue
+                    }
+                }
+
+                else -> {
+                    // For other numeric params, overwrite as before.
+                    out[key] = rawValue
+                }
             }
         }
         return out
@@ -193,7 +230,7 @@ object SlotRepair {
         return if (BACK_REGEX.containsMatchIn(lower)) -seconds else seconds
     }
 
-    /** When the model omits delta_seconds, fill a signed ±30s default from wording. */
+    /** When the model omits delta_seconds, fill a signed default from direction or wording. */
     private fun fillSeekRelativeDefault(
         tool: String,
         action: String,
@@ -202,7 +239,22 @@ object SlotRepair {
     ): Map<String, Any?> {
         if (tool != "playback" || action != "seek_relative") return params
         if (params.containsKey("delta_seconds")) return params
-        val signed = if (BACK_REGEX.containsMatchIn(utterance.lowercase())) -DEFAULT_SKIP_SECONDS else DEFAULT_SKIP_SECONDS
+        // If direction was produced, infer the sign from it rather than the utterance.
+        val direction = params["direction"] as? String
+        val signed = when {
+            direction == "backward" -> -DEFAULT_SKIP_SECONDS
+
+            direction == "forward" -> DEFAULT_SKIP_SECONDS
+
+            else -> {
+                // Fallback to utterance wording for cases like "skip" or "jump".
+                if (BACK_REGEX.containsMatchIn(utterance.lowercase())) {
+                    -DEFAULT_SKIP_SECONDS
+                } else {
+                    DEFAULT_SKIP_SECONDS
+                }
+            }
+        }
         return params + ("delta_seconds" to signed)
     }
 

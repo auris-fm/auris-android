@@ -29,15 +29,17 @@ class ToolCallMapper @Inject constructor() {
         "resume" -> VoiceIntent.Playback.Resume
 
         "seek_relative" -> {
-            // Last-resort magnitude when SlotRepair did not fill a signed default.
-            // Prefer SlotRepair's utterance-aware ±30s; this is not the user skip setting.
-            val seconds = call.intParam("delta_seconds") ?: 30
-            VoiceIntent.Playback.SeekRelative(seconds * 1000)
+            // deltaSeconds: null when the request stated no amount — the sink
+            // applies its own interval in direction. The direction comes from
+            // the tool call params (produced by the model or SlotRepair).
+            val seconds = call.intParam("delta_seconds")
+            val direction = call.params["direction"] as? String
+            VoiceIntent.Playback.SeekRelative(seconds, direction)
         }
 
         "seek_to" -> {
             val seconds = call.intParam("position_seconds") ?: return null
-            VoiceIntent.Playback.SeekAbsolute(seconds * 1000)
+            VoiceIntent.Playback.SeekAbsolute(seconds)
         }
 
         "next_episode" -> VoiceIntent.Playback.NextEpisode

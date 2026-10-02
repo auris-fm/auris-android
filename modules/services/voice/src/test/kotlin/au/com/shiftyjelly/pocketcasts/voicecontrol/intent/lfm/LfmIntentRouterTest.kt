@@ -316,7 +316,7 @@ class LfmIntentRouterTest {
 
         router.ensureReady().getOrThrow()
         assertEquals(
-            VoiceIntent.Playback.SeekRelative(-60_000),
+            VoiceIntent.Playback.SeekRelative(-60),
             router.recognize(english("go back a minute"), RECOGNITION_CONTEXT).intent,
         )
     }

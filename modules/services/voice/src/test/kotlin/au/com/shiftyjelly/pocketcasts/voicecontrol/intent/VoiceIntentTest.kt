@@ -5,10 +5,17 @@ import org.junit.Test
 
 class VoiceIntentTest {
     @Test
-    fun `seek relative stores milliseconds`() {
-        val intent = VoiceIntent.Playback.SeekRelative(deltaMs = 30_000)
+    fun `seek relative stores seconds`() {
+        val intent = VoiceIntent.Playback.SeekRelative(deltaSeconds = 30)
 
-        assertEquals(30_000, intent.deltaMs)
+        assertEquals(30, intent.deltaSeconds)
+    }
+
+    @Test
+    fun `seek relative stores null when no amount stated`() {
+        val intent = VoiceIntent.Playback.SeekRelative(null)
+
+        assertEquals(null, intent.deltaSeconds)
     }
 
     @Test

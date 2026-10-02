@@ -153,3 +153,9 @@ internal data class CloudRouteHttpErrorPayload(
     val message: String? = null,
     val error: String? = null,
 )
+
+/** Server's auth-response payload: the codec it negotiated for the binary audio path. */
+@JsonClass(generateAdapter = true)
+internal data class CloudRouteAuthResponse(
+    val codec: String?,
+)

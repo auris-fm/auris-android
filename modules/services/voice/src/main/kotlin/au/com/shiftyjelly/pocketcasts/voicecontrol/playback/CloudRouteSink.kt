@@ -14,6 +14,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudIdentity
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
@@ -64,6 +65,8 @@ class CloudRouteSink internal constructor(
      * restore over them.
      */
     private val playbackCommandRevision: () -> Long = { 0L },
+    /** Audio player for cloud-delivered binary audio frames. Null when SSE-only. */
+    private val audioPlayer: CloudAudioPlayer? = null,
 ) : VoiceCloudRouteSink {
 
     @Inject constructor(
@@ -77,6 +80,7 @@ class CloudRouteSink internal constructor(
         templateResolver: SpokenTemplateResolver,
         currentLocale: () -> Locale,
         playbackContextMonitor: PlaybackContextMonitor,
+        audioPlayer: CloudAudioPlayer?,
     ) : this(
         resolveBaseUrl = cloudConfig::baseUrl,
         tokenProvider = tokenProvider,
@@ -85,6 +89,7 @@ class CloudRouteSink internal constructor(
         playbackContextProvider = playbackContextProvider,
         cloudPlaybackContextState = cloudPlaybackContextState,
         analytics = analytics,
+        audioPlayer = audioPlayer,
         routeInvoker = null,
         searchResultsRenderer = null,
         conversationMemory = CloudConversationMemory(),
@@ -169,6 +174,7 @@ class CloudRouteSink internal constructor(
         var tokenBuffer = ""
         var executedAction = false
         var handledResult = false
+        var audioPlayed = false
         var outcome: VoiceResponse? = null
 
         // Everything from registration onward sits inside the cleanup path: a
@@ -224,12 +230,33 @@ class CloudRouteSink internal constructor(
             events.collect { event ->
                 if (outcome != null) return@collect
                 when (event) {
+                    is CloudRouteEvent.Connected -> {
+                        // Handshake acknowledgement; the server is ready for the auth frame.
+                    }
+
+                    is CloudRouteEvent.AuthResponse -> {
+                        // Server chose a codec; propagate it to the audio player so
+                        // it creates the correct decoder.
+                        audioPlayer?.setCodec(event.codec)
+                    }
+
                     is CloudRouteEvent.Action -> {
                         // Only a *performed* action counts: executeAction ignores an unknown tool,
                         // an unknown action, missing parameters and superseded turns, and an ignored
                         // action followed by a blank Done must not pass for a turn that delivered
                         // something.
                         executedAction = executeAction(event.tool, event.action, event.params, turnState, myId) || executedAction
+                    }
+
+                    is CloudRouteEvent.AudioFrame -> {
+                        // Binary audio from the WebSocket path: submit to the player
+                        // for buffered playback. The SSE fallback uses Token accumulation
+                        // instead, so this branch is a no-op on that path.
+                        audioPlayer?.submitFrame(event.bytes)
+                        if (!audioPlayed) {
+                            audioPlayer?.play()
+                            audioPlayed = true
+                        }
                     }
 
                     is CloudRouteEvent.Token -> tokenBuffer += event.text
@@ -240,6 +267,10 @@ class CloudRouteSink internal constructor(
                             inputTokens = event.inputTokens,
                             outputTokens = event.outputTokens,
                         )
+                        // Drain queued frames so the last audio lands, then stop.
+                        if (audioPlayed) {
+                            audioPlayer?.drainAndStop()
+                        }
                         // Not redundant with the memory's own blank check: a
                         // blank answer is not an exchange, and record() would
                         // still add the user half of one.
@@ -247,6 +278,14 @@ class CloudRouteSink internal constructor(
                             conversationMemory.record(request, tokenBuffer)
                         }
                         outcome = when {
+                            audioPlayed -> VoiceResponse.Silent
+
+                            audioPlayer != null -> {
+                                // WebSocket path expected audio but none arrived —
+                                // explicit failure rather than speaking leftover tokens.
+                                VoiceResponse.Earcon(EarconId.ERROR)
+                            }
+
                             tokenBuffer.isNotBlank() -> VoiceResponse.Spoken(tokenBuffer)
 
                             // The turn delivered something else — an action it actually performed,
@@ -346,6 +385,11 @@ class CloudRouteSink internal constructor(
             withContext(NonCancellable) {
                 turnMutex.withLock {
                     if (activeTurnId == myId) {
+                        // Stop cloud audio if it was playing but the turn ended
+                        // abnormally (cancellation, timeout, error).
+                        if (audioPlayed) {
+                            audioPlayer?.stop()
+                        }
                         restoreTransientAudioState()
                         activeTurnId = 0
                         activeTurn = null
@@ -445,7 +489,7 @@ class CloudRouteSink internal constructor(
 
                 "stop_quote" -> {
                     val restoreMs = turnState.preQuotePositionMs ?: return@withLock false
-                    playbackSink.seekTo(restoreMs.toInt())
+                    playbackSink.seekTo(restoreMs.toInt() / 1000)
                     true
                 }
 
@@ -463,6 +507,25 @@ class CloudRouteSink internal constructor(
                     // cannot leave the flag describing a state we failed to reach.
                     playerAutoPaused = false
                     playbackSink.resume()
+                    true
+                }
+
+                "seek_relative" -> {
+                    val delta = (params["delta_seconds"] as? Number)?.toInt()
+                    val direction = params["direction"] as? String
+                    when {
+                        delta != null && delta != 0 -> {
+                            if (delta > 0) {
+                                playbackSink.skipForward(delta)
+                            } else {
+                                playbackSink.skipBackward(-delta)
+                            }
+                        }
+
+                        direction == "backward" -> playbackSink.skipBackward(null)
+
+                        else -> playbackSink.skipForward(null)
+                    }
                     true
                 }
 
@@ -495,7 +558,7 @@ class CloudRouteSink internal constructor(
         val referenceSeconds = referenceMs / 1000.0
         val playbackMs = fingerprintTimingManager.playbackTimeMs(referenceSeconds)
             ?: referenceMs.toInt()
-        playbackSink.seekTo(playbackMs.coerceAtLeast(0))
+        playbackSink.seekTo((playbackMs / 1000).coerceAtLeast(0))
     }
 
     private fun Map<String, Any?>.referencePositionMs(): Long? {

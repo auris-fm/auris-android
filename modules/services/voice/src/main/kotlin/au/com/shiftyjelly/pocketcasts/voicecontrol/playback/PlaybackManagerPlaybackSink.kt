@@ -21,18 +21,18 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         return VoiceResponse.Silent
     }
 
-    override suspend fun skipForward(seconds: Int): VoiceResponse {
+    override suspend fun skipForward(seconds: Int?): VoiceResponse {
         playbackManager.skipForwardSuspend(SourceView.VOICE_COMMANDS, seconds)
         return VoiceResponse.Silent
     }
 
-    override suspend fun skipBackward(seconds: Int): VoiceResponse {
+    override suspend fun skipBackward(seconds: Int?): VoiceResponse {
         playbackManager.skipBackwardSuspend(SourceView.VOICE_COMMANDS, seconds)
         return VoiceResponse.Silent
     }
 
-    override suspend fun seekTo(positionMs: Int): VoiceResponse {
-        playbackManager.seekToTimeMsSuspend(positionMs)
+    override suspend fun seekTo(positionSeconds: Int): VoiceResponse {
+        playbackManager.seekToTimeMsSuspend(positionSeconds * 1000)
         return VoiceResponse.Silent
     }
 

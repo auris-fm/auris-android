@@ -118,4 +118,107 @@ class SlotRepairTest {
         )
         assertEquals(-30, backwards!!.params["delta_seconds"])
     }
+
+    // -- shared fixture: relative_seek_repair.json --
+
+    @Test
+    fun repair_preservesSign_whenDeltaNonZero() {
+        // Case: "Nudge it backwards fifteen seconds" — predicted -1 → repaired -15
+        val r = SlotRepair.repair(
+            raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=-1)]<|tool_call_end|>",
+            utterance = "Nudge it backwards fifteen seconds",
+            tool = "playback",
+            action = "seek_relative",
+        )
+        // Sign preserved, magnitude corrected from utterance
+        assertEquals(-15, r!!.params["delta_seconds"])
+    }
+
+    @Test
+    fun repair_correctsMagnitude_preservesPositiveSign() {
+        // Case: "rewind fifteen seconds" — predicted 1 → repaired 15 (keep positive sign)
+        val r = SlotRepair.repair(
+            raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=1)]<|tool_call_end|>",
+            utterance = "rewind fifteen seconds",
+            tool = "playback",
+            action = "seek_relative",
+        )
+        // Sign preserved (positive), magnitude corrected
+        assertEquals(15, r!!.params["delta_seconds"])
+    }
+
+    @Test
+    fun repair_fillsFromUtterance_whenDeltaZero() {
+        // Case: "rewind fifteen seconds" — predicted 0 → repaired -15
+        val r = SlotRepair.repair(
+            raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=0)]<|tool_call_end|>",
+            utterance = "rewind fifteen seconds",
+            tool = "playback",
+            action = "seek_relative",
+        )
+        // Zero has no sign — fill from utterance
+        assertEquals(-15, r!!.params["delta_seconds"])
+    }
+
+    @Test
+    fun repair_preservesDirection() {
+        // Case: "go back" — predicted backward → repaired backward
+        val r = SlotRepair.repair(
+            raw = "<|tool_call_start|>[playback(action='seek_relative', direction='backward')]<|tool_call_end|>",
+            utterance = "go back",
+            tool = "playback",
+            action = "seek_relative",
+        )
+        assertEquals("backward", r!!.params["direction"])
+    }
+
+    @Test
+    fun repair_preservesDirection_withPositiveDelta() {
+        // Case: "rewind fifteen seconds" — predicted delta=1, direction=backward → repaired delta=15, direction=backward
+        val r = SlotRepair.repair(
+            raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=1, direction='backward')]<|tool_call_end|>",
+            utterance = "rewind fifteen seconds",
+            tool = "playback",
+            action = "seek_relative",
+        )!!
+        assertEquals(15, r.params["delta_seconds"])
+        assertEquals("backward", r.params["direction"])
+    }
+
+    @Test
+    fun repair_fillsDeltaFromDirection_whenAbsent() {
+        // Case: "go back a minute" — predicted direction=backward → repaired direction=backward, delta=-60
+        val r = SlotRepair.repair(
+            raw = "<|tool_call_start|>[playback(action='seek_relative', direction='backward')]<|tool_call_end|>",
+            utterance = "go back a minute",
+            tool = "playback",
+            action = "seek_relative",
+        )!!
+        assertEquals("backward", r.params["direction"])
+        assertEquals(-60, r.params["delta_seconds"])
+    }
+
+    @Test
+    fun repair_correctsMagnitude_preservesDirection() {
+        // Case: "jump four minutes" — predicted delta=4 → repaired delta=240
+        val r = SlotRepair.repair(
+            raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=4)]<|tool_call_end|>",
+            utterance = "jump four minutes",
+            tool = "playback",
+            action = "seek_relative",
+        )
+        assertEquals(240, r!!.params["delta_seconds"])
+    }
+
+    @Test
+    fun repair_fillsDeltaFromDirectionDefault() {
+        // Case: "back that up a minute" — predicted {} → repaired delta=-60
+        val r = SlotRepair.repair(
+            raw = "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
+            utterance = "back that up a minute",
+            tool = "playback",
+            action = "seek_relative",
+        )
+        assertEquals(-60, r!!.params["delta_seconds"])
+    }
 }

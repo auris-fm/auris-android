@@ -380,7 +380,12 @@ class VoiceAsrEngine @Inject constructor(
 
         // No usable intent: three outcomes, decided in one place
         // (see [CloudEscalationPolicy] for which reason lands where).
-        when (CloudEscalationPolicy.decide(reason, addressed)) {
+        val escalation = CloudEscalationPolicy.decide(reason, addressed)
+        Timber.d(
+            "[VoicePipeline] escalation reason=%s addressed=%s → %s",
+            reason, addressed, escalation,
+        )
+        when (escalation) {
             // A rejection, not a failure. A wake-negative capture lands here — a follow-up the wake
             // did not cover in its own segment, or speech caught from the room.
             // Heard something we could not route and the user was not addressing us: a tone is
@@ -494,6 +499,10 @@ class VoiceAsrEngine @Inject constructor(
                 dropWithError = true,
             )
         }
+        Timber.d(
+            "[VoicePipeline] translate %s→en '%s' → '%s'",
+            detected, trimmed.text, translated,
+        )
         if (translated.isBlank()) {
             return RoutePrep(
                 input = null,

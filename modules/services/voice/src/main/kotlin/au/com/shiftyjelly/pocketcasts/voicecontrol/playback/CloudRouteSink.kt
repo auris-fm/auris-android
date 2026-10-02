@@ -416,6 +416,10 @@ class CloudRouteSink internal constructor(
         turnState: TurnState,
         myId: Long,
     ): Boolean {
+        Timber.d(
+            "[VoicePipeline] cloud action tool=%s action=%s params=%s",
+            tool, action, params,
+        )
         if (tool != "playback") return false
 
         // Player-state changes are serialized with ownership: a superseded

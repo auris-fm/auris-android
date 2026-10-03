@@ -1,10 +1,13 @@
 package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -84,16 +87,32 @@ class WebSocketCloudTurnTransport(
         }
 
         val socket = okHttpClient.newWebSocket(request, listener)
-        awaitClose {
-            socket.cancel()
+
+        // Launch collection BEFORE awaitClose so it runs concurrently with the
+        // socket being open. awaitClose suspends until the callbackFlow is
+        // cancelled, so any code after it would not execute while the socket
+        // is active. The launched job forwards channel events to the flow,
+        // and is cancelled when the flow is cancelled (which also cancels the
+        // socket via the awaitClose cleanup).
+        val collectionJob = launch {
+            try {
+                channel.consumeEach { event ->
+                    trySend(event)
+                }
+            } catch (_: CancellationException) {
+                // Normal cancellation — the flow was cancelled.
+            } catch (e: Exception) {
+                Timber.w(e, "Cloud route collection failed")
+                emitOrFail(channel, CloudRouteEvent.Error(
+                    code = CloudRouteErrorCodes.CONNECTION_LOST,
+                    message = e.message ?: "",
+                ))
+            }
         }
 
-        // Collect from the explicit channel and forward to the callbackFlow.
-        // consumeEach suspends until an element is available, then forwards it.
-        // This must come BEFORE awaitClose so events flow through the entire
-        // lifecycle: listener → channel → callbackFlow → consumer.
-        channel.consumeEach { event ->
-            trySend(event)
+        awaitClose {
+            socket.cancel()
+            collectionJob.cancel()
         }
     }
 

@@ -1,4 +1,4 @@
-# PR 38 Review Mapping — Current Head (55b7914be)
+# PR 38 Review Mapping — Current Head (5f0f946cb)
 
 ## Routing Blockers
 
@@ -77,22 +77,22 @@
 - **Evidence**: `CloudRouteSink.kt` line 271-272, `CloudAudioPlayer.kt` `drainAndStop()`
 
 ### 15. New standalone AudioTrack bypasses shared output path ✅ FIXED
-- **Commit**: 55b7914be
+- **Commit**: 5f0f946cb
 - **Change**: Added `duck()` and `restore()` to `VoicePlaybackSink`. `PlaybackManagerPlaybackSink.duck()` requests `AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK` focus. `CloudRouteSink` calls `duck()` on first audio frame and `restore()` on Done. Host player's `FocusManager` handles volume ducking via existing `VOLUME_DUCK` path.
 - **Evidence**: `PlaybackManagerPlaybackSink.kt`, `CloudRouteSink.kt`
 
 ### 16. audioPlayed reports arrival even when no successful write exists ✅ FIXED
-- **Commit**: 55b7914be
+- **Commit**: 5f0f946cb
 - **Change**: Added `audioWritten` flag to `CloudAudioPlayer` — set only when `track.write()` succeeds. `CloudRouteSink` checks `audioPlayer?.audioWritten` for outcome determination instead of `audioPlayed`.
 - **Evidence**: `CloudAudioPlayer.kt`, `CloudRouteSink.kt` line 271
 
 ### 17. trySend failures silently drop events ✅ IMPROVED
-- **Commit**: 55b7914be
+- **Commit**: 5f0f946cb
 - **Change**: `callbackFlow` already uses an unbounded channel. Added `emitOrLog()` helper that logs when `trySend` fails (channel closed/collector gone). The SSE path already used `trySendBlocking().getOrThrow()`.
 - **Evidence**: `WebSocketCloudTurnTransport.kt`
 
 ### 18. Decoder returns raw PCM as valid audio ✅ FIXED
-- **Commit**: 55b7914be
+- **Commit**: 5f0f946cb
 - **Change**: On Opus decoder creation failure, `decodeOpus` now returns `ByteArray(0)` instead of raw input. This prevents invalid audio from being written to the track.
 - **Evidence**: `CloudAudioPlayer.kt` `decodeOpus()`
 
@@ -114,7 +114,7 @@
 - **Evidence**: `CloudRouteSink.kt` lines 137, 140, 432-445, 481, 496, 504
 
 ### 19. Auth adapter context serialization ✅ IMPROVED
-- **Commit**: 55b7914be
+- **Commit**: 5f0f946cb
 - **Change**: Replaced `jsonValue` delegation with `writeContextAsRaw()` — a manual field-by-field writer that produces a proper nested JSON object without the `jsonValue` reader-writer coupling issue.
 - **Evidence**: `CloudTurnAuthenticateJsonAdapter.kt`
 
@@ -144,11 +144,11 @@
 | 12 | Opus END_OF_STREAM bug | ✅ Fixed (cdcf1b5b5) |
 | 13 | Decoder fallback to raw PCM | ✅ Fixed (cdcf1b5b5) |
 | 14 | Premature playback restoration | ✅ Fixed (cdcf1b5b5) |
-| 15 | Shared audio output ownership | ✅ Fixed (55b7914be, duck/restore via AudioFocus) |
-| 16 | audioPlayed over-reporting | ✅ Fixed (55b7914be, audioWritten tracks actual write) |
-| 17 | WebSocket frame drops | ✅ Improved (55b7914be, log drops, unbounded channel) |
-| 18 | Opus fallback to raw PCM | ✅ Fixed (55b7914be, reject with empty buffer) |
-| 19 | Auth adapter context serialization | ✅ Improved (55b7914be, writeContextAsRaw) |
+| 15 | Shared audio output ownership | ✅ Fixed (5f0f946cb, duck/restore via AudioFocus) |
+| 16 | audioPlayed over-reporting | ✅ Fixed (5f0f946cb, audioWritten tracks actual write) |
+| 17 | WebSocket frame drops | ✅ Improved (5f0f946cb, log drops, unbounded channel) |
+| 18 | Opus fallback to raw PCM | ✅ Fixed (5f0f946cb, reject with empty buffer) |
+| 19 | Auth adapter context serialization | ✅ Improved (5f0f946cb, writeContextAsRaw) |
 | 20 | Action-only completion | ✅ Present (executedAction flag in CloudRouteSink) |
 | 21 | Pause/restoration | ✅ Present (playerAutoPaused + restoreTransientAudioState) |
 | 22 | WebSocket frame overflow | ✅ Fixed (bounded channel 4096, emitOrFail terminates turn with CONNECTION_LOST) |

@@ -137,8 +137,8 @@ internal data class CloudRouteTokenPayload(
 
 @JsonClass(generateAdapter = true)
 internal data class CloudRouteDonePayload(
-    @Json(name = "input_tokens") val inputTokens: Int,
-    @Json(name = "output_tokens") val outputTokens: Int,
+    @Json(name = "input_tokens") val inputTokens: Int? = null,
+    @Json(name = "output_tokens") val outputTokens: Int? = null,
 )
 
 @JsonClass(generateAdapter = true)

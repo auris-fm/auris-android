@@ -48,12 +48,26 @@ class CloudAudioPlayer(
     var codec: String = ""
         internal set
 
-    /** Update the codec after the server's auth response, before any audio frames arrive. */
+    /**
+     * Update the codec after the server's auth response, before any audio frames arrive.
+     * Re-creates the [AudioTrack] and decoder so the sample rate and channel config
+     * match the server's negotiated settings.
+     */
     fun setCodec(name: String) {
         if (name != codec) {
             codec = name
             Timber.i("[CloudAudio] negotiated codec: %s", name)
+            rebuildTrackAndDecoder()
         }
+    }
+
+    /** Re-create the [AudioTrack] and [MediaCodec] decoder to match the negotiated codec. */
+    private fun rebuildTrackAndDecoder() {
+        decodeCodec?.stop()
+        decodeCodec?.release()
+        decodeCodec = null
+        audioTrack?.release()
+        audioTrack = null
     }
 
     /** True while audio is actively being played (not paused, not idle). */

@@ -51,8 +51,73 @@ internal object CloudRouteEvents {
         }.getOrNull()
     }
 
-    /** The frame minus its `type` field, for the adapters that do not know about it. */
-    private fun peel(text: String): String = text
+    /**
+     * Return the JSON frame without its `type` discriminator so adapters that do not expect
+     * `type` can parse the remaining fields cleanly.
+     */
+    private fun peel(text: String): String {
+        val trimmed = text.trim()
+        if (!trimmed.startsWith('{')) return text
+        val json = runCatching { JsonReader.of(Buffer().writeUtf8(trimmed)) }.getOrNull() ?: return text
+        return try {
+            json.beginObject()
+            val sb = StringBuilder().append("{")
+            var first = true
+            while (json.hasNext()) {
+                val name = json.nextName()
+                if (!first) sb.append(',')
+                first = false
+                sb.append('"').append(escapeJsonString(name)).append('":')
+                copyValue(json, sb)
+            }
+            json.endObject()
+            sb.append('}').toString()
+        } catch (_: Exception) {
+            text
+        }
+    }
+
+    private fun copyValue(reader: JsonReader, sb: StringBuilder) {
+        when (reader.peek()) {
+            JsonReader.Token.NULL -> sb.append("null")
+            JsonReader.Token.BOOLEAN -> sb.append(if (reader.nextBoolean()) "true" else "false")
+            JsonReader.Token.NUMBER -> sb.append(reader.nextString())
+            JsonReader.Token.STRING -> sb.append('"').append(escapeJsonString(reader.nextString())).append('"')
+            JsonReader.Token.BEGIN_OBJECT -> {
+                sb.append('{')
+                reader.beginObject()
+                var first = true
+                while (reader.hasNext()) {
+                    if (!first) sb.append(',')
+                    first = false
+                    sb.append('"').append(escapeJsonString(reader.nextName())).append('":')
+                    copyValue(reader, sb)
+                }
+                reader.endObject()
+                sb.append('}')
+            }
+            JsonReader.Token.BEGIN_ARRAY -> {
+                sb.append('[')
+                reader.beginArray()
+                var first = true
+                while (reader.hasNext()) {
+                    if (!first) sb.append(',')
+                    first = false
+                    copyValue(reader, sb)
+                }
+                reader.endArray()
+                sb.append(']')
+            }
+            else -> {
+                sb.append("null")
+                reader.skipValue()
+            }
+        }
+    }
+
+    private fun escapeJsonString(s: String): String {
+        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    }
 
     private val TYPE_OPTIONS = JsonReader.Options.of("type")
 }

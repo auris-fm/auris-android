@@ -102,10 +102,11 @@
 - **Evidence**: `CloudRouteSink.kt` lines 247, 291 (outcome determination)
 
 ### 22. WebSocket frame overflow ✅ FIXED
-- **Commit**: bafc1e369
+- **Commits**: bafc1e369, ae1957c30, dbf77818f
 - **Component**: `WebSocketCloudTurnTransport` uses `Channel<CloudRouteEvent>(4096)` with `emitOrFail()` helper.
-- **Mechanism**: When `trySend` fails (channel full), `emitOrFail` sends a `CloudRouteEvent.Error(CONNECTION_LOST)` to terminate the turn explicitly. This satisfies the reviewer's requirement: "the transport must preserve them or terminate explicitly, not continue after silently losing an action/audio frame."
-- **Test**: `WebSocketCloudTurnTransportOverflowTest.kt` — 3 tests covering overflow behavior, normal delivery, and empty channel.
+- **Mechanism**: Collection is launched via `launch { channel.consumeEach { trySend(it) } }` BEFORE `awaitClose`, so events are forwarded while the socket is active. When `trySend` fails (channel full), `emitOrFail` sends a `CloudRouteEvent.Error(CONNECTION_LOST)` to terminate the turn explicitly. If even the error fails, the channel is closed to signal termination. `trySend` failures from the callbackFlow boundary are propagated as observable terminal errors via `close(exception)`.
+- **Lifecycle fix**: `awaitClose` suspends until cancellation, so collection MUST come before it. Using `launch` to start collection concurrently with the socket.
+- **Test**: `WebSocketCloudTurnTransportOverflowTest.kt` — 5 tests covering overflow behavior, normal delivery, empty channel, consumeEach lifecycle, and overflow during slow collection.
 
 ### 21. Pause/restoration ✅ PRESENT
 - **Location**: `CloudRouteSink.kt`

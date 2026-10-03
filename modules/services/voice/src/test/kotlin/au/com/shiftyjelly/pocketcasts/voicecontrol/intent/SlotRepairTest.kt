@@ -92,31 +92,105 @@ class SlotRepairTest {
     }
 
     @Test
-    fun repair_seekRelativeWithoutDelta_fillsSignedDefaultFromWording() {
-        val forward = SlotRepair.repair(
-            raw = "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
-            utterance = "skip ahead",
+    fun repair_seekRelative_directionOnly_noDefaultDelta() {
+        // Direction produced by model, no delta — do NOT invent ±30.
+        val r = SlotRepair.repair(
+            raw = "<|tool_call_start|>[playback(action='seek_relative', direction='backward')]<|tool_call_end|>",
+            utterance = "go back",
             tool = "playback",
             action = "seek_relative",
         )
-        assertEquals(30, forward!!.params["delta_seconds"])
+        assertEquals("backward", r!!.params["direction"])
+        assertTrue("delta should not be filled when direction is present", r.params["delta_seconds"] == null)
+    }
 
-        val backward = SlotRepair.repair(
-            raw = "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
-            utterance = "skip back",
+    @Test
+    fun repair_seekRelative_bareZero_dropZeroKeepDirection() {
+        // Fixture: "go back" — predicted {delta: 0, dir: backward} → repaired {dir: backward}
+        val r = SlotRepair.repair(
+            raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=0, direction='backward')]<|tool_call_end|>",
+            utterance = "go back",
             tool = "playback",
             action = "seek_relative",
         )
-        assertEquals(-30, backward!!.params["delta_seconds"])
+        assertEquals("backward", r!!.params["direction"])
+        assertTrue("delta should be dropped for bare zero", r.params["delta_seconds"] == null)
+    }
 
-        // `\bback\b` does not match inside "backwards" — must still fill -30.
-        val backwards = SlotRepair.repair(
+    @Test
+    fun repair_seekRelative_emptyPrediction_inferDirectionFromUtterance() {
+        // Fixture: "go back" — predicted {} → repaired {dir: backward}
+        val r = SlotRepair.repair(
             raw = "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
-            utterance = "skip backwards",
+            utterance = "go back",
             tool = "playback",
             action = "seek_relative",
         )
-        assertEquals(-30, backwards!!.params["delta_seconds"])
+        assertEquals("backward", r!!.params["direction"])
+        assertTrue("no delta when utterance has no number", r.params["delta_seconds"] == null)
+    }
+
+    @Test
+    fun repair_seekRelative_emptyPrediction_inferDirectionAndDelta() {
+        // "go back a minute" — predicted {} → repaired {dir: backward, delta: -60}
+        val r = SlotRepair.repair(
+            raw = "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
+            utterance = "go back a minute",
+            tool = "playback",
+            action = "seek_relative",
+        )
+        assertEquals("backward", r!!.params["direction"])
+        assertEquals(-60, r.params["delta_seconds"])
+    }
+
+    @Test
+    fun repair_seekRelative_emptyPrediction_numberOnly_deltaNotDirection() {
+        // Fixture: "back that up a minute" — predicted {} → repaired {dir: backward, delta: -60}
+        val r = SlotRepair.repair(
+            raw = "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
+            utterance = "back that up a minute",
+            tool = "playback",
+            action = "seek_relative",
+        )
+        assertEquals("backward", r!!.params["direction"])
+        assertEquals(-60, r.params["delta_seconds"])
+    }
+
+    @Test
+    fun repair_seekRelative_bareZero_emptyDropOnly_noDirection() {
+        // Fixture: "skip" — predicted {delta: 0} → repaired {}
+        val r = SlotRepair.repair(
+            raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=0)]<|tool_call_end|>",
+            utterance = "skip",
+            tool = "playback",
+            action = "seek_relative",
+        )
+        assertTrue("params should be empty after dropping bare zero", r!!.params.isEmpty())
+    }
+
+    @Test
+    fun repair_seekRelative_bareZero_emptyDropOnly_inferDirection() {
+        // Fixture: "go back" — predicted {delta: 0} → repaired {dir: backward}
+        val r = SlotRepair.repair(
+            raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=0)]<|tool_call_end|>",
+            utterance = "go back",
+            tool = "playback",
+            action = "seek_relative",
+        )
+        assertEquals("backward", r!!.params["direction"])
+        assertTrue("no delta when utterance has no number", r.params["delta_seconds"] == null)
+    }
+
+    @Test
+    fun repair_seekRelative_outOfRange_returnsNull() {
+        // Fixture: "jump back ninety minutes" → null
+        val r = SlotRepair.repair(
+            raw = "<|tool_call_start|>[playback(action='seek_relative', delta_seconds=0)]<|tool_call_end|>",
+            utterance = "jump back ninety minutes",
+            tool = "playback",
+            action = "seek_relative",
+        )
+        assertTrue("out-of-range amount should return null (no repaired call)", r == null)
     }
 
     // -- shared fixture: relative_seek_repair.json --

@@ -101,6 +101,12 @@
 - **Mechanism**: `executedAction` flag is set to `true` when `executeAction` returns `true`. On Done, if `executedAction` is true (or `handledResult` is true), the outcome is `VoiceResponse.Silent` — the action/result was the answer.
 - **Evidence**: `CloudRouteSink.kt` lines 247, 291 (outcome determination)
 
+### 22. WebSocket frame overflow ✅ FIXED
+- **Commit**: bafc1e369
+- **Component**: `WebSocketCloudTurnTransport` uses `Channel<CloudRouteEvent>(4096)` with `emitOrFail()` helper.
+- **Mechanism**: When `trySend` fails (channel full), `emitOrFail` sends a `CloudRouteEvent.Error(CONNECTION_LOST)` to terminate the turn explicitly. This satisfies the reviewer's requirement: "the transport must preserve them or terminate explicitly, not continue after silently losing an action/audio frame."
+- **Test**: `WebSocketCloudTurnTransportOverflowTest.kt` — 3 tests covering overflow behavior, normal delivery, and empty channel.
+
 ### 21. Pause/restoration ✅ PRESENT
 - **Location**: `CloudRouteSink.kt`
 - **Mechanism**: `playerAutoPaused` flag tracks whether the turn paused the host player. `restoreTransientAudioState()` checks this flag + ownership + host-playing state before resuming. Now replaced by duck/restore pattern but the mechanism remains.
@@ -142,5 +148,7 @@
 | 17 | WebSocket frame drops | ✅ Improved (55b7914be, log drops, unbounded channel) |
 | 18 | Opus fallback to raw PCM | ✅ Fixed (55b7914be, reject with empty buffer) |
 | 19 | Auth adapter context serialization | ✅ Improved (55b7914be, writeContextAsRaw) |
-| 20 | Action-only completion | ✅ Already present (executedAction flag in CloudRouteSink) |
-| 21 | Pause/restoration | ✅ Already present (playerAutoPaused + restoreTransientAudioState) |
+| 20 | Action-only completion | ✅ Present (executedAction flag in CloudRouteSink) |
+| 21 | Pause/restoration | ✅ Present (playerAutoPaused + restoreTransientAudioState) |
+| 22 | WebSocket frame overflow | ✅ Fixed (bounded channel 4096, emitOrFail terminates turn with CONNECTION_LOST) |
+| 23 | Governing component | ✅ CloudRouteSink governs cloud playback, focus (via duck()/restore()), and restoration |

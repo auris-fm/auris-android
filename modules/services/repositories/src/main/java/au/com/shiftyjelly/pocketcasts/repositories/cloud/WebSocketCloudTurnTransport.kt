@@ -86,12 +86,15 @@ class WebSocketCloudTurnTransport(
         val socket = okHttpClient.newWebSocket(request, listener)
         awaitClose {
             socket.cancel()
-            channel.cancel()
         }
 
-        // Delegate collection to the explicit channel so we can fail explicitly on
-        // buffer overflow. The callbackFlow's implicit channel would silently drop.
-        channel.openStream().collect { trySend(it) }
+        // Collect from the explicit channel and forward to the callbackFlow.
+        // consumeEach suspends until an element is available, then forwards it.
+        // This must come BEFORE awaitClose so events flow through the entire
+        // lifecycle: listener → channel → callbackFlow → consumer.
+        channel.consumeEach { event ->
+            trySend(event)
+        }
     }
 
     /**
@@ -100,15 +103,22 @@ class WebSocketCloudTurnTransport(
      * With a bounded channel (4096 events), a full channel means the collector
      * is genuinely overwhelmed — not just slow. In that case, we send an error
      * to terminate the turn rather than silently losing the frame.
+     *
+     * If even the error can't be delivered, we close the channel to signal
+     * termination to any pending receivers.
      */
     private fun emitOrFail(channel: Channel<CloudRouteEvent>, event: CloudRouteEvent) {
         val result = channel.trySend(event)
         if (result.isFailure) {
             Timber.w("Cloud route: channel full, terminating turn — dropped event %s", event::class.simpleName)
-            // Send an error to terminate the turn explicitly rather than
-            // silently losing the frame. The collector will receive this
-            // error and stop collecting, which closes the flow.
-            channel.trySend(CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""))
+            // Try to send a CONNECTION_LOST error to terminate the turn.
+            // If this also fails, close the channel to signal termination.
+            val errorResult = channel.trySend(
+                CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = "")
+            )
+            if (errorResult.isFailure) {
+                channel.close()
+            }
         }
     }
 

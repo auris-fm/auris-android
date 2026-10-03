@@ -196,6 +196,12 @@ class VoicePlaybackIntentExecutor @Inject constructor(
 }
 
 interface VoicePlaybackSink {
+    /** Lower the host player's volume (duck) while cloud audio plays through the shared output. */
+    suspend fun duck(): VoiceResponse
+
+    /** Restore the host player to full volume after cloud audio finishes. */
+    suspend fun restore(): VoiceResponse
+
     suspend fun pause(): VoiceResponse
     suspend fun resume(): VoiceResponse
     suspend fun skipForward(seconds: Int?): VoiceResponse

@@ -175,6 +175,7 @@ class CloudRouteSink internal constructor(
         var executedAction = false
         var handledResult = false
         var audioPlayed = false
+        var ducked = false
         var outcome: VoiceResponse? = null
 
         // Everything from registration onward sits inside the cleanup path: a
@@ -206,26 +207,6 @@ class CloudRouteSink internal constructor(
             )
             val events = openRoute(turn)
 
-            turnMutex.withLock {
-                if (activeTurnId == myId && isHostPlaying()) {
-                    // Everything here is decided *before* the suspending pause:
-                    //   - the flag, because the player can already be paused when
-                    //     cancellation lands mid-call and a flag set afterwards
-                    //     would leave the finally thinking there is nothing to
-                    //     restore — audio stuck paused;
-                    //   - the revision, because sampling after the suspension
-                    //     would swallow a command the user issued *during* it,
-                    //     and the restore would then pass over them.
-                    // Our own pause is filtered by source, so it does not appear
-                    // in this count either way; sampling early only ever makes
-                    // the restore more conservative.
-                    playerAutoPaused = true
-                    pauseCommandRevision = playbackCommandRevision()
-                    playbackSink.pause()
-                    Timber.i("[VoicePipeline] cloud turn paused playback (host was playing)")
-                }
-            }
-
             // Flow.collect's action is crossinline — cannot return@routeTurn from it.
             events.collect { event ->
                 if (outcome != null) return@collect
@@ -252,11 +233,14 @@ class CloudRouteSink internal constructor(
                         // Binary audio from the WebSocket path: submit to the player
                         // for buffered playback. The SSE fallback uses Token accumulation
                         // instead, so this branch is a no-op on that path.
-                        audioPlayer?.submitFrame(event.bytes)
+                        // Duck the host player on the first frame; restore on Done.
                         if (!audioPlayed) {
-                            audioPlayer?.play()
                             audioPlayed = true
+                            playbackSink.duck()
+                            ducked = true
                         }
+                        audioPlayer?.submitFrame(event.bytes)
+                        audioPlayer?.play()
                     }
 
                     is CloudRouteEvent.Token -> tokenBuffer += event.text
@@ -267,6 +251,11 @@ class CloudRouteSink internal constructor(
                             inputTokens = event.inputTokens,
                             outputTokens = event.outputTokens,
                         )
+                        // Restore the host player to full volume.
+                        if (ducked) {
+                            playbackSink.restore()
+                            ducked = false
+                        }
                         // Drain queued frames so the last audio lands, then stop.
                         if (audioPlayed) {
                             audioPlayer?.drainAndStop()
@@ -278,7 +267,7 @@ class CloudRouteSink internal constructor(
                             conversationMemory.record(request, tokenBuffer)
                         }
                         outcome = when {
-                            audioPlayed -> VoiceResponse.Silent
+                            audioPlayer?.audioWritten == true -> VoiceResponse.Silent
 
                             audioPlayer != null -> {
                                 // WebSocket path expected audio but none arrived —
@@ -389,6 +378,12 @@ class CloudRouteSink internal constructor(
                         // abnormally (cancellation, timeout, error).
                         if (audioPlayed) {
                             audioPlayer?.stop()
+                        }
+                        // Abandon duck focus if we requested it but didn't complete
+                        // normally (Done already restores).
+                        if (ducked) {
+                            playbackSink.restore()
+                            ducked = false
                         }
                         restoreTransientAudioState()
                         activeTurnId = 0

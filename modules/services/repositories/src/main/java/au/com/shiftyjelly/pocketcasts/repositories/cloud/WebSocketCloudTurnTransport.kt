@@ -25,6 +25,16 @@ class WebSocketCloudTurnTransport(
 ) : CloudTurnTransport {
 
     override fun exchange(frame: CloudTurnFrame): Flow<CloudRouteEvent> = callbackFlow {
+        // callbackFlow creates an unbounded channel (Int.MAX_VALUE) by default,
+        // so trySend never rejects from buffer pressure. We prefer trySend over
+        // send because the WebSocket callbacks are non-suspending and cannot
+        // call suspend functions. Dropped events only occur when the channel
+        // is already closed (collector gone), in which case the turn is unwinding
+        // and there is no consumer anyway.
+        //
+        // We log drops for observability; the unbounded channel means drops are
+        // rare and only happen during turn cleanup.
+
         // The requested codec is a fallback; the server's auth response supplies the
         // negotiated codec that binary frames should carry.
         val requestedCodec = (frame as CloudTurnFrame.Authenticate).codecs.firstOrNull().orEmpty()
@@ -39,12 +49,10 @@ class WebSocketCloudTurnTransport(
                 // and close so the caller knows the transport failed.
                 if (response.code != 101) {
                     Timber.w("Cloud route WebSocket rejected: %d %s", response.code, response.message)
-                    trySend(
-                        CloudRouteEvent.Error(
-                            code = CloudRouteErrorCodes.CONNECTION_LOST,
-                            message = "",
-                        ),
-                    )
+                    emitOrLog(CloudRouteEvent.Error(
+                        code = CloudRouteErrorCodes.CONNECTION_LOST,
+                        message = "",
+                    ))
                     close()
                     return
                 }
@@ -54,20 +62,20 @@ class WebSocketCloudTurnTransport(
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 val codec = negotiatedCodec.get()
-                trySend(CloudRouteEvent.AudioFrame(codec = codec, bytes = bytes.toByteArray()))
+                emitOrLog(CloudRouteEvent.AudioFrame(codec = codec, bytes = bytes.toByteArray()))
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 val event = CloudRouteEvents.decode(text)
                 if (event == null) {
                     Timber.w("Cloud route frame could not be decoded")
-                    trySend(CloudRouteEvent.Error(code = CloudRouteErrorCodes.INVALID_RESPONSE, message = ""))
+                    emitOrLog(CloudRouteEvent.Error(code = CloudRouteErrorCodes.INVALID_RESPONSE, message = ""))
                 } else if (event is CloudRouteEvent.AuthResponse) {
                     // Capture the server's negotiated codec for binary audio frames.
                     negotiatedCodec.set(event.codec.ifBlank { requestedCodec })
-                    trySend(event)
+                    emitOrLog(event)
                 } else {
-                    trySend(event)
+                    emitOrLog(event)
                 }
             }
 
@@ -75,7 +83,7 @@ class WebSocketCloudTurnTransport(
                 // A socket failure is a transport failure, never a payload one: the client maps it
                 // to connection_lost rather than invalid_response.
                 Timber.w(t, "Cloud route socket failed")
-                trySend(CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""))
+                emitOrLog(CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""))
                 close()
             }
 
@@ -86,6 +94,19 @@ class WebSocketCloudTurnTransport(
 
         val socket = okHttpClient.newWebSocket(request, listener)
         awaitClose { socket.cancel() }
+    }
+
+    /**
+     * Emit an event or log a drop if the channel is closed.
+     *
+     * The callbackFlow's channel is unbounded, so buffer-pressure drops don't occur.
+     * A drop here means the collector is already gone (the turn is unwinding).
+     */
+    private fun emitOrLog(event: CloudRouteEvent) {
+        val result = trySend(event)
+        if (result.isFailure) {
+            Timber.w("Cloud route: dropped event %s (channel closed)", event::class.simpleName)
+        }
     }
 
     private fun CloudTurnFrame.toJson(): String = when (this) {

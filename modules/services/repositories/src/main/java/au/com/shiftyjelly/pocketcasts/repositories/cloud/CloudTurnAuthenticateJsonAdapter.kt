@@ -35,10 +35,14 @@ internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<Clou
         writer.name("access_token").value(value.accessToken)
         writer.name("request_id").value(value.requestId)
         writer.name("request").value(value.request)
-        val contextJson = contextAdapter.toJson(value.context)
-        if (contextJson.isNotEmpty()) {
+        // Write context as a raw nested JSON object (not an escaped string).
+        // Serialize context with its own adapter and emit the resulting JSON
+        // object verbatim. The context adapter uses snake_case field names
+        // that must be preserved in the wire format.
+        val context = value.context
+        if (context != null) {
             writer.name("context")
-                .jsonValue(JsonReader.of(Buffer().writeUtf8(contextJson)))
+            writeContextAsRaw(writer, context)
         }
         if (value.capabilities.isNotEmpty()) {
             writer.name("capabilities")
@@ -50,6 +54,46 @@ internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<Clou
         writer.beginArray()
         value.codecs.forEach { writer.value(it) }
         writer.endArray()
+        writer.endObject()
+    }
+
+    /** Emit a [CloudRouteContext] as a raw nested JSON object. */
+    private fun writeContextAsRaw(writer: JsonWriter, context: CloudRouteContext) {
+        writer.beginObject()
+        if (context.recentConversation != null && context.recentConversation.isNotEmpty()) {
+            writer.name("recent_conversation")
+            writer.beginArray()
+            for (entry in context.recentConversation) {
+                writer.beginObject()
+                writer.name("role").value(entry.role)
+                writer.name("text").value(entry.text)
+                writer.endObject()
+            }
+            writer.endArray()
+        }
+        if (context.episodeId.isNotEmpty()) {
+            writer.name("episode_id").value(context.episodeId)
+        }
+        if (context.podcastId.isNotEmpty()) {
+            writer.name("podcast_id").value(context.podcastId)
+        }
+        if (context.referencePositionMs != 0L) {
+            writer.name("reference_position_ms").value(context.referencePositionMs)
+        }
+        if (context.clientPositionMs != 0L) {
+            writer.name("client_position_ms").value(context.clientPositionMs)
+        }
+        if (context.recentReferencePositions.isNotEmpty()) {
+            writer.name("recent_reference_positions")
+            writer.beginArray()
+            for (pos in context.recentReferencePositions) {
+                writer.value(pos)
+            }
+            writer.endArray()
+        }
+        if (context.previousReferencePositionMs != null) {
+            writer.name("previous_reference_position_ms").value(context.previousReferencePositionMs)
+        }
         writer.endObject()
     }
 

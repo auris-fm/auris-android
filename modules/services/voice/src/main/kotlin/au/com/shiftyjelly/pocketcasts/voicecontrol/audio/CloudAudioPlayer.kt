@@ -48,6 +48,10 @@ class CloudAudioPlayer(
     var codec: String = ""
         internal set
 
+    /** Current sample rate derived from the negotiated codec. */
+    var currentSampleRate: Int = sampleRateHz
+        private set
+
     /**
      * Update the codec after the server's auth response, before any audio frames arrive.
      * Re-creates the [AudioTrack] and decoder so the sample rate and channel config
@@ -56,8 +60,20 @@ class CloudAudioPlayer(
     fun setCodec(name: String) {
         if (name != codec) {
             codec = name
-            Timber.i("[CloudAudio] negotiated codec: %s", name)
+            currentSampleRate = parseSampleRate(name)
+            Timber.i("[CloudAudio] negotiated codec: %s (sample rate: %d Hz)", name, currentSampleRate)
             rebuildTrackAndDecoder()
+        }
+    }
+
+    /** Parse the sample rate from a codec string like `opus@48k` or `pcm@24k`. */
+    private fun parseSampleRate(name: String): Int {
+        val lower = name.lowercase()
+        return when {
+            lower.contains("48k") -> 48000
+            lower.contains("24k") -> 24000
+            lower.contains("16k") -> 16000
+            else -> sampleRateHz // default
         }
     }
 
@@ -68,10 +84,15 @@ class CloudAudioPlayer(
         decodeCodec = null
         audioTrack?.release()
         audioTrack = null
+        ensureAudioTrack()
     }
 
     /** True while audio is actively being played (not paused, not idle). */
     val isPlaying: Boolean get() = playing && !paused
+
+    /** True when at least one frame was successfully written to the AudioTrack. */
+    var audioWritten = false
+        private set
 
     init {
         ensureAudioTrack()
@@ -180,7 +201,7 @@ class CloudAudioPlayer(
         if (audioTrack != null) return
 
         val minBufSize = AudioTrack.getMinBufferSize(
-            sampleRateHz,
+            currentSampleRate,
             channelConfig,
             audioFormat,
         )
@@ -193,7 +214,7 @@ class CloudAudioPlayer(
             .setAudioAttributes(audioAttributes)
             .setAudioFormat(
                 AudioFormat.Builder()
-                    .setSampleRate(sampleRateHz)
+                    .setSampleRate(currentSampleRate)
                     .setChannelMask(channelConfig)
                     .setEncoding(audioFormat)
                     .build(),
@@ -233,6 +254,7 @@ class CloudAudioPlayer(
                     Timber.w("[CloudAudio] AudioTrack.write returned $written")
                     break
                 }
+                audioWritten = true
             }
         }
     }
@@ -241,14 +263,14 @@ class CloudAudioPlayer(
         if (decodeCodec == null) {
             val format = MediaFormat.createAudioFormat(
                 MediaFormat.MIMETYPE_AUDIO_OPUS,
-                sampleRateHz,
+                currentSampleRate,
                 if (channelConfig == AudioFormat.CHANNEL_OUT_STEREO) 2 else 1,
             )
             format.setString(
                 MediaFormat.KEY_CHANNEL_COUNT,
                 if (channelConfig == AudioFormat.CHANNEL_OUT_STEREO) "2" else "1",
             )
-            format.setInteger(MediaFormat.KEY_SAMPLE_RATE, sampleRateHz)
+            format.setInteger(MediaFormat.KEY_SAMPLE_RATE, currentSampleRate)
 
             try {
                 decodeCodec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS)
@@ -258,11 +280,11 @@ class CloudAudioPlayer(
             } catch (e: Exception) {
                 Timber.w(e, "[CloudAudio] failed to create Opus decoder")
                 decodeCodec = null
-                return input // fall back to raw
+                return ByteArray(0) // reject: raw Opus bytes are not valid audio
             }
         }
 
-        val codec = decodeCodec ?: return input
+        val codec = decodeCodec ?: return ByteArray(0)
 
         val inputBufferIndex = codec.dequeueInputBuffer(10_000)
         if (inputBufferIndex >= 0) {

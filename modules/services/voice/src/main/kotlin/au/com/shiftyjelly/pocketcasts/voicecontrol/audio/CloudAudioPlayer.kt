@@ -31,6 +31,16 @@ class CloudAudioPlayer(
     private val channelConfig: Int = AudioFormat.CHANNEL_OUT_MONO,
     private val audioFormat: Int = AudioFormat.ENCODING_PCM_16BIT,
 ) {
+    /**
+     * Audio attributes that route through the shared STREAM_MUSIC output path.
+     *
+     * USAGE_MEDIA + CONTENT_TYPE_SPEECH maps to AudioManager.STREAM_MUSIC, the same
+     * stream the host player uses. This means cloud audio is mixed into the shared
+     * output path by the Android audio system — not isolated on a separate path.
+     *
+     * Ducking is handled by AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK, which causes the
+     * host player's FocusManager to lower its volume while cloud audio plays.
+     */
     private val audioAttributes = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_MEDIA)
         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)

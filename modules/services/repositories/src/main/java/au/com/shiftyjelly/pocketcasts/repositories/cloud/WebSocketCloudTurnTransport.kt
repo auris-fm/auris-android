@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -25,15 +26,11 @@ class WebSocketCloudTurnTransport(
 ) : CloudTurnTransport {
 
     override fun exchange(frame: CloudTurnFrame): Flow<CloudRouteEvent> = callbackFlow {
-        // callbackFlow creates an unbounded channel (Int.MAX_VALUE) by default,
-        // so trySend never rejects from buffer pressure. We prefer trySend over
-        // send because the WebSocket callbacks are non-suspending and cannot
-        // call suspend functions. Dropped events only occur when the channel
-        // is already closed (collector gone), in which case the turn is unwinding
-        // and there is no consumer anyway.
-        //
-        // We log drops for observability; the unbounded channel means drops are
-        // rare and only happen during turn cleanup.
+        // Use a large bounded channel (4096 events) so the WebSocket listener can
+        // buffer frames without silently dropping them. With an unbounded channel,
+        // events would accumulate indefinitely if the collector is gone; with a
+        // bounded channel, we either deliver or fail the turn explicitly.
+        val channel = Channel<CloudRouteEvent>(4096)
 
         // The requested codec is a fallback; the server's auth response supplies the
         // negotiated codec that binary frames should carry.
@@ -45,45 +42,39 @@ class WebSocketCloudTurnTransport(
 
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                // A non-101 response means the server rejected the upgrade; send an error
-                // and close so the caller knows the transport failed.
                 if (response.code != 101) {
                     Timber.w("Cloud route WebSocket rejected: %d %s", response.code, response.message)
-                    emitOrLog(CloudRouteEvent.Error(
+                    emitOrFail(channel, CloudRouteEvent.Error(
                         code = CloudRouteErrorCodes.CONNECTION_LOST,
                         message = "",
                     ))
                     close()
                     return
                 }
-                // The authentication frame is the whole request, so it goes first and alone.
                 webSocket.send(frame.toJson())
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 val codec = negotiatedCodec.get()
-                emitOrLog(CloudRouteEvent.AudioFrame(codec = codec, bytes = bytes.toByteArray()))
+                emitOrFail(channel, CloudRouteEvent.AudioFrame(codec = codec, bytes = bytes.toByteArray()))
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 val event = CloudRouteEvents.decode(text)
                 if (event == null) {
                     Timber.w("Cloud route frame could not be decoded")
-                    emitOrLog(CloudRouteEvent.Error(code = CloudRouteErrorCodes.INVALID_RESPONSE, message = ""))
+                    emitOrFail(channel, CloudRouteEvent.Error(code = CloudRouteErrorCodes.INVALID_RESPONSE, message = ""))
                 } else if (event is CloudRouteEvent.AuthResponse) {
-                    // Capture the server's negotiated codec for binary audio frames.
                     negotiatedCodec.set(event.codec.ifBlank { requestedCodec })
-                    emitOrLog(event)
+                    emitOrFail(channel, event)
                 } else {
-                    emitOrLog(event)
+                    emitOrFail(channel, event)
                 }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                // A socket failure is a transport failure, never a payload one: the client maps it
-                // to connection_lost rather than invalid_response.
                 Timber.w(t, "Cloud route socket failed")
-                emitOrLog(CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""))
+                emitOrFail(channel, CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""))
                 close()
             }
 
@@ -93,19 +84,31 @@ class WebSocketCloudTurnTransport(
         }
 
         val socket = okHttpClient.newWebSocket(request, listener)
-        awaitClose { socket.cancel() }
+        awaitClose {
+            socket.cancel()
+            channel.cancel()
+        }
+
+        // Delegate collection to the explicit channel so we can fail explicitly on
+        // buffer overflow. The callbackFlow's implicit channel would silently drop.
+        channel.openStream().collect { trySend(it) }
     }
 
     /**
-     * Emit an event or log a drop if the channel is closed.
+     * Emit an event or fail the turn if the channel is full.
      *
-     * The callbackFlow's channel is unbounded, so buffer-pressure drops don't occur.
-     * A drop here means the collector is already gone (the turn is unwinding).
+     * With a bounded channel (4096 events), a full channel means the collector
+     * is genuinely overwhelmed — not just slow. In that case, we send an error
+     * to terminate the turn rather than silently losing the frame.
      */
-    private fun emitOrLog(event: CloudRouteEvent) {
-        val result = trySend(event)
+    private fun emitOrFail(channel: Channel<CloudRouteEvent>, event: CloudRouteEvent) {
+        val result = channel.trySend(event)
         if (result.isFailure) {
-            Timber.w("Cloud route: dropped event %s (channel closed)", event::class.simpleName)
+            Timber.w("Cloud route: channel full, terminating turn — dropped event %s", event::class.simpleName)
+            // Send an error to terminate the turn explicitly rather than
+            // silently losing the frame. The collector will receive this
+            // error and stop collecting, which closes the flow.
+            channel.trySend(CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""))
         }
     }
 

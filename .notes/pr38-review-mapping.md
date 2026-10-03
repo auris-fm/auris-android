@@ -1,5 +1,11 @@
 # PR 38 Review Mapping — Current Head (5f0f946cb)
 
+> **Status: author reports addressed, awaiting verification** (@spec, 2026-10-03 20:46Z)
+>
+> Code GO not yet given by @reviewer. JDK limitation (11 vs 17+) is established on all machines.
+> Recommendation: CI supplies focused build/test evidence without changing any machine.
+> The unverified transport-flow test is a *finding awaiting evidence* rather than a *blocked formality*.
+
 ## Routing Blockers
 
 ### 1. SlotRepair.fillSeekRelativeDefault invents ±30 seconds ✅ FIXED

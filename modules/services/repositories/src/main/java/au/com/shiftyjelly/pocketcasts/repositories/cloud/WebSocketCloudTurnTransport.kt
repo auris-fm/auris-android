@@ -97,16 +97,22 @@ class WebSocketCloudTurnTransport(
         val collectionJob = launch {
             try {
                 channel.consumeEach { event ->
-                    trySend(event)
+                    val result = trySend(event)
+                    if (result.isFailure) {
+                        // Propagate failure to the callbackFlow so the consumer
+                        // receives an observable terminal failure rather than
+                        // silently losing the event. The flow will close with
+                        // this exception.
+                        close(result.exceptionOrNull() ?: RuntimeException(
+                            "Cloud route: callbackFlow buffer full, dropping event ${event::class.simpleName}"
+                        ))
+                    }
                 }
             } catch (_: CancellationException) {
                 // Normal cancellation — the flow was cancelled.
             } catch (e: Exception) {
                 Timber.w(e, "Cloud route collection failed")
-                emitOrFail(channel, CloudRouteEvent.Error(
-                    code = CloudRouteErrorCodes.CONNECTION_LOST,
-                    message = e.message ?: "",
-                ))
+                close(e)
             }
         }
 

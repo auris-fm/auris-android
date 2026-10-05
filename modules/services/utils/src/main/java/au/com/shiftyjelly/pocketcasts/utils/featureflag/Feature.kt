@@ -152,15 +152,6 @@ enum class Feature(
         hasDevToggle = true,
         addedOn = LocalDate.parse("2025-08-29"),
     ),
-    IMPROVED_SEARCH_SUGGESTIONS(
-        key = "search_predictive",
-        title = "Predictive search suggestions",
-        defaultValue = isDebugOrPrototypeBuild,
-        tier = FeatureTier.Free,
-        hasFirebaseRemoteFlag = true,
-        hasDevToggle = true,
-        addedOn = LocalDate.parse("2025-10-07"),
-    ),
     IMPROVE_APP_RATINGS(
         key = "improve_app_ratings",
         title = "Banner prompting for app rating",
@@ -353,7 +344,7 @@ enum class Feature(
     ),
     SMART_BOOKMARKS(
         key = "smart_bookmarks",
-        title = "AI-enriched bookmarks with title and summary",
+        title = "AI-enriched bookmarks with a generated title",
         defaultValue = isDebugOrPrototypeBuild,
         tier = FeatureTier.Plus(),
         hasFirebaseRemoteFlag = false,
@@ -377,6 +368,15 @@ enum class Feature(
         hasFirebaseRemoteFlag = true,
         hasDevToggle = true,
         addedOn = LocalDate.parse("2026-07-02"),
+    ),
+    NETWORK_DISCOVERY(
+        key = "network_discovery",
+        title = "Networks in Discover, search and the podcast page",
+        defaultValue = isDebugOrPrototypeBuild,
+        tier = FeatureTier.Free,
+        hasFirebaseRemoteFlag = true,
+        hasDevToggle = true,
+        addedOn = LocalDate.parse("2026-09-04"),
     ),
 }
 

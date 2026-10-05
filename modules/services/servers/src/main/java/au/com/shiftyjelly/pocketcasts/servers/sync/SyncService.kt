@@ -6,6 +6,7 @@ import au.com.shiftyjelly.pocketcasts.servers.sync.forgotpassword.ForgotPassword
 import au.com.shiftyjelly.pocketcasts.servers.sync.forgotpassword.ForgotPasswordResponse
 import au.com.shiftyjelly.pocketcasts.servers.sync.history.HistoryYearResponse
 import au.com.shiftyjelly.pocketcasts.servers.sync.history.HistoryYearSyncRequest
+import au.com.shiftyjelly.pocketcasts.servers.sync.login.DeviceApproveRequest
 import au.com.shiftyjelly.pocketcasts.servers.sync.login.DeviceAuthorizeRequest
 import au.com.shiftyjelly.pocketcasts.servers.sync.login.DeviceAuthorizeResponse
 import au.com.shiftyjelly.pocketcasts.servers.sync.login.DeviceTokenRequest
@@ -73,6 +74,9 @@ interface SyncService {
     @POST("/user/token")
     suspend fun deviceToken(@Body request: DeviceTokenRequest): DeviceTokenResponse
 
+    @POST("/device/approve")
+    suspend fun deviceApprove(@Header("Authorization") authorization: String, @Body request: DeviceApproveRequest)
+
     @POST("/user/register_pocket_casts")
     suspend fun register(@Body request: RegisterRequest): LoginTokenResponse
 
@@ -104,9 +108,6 @@ interface SyncService {
     @Headers("Content-Type: application/octet-stream")
     @POST("/up_next/sync")
     suspend fun upNextSyncProtobuf(@Header("Authorization") authorization: String, @Body request: UpNextSyncRequestProtobuf): UpNextResponse
-
-    @POST("/user/last_sync_at")
-    fun getLastSyncAtRx(@Header("Authorization") authorization: String, @Body request: BasicRequest): Single<LastSyncAtResponse>
 
     @POST("/user/last_sync_at")
     suspend fun getLastSyncAt(@Header("Authorization") authorization: String, @Body request: BasicRequest): LastSyncAtResponse
@@ -173,6 +174,10 @@ interface SyncService {
 
     @GET("/files/{uuid}")
     fun getFile(@Header("Authorization") authorization: String, @Path("uuid") uuid: String): Single<Response<ServerFile>>
+
+    @Headers("Cache-Control: no-store")
+    @GET("/files/play/{uuid}")
+    suspend fun getFilePlaybackUrl(@Header("Authorization") authorization: String, @Path("uuid") uuid: String): FileUrlResponse
 
     @POST("/user/stats/summary")
     suspend fun loadStats(@Header("Authorization") authorization: String, @Body request: StatsSummaryRequest): Map<String, Any>

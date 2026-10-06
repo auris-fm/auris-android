@@ -207,6 +207,27 @@ class CloudRouteSink internal constructor(
             )
             val events = openRoute(turn)
 
+            // Hold the user's place: pause the host for the turn, and remember the obligation
+            // to restore it. Taken under the same mutex as registration so a predecessor's
+            // suspending restore cannot land between them — and only once the route is open,
+            // so a turn that fails before it can run does not pause the user's playback only
+            // to resume it.
+            //
+            // Ownership-scoped rather than per-turn: a successor inherits the already-paused
+            // player instead of pausing twice, so the obligation transfers with ownership.
+            // Gated on the host actually playing, because claiming a pause that never happened
+            // would resume a player the user had deliberately stopped. The obligation is set
+            // before the suspending call so a cancellation that lands mid-pause still restores;
+            // the revision is sampled before it so a command that arrives during the suspension
+            // is not swallowed into the value expected at restore.
+            turnMutex.withLock {
+                if (activeTurnId == myId && !playerAutoPaused && isHostPlaying()) {
+                    pauseCommandRevision = playbackCommandRevision()
+                    playerAutoPaused = true
+                    playbackSink.pause()
+                }
+            }
+
             // Flow.collect's action is crossinline — cannot return@routeTurn from it.
             events.collect { event ->
                 if (outcome != null) return@collect

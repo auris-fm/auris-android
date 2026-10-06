@@ -315,8 +315,12 @@ class LfmIntentRouterTest {
         val router = createRouter(inference)
 
         router.ensureReady().getOrThrow()
+        // Both are present: the sign carries a direction that came *with* an amount, and the
+        // direction field carries one that came without. "go back a minute" states an amount
+        // and a direction, so this expectation is SeekRelative(-60, "backward") — the earlier
+        // direction-less expectation predated the ruling and was stale.
         assertEquals(
-            VoiceIntent.Playback.SeekRelative(-60),
+            VoiceIntent.Playback.SeekRelative(-60, "backward"),
             router.recognize(english("go back a minute"), RECOGNITION_CONTEXT).intent,
         )
     }

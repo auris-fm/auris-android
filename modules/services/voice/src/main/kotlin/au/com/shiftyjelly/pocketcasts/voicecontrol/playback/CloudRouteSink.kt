@@ -527,6 +527,12 @@ class CloudRouteSink internal constructor(
                 }
 
                 "seek_relative" -> {
+                    // delta_seconds is nullable for a reason: null means "no amount was stated,"
+                    // which is the only case that applies the sink's own interval. A stated zero
+                    // is a real delta meaning "stay put" — treated here as a no-op, matching the
+                    // local executor's `0 -> Silent`. Falling through would move a user who named
+                    // no movement by the interval, which is the defaulted-seek failure this
+                    // dispatch exists to avoid.
                     val delta = (params["delta_seconds"] as? Number)?.toInt()
                     val direction = params["direction"] as? String
                     when {
@@ -537,6 +543,8 @@ class CloudRouteSink internal constructor(
                                 playbackSink.skipBackward(-delta)
                             }
                         }
+
+                        delta == 0 -> Unit
 
                         direction == "backward" -> playbackSink.skipBackward(null)
 

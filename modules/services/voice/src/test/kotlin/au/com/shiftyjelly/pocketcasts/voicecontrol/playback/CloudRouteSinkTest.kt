@@ -1169,6 +1169,53 @@ class CloudRouteSinkTest {
         val outputTokens: Int?,
     )
 
+    @Test
+    fun `a stated zero delta stays put instead of applying the interval`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_relative",
+                    params = mapOf("delta_seconds" to 0),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+
+        deps.sink().routeToCloud("stay put", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // A named zero is a real delta, not a missing one. Applying the interval here would move
+        // a user who named no movement — the defaulted-seek failure this dispatch exists to avoid.
+        // The local executor maps 0 -> Silent the same way.
+        assertEquals(
+            "a stated zero must not move the player",
+            emptyList<String>(),
+            deps.playback.calls.filter { it.startsWith("skip") },
+        )
+    }
+
+    @Test
+    fun `an unstated amount applies the interval in the stated direction`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_relative",
+                    params = mapOf("direction" to "backward"),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+
+        deps.sink().routeToCloud("go back", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // A null delta is the only case that uses the sink's own interval.
+        assertEquals(
+            listOf("skipBackward:null"),
+            deps.playback.calls.filter { it.startsWith("skip") },
+        )
+    }
+
     private class TestDeps(
         private val baseUrl: String = "https://cloud.example.com",
         private val userId: String = "user_test",
@@ -1296,8 +1343,14 @@ class CloudRouteSinkTest {
             return VoiceResponse.Silent
         }
 
-        override suspend fun skipForward(seconds: Int?): VoiceResponse = VoiceResponse.Silent
-        override suspend fun skipBackward(seconds: Int?): VoiceResponse = VoiceResponse.Silent
+        override suspend fun skipForward(seconds: Int?): VoiceResponse {
+            calls += "skipForward:$seconds"
+            return VoiceResponse.Silent
+        }
+        override suspend fun skipBackward(seconds: Int?): VoiceResponse {
+            calls += "skipBackward:$seconds"
+            return VoiceResponse.Silent
+        }
 
         override suspend fun seekTo(positionSeconds: Int): VoiceResponse {
             calls += "seekTo:$positionSeconds"

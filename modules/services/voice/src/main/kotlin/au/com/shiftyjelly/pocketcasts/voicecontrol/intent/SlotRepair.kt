@@ -263,11 +263,14 @@ object SlotRepair {
      * When the model's call is incomplete for seek_relative, fill what is missing from the utterance.
      *
      * Rules from the shared fixture:
-     * - Direction present but no delta: extract delta from utterance.
-     * - Delta present but no direction: infer direction from utterance (if no number present).
-     * - Both absent: infer direction from utterance AND extract delta if a number is spoken.
-     *   But when the utterance has a number, only extract delta (not direction).
-     * - Direction from prediction + no utterance number: keep direction only.
+     * - **Direction predicted, no delta**: extract a delta if the utterance states one;
+     *   otherwise keep the direction alone.
+     * - **Delta present, no direction**: add none. The sign already carries the direction, and an
+     *   utterance is not a second source for it — `"go back"` with `delta_seconds: -30` is
+     *   returned unchanged.
+     * - **Both absent**: extract the delta first; a direction is inferred from the wording only
+     *   when the utterance states no amount at all. The two are alternatives, never paired —
+     *   `"back that up a minute"` → `{delta_seconds: -60}`, `"go back"` → `{direction: backward}`.
      */
     private fun fillSeekRelativeDefault(
         tool: String,

@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.intent
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -132,27 +133,29 @@ class SlotRepairTest {
 
     @Test
     fun repair_seekRelative_emptyPrediction_inferDirectionAndDelta() {
-        // "go back a minute" — predicted {} → repaired {dir: backward, delta: -60}
+        // "go back a minute" — predicted {} → repaired {delta_seconds: -60}
+        // No direction: the amount states the direction through its sign.
         val r = SlotRepair.repair(
             raw = "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
             utterance = "go back a minute",
             tool = "playback",
             action = "seek_relative",
         )
-        assertEquals("backward", r!!.params["direction"])
+        assertNull(r!!.params["direction"])
         assertEquals(-60, r.params["delta_seconds"])
     }
 
     @Test
     fun repair_seekRelative_emptyPrediction_numberOnly_deltaNotDirection() {
-        // Fixture: "back that up a minute" — predicted {} → repaired {dir: backward, delta: -60}
+        // Fixture: "back that up a minute" — predicted {} → repaired {delta_seconds: -60}
+        // No direction: the utterance states an amount, and the sign carries the direction.
         val r = SlotRepair.repair(
             raw = "<|tool_call_start|>[playback(action='seek_relative')]<|tool_call_end|>",
             utterance = "back that up a minute",
             tool = "playback",
             action = "seek_relative",
         )
-        assertEquals("backward", r!!.params["direction"])
+        assertNull(r!!.params["direction"])
         assertEquals(-60, r.params["delta_seconds"])
     }
 

@@ -286,19 +286,24 @@ object SlotRepair {
             return extracted?.let { params + ("delta_seconds" to it) } ?: params
         }
 
-        // Delta present but no direction → infer direction from utterance.
-        if (hasDelta && !hasDirection) {
-            val inferredDir = extractDirectionFromUtterance(utterance)
-            return inferredDir?.let { params + ("direction" to inferredDir) } ?: params
-        }
+        // Delta present but no direction → add none. The sign already carries the direction,
+        // and an utterance that states an amount is not a second source for it (fixture:
+        // "go back" with delta_seconds -30 repairs to exactly that, no direction).
+        if (hasDelta && !hasDirection) return params
 
-        // Both absent → infer direction AND extract delta.
+        // Both absent → extract the delta first, and only fall back to a direction from the
+        // wording when the utterance states no amount at all: the two are alternatives, because
+        // a stated amount already carries its direction in the sign (fixture: "back that up a
+        // minute" repairs to {delta_seconds: -60}; "go back" has no amount and repairs to
+        // {direction: backward}).
         if (!hasDelta && !hasDirection) {
-            val inferredDir = extractDirectionFromUtterance(utterance)
             val extractedDelta = extractDeltaSeconds(utterance)
             val out = params.toMutableMap()
-            inferredDir?.let { out["direction"] = it }
-            extractedDelta?.let { out["delta_seconds"] = it }
+            if (extractedDelta != null) {
+                out["delta_seconds"] = extractedDelta
+            } else {
+                extractDirectionFromUtterance(utterance)?.let { out["direction"] = it }
+            }
             return out
         }
 

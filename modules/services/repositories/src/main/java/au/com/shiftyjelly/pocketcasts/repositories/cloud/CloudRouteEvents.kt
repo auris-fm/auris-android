@@ -67,7 +67,7 @@ internal object CloudRouteEvents {
                 val name = json.nextName()
                 if (!first) sb.append(',')
                 first = false
-                sb.append('"').append(escapeJsonString(name)).append('":')
+                sb.append('"').append(escapeJsonString(name)).append('"').append(':')
                 copyValue(json, sb)
             }
             json.endObject()
@@ -80,9 +80,13 @@ internal object CloudRouteEvents {
     private fun copyValue(reader: JsonReader, sb: StringBuilder) {
         when (reader.peek()) {
             JsonReader.Token.NULL -> sb.append("null")
+
             JsonReader.Token.BOOLEAN -> sb.append(if (reader.nextBoolean()) "true" else "false")
+
             JsonReader.Token.NUMBER -> sb.append(reader.nextString())
+
             JsonReader.Token.STRING -> sb.append('"').append(escapeJsonString(reader.nextString())).append('"')
+
             JsonReader.Token.BEGIN_OBJECT -> {
                 sb.append('{')
                 reader.beginObject()
@@ -90,12 +94,13 @@ internal object CloudRouteEvents {
                 while (reader.hasNext()) {
                     if (!first) sb.append(',')
                     first = false
-                    sb.append('"').append(escapeJsonString(reader.nextName())).append('":')
+                    sb.append('"').append(escapeJsonString(reader.nextName())).append('"').append(':')
                     copyValue(reader, sb)
                 }
                 reader.endObject()
                 sb.append('}')
             }
+
             JsonReader.Token.BEGIN_ARRAY -> {
                 sb.append('[')
                 reader.beginArray()
@@ -108,6 +113,7 @@ internal object CloudRouteEvents {
                 reader.endArray()
                 sb.append(']')
             }
+
             else -> {
                 sb.append("null")
                 reader.skipValue()

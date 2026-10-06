@@ -455,6 +455,16 @@ class VoicePlaybackIntentExecutorTest {
         var onCall: ((String) -> Unit)? = null
 
         val calls = mutableListOf<String>()
+        override suspend fun duck(): VoiceResponse {
+            calls += "duck"
+            onCall?.invoke("duck")
+            return VoiceResponse.Silent
+        }
+        override suspend fun restore(): VoiceResponse {
+            calls += "restore"
+            onCall?.invoke("restore")
+            return VoiceResponse.Silent
+        }
         override suspend fun pause(): VoiceResponse {
             calls += "pause"
             onCall?.invoke("pause")

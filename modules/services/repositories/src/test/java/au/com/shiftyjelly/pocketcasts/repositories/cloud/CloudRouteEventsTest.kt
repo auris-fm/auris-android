@@ -23,7 +23,9 @@ class CloudRouteEventsTest {
 
     @Test
     fun `decode parses result event`() {
-        val text = """{"type":"result","results":{"kind":"episode_results","items":[]}}"""
+        // Flat, not nested: frames.ts ResultFrame is `{type:"result"} & payload`, and
+        // session.ts merges with `{ type: event, ...payload }`. CloudSearchResults is the payload.
+        val text = """{"type":"result","kind":"episode_results","scope":"library","items":[]}"""
         val event = CloudRouteEvents.decode(text)
         assert(event is CloudRouteEvent.Result)
     }

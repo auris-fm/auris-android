@@ -7,9 +7,9 @@ import au.com.shiftyjelly.pocketcasts.analytics.SourceView
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
-import timber.log.Timber
 import javax.inject.Inject
 import javax.inject.Singleton
+import timber.log.Timber
 
 @Singleton
 class PlaybackManagerPlaybackSink @Inject constructor(
@@ -26,6 +26,10 @@ class PlaybackManagerPlaybackSink @Inject constructor(
      * The [PlaybackManager] already responds to AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK
      * by lowering its volume (VOLUME_DUCK) when configured for duck-over-notification.
      */
+    // The listener-based overload is deprecated in favour of AudioFocusRequestCompat, which lives in
+    // androidx.media — a dependency this module does not carry (FocusManager in :repositories uses it).
+    // Migrating means adding that dependency; suppressing is the smaller change until then.
+    @Suppress("DEPRECATION")
     override suspend fun duck(): VoiceResponse {
         val result = audioManager.requestAudioFocus(
             { focusChange ->
@@ -33,9 +37,11 @@ class PlaybackManagerPlaybackSink @Inject constructor(
                     AudioManager.AUDIOFOCUS_GAIN -> {
                         Timber.i("[VoicePipeline] audio focus restored after cloud duck")
                     }
+
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                         Timber.i("[VoicePipeline] host player ducked via focus")
                     }
+
                     else -> {}
                 }
             },
@@ -51,6 +57,7 @@ class PlaybackManagerPlaybackSink @Inject constructor(
     }
 
     /** Restore by abandoning the duckable focus so the host player regains full volume. */
+    @Suppress("DEPRECATION") // Same reason as duck(): see the note there.
     override suspend fun restore(): VoiceResponse {
         audioManager.abandonAudioFocus {}
         Timber.i("[VoicePipeline] abandoned cloud duck focus, host player restored")

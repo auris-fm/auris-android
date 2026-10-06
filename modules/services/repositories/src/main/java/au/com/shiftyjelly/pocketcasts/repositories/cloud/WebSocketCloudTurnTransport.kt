@@ -5,6 +5,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.launch
@@ -47,10 +48,13 @@ class WebSocketCloudTurnTransport(
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (response.code != 101) {
                     Timber.w("Cloud route WebSocket rejected: %d %s", response.code, response.message)
-                    emitOrFail(channel, CloudRouteEvent.Error(
-                        code = CloudRouteErrorCodes.CONNECTION_LOST,
-                        message = "",
-                    ))
+                    emitOrFail(
+                        channel,
+                        CloudRouteEvent.Error(
+                            code = CloudRouteErrorCodes.CONNECTION_LOST,
+                            message = "",
+                        ),
+                    )
                     close()
                     return
                 }
@@ -103,9 +107,11 @@ class WebSocketCloudTurnTransport(
                         // receives an observable terminal failure rather than
                         // silently losing the event. The flow will close with
                         // this exception.
-                        close(result.exceptionOrNull() ?: RuntimeException(
-                            "Cloud route: callbackFlow buffer full, dropping event ${event::class.simpleName}"
-                        ))
+                        close(
+                            result.exceptionOrNull() ?: RuntimeException(
+                                "Cloud route: callbackFlow buffer full, dropping event ${event::class.simpleName}",
+                            ),
+                        )
                     }
                 }
             } catch (_: CancellationException) {
@@ -139,7 +145,7 @@ class WebSocketCloudTurnTransport(
             // Try to send a CONNECTION_LOST error to terminate the turn.
             // If this also fails, close the channel to signal termination.
             val errorResult = channel.trySend(
-                CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = "")
+                CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
             )
             if (errorResult.isFailure) {
                 channel.close()

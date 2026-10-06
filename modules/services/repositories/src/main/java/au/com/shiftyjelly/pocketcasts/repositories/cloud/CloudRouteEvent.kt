@@ -10,8 +10,9 @@ sealed class CloudRouteEvent {
     data class Token(val text: String) : CloudRouteEvent()
 
     data class Done(
-        val inputTokens: Int,
-        val outputTokens: Int,
+        // Nullable: the server may omit either count, and the analytics sink takes them nullable.
+        val inputTokens: Int?,
+        val outputTokens: Int?,
     ) : CloudRouteEvent()
 
     data class Error(

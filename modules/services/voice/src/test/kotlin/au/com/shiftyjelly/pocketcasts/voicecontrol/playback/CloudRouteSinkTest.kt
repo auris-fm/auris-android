@@ -1268,6 +1268,16 @@ class CloudRouteSinkTest {
         var throwOnPauseCall: Int? = null
         private var pauseCalls = 0
 
+        override suspend fun duck(): VoiceResponse {
+            calls += "duck"
+            return VoiceResponse.Silent
+        }
+
+        override suspend fun restore(): VoiceResponse {
+            calls += "restore"
+            return VoiceResponse.Silent
+        }
+
         override suspend fun pause(): VoiceResponse {
             calls += "pause"
             host?.playing = false

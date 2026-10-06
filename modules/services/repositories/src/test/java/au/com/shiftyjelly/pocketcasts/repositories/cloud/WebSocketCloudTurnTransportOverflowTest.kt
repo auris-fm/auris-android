@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -41,13 +42,13 @@ class WebSocketCloudTurnTransportOverflowTest {
 
         // Simulate emitOrFail: try to send the overflowed event.
         val overflowResult = channel.trySend(
-            CloudRouteEvent.AudioFrame(codec = "opus", bytes = byteArrayOf())
+            CloudRouteEvent.AudioFrame(codec = "opus", bytes = byteArrayOf()),
         )
         assertTrue("Overflow trySend should fail", overflowResult.isFailure)
 
         // emitOrFail tries to send CONNECTION_LOST error.
         val errorResult = channel.trySend(
-            CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = "")
+            CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
         )
         assertTrue("Error trySend should also fail", errorResult.isFailure)
 
@@ -79,7 +80,7 @@ class WebSocketCloudTurnTransportOverflowTest {
 
         for (i in 0 until 100) {
             val result = channel.trySend(
-                CloudRouteEvent.AudioFrame(codec = "opus", bytes = byteArrayOf(i.toByte()))
+                CloudRouteEvent.AudioFrame(codec = "opus", bytes = byteArrayOf(i.toByte())),
             )
             assertTrue("trySend should succeed: $i", result.isSuccess)
         }
@@ -106,13 +107,13 @@ class WebSocketCloudTurnTransportOverflowTest {
 
         // Overflow.
         val overflowResult = channel.trySend(
-            CloudRouteEvent.AudioFrame(codec = "opus", bytes = byteArrayOf(2))
+            CloudRouteEvent.AudioFrame(codec = "opus", bytes = byteArrayOf(2)),
         )
         assertTrue("Overflow should fail", overflowResult.isFailure)
 
         // Error also fails.
         val errorResult = channel.trySend(
-            CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = "")
+            CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
         )
         assertTrue("Error should fail", errorResult.isFailure)
 
@@ -195,13 +196,13 @@ class WebSocketCloudTurnTransportOverflowTest {
 
         // Overflow — this will fail and trigger error→close.
         val overflowResult = channel.trySend(
-            CloudRouteEvent.AudioFrame(codec = "opus", bytes = byteArrayOf(2))
+            CloudRouteEvent.AudioFrame(codec = "opus", bytes = byteArrayOf(2)),
         )
         assertTrue("Overflow should fail", overflowResult.isFailure)
 
         // Error also fails.
         val errorResult = channel.trySend(
-            CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = "")
+            CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
         )
         assertTrue("Error should fail", errorResult.isFailure)
 

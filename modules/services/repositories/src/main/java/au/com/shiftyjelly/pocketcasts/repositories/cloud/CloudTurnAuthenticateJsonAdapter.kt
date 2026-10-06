@@ -40,10 +40,8 @@ internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<Clou
         // object verbatim. The context adapter uses snake_case field names
         // that must be preserved in the wire format.
         val context = value.context
-        if (context != null) {
-            writer.name("context")
-            writeContextAsRaw(writer, context)
-        }
+        writer.name("context")
+        writeContextAsRaw(writer, context)
         if (value.capabilities.isNotEmpty()) {
             writer.name("capabilities")
             writer.beginArray()
@@ -74,7 +72,7 @@ internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<Clou
         if (context.episodeId.isNotEmpty()) {
             writer.name("episode_id").value(context.episodeId)
         }
-        if (context.podcastId.isNotEmpty()) {
+        if (context.podcastId?.isNotEmpty() == true) {
             writer.name("podcast_id").value(context.podcastId)
         }
         if (context.referencePositionMs != 0L) {

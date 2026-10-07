@@ -9,12 +9,14 @@ import okio.Buffer
 /**
  * Serialises the authentication frame, the first message on a turn.
  *
- * Field names follow the spec's frame exactly (`type`, `access_token`, `request_id`, `request`,
- * `context`, `capabilities`, `codecs`); `context` is delegated so its own snake_case annotations
- * keep applying. Absent capabilities are omitted rather than sent empty, which the server accepts.
+ * Field names follow the spec's frame (`type`, `access_token`, `request_id`, `request`, `context`,
+ * `capabilities`, `codecs`, and the optional `route_hint`); `context` and `route_hint` are delegated
+ * so their own annotations keep applying. Absent capabilities and an absent hint are omitted rather
+ * than sent empty, which the server accepts.
  */
 internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<CloudTurnFrame.Authenticate>() {
     private val contextAdapter = moshi.adapter(CloudRouteContext::class.java)
+    private val hintAdapter = moshi.adapter(CloudRouteHint::class.java)
     private val options = JsonReader.Options.of(
         "type",
         "access_token",
@@ -23,6 +25,7 @@ internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<Clou
         "context",
         "capabilities",
         "codecs",
+        "route_hint",
     )
 
     override fun toJson(writer: JsonWriter, value: CloudTurnFrame.Authenticate?) {
@@ -52,6 +55,12 @@ internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<Clou
         writer.beginArray()
         value.codecs.forEach { writer.value(it) }
         writer.endArray()
+        // Optional: omitted entirely when no typed-UI flow supplied one, so a turn without a hint
+        // is byte-identical to the frame that existed before the field.
+        value.routeHint?.let { hint ->
+            writer.name("route_hint")
+            hintAdapter.toJson(writer, hint)
+        }
         writer.endObject()
     }
 

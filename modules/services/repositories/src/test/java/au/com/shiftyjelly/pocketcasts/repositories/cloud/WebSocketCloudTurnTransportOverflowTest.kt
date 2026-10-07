@@ -38,7 +38,7 @@ class WebSocketCloudTurnTransportOverflowTest {
         val channel = Channel<CloudRouteEvent>(1)
 
         // Fill the channel — simulating a full channel.
-        channel.trySend(CloudRouteEvent.Connected)
+        channel.trySend(CloudRouteEvent.Connected("opus@48k"))
 
         // Simulate emitOrFail: try to send the overflowed event.
         val overflowResult = channel.trySend(
@@ -64,7 +64,7 @@ class WebSocketCloudTurnTransportOverflowTest {
         }
 
         assertEquals("Should have received the original Connected event", 1, events.size)
-        assertEquals(CloudRouteEvent.Connected, events[0])
+        assertEquals(CloudRouteEvent.Connected("opus@48k"), events[0])
         // Note: the error was also dropped (channel full), so the consumer only
         // sees the original event and then the closed channel. This is the correct
         // behavior — the error is logged via Timber, and the consumer receives the
@@ -102,7 +102,7 @@ class WebSocketCloudTurnTransportOverflowTest {
         val channel = Channel<CloudRouteEvent>(2)
 
         // Fill channel.
-        channel.trySend(CloudRouteEvent.Connected)
+        channel.trySend(CloudRouteEvent.Connected("opus@48k"))
         channel.trySend(CloudRouteEvent.AudioFrame(codec = "opus", bytes = byteArrayOf(1)))
 
         // Overflow.
@@ -128,7 +128,7 @@ class WebSocketCloudTurnTransportOverflowTest {
         }
 
         assertEquals("Should have 2 events (Connected + first AudioFrame)", 2, events.size)
-        assertEquals(CloudRouteEvent.Connected, events[0])
+        assertEquals(CloudRouteEvent.Connected("opus@48k"), events[0])
         assertTrue(events[1] is CloudRouteEvent.AudioFrame)
     }
 
@@ -154,7 +154,7 @@ class WebSocketCloudTurnTransportOverflowTest {
         }
 
         // Send events while the collector is running.
-        channel.trySend(CloudRouteEvent.Connected)
+        channel.trySend(CloudRouteEvent.Connected("opus@48k"))
         channel.trySend(CloudRouteEvent.AudioFrame(codec = "opus", bytes = byteArrayOf(1)))
 
         // Give the collector time to drain.
@@ -167,7 +167,7 @@ class WebSocketCloudTurnTransportOverflowTest {
         collectionJob.join()
 
         assertEquals("Should have collected 2 events", 2, collected.size)
-        assertEquals(CloudRouteEvent.Connected, collected[0])
+        assertEquals(CloudRouteEvent.Connected("opus@48k"), collected[0])
         assertTrue(collected[1] is CloudRouteEvent.AudioFrame)
     }
 
@@ -191,7 +191,7 @@ class WebSocketCloudTurnTransportOverflowTest {
         }
 
         // Fill the channel quickly (faster than the collector).
-        channel.trySend(CloudRouteEvent.Connected)
+        channel.trySend(CloudRouteEvent.Connected("opus@48k"))
         channel.trySend(CloudRouteEvent.AudioFrame(codec = "opus", bytes = byteArrayOf(1)))
 
         // Overflow — this will fail and trigger error→close.

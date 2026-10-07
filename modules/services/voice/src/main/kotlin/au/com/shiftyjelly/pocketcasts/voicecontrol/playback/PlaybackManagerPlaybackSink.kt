@@ -7,6 +7,7 @@ import au.com.shiftyjelly.pocketcasts.analytics.SourceView
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
+import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 import timber.log.Timber
@@ -14,7 +15,9 @@ import timber.log.Timber
 @Singleton
 class PlaybackManagerPlaybackSink @Inject constructor(
     private val playbackManager: PlaybackManager,
-    private val context: Context,
+    // Qualified: Hilt binds Context only as @ApplicationContext (or @ActivityContext), so a bare
+    // Context is a missing binding. Every other injection in this module qualifies it.
+    @ApplicationContext private val context: Context,
 ) : VoicePlaybackSink {
 
     private val audioManager: AudioManager = context.getSystemService<AudioManager>()

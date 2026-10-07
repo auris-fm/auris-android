@@ -71,7 +71,8 @@ class WebSocketCloudTurnTransport(
                 if (event == null) {
                     Timber.w("Cloud route frame could not be decoded")
                     emitOrFail(channel, CloudRouteEvent.Error(code = CloudRouteErrorCodes.INVALID_RESPONSE, message = ""))
-                } else if (event is CloudRouteEvent.AuthResponse) {
+                } else if (event is CloudRouteEvent.Connected) {
+                    // The handshake is where the negotiated codec arrives; binary frames carry it.
                     negotiatedCodec.set(event.codec.ifBlank { requestedCodec })
                     emitOrFail(channel, event)
                 } else {

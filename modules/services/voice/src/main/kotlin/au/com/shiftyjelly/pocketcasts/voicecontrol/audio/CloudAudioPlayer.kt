@@ -10,6 +10,13 @@ import android.media.MediaFormat
 import android.os.Build
 import java.nio.ByteBuffer
 import kotlin.math.max
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import timber.log.Timber
 
 /**
@@ -47,6 +54,20 @@ class CloudAudioPlayer(
         .build()
 
     private var audioTrack: AudioTrack? = null
+
+    /**
+     * Reports whether this player is currently making sound, for the voice gate.
+     *
+     * The gate treats `AudioManager.isMusicActive` as "another app is playing" unless we are the
+     * ones emitting. Its self-attribution timestamp is written by the earcon/TTS renderer, which
+     * never runs for a cloud answer — so a multi-second answer was heard as a stranger and the
+     * microphone was cut while we were still speaking. This is the cloud path joining that same
+     * signal rather than the gate special-casing a cloud turn.
+     */
+    var onPlaybackAudibleChanged: ((Boolean) -> Unit)? = null
+
+    /** Ticks the audible stamp while we are playing, so it cannot go stale mid-answer. */
+    private var audibleHeartbeat: Job? = null
     private val frameBuffer = mutableListOf<ByteArray>()
     private var playing = false
     private var paused = false
@@ -138,11 +159,13 @@ class CloudAudioPlayer(
                 audioTrack?.play()
                 paused = false
                 Timber.i("[CloudAudio] resumed")
+                startAudibleHeartbeat()
             } else if (!playing) {
                 audioTrack?.play()
                 playing = true
                 drainFrames()
                 Timber.i("[CloudAudio] started")
+                startAudibleHeartbeat()
             }
         }
     }
@@ -188,9 +211,48 @@ class CloudAudioPlayer(
                 playing = false
                 paused = false
                 Timber.i("[CloudAudio] stopped")
+                stopAudibleHeartbeat()
             }
         }
     }
+
+    /**
+     * Report "we are making sound" every [AUDIBLE_HEARTBEAT_MS] while playing.
+     *
+     * A single stamp at play start goes stale in an answer longer than the gate's attribution
+     * window (5 s), and the microphone is then cut while we are still speaking — the reported bug,
+     * just past the window. The refresh cannot ride the write path, because that path returns when
+     * the buffer empties and the client is designed to ride out an underrun; a stamp tied to it
+     * would look like coverage and be a no-op in exactly the case the property exists for.
+     *
+     * The tick samples the same predicate the write path and [submitFrame] already sample
+     * (`playing && !paused`) — it is that predicate sampled by time rather than by frame arrival,
+     * not a second way of answering the question.
+     *
+     * Coupled to [pause] deliberately: pausing stops the tick, so the gate's copy keeps the last
+     * stamp and the 5 s window expires on its own. That expiry is what carries the paused case,
+     * which is why [pause] does not signal `false` itself — if this predicate ever stops matching
+     * "consuming audio", the paused case breaks with it.
+     */
+    private fun startAudibleHeartbeat() {
+        audibleHeartbeat?.cancel()
+        onPlaybackAudibleChanged?.invoke(true)
+        audibleHeartbeat = heartbeatScope.launch {
+            while (isActive) {
+                delay(AUDIBLE_HEARTBEAT_MS)
+                if (!playing || paused) break
+                onPlaybackAudibleChanged?.invoke(true)
+            }
+        }
+    }
+
+    private fun stopAudibleHeartbeat() {
+        audibleHeartbeat?.cancel()
+        audibleHeartbeat = null
+        onPlaybackAudibleChanged?.invoke(false)
+    }
+
+    private val heartbeatScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     /** Release all resources. Must be called before the player is discarded. */
     fun release() {
@@ -340,5 +402,14 @@ class CloudAudioPlayer(
 
     companion object {
         private const val TAG = "CloudAudio"
+
+        /**
+         * How often to refresh the audible stamp while playing.
+         *
+         * The gate attributes sound by asking whether this app emitted within the last 5 s
+         * (`OtherAppPlayingCondition.transitionWindowMs`), so the refresh has to be comfortably
+         * inside that: an answer of 5 s or more would otherwise go stale mid-playback.
+         */
+        private const val AUDIBLE_HEARTBEAT_MS = 1_000L
     }
 }

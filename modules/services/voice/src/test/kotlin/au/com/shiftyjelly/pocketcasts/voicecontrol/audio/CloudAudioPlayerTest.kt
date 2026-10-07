@@ -102,4 +102,82 @@ class CloudAudioPlayerTest {
     fun notPlayingInitially() {
         assertFalse(player.isPlaying)
     }
+
+    // --- The mic-gate contract -------------------------------------------------------------
+    // The voice gate blocks the mic when "another app is playing", with a self-attribution
+    // guard keyed on the app's own emitted audio. The guard's timestamp is written only by the
+    // earcon/TTS renderer, so a cloud answer was never covered by it: the app heard its own
+    // answer as a stranger and cut the mic mid-answer. These pin the missing half.
+
+    @Test
+    fun `cloud playback reports us making sound`() {
+        val states = mutableListOf<Boolean>()
+        player.onPlaybackAudibleChanged = { audible -> states += audible }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+
+        assertTrue("play must be reported as us making sound", states.firstOrNull() == true)
+    }
+
+    @Test
+    fun `a long answer keeps refreshing the stamp even when frames stall`() {
+        // The property is "fresh whenever we are still the sound", so it must hold while the
+        // player is playing — including an underrun, which the client is designed to ride out
+        // ("pauses-and-resumes on underrun"). A refresh tied to the write path goes stale exactly
+        // then, which is the case the property exists for.
+        var reports = 0
+        player.onPlaybackAudibleChanged = { audible -> if (audible) reports += 1 }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        // Count only what happens AFTER play() has returned: play() reports as it starts, so a
+        // total count would pass on the start-up reports alone and never exercise this property.
+        val afterStart = reports
+        // No further frames: the buffer is empty and the write path is idle, which is the
+        // underrun the client is designed to ride out.
+        Thread.sleep(2_500)
+
+        assertTrue(
+            "the stamp must refresh while playing and idle, not only at start (got ${reports - afterStart} after start)",
+            reports > afterStart,
+        )
+    }
+
+    @Test
+    fun `a multi-frame answer refreshes the stamp for its whole duration`() {
+        // The gate's attribution window is far shorter than an answer, so a single stamp at play
+        // start goes stale mid-answer and the microphone is cut while we are still speaking —
+        // the reported bug, just past the window. Counting the reports is the assertion that
+        // cannot pass by accident: one start-of-play call would satisfy a callback-fired check.
+        var reports = 0
+        player.onPlaybackAudibleChanged = { audible -> if (audible) reports += 1 }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.submitFrame(byteArrayOf(0x02, 0x03))
+        player.submitFrame(byteArrayOf(0x04, 0x05))
+        player.play()
+        val atStart = reports
+        Thread.sleep(2_500)
+
+        assertTrue(
+            "a multi-second answer must keep refreshing after start (got ${reports - atStart} after start)",
+            reports > atStart,
+        )
+    }
+
+    @Test
+    fun `cloud playback reports that we stopped making sound`() {
+        val states = mutableListOf<Boolean>()
+        player.onPlaybackAudibleChanged = { audible -> states += audible }
+
+        player.submitFrame(byteArrayOf(0x00, 0x01))
+        player.play()
+        player.stop()
+
+        // The stamp is refreshed for the whole utterance, so the reports are not a clean pair —
+        // what matters is the LAST word: once we stop, the gate must not keep believing we are
+        // the sound, or it would swallow a foreign app for the length of the window.
+        assertEquals("the final report must be that we stopped", false, states.last())
+    }
 }

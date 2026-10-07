@@ -10,6 +10,20 @@
 # The comparison that catches it is against the SOURCE OF TRUTH:
 #   base:<file>  vs  reviewed-sha:<file>, for every file the change touches.
 #
+# SCOPE -- what this tool cannot answer, stated because the answer it cannot give is SILENT
+# rather than wrong. It iterates the CHANGE's own file set (or explicit paths), so content that
+# a branch carries and the base never mentions is invisible to it by construction: a branch 88
+# commits ahead will read as "these files match" for the files it does touch. To ask about a
+# branch's whole content, use a line-level comparison over the union of both trees
+# (`git log -S` for a specific line, or a diff over `git ls-tree -r --name-only` of both refs).
+#
+# `DIFFERS` is a flag and not a verdict: two versions that are not identical differ both for a
+# supersession (the base replaced this content deliberately) and for a loss. Naming the cause is
+# the human step, and it is the step that makes a removal safe: "absent from the base" is safe
+# only when the absence has a named cause.
+#
+# A clean worktree is a fact about the checkout and says nothing about the ref.
+#
 # Companion to cloud-turn-observability/scripts/check_head.sh, which LOCATES a reduction
 # by path. This one DECIDES whether what landed matches what was reviewed, file by file.
 # They are deliberately two tools: locating and deciding are different jobs, and collapsing

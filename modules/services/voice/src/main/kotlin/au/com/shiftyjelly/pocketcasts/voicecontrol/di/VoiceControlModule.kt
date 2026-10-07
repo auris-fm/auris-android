@@ -251,6 +251,16 @@ abstract class VoiceControlModule {
         @Singleton
         fun provideCloudAudioPlayer(
             @ApplicationContext context: Context,
-        ): au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer(context)
+            audioFeedbackRenderer: AudioFeedbackRenderer,
+        ): au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer(context).apply {
+            // The cloud answer is audible output, but it is not produced by the feedback
+            // renderer — so without this the gate's "we are making sound" stamp goes stale
+            // while an answer plays, the answer is read as a foreign app, and the microphone
+            // is cut mid-answer. Joining the renderer's existing signal is the systematic fix:
+            // the gate keeps one question ("are we the sound?") and gains no cloud special case.
+            onPlaybackAudibleChanged = { audible ->
+                if (audible) audioFeedbackRenderer.noteAudibleNow()
+            }
+        }
     }
 }

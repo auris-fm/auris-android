@@ -35,6 +35,21 @@ class AudioFeedbackRenderer(
     val hasEmittedAudio: StateFlow<Boolean> = _hasEmittedAudio
     val lastEmittedAtMs: StateFlow<Long> = _lastEmittedAtMs
 
+    /**
+     * Note that this app is making sound *now*, from a path that is not this renderer.
+     *
+     * [noteEmitted] is private because every caller used to be in this class — but the cloud
+     * player is a second producer of audible output, and it was the one the gate did not know
+     * about: a cloud answer played for seconds while the gate saw a stale self-emission, read
+     * `isMusicActive` as a foreign app, and cut the microphone mid-answer. Rather than teach the
+     * gate about cloud turns, the cloud path joins the signal that already answers this question.
+     *
+     * This is the same shape as [speakWithHeartbeat]: longer-than-the-window audio refreshes the
+     * stamp for its own duration, because speech outlasting the window reads as a foreign app for
+     * the rest of the answer.
+     */
+    fun noteAudibleNow() = noteEmitted()
+
     private fun noteEmitted() {
         _hasEmittedAudio.value = true
         _lastEmittedAtMs.value = SystemClock.elapsedRealtime()

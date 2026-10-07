@@ -137,8 +137,8 @@ internal data class CloudRouteTokenPayload(
 
 @JsonClass(generateAdapter = true)
 internal data class CloudRouteDonePayload(
-    @Json(name = "input_tokens") val inputTokens: Int,
-    @Json(name = "output_tokens") val outputTokens: Int,
+    @Json(name = "input_tokens") val inputTokens: Int? = null,
+    @Json(name = "output_tokens") val outputTokens: Int? = null,
 )
 
 @JsonClass(generateAdapter = true)
@@ -152,4 +152,10 @@ internal data class CloudRouteHttpErrorPayload(
     val code: String? = null,
     val message: String? = null,
     val error: String? = null,
+)
+
+/** Server's auth-response payload: the codec it negotiated for the binary audio path. */
+@JsonClass(generateAdapter = true)
+internal data class CloudRouteAuthResponse(
+    val codec: String?,
 )

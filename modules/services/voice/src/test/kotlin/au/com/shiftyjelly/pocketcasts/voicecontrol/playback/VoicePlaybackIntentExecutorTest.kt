@@ -48,7 +48,7 @@ class VoicePlaybackIntentExecutorTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
 
-        val response = executor.execute(VoiceIntent.Playback.SeekRelative(30_000))
+        val response = executor.execute(VoiceIntent.Playback.SeekRelative(30))
 
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(listOf("skipForward:30"), sinks.playback.calls)
@@ -59,21 +59,35 @@ class VoicePlaybackIntentExecutorTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
 
-        val response = executor.execute(VoiceIntent.Playback.SeekRelative(-10_000))
+        val response = executor.execute(VoiceIntent.Playback.SeekRelative(-10))
 
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(listOf("skipBackward:10"), sinks.playback.calls)
     }
 
     @Test
-    fun `relative positive sub-second seek does nothing`() = runTest {
+    fun `relative null seek with direction uses sink interval`() = runTest {
+        // null deltaSeconds means "no amount stated — sink should apply its own
+        // interval in direction". The executor passes null so the sink uses the
+        // app's configured interval rather than a manufactured value.
         val sinks = FakeSinks()
         val executor = sinks.executor()
 
-        val response = executor.execute(VoiceIntent.Playback.SeekRelative(999))
+        val response = executor.execute(VoiceIntent.Playback.SeekRelative(null, "backward"))
 
         assertEquals(VoiceResponse.Silent, response)
-        assertEquals(emptyList<String>(), sinks.playback.calls)
+        assertEquals(listOf("skipBackward:null"), sinks.playback.calls)
+    }
+
+    @Test
+    fun `relative null seek without direction uses forward interval`() = runTest {
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+
+        val response = executor.execute(VoiceIntent.Playback.SeekRelative(null, null))
+
+        assertEquals(VoiceResponse.Silent, response)
+        assertEquals(listOf("skipForward:null"), sinks.playback.calls)
     }
 
     @Test
@@ -239,7 +253,7 @@ class VoicePlaybackIntentExecutorTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
 
-        executor.execute(VoiceIntent.Playback.SeekRelative(30_000))
+        executor.execute(VoiceIntent.Playback.SeekRelative(30))
 
         // A seek does not contest the turn's pause, so it must not invalidate it.
         org.mockito.kotlin.verify(sinks.playbackManager, org.mockito.kotlin.never()).noteUserPlaybackCommand()
@@ -441,6 +455,16 @@ class VoicePlaybackIntentExecutorTest {
         var onCall: ((String) -> Unit)? = null
 
         val calls = mutableListOf<String>()
+        override suspend fun duck(): VoiceResponse {
+            calls += "duck"
+            onCall?.invoke("duck")
+            return VoiceResponse.Silent
+        }
+        override suspend fun restore(): VoiceResponse {
+            calls += "restore"
+            onCall?.invoke("restore")
+            return VoiceResponse.Silent
+        }
         override suspend fun pause(): VoiceResponse {
             calls += "pause"
             onCall?.invoke("pause")
@@ -450,16 +474,16 @@ class VoicePlaybackIntentExecutorTest {
             calls += "resume"
             return VoiceResponse.Silent
         }
-        override suspend fun skipForward(seconds: Int): VoiceResponse {
+        override suspend fun skipForward(seconds: Int?): VoiceResponse {
             calls += "skipForward:$seconds"
             return VoiceResponse.Silent
         }
-        override suspend fun skipBackward(seconds: Int): VoiceResponse {
+        override suspend fun skipBackward(seconds: Int?): VoiceResponse {
             calls += "skipBackward:$seconds"
             return VoiceResponse.Silent
         }
-        override suspend fun seekTo(positionMs: Int): VoiceResponse {
-            calls += "seekTo:$positionMs"
+        override suspend fun seekTo(positionSeconds: Int): VoiceResponse {
+            calls += "seekTo:$positionSeconds"
             return VoiceResponse.Silent
         }
         override fun nextEpisode(): VoiceResponse {

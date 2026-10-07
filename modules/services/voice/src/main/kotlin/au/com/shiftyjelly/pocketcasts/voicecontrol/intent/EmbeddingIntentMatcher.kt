@@ -194,14 +194,14 @@ class EmbeddingIntentMatcher @Inject constructor(
 
             "seek_relative_forward" -> {
                 val entities = entityExtractor.extract(text, intentType)
-                val deltaMs = (entities.deltaSeconds ?: 30) * 1000
-                VoiceIntent.Playback.SeekRelative(deltaMs)
+                val deltaSeconds = entities.deltaSeconds ?: 30
+                VoiceIntent.Playback.SeekRelative(deltaSeconds)
             }
 
             "seek_relative_backward" -> {
                 val entities = entityExtractor.extract(text, intentType)
-                val deltaMs = -(entities.deltaSeconds ?: 30) * 1000
-                VoiceIntent.Playback.SeekRelative(deltaMs)
+                val deltaSeconds = entities.deltaSeconds ?: 30
+                VoiceIntent.Playback.SeekRelative(-deltaSeconds)
             }
 
             "set_speed" -> {

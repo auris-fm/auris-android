@@ -32,25 +32,25 @@ class ToolCallMapperTest {
     @Test
     fun `playback seek relative`() {
         val result = mapper.map(ToolCall("playback", "seek_relative", mapOf("delta_seconds" to 30)))
-        assertEquals(VoiceIntent.Playback.SeekRelative(30_000), result)
+        assertEquals(VoiceIntent.Playback.SeekRelative(30), result)
     }
 
     @Test
     fun `playback seek relative negative`() {
         val result = mapper.map(ToolCall("playback", "seek_relative", mapOf("delta_seconds" to -15)))
-        assertEquals(VoiceIntent.Playback.SeekRelative(-15_000), result)
+        assertEquals(VoiceIntent.Playback.SeekRelative(-15), result)
     }
 
     @Test
     fun `playback seek to`() {
         val result = mapper.map(ToolCall("playback", "seek_to", mapOf("position_seconds" to 120)))
-        assertEquals(VoiceIntent.Playback.SeekAbsolute(120_000), result)
+        assertEquals(VoiceIntent.Playback.SeekAbsolute(120), result)
     }
 
     @Test
-    fun `playback seek relative without delta uses default skip`() {
+    fun `playback seek relative without delta carries null`() {
         val result = mapper.map(ToolCall("playback", "seek_relative", emptyMap()))
-        assertEquals(VoiceIntent.Playback.SeekRelative(30_000), result)
+        assertEquals(VoiceIntent.Playback.SeekRelative(null), result)
     }
 
     @Test

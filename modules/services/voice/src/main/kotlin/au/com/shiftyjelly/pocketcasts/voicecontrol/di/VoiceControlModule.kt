@@ -246,5 +246,11 @@ abstract class VoiceControlModule {
             earconPlayer: EarconPlayer,
             ttsEngine: TtsEngine,
         ): AudioFeedbackRenderer = AudioFeedbackRenderer(earconPlayer, ttsEngine)
+
+        @Provides
+        @Singleton
+        fun provideCloudAudioPlayer(
+            @ApplicationContext context: Context,
+        ): au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer(context)
     }
 }

@@ -20,9 +20,24 @@ object SlotRepair {
         params = repairStringParams(tool, action, params, utterance).toMutableMap()
         params = sanitizeParams(tool, action, params).toMutableMap()
         params = dropNoneLike(params).toMutableMap()
+        // Drop stated-zero delta: zero is not a real amount, so keep direction but drop the zero.
+        params = dropStatedZero(tool, action, params).toMutableMap()
         params = fillSeekRelativeDefault(tool, action, params, utterance).toMutableMap()
+
+        // An unsupported spoken amount must not clamp or default — no repaired call at all.
+        if (tool == "playback" && action == "seek_relative") {
+            val delta = params["delta_seconds"] as? Number
+            if (delta != null) {
+                val absDelta = kotlin.math.abs(delta.toDouble())
+                if (absDelta > MAX_REPAIR_SECONDS) return null
+            }
+        }
+
         return ToolCall(tool, action, params)
     }
+
+    /** Maximum repaired relative delta (1 hour). Larger amounts return null (no repaired call). */
+    private const val MAX_REPAIR_SECONDS = 3600
 
     internal fun collapseRepetition(text: String): String {
         if (text.isEmpty()) return text
@@ -66,7 +81,7 @@ object SlotRepair {
     private val ACTION_PARAMS: Map<Pair<String, String>, Set<String>> = mapOf(
         "playback" to "pause" to emptySet(),
         "playback" to "resume" to emptySet(),
-        "playback" to "seek_relative" to setOf("delta_seconds"),
+        "playback" to "seek_relative" to setOf("delta_seconds", "direction"),
         "playback" to "seek_to" to setOf("position_seconds"),
         "playback" to "next_episode" to emptySet(),
         "effects" to "set_speed" to setOf("speed"),
@@ -156,6 +171,20 @@ object SlotRepair {
         }
     }
 
+    /**
+     * For seek_relative, drop a stated-zero delta: zero is not a real amount,
+     * so keep direction but drop the zero so the utterance can supply the real magnitude.
+     */
+    private fun dropStatedZero(tool: String, action: String, params: Map<String, Any?>): Map<String, Any?> {
+        if (tool != "playback" || action != "seek_relative") return params
+        val delta = params["delta_seconds"]
+        return if (delta is Number && delta.toDouble() == 0.0) {
+            params - "delta_seconds"
+        } else {
+            params
+        }
+    }
+
     private fun repairNumericParams(
         tool: String,
         action: String,
@@ -165,9 +194,46 @@ object SlotRepair {
         val allowed = allowedParams(tool, action)
         val extracted = extractNumericSlots(tool, action, utterance)
         val out = params.toMutableMap()
-        for ((key, value) in extracted) {
-            if (key in allowed) {
-                out[key] = value
+        for ((key, rawValue) in extracted) {
+            if (key !in allowed) continue
+            val existing = out[key]
+            when (key) {
+                "delta_seconds" -> {
+                    // Preserve the sign the call produced; repair may correct a
+                    // magnitude (0, a wrong unit count) but must never turn a
+                    // negative into a positive or the reverse.
+                    // A zero has no sign to preserve — fill from utterance.
+                    val existingSign = when (existing) {
+                        is Int -> existing.compareTo(0)
+
+                        // 1, 0, -1
+                        is Long -> existing.compareTo(0)
+
+                        else -> 0
+                    }
+                    val extractedValue = when (rawValue) {
+                        is Int -> rawValue
+                        is Long -> rawValue.toInt()
+                        else -> 0
+                    }
+                    out[key] = when {
+                        existingSign == 0 -> extractedValue
+
+                        // fill absent / zero from utterance
+                        existingSign != 0 -> {
+                            // Keep existing sign, apply extracted magnitude
+                            val magnitude = kotlin.math.abs(extractedValue)
+                            existingSign * magnitude
+                        }
+
+                        else -> extractedValue
+                    }
+                }
+
+                else -> {
+                    // For other numeric params, overwrite as before.
+                    out[key] = rawValue
+                }
             }
         }
         return out
@@ -193,7 +259,19 @@ object SlotRepair {
         return if (BACK_REGEX.containsMatchIn(lower)) -seconds else seconds
     }
 
-    /** When the model omits delta_seconds, fill a signed ±30s default from wording. */
+    /**
+     * When the model's call is incomplete for seek_relative, fill what is missing from the utterance.
+     *
+     * Rules from the shared fixture:
+     * - **Direction predicted, no delta**: extract a delta if the utterance states one;
+     *   otherwise keep the direction alone.
+     * - **Delta present, no direction**: add none. The sign already carries the direction, and an
+     *   utterance is not a second source for it — `"go back"` with `delta_seconds: -30` is
+     *   returned unchanged.
+     * - **Both absent**: extract the delta first; a direction is inferred from the wording only
+     *   when the utterance states no amount at all. The two are alternatives, never paired —
+     *   `"back that up a minute"` → `{delta_seconds: -60}`, `"go back"` → `{direction: backward}`.
+     */
     private fun fillSeekRelativeDefault(
         tool: String,
         action: String,
@@ -201,14 +279,53 @@ object SlotRepair {
         utterance: String,
     ): Map<String, Any?> {
         if (tool != "playback" || action != "seek_relative") return params
-        if (params.containsKey("delta_seconds")) return params
-        val signed = if (BACK_REGEX.containsMatchIn(utterance.lowercase())) -DEFAULT_SKIP_SECONDS else DEFAULT_SKIP_SECONDS
-        return params + ("delta_seconds" to signed)
+
+        val hasDelta = params.containsKey("delta_seconds")
+        val hasDirection = params.containsKey("direction")
+
+        // Direction present but no delta → extract delta from utterance.
+        if (hasDirection && !hasDelta) {
+            val extracted = extractDeltaSeconds(utterance)
+            return extracted?.let { params + ("delta_seconds" to it) } ?: params
+        }
+
+        // Delta present but no direction → add none. The sign already carries the direction,
+        // and an utterance that states an amount is not a second source for it (fixture:
+        // "go back" with delta_seconds -30 repairs to exactly that, no direction).
+        if (hasDelta && !hasDirection) return params
+
+        // Both absent → extract the delta first, and only fall back to a direction from the
+        // wording when the utterance states no amount at all: the two are alternatives, because
+        // a stated amount already carries its direction in the sign (fixture: "back that up a
+        // minute" repairs to {delta_seconds: -60}; "go back" has no amount and repairs to
+        // {direction: backward}).
+        if (!hasDelta && !hasDirection) {
+            val extractedDelta = extractDeltaSeconds(utterance)
+            val out = params.toMutableMap()
+            if (extractedDelta != null) {
+                out["delta_seconds"] = extractedDelta
+            } else {
+                extractDirectionFromUtterance(utterance)?.let { out["direction"] = it }
+            }
+            return out
+        }
+
+        return params
+    }
+
+    /** Infer direction ("backward" or "forward") from utterance wording. */
+    private fun extractDirectionFromUtterance(utterance: String): String? {
+        val lower = utterance.lowercase()
+        return when {
+            FORWARD_REGEX.containsMatchIn(lower) -> "forward"
+            BACK_REGEX.containsMatchIn(lower) -> "backward"
+            else -> null
+        }
     }
 
     private val A_MINUTE_REGEX = Regex("""\ba\s+minute\b""")
     private val BACK_REGEX = Regex("""\b(back|backward|backwards|rewind|behind)\b""")
-    private const val DEFAULT_SKIP_SECONDS = 30
+    private val FORWARD_REGEX = Regex("""\b(forward|ahead)\b""")
 
     private fun durationPairs(utterance: String): List<Pair<Number, String>> {
         val pairs = mutableListOf<Pair<Number, String>>()
@@ -237,8 +354,9 @@ object SlotRepair {
         }
     }
 
+    // Simple number regex: matches digits or number words (no lookbehind/lookahead)
     private val NUMBER_REGEX = Regex(
-        """(?<![A-Za-z])(?:\d+(?:\.\d+)?|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\s](?:one|two|three|four|five|six|seven|eight|nine))?|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|zero|oh))(?![A-Za-z])""",
+        """(?:\d+(?:\.\d+)?|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\s](?:one|two|three|four|five|six|seven|eight|nine))?|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|zero|oh))""",
         RegexOption.IGNORE_CASE,
     )
     private val UNIT_REGEX = Regex("""\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?)\b""", RegexOption.IGNORE_CASE)
@@ -251,7 +369,8 @@ object SlotRepair {
         if (parts.size == 2 && parts[0] in TENS && parts[1] in ONES_1_9) {
             return TENS.getValue(parts[0]) + ONES_1_9.getValue(parts[1])
         }
-        return ONES[parts.singleOrNull() ?: return null]
+        val single = parts.singleOrNull() ?: return null
+        return ONES[single] ?: TENS[single]
     }
 
     private val ONES = mapOf(

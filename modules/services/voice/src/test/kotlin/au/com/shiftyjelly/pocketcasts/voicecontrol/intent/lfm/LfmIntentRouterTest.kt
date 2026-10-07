@@ -315,8 +315,10 @@ class LfmIntentRouterTest {
         val router = createRouter(inference)
 
         router.ensureReady().getOrThrow()
+        // Direction is null: the utterance states an amount, and an amount carries its direction
+        // in the sign. The separate direction field is for a direction that came *without* one.
         assertEquals(
-            VoiceIntent.Playback.SeekRelative(-60_000),
+            VoiceIntent.Playback.SeekRelative(-60),
             router.recognize(english("go back a minute"), RECOGNITION_CONTEXT).intent,
         )
     }

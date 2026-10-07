@@ -73,17 +73,28 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         VoiceIntent.Playback.Resume -> playbackSink.resume()
 
         is VoiceIntent.Playback.SeekRelative -> {
-            val seconds = abs(intent.deltaMs / 1000)
-            if (seconds == 0) {
-                VoiceResponse.Silent
-            } else if (intent.deltaMs >= 0) {
-                playbackSink.skipForward(seconds)
-            } else {
-                playbackSink.skipBackward(seconds)
+            // deltaSeconds in seconds; null means "no amount stated — sink
+            // should apply its configured interval in direction".
+            when (val delta = intent.deltaSeconds) {
+                null -> {
+                    // No amount stated; sink applies its interval in direction.
+                    // Pass null so the sink uses the app's configured interval.
+                    when (intent.direction) {
+                        "backward" -> playbackSink.skipBackward(null)
+                        else -> playbackSink.skipForward(null)
+                    }
+                }
+
+                0 -> VoiceResponse.Silent
+
+                // explicit "stay put"
+                in Int.MIN_VALUE..-1 -> playbackSink.skipBackward(abs(delta))
+
+                else -> playbackSink.skipForward(delta)
             }
         }
 
-        is VoiceIntent.Playback.SeekAbsolute -> playbackSink.seekTo(intent.positionMs.coerceAtLeast(0))
+        is VoiceIntent.Playback.SeekAbsolute -> playbackSink.seekTo(intent.positionSeconds.coerceAtLeast(0))
 
         VoiceIntent.Playback.NextEpisode -> playbackSink.nextEpisode()
     }
@@ -185,11 +196,17 @@ class VoicePlaybackIntentExecutor @Inject constructor(
 }
 
 interface VoicePlaybackSink {
+    /** Lower the host player's volume (duck) while cloud audio plays through the shared output. */
+    suspend fun duck(): VoiceResponse
+
+    /** Restore the host player to full volume after cloud audio finishes. */
+    suspend fun restore(): VoiceResponse
+
     suspend fun pause(): VoiceResponse
     suspend fun resume(): VoiceResponse
-    suspend fun skipForward(seconds: Int): VoiceResponse
-    suspend fun skipBackward(seconds: Int): VoiceResponse
-    suspend fun seekTo(positionMs: Int): VoiceResponse
+    suspend fun skipForward(seconds: Int?): VoiceResponse
+    suspend fun skipBackward(seconds: Int?): VoiceResponse
+    suspend fun seekTo(positionSeconds: Int): VoiceResponse
     fun nextEpisode(): VoiceResponse
 }
 

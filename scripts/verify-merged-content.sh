@@ -36,7 +36,9 @@ base="origin/main"
 shift 2 2>/dev/null || shift 1 2>/dev/null || true
 [ "${1:-}" = "--" ] && shift
 
+explicit_paths=0
 if [ "$#" -gt 0 ]; then
+  explicit_paths=1
   files=("$@")
 else
   # default: every file the reviewed commit's change touches, relative to its parent.
@@ -50,6 +52,21 @@ else
 fi
 
 fail=0
+
+# The reverse direction, which the first version of this script lacked: a file the BASE has
+# and the reviewed head does not is a merge that would delete landed work. The loop below only
+# iterates files the *change* touches, so a base file the head silently drops is never visited.
+# Only meaningful with an explicit path list; for the default set the change is not the whole
+# tree, and its absent files are the change's own deletions.
+if [ "$explicit_paths" -eq 1 ]; then
+  for f in "${files[@]}"; do
+    if git cat-file -e "${base}:${f}" 2>/dev/null && ! git cat-file -e "${reviewed}:${f}" 2>/dev/null; then
+      printf 'DROPPED  %s  (in %s, absent from %s)\n' "$f" "$base" "$reviewed"
+      fail=1
+    fi
+  done
+fi
+
 for f in "${files[@]}"; do
   if ! git cat-file -e "${base}:${f}" 2>/dev/null; then
     printf 'ABSENT in %s: %s\n' "$base" "$f"

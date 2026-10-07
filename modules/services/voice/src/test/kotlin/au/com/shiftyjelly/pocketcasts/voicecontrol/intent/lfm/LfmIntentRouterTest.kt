@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCallMapper
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
@@ -320,6 +321,29 @@ class LfmIntentRouterTest {
         assertEquals(
             VoiceIntent.Playback.SeekRelative(-60),
             router.recognize(english("go back a minute"), RECOGNITION_CONTEXT).intent,
+        )
+    }
+
+    @Test
+    fun routingRecord_isWrittenToTheShareableLogBufferWithTranscriptAndOutcome() = runTest {
+        val logDir = tempDir.newFolder("logs")
+        LogBuffer.setup(logDir.absolutePath)
+        val inference = FakeLfmInference().apply { classifyLabel = "no_match:" }
+        val router = createRouter(inference)
+
+        router.ensureReady().getOrThrow()
+        router.recognize(english("play that thing"), RECOGNITION_CONTEXT)
+
+        val line = File(logDir, "debug.log")
+            .readLines()
+            .single { it.contains("request_id=") }
+        assertTrue(line.contains("transcript='play that thing'"))
+        assertTrue(line.contains("outcome=${RouterStageDiagnostic.OUTCOME_NO_INTENT}"))
+        assertTrue(line.contains("stage=${RouterStageDiagnostic.STAGE_NO_MATCH}"))
+        assertTrue(line.contains("reason=${RouterStageDiagnostic.REASON_NO_MATCH}"))
+        assertTrue(
+            "request_id must be a UUID",
+            Regex("request_id=[0-9a-fA-F-]{36}").containsMatchIn(line),
         )
     }
 

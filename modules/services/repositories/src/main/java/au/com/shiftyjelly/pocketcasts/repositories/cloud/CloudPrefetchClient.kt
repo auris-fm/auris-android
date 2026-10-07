@@ -42,7 +42,7 @@ class CloudPrefetchClient(
         baseUrl: String,
         userId: String,
         okHttpClient: OkHttpClient = sharedClient(),
-    ) : this({ baseUrl }, CloudRouteClient.CloudFixedTokenProvider(userId), okHttpClient)
+    ) : this({ baseUrl }, CloudFixedTokenProvider(userId), okHttpClient)
 
     /** Result of a best-effort prefetch hint; informational only. */
     enum class Outcome { ACCEPTED, SKIPPED, NOT_SENT }

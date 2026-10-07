@@ -38,9 +38,10 @@ sealed class CloudRouteEvent {
     /** Negotiated structured discovery results (only when advertised). */
     data class Result(val results: CloudSearchResults) : CloudRouteEvent()
 
-    /** WebSocket handshake acknowledgement — the server is ready for the auth frame. */
-    object Connected : CloudRouteEvent()
-
-    /** Server's auth response carrying the negotiated binary audio codec. */
-    data class AuthResponse(val codec: String) : CloudRouteEvent()
+    /**
+     * WebSocket handshake acknowledgement. It carries the codec the server negotiated for the
+     * binary audio path (`{"type":"connected","codec":...,"reservation_id":...}`), which is the
+     * only place that value arrives: the protocol has no separate `auth` frame.
+     */
+    data class Connected(val codec: String) : CloudRouteEvent()
 }

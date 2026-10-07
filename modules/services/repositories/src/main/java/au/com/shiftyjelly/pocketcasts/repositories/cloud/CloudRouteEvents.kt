@@ -38,13 +38,12 @@ internal object CloudRouteEvents {
                 "done" -> CloudRouteJson.doneAdapter.fromJson(payload)
                     ?.let { CloudRouteEvent.Done(inputTokens = it.inputTokens, outputTokens = it.outputTokens) }
 
-                "auth" -> CloudRouteJson.authResponseAdapter.fromJson(payload)
-                    ?.let { CloudRouteEvent.AuthResponse(codec = it.codec.orEmpty()) }
-
                 "error" -> CloudRouteJson.errorAdapter.fromJson(payload)
                     ?.let { CloudRouteEvent.Error(code = it.code, message = it.message) }
 
-                "connected" -> CloudRouteEvent.Connected
+                // The handshake carries the negotiated codec; there is no separate `auth` frame.
+                "connected" -> CloudRouteJson.connectedAdapter.fromJson(payload)
+                    ?.let { CloudRouteEvent.Connected(codec = it.codec.orEmpty()) }
 
                 else -> null
             }

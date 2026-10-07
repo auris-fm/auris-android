@@ -41,16 +41,6 @@ data class CloudRouteHint(
     val arguments: Map<String, Any?> = emptyMap(),
 )
 
-@JsonClass(generateAdapter = true)
-internal data class CloudRouteRequestBody(
-    val request: String,
-    val context: CloudRouteContext,
-    @Json(name = "request_id") val requestId: String? = null,
-    /** Null (omitted) unless the client advertises at least one capability. */
-    val capabilities: List<String>? = null,
-    @Json(name = "route_hint") val routeHint: CloudRouteHint? = null,
-)
-
 /** One logical turn: the utterance plus its turn-control fields. */
 data class CloudRouteTurn(
     val request: String,
@@ -154,8 +144,11 @@ internal data class CloudRouteHttpErrorPayload(
     val error: String? = null,
 )
 
-/** Server's auth-response payload: the codec it negotiated for the binary audio path. */
+/**
+ * The `connected` frame's payload: the codec the server negotiated for the binary audio path.
+ * This is where that value arrives — the protocol has no separate `auth` frame.
+ */
 @JsonClass(generateAdapter = true)
-internal data class CloudRouteAuthResponse(
+internal data class CloudRouteConnectedPayload(
     val codec: String?,
 )

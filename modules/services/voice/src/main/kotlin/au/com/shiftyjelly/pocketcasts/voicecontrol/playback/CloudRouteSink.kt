@@ -1,7 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteCapabilities
-import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteClient
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteConversationEntry
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteErrorCodes
@@ -11,6 +10,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteLimits
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudSearchResults
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnRoute
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudIdentity
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
@@ -233,12 +233,9 @@ class CloudRouteSink internal constructor(
                 if (outcome != null) return@collect
                 when (event) {
                     is CloudRouteEvent.Connected -> {
-                        // Handshake acknowledgement; the server is ready for the auth frame.
-                    }
-
-                    is CloudRouteEvent.AuthResponse -> {
-                        // Server chose a codec; propagate it to the audio player so
-                        // it creates the correct decoder.
+                        // Handshake acknowledgement, and the frame that carries the codec the
+                        // server negotiated. Propagate it so the player builds the right decoder
+                        // and sample rate before any binary frame arrives.
                         audioPlayer?.setCodec(event.codec)
                     }
 
@@ -418,7 +415,11 @@ class CloudRouteSink internal constructor(
 
     private fun openRoute(turn: CloudRouteTurn): Flow<CloudRouteEvent> {
         routeInvoker?.let { return it(turn) }
-        return CloudRouteClient(resolveBaseUrl(), tokenProvider).route(turn)
+        // Production runs over the WebSocket only (cloud-assistant.md, owner's ruling): a refused
+        // upgrade fails the turn visibly rather than falling back, so a completed turn is evidence
+        // the negotiated path served it. The choice lives in one place rather than beside a second
+        // path — there is no second path to be beside.
+        return CloudTurnRoute(resolveBaseUrl(), tokenProvider).route(turn)
     }
 
     /** Advertise a capability only when its renderer is actually available. */

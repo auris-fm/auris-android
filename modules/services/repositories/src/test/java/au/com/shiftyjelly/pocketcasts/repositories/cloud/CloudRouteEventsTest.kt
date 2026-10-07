@@ -51,19 +51,17 @@ class CloudRouteEventsTest {
     }
 
     @Test
-    fun `decode parses auth response event`() {
-        val text = """{"type":"auth","codec":"opus@48k"}"""
+    fun `decode parses connected event and carries its negotiated codec`() {
+        // The handshake is where the codec arrives - the protocol has no `auth` frame.
+        val text = """{"type":"connected","codec":"opus@48k","reservation_id":"r-1"}"""
         val event = CloudRouteEvents.decode(text)
-        assert(event is CloudRouteEvent.AuthResponse)
-        val auth = event as CloudRouteEvent.AuthResponse
-        assertEquals("opus@48k", auth.codec)
+        assertEquals(CloudRouteEvent.Connected(codec = "opus@48k"), event)
     }
 
     @Test
-    fun `decode parses connected event`() {
-        val text = """{"type":"connected"}"""
-        val event = CloudRouteEvents.decode(text)
-        assertEquals(CloudRouteEvent.Connected, event)
+    fun `decode tolerates a connected frame without a codec`() {
+        val event = CloudRouteEvents.decode("""{"type":"connected"}""")
+        assertEquals(CloudRouteEvent.Connected(codec = ""), event)
     }
 
     @Test

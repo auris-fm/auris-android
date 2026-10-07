@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm
 
 import android.os.SystemClock
+import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.LfmPrompt
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.SlotRepair
@@ -11,6 +12,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.RouterInputFormat
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizeResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
@@ -99,6 +101,9 @@ class LfmIntentRouter internal constructor(
                 startedAt = startedAt,
                 stageLatencyMs = stageLatencyMs,
                 monoMs = monoMs,
+                // Carried to the export so a routing record can be paired with its turn (see finish()).
+                requestId = UUID.randomUUID().toString(),
+                transcript = input.routerTranscript,
             )
 
             if (input.routerTranscript.isBlank()) {
@@ -247,7 +252,8 @@ class LfmIntentRouter internal constructor(
         }
     }
 
-    private fun finish(result: VoiceRecognizeResult): VoiceRecognizeResult {
+    private fun finish(routed: Routed): VoiceRecognizeResult {
+        val result = routed.result
         result.diagnostic?.let { diagnostic ->
             try {
                 diagnosticSink?.invoke(diagnostic)
@@ -273,9 +279,34 @@ class LfmIntentRouter internal constructor(
             } catch (logError: Throwable) {
                 Timber.w(logError, "Router diagnostic log failed")
             }
+            // The exportable record: written to LogBuffer, which is the buffer the support-bundle
+            // export already shares (Settings -> Logs). Unlike the Timber lines above, this survives
+            // on-device in a release build and carries the transcript, so a missed utterance can be
+            // paired with its routing outcome when the corpus is authored. LogBuffer prefixes each
+            // line with its own timestamp.
+            try {
+                LogBuffer.i(
+                    TAG_ROUTING_RECORD,
+                    "request_id=%s outcome=%s stage=%s reason=%s transcript='%s'",
+                    routed.requestId,
+                    diagnostic.finalOutcome,
+                    diagnostic.failedStage ?: "ok",
+                    diagnostic.reason ?: "-",
+                    routed.transcript,
+                )
+            } catch (recordError: Throwable) {
+                Timber.w(recordError, "Router routing record export failed")
+            }
         }
         return result
     }
+
+    /** A built result plus the fields the export needs, so [finish] can write them without every call site carrying them. */
+    private class Routed(
+        val result: VoiceRecognizeResult,
+        val requestId: String,
+        val transcript: String,
+    )
 
     private class DiagnosticBuilder(
         private val modelRelease: String?,
@@ -286,6 +317,8 @@ class LfmIntentRouter internal constructor(
         private val startedAt: Long,
         private val stageLatencyMs: MutableMap<String, Long>,
         private val monoMs: () -> Long,
+        private val requestId: String,
+        private val transcript: String,
     ) {
         fun <T> timed(stage: String, block: () -> T): T {
             val t0 = monoMs()
@@ -301,42 +334,55 @@ class LfmIntentRouter internal constructor(
             stage: String,
             reason: String,
             classifierLabel: String? = null,
-        ): VoiceRecognizeResult = VoiceRecognizeResult(
-            intent = null,
-            diagnostic = RouterStageDiagnostic(
-                modelRelease = modelRelease,
-                quant = quant,
-                inputFormat = inputFormat,
-                sourceLanguage = sourceLanguage,
-                translationKind = translationKind,
-                classifierLabel = classifierLabel,
-                finalOutcome = RouterStageDiagnostic.OUTCOME_NO_INTENT,
-                failedStage = stage,
-                reason = reason,
-                stageLatencyMs = stageLatencyMs.toMap(),
-                totalLatencyMs = (monoMs() - startedAt).coerceAtLeast(0L),
+        ): Routed = Routed(
+            result = VoiceRecognizeResult(
+                intent = null,
+                diagnostic = RouterStageDiagnostic(
+                    modelRelease = modelRelease,
+                    quant = quant,
+                    inputFormat = inputFormat,
+                    sourceLanguage = sourceLanguage,
+                    translationKind = translationKind,
+                    classifierLabel = classifierLabel,
+                    finalOutcome = RouterStageDiagnostic.OUTCOME_NO_INTENT,
+                    failedStage = stage,
+                    reason = reason,
+                    stageLatencyMs = stageLatencyMs.toMap(),
+                    totalLatencyMs = (monoMs() - startedAt).coerceAtLeast(0L),
+                ),
             ),
+            requestId = requestId,
+            transcript = transcript,
         )
 
         fun success(
             intent: VoiceIntent,
             classifierLabel: String,
-        ): VoiceRecognizeResult = VoiceRecognizeResult(
-            intent = intent,
-            diagnostic = RouterStageDiagnostic(
-                modelRelease = modelRelease,
-                quant = quant,
-                inputFormat = inputFormat,
-                sourceLanguage = sourceLanguage,
-                translationKind = translationKind,
-                classifierLabel = classifierLabel,
-                finalOutcome = RouterStageDiagnostic.OUTCOME_INTENT,
-                failedStage = null,
-                reason = null,
-                stageLatencyMs = stageLatencyMs.toMap(),
-                totalLatencyMs = (monoMs() - startedAt).coerceAtLeast(0L),
+        ): Routed = Routed(
+            result = VoiceRecognizeResult(
+                intent = intent,
+                diagnostic = RouterStageDiagnostic(
+                    modelRelease = modelRelease,
+                    quant = quant,
+                    inputFormat = inputFormat,
+                    sourceLanguage = sourceLanguage,
+                    translationKind = translationKind,
+                    classifierLabel = classifierLabel,
+                    finalOutcome = RouterStageDiagnostic.OUTCOME_INTENT,
+                    failedStage = null,
+                    reason = null,
+                    stageLatencyMs = stageLatencyMs.toMap(),
+                    totalLatencyMs = (monoMs() - startedAt).coerceAtLeast(0L),
+                ),
             ),
+            requestId = requestId,
+            transcript = transcript,
         )
+    }
+
+    private companion object {
+        /** Tag for the exportable routing record in [LogBuffer]. */
+        const val TAG_ROUTING_RECORD = "VoiceRouter"
     }
 
     private data class TokenizedPrompt(

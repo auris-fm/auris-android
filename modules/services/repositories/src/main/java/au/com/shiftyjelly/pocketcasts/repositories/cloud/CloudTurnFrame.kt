@@ -16,5 +16,12 @@ sealed interface CloudTurnFrame {
         val context: CloudRouteContext,
         val capabilities: List<String>,
         val codecs: List<String>,
+        /**
+         * A read-only tool hint from a typed UI flow, when one supplied it. Optional and omitted
+         * when absent. It was SSE-only until the frame gained it: the socket path was wired while
+         * the field was missing, and since the SSE fallback retires once the transport is deployed,
+         * a hint that could not travel would have stopped working at retirement rather than here.
+         */
+        val routeHint: CloudRouteHint? = null,
     ) : CloudTurnFrame
 }

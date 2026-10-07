@@ -240,7 +240,7 @@ class CloudAudioPlayer(
         audibleHeartbeat = heartbeatScope.launch {
             while (isActive) {
                 delay(AUDIBLE_HEARTBEAT_MS)
-                if (!playing || paused) break
+                if (!isPlaying) break
                 onPlaybackAudibleChanged?.invoke(true)
             }
         }

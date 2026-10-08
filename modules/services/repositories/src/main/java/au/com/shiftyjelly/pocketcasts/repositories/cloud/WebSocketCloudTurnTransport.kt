@@ -22,7 +22,7 @@ import timber.log.Timber
  * emit the server's frames as [CloudRouteEvent]s.
  *
  * Binary frames are audio in the negotiated codec. Text frames carry the event vocabulary, decoded
- * by their `type` discriminator through the same Moshi adapters the SSE path used.
+ * by their `type` discriminator through the shared [CloudRouteJson] adapters.
  */
 class WebSocketCloudTurnTransport(
     private val baseUrl: String,

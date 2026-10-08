@@ -6,9 +6,8 @@ import okio.Buffer
 /**
  * Decodes a WebSocket text frame into a [CloudRouteEvent] by its `type` discriminator.
  *
- * The SSE path dispatched on `event:` line prefixes; a socket carries whole JSON messages, so the
- * discriminator is inside the payload. Payload shapes are the ones the SSE path already used, so
- * the existing [CloudRouteJson] adapters do the work.
+ * A socket carries whole JSON messages, so the discriminator is inside the payload rather than on
+ * a line prefix; the existing [CloudRouteJson] adapters do the decoding.
  */
 internal object CloudRouteEvents {
     @Suppress("UNCHECKED_CAST") // The flexible map adapter yields Any? for the nested params map.

@@ -31,8 +31,8 @@ object CloudRouteCodecs {
  * test needs: **every completed turn is evidence the negotiated path served it**, so "the socket
  * ran" and "the turn finished" stop being two facts to reconcile.
  *
- * The typed-UI flow is unaffected — its POST/SSE transport with `route_hint` is how that flow
- * works, not a fallback.
+ * The typed-UI flow is unaffected — a `route_hint` rides this same socket request as the first
+ * frame's optional field, so a hint from a typed flow reaches the server by the one transport.
  */
 class CloudTurnRoute(
     private val baseUrl: String,

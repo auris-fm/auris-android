@@ -87,7 +87,7 @@ Shared infrastructure and business logic. Core services include:
 - `ui` - Shared UI theming and components
 - `analytics` - Analytics tracking
 - `localization` - Strings and translations
-- `voice` - Voice control: ASR/backends, the gate, earcons and TTS, and the client-side cloud sink (`CloudRouteSink`) that consumes the cloud contract. The contract types themselves (`CloudTurnRoute`, the transport, `CloudRouteErrorCodes`, `CloudRouteEvent`, `CloudRouteModels`, the prefetch clients) live in the `cloud` package of `repositories`; see "Where the contract lives" below.
+- `voice` - Voice control: ASR/backends, the gate, earcons and TTS, and the client-side cloud sink (`CloudRouteSink`) that consumes the cloud contract. The contract types themselves (`CloudTurnRoute`, `CloudTurnTransport` and its socket implementation, `CloudRouteErrorCodes`, `CloudRouteEvent`, `CloudRouteModels`, the prefetch clients) live in the `cloud` package of `repositories`; see "Where the contract lives" below.
 
 **Dependency Flow**:
 ```

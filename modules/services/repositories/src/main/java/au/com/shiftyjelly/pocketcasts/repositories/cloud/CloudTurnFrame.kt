@@ -7,7 +7,7 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 sealed interface CloudTurnFrame {
     /**
      * The first frame on a turn, carrying the whole request. The access token travels here rather
-     * than in a header, which is why the transport cannot reuse the SSE request shape.
+     * than in a header, because the request is part of the socket's first message.
      */
     data class Authenticate(
         val accessToken: String,
@@ -18,9 +18,7 @@ sealed interface CloudTurnFrame {
         val codecs: List<String>,
         /**
          * A read-only tool hint from a typed UI flow, when one supplied it. Optional and omitted
-         * when absent. It was SSE-only until the frame gained it: the socket path was wired while
-         * the field was missing, and since the SSE fallback retires once the transport is deployed,
-         * a hint that could not travel would have stopped working at retirement rather than here.
+         * when absent.
          */
         val routeHint: CloudRouteHint? = null,
     ) : CloudTurnFrame

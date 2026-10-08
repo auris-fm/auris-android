@@ -28,7 +28,7 @@ responses log `HTTP <code> <method> <url>`. OPML fails closed on non-2xx.
 ## Auris-owned routes (same gateway host, Bearer `user_{uuid}`)
 
 - [ ] `GET /api/v1/episodes/{uuid}/fingerprints` — reference fetch during playback prep
-- [ ] `POST /api/v1/cloud/route` — one full assistant turn (SSE tokens + optional action + `done`)
+- [ ] `GET /api/v1/cloud/route` (WebSocket upgrade) — one full assistant turn: frames arrive on the socket and the turn ends with `done`. A refused upgrade is a terminal failure, so a failed step here is the expected visible outcome rather than a silent degradation; there is no POST/SSE route to fall back to.
 
 ## Rollback
 

@@ -65,7 +65,7 @@ class CloudRouteSink internal constructor(
      * restore over them.
      */
     private val playbackCommandRevision: () -> Long = { 0L },
-    /** Audio player for cloud-delivered binary audio frames. Null when SSE-only. */
+    /** Audio player for cloud-delivered binary audio frames. */
     private val audioPlayer: CloudAudioPlayer? = null,
 ) : VoiceCloudRouteSink {
 
@@ -248,9 +248,8 @@ class CloudRouteSink internal constructor(
                     }
 
                     is CloudRouteEvent.AudioFrame -> {
-                        // Binary audio from the WebSocket path: submit to the player
-                        // for buffered playback. The SSE fallback uses Token accumulation
-                        // instead, so this branch is a no-op on that path.
+                        // Binary audio on the turn socket: submit to the player for buffered
+                        // playback (the assistant's reply is delivered as audio, not tokens).
                         // Duck the host player on the first frame; restore on Done.
                         if (!audioPlayed) {
                             audioPlayed = true

@@ -260,6 +260,10 @@ class CloudRouteSink internal constructor(
                         audioPlayer?.play()
                     }
 
+                    // No frame on the socket produces a Token, so this branch is inert on the shipped
+                    // path; it is kept because the event type is part of the contract model and the
+                    // route tests drive it directly. If the protocol ever streams text, the
+                    // accumulation below is where it lands.
                     is CloudRouteEvent.Token -> tokenBuffer += event.text
 
                     is CloudRouteEvent.Done -> {

@@ -412,20 +412,12 @@ class VoiceAsrEngineTest {
             ),
         )
 
-        // A REAL signal rather than the class-level mock, so signal-visible effects are observed
-        // instead of mock defaults. The row's allowance half is deliberately NOT asserted here: under
-        // runTest the signal's Dispatchers.Main timer IS the test dispatcher, so advancing far enough to
-        // process the segment also expires the window, and the allowance's state after the drop cannot
-        // be separated from the window's expiry at this level. That half needs the device run the row
-        // asks for. What this test establishes is the downstream drop.
-        val realSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
-        realSignal.onWakeWordDetected()
         engine = VoiceAsrEngine(
             voiceAudioProcessor = voiceAudioProcessor,
             utteranceFilter = utteranceFilter,
             intentRecognizer = recognizer,
             wakeWordDetector = wakeWordDetector,
-            gracePeriodSignal = realSignal,
+            gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
             context = context,
@@ -454,6 +446,14 @@ class VoiceAsrEngineTest {
         // session's speaker target. start() resets once, before processing, so exactly one reset is the
         // drop adding none of its own.
         assertEquals("a rejected segment must not reset the session filter", 1, resets)
+
+        // The two effects the acceptance row names, read directly rather than through behaviour that a
+        // mock would have to reproduce. The drop path ends in a bare `return` between the wake handling
+        // and the ASR, so nothing below it may touch grace: no window opened or reset, and no dispatch
+        // allowance spent. These are `never` because a single call is the defect.
+        verify(gracePeriodSignal, never()).onWakeWordDetected()
+        verify(gracePeriodSignal, never()).onCommandRecognized(any(), any())
+        verify(gracePeriodSignal, never()).issueEscalation()
 
         engine.stop()
     }

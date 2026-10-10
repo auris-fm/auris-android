@@ -28,15 +28,13 @@ class PlaybackCrossCorrelator @Inject constructor() {
         val minDelay = (MIN_DELAY_SECONDS * sampleRate).toInt()
         val maxDelay = (MAX_DELAY_SECONDS * sampleRate).toInt()
 
-        // When both sides carry a position, the audible sample is the one whose player position
-        // falls minDelay..maxDelay *before the mic segment's position* — which is a claim about
-        // time, not about buffer offset.
-        val anchoredOffset = anchorOffset(micAudio, reference, micPositionMs, sampleRate)
-        val offsetRange = if (anchoredOffset != null) {
-            anchoredOffset..anchoredOffset
-        } else {
-            minDelay..maxDelay.coerceAtMost(playbackBuffer.size - micAudio.size)
-        }
+        // When both sides carry a position, translate the plausible acoustic-delay window
+        // (minDelay..maxDelay) into the reference's coordinates and search that whole range. The
+        // window is what defines bleed, so anchoring must not narrow it to a single offset: a
+        // genuine echo at either end of 50..500 ms is still bleed and must be found.
+        val anchoredRange = anchoredOffsetRange(micAudio, reference, micPositionMs, sampleRate)
+        val offsetRange = anchoredRange
+            ?: (minDelay..maxDelay.coerceAtMost(playbackBuffer.size - micAudio.size))
 
         var maxCorrelation = 0.0
         for (offset in offsetRange) {
@@ -49,24 +47,36 @@ class PlaybackCrossCorrelator @Inject constructor() {
     }
 
     /**
-     * Buffer offset whose player position is one acoustic delay before the mic segment, or null
-     * when either side lacks a timestamp (the caller then falls back to scanning offsets).
+     * The same 50..500 ms acoustic-delay window, expressed as buffer offsets via the player
+     * positions of the reference window and the mic segment; null when either side lacks a
+     * timestamp (the caller then scans the default window).
+     *
+     * A sample is a bleed candidate when it played one acoustic delay before the mic segment, so
+     * the candidate offsets are those whose player position lies in
+     * `[micStart - maxDelay, micStart - minDelay]` relative to the reference's start.
      */
-    private fun anchorOffset(
+    private fun anchoredOffsetRange(
         micAudio: FloatArray,
         reference: PlaybackReference,
         micPositionMs: Long?,
         sampleRate: Int,
-    ): Int? {
+    ): IntRange? {
         val refStart = reference.startPositionMs ?: return null
         val micStart = micPositionMs ?: return null
-        // The middle of the plausible delay window; the window is the same range the unanchored scan
-        // covers, so this narrows where to look without changing what counts as bleed.
-        val assumedDelayMs = ((MIN_DELAY_SECONDS + MAX_DELAY_SECONDS) * 1_000.0 / 2).toLong()
-        val wantedMs = micStart - assumedDelayMs
-        val offsetSamples = ((wantedMs - refStart) * sampleRate / 1_000L).toInt()
+
+        val minDelayMs = (MIN_DELAY_SECONDS * 1_000).toLong()
+        val maxDelayMs = (MAX_DELAY_SECONDS * 1_000).toLong()
+
+        // Offset whose player position is `delayMs` before the mic segment, for each window edge.
+        fun offsetForDelay(delayMs: Long): Int = ((micStart - delayMs - refStart) * sampleRate / 1_000L).toInt()
+
         val maxOffset = (reference.samples.size - micAudio.size).coerceAtLeast(0)
-        return offsetSamples.coerceIn(0, maxOffset)
+        val lower = offsetForDelay(maxDelayMs).coerceIn(0, maxOffset)
+        val upper = offsetForDelay(minDelayMs).coerceIn(0, maxOffset)
+        // The larger delay maps to the smaller offset; keep the range ordered and non-empty.
+        val start = minOf(lower, upper)
+        val end = maxOf(lower, upper)
+        return start..end
     }
 
     /**

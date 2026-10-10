@@ -73,4 +73,55 @@ class PlaybackCrossCorrelatorPositionTest {
             PlaybackCrossCorrelator().isPlaybackBleed(mic, untimestamped),
         )
     }
+
+    @Test
+    fun `echo at the near end of the delay window is bleed`() {
+        assertBleedAtDelay(150L)
+    }
+
+    @Test
+    fun `echo at the far end of the delay window is bleed`() {
+        assertBleedAtDelay(450L)
+    }
+
+    /**
+     * Places the matching playback burst exactly [delayMs] before the mic segment, so the correct
+     * offset is determined by the position. A search anchored to a single point (the window
+     * midpoint, 275 ms) finds neither end and misses the echo.
+     */
+    private fun assertBleedAtDelay(delayMs: Long) {
+        val rate = 16_000
+        val micSamples = 1600
+        val burst = tone(micSamples, 300.0)
+        // The reference starts `delayMs` before the mic segment, so the burst at offset 0 is
+        // exactly `delayMs` old when the mic segment is captured.
+        val tail = tone(8000, 900.0, phase = 0.7)
+        val reference = PlaybackReference(
+            samples = burst + tail,
+            sampleRateHz = rate,
+            startPositionMs = 0L,
+        )
+        val mic = FloatArray(micSamples) { i -> 0.3f * burst[i] }
+
+        assertTrue(
+            "an echo arriving $delayMs ms late is inside the window and must be found",
+            PlaybackCrossCorrelator().isPlaybackBleed(mic, reference, micPositionMs = delayMs),
+        )
+    }
+
+    @Test
+    fun `echo outside the delay window is not bleed`() {
+        val rate = 16_000
+        val micSamples = 1600
+        val burst = tone(micSamples, 300.0)
+        val tail = tone(8000, 900.0, phase = 0.7)
+        val reference = PlaybackReference(samples = burst + tail, sampleRateHz = rate, startPositionMs = 0L)
+        val mic = FloatArray(micSamples) { i -> 0.3f * burst[i] }
+
+        // 900 ms is beyond the 500 ms window: the burst cannot be the echo of this segment.
+        assertFalse(
+            "a delay outside 50..500 ms is not bleed",
+            PlaybackCrossCorrelator().isPlaybackBleed(mic, reference, micPositionMs = 900L),
+        )
+    }
 }

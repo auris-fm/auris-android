@@ -73,6 +73,12 @@ class EchoRejectionDeviceTest {
         withTimeoutOrNull(5_000) { delay(1_000) }
         val nativeBefore = MicrophoneCapture.framesConsumed()
 
+        // Collect what the detector saw, so a zero-segment result says WHICH stage stopped it: a level
+        // below the gate, a score below the speech threshold, or an endpoint that never closed.
+        MicrophoneCapture.setDiagnosticsEnabled(true)
+        val quietFloor = MicrophoneCapture.diagnostics()
+        Log.i(tag, "quiet floor: $quietFloor")
+
         // The app's own speech, through the real renderer: plays audibly and records the accepted
         // prefix into the reference the filter reads.
         val engine = AndroidPlatformTtsEngine(ctx, recorder)
@@ -80,10 +86,14 @@ class EchoRejectionDeviceTest {
         withTimeoutOrNull(30_000) {
             engine.speak("the quick brown fox jumps over the lazy dog and keeps running", "en")
         }
+        val duringSpeech = MicrophoneCapture.diagnostics()
+        Log.i(tag, "during app speech: $duringSpeech")
         val nativeAfterSpeech = MicrophoneCapture.framesConsumed()
         // Let the loopback land in the microphone and any segment close.
         withTimeoutOrNull(10_000) { delay(4_000) }
 
+        val afterSpeech = MicrophoneCapture.diagnostics()
+        Log.i(tag, "after app speech: $afterSpeech")
         val nativeTotal = MicrophoneCapture.framesConsumed()
         val reference = recorder.reference()
         val mic = segments.lastOrNull()

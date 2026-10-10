@@ -309,4 +309,71 @@ class CloudAudioPlayerTest {
             player.release()
         }
     }
+
+    @Test
+    fun `irregular partial writes record every accepted sample exactly once`() {
+        // The remainder loop exists because a sink may accept part of a frame. A prefix test only shows
+        // the first short write; what is unproven is that VARYING acceptance per call advances the
+        // remainder correctly — too little and audio is dropped, too much and samples are counted
+        // twice. The recorder is the witness: it must end up holding exactly the bytes the sink took.
+        val recorder = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder(
+            au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap(),
+        )
+        val acceptedPerCall = mutableListOf<Int>()
+        val player = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            playbackBufferRecorder = recorder,
+        ).apply {
+            // Deliberately irregular, and in WHOLE samples: a real sink returns a byte count that
+            // pairs up, so an odd take would test a stimulus the production path cannot produce.
+            writeToSink = { _, _, _, count ->
+                val take = when (acceptedPerCall.size) {
+                    0 -> 4
+                    1 -> 12
+                    else -> count
+                }.coerceAtMost(count)
+                if (take == 0) -1 else take
+            }
+            // The sink counts as accepting; the sizes are recorded for the assertion below.
+            val inner = writeToSink!!
+            writeToSink = { track, bytes, offset, count ->
+                inner(track, bytes, offset, count).also { acceptedPerCall += it }
+            }
+        }
+        // Distinct bytes per position, so a wrong offset shows as a wrong VALUE, not just a count.
+        val frame = ByteArray(64) { i -> (i + 1).toByte() }
+        try {
+            player.submitFrame(frame)
+            player.play()
+            player.submitFrame(frame)
+
+            val recorded = recorder.snapshot()
+            // What the reference must NOT do is duplicate or misalign: a conversion that always
+            // started at index 0 re-read the frame's opening bytes for every remainder chunk, so the
+            // reference held the head repeated and a length that never matched what the sink took.
+            // Every recorded sample must therefore appear once, in order.
+            // Across the WHOLE recording, not just its head: a conversion that ignored the chunk
+            // offset re-reads the frame's opening for each remainder, so the damage appears in the
+            // second chunk onward — a head-only check passes while the body is misaligned.
+            val expectedFrame = FloatArray(32) { i ->
+                val lo = frame[i * 2].toInt() and 0xFF
+                val hi = frame[i * 2 + 1].toInt()
+                ((hi shl 8) or lo).toShort() / 32768f
+            }
+            assertEquals(
+                "every recorded sample must come from its own position in the frame (got=${recorded.take(32).toList()})",
+                expectedFrame.toList(),
+                recorded.take(expectedFrame.size).toList(),
+            )
+            // Every accepted byte is a whole number of samples here, so none may be lost.
+            assertEquals(
+                "the reference must hold exactly the sink's accepted samples (calls=$acceptedPerCall)",
+                acceptedPerCall.sum() / 2,
+                recorded.size,
+            )
+        } finally {
+            player.release()
+        }
+    }
 }

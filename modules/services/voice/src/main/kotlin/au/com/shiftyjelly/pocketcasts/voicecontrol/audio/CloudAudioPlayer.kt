@@ -374,7 +374,7 @@ class CloudAudioPlayer(
                     audioWritten = true
                     // Record only what the sink accepted, so the reference never holds audio the
                     // output rejected, and position it on the submitted-sample timeline.
-                    val floats = s16leBytesToFloats(pcmBytes, written)
+                    val floats = s16leBytesToFloats(pcmBytes, written, offset)
                     val positionMs = (submittedSamples * 1_000L) / sampleRateHz
                     playbackBufferRecorder?.write(floats, positionMs)
                     submittedSamples += floats.size
@@ -462,12 +462,16 @@ class CloudAudioPlayer(
          * [lengthBytes] bounds what is read, so a partial AudioTrack write records only what the
          * sink actually accepted rather than the whole decoded buffer.
          */
-        internal fun s16leBytesToFloats(bytes: ByteArray, lengthBytes: Int): FloatArray {
+        internal fun s16leBytesToFloats(bytes: ByteArray, lengthBytes: Int, offset: Int = 0): FloatArray {
             val samples = lengthBytes / 2
             val out = FloatArray(samples)
             for (i in 0 until samples) {
-                val lo = bytes[i * 2].toInt() and 0xFF
-                val hi = bytes[i * 2 + 1].toInt()
+                // Read from the chunk's own offset. Converting the remainder of a partially accepted
+                // frame from index 0 re-reads the frame's opening bytes for every chunk, so the
+                // reference holds duplicated, misaligned audio of a length that never matches what
+                // the sink took.
+                val lo = bytes[offset + i * 2].toInt() and 0xFF
+                val hi = bytes[offset + i * 2 + 1].toInt()
                 val v = (hi shl 8) or lo
                 out[i] = v.toShort() / 32768f
             }

@@ -4,10 +4,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRendere
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsPlaybackIncompleteException
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.never
 import org.mockito.Mockito.verify
 import org.robolectric.RobolectricTestRunner
 
@@ -35,14 +35,15 @@ class VoiceControlServiceWiringTest {
     }
 
     @Test
-    fun `an unhandled renderer would not raise feedback, so the wiring is what supplies it`() {
+    fun `without the wiring the failure does not raise feedback`() {
         val earconPlayer = mock(EarconPlayer::class.java)
         val renderer = AudioFeedbackRenderer(earconPlayer, unreachableTts())
         try {
-            // Without the wiring, the default handler only logs; no earcon is raised. This is the
-            // control that makes the test above meaningful.
+            // The mirror of the test above: with no attachPlaybackFailureHandling call, the default
+            // handler only logs, so no earcon may be raised. Without this assertion the first test
+            // could pass for a reason unrelated to the wiring.
             renderer.onPlaybackFailure(TtsPlaybackIncompleteException(framesWritten = 10, framesPlayed = 2))
-            assertTrue("no earcon without the production wiring", true)
+            verify(earconPlayer, never()).play(EarconId.ERROR)
         } finally {
             renderer.release()
         }

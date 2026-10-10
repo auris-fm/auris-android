@@ -12,7 +12,7 @@ import timber.log.Timber
  * so a test can assert its effect and **fail if this wiring is removed**, which is the property the
  * inline assignment could not have.
  */
-internal object VoiceControlServiceWiring {
+object VoiceControlServiceWiring {
 
     /**
      * Attaches the delivery-failure handler to [renderer]. The handler reports the local failure and

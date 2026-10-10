@@ -46,6 +46,11 @@ class EarconPlayer(
         }
     }
 
+    /** The last earcon this player started, so a caller or test can observe that feedback sounded. */
+    @Volatile
+    var lastPlayedId: EarconId? = null
+        private set
+
     /** Plays [id] and reports whether it actually started. */
     fun play(id: EarconId): Boolean {
         if (released) return false
@@ -65,6 +70,7 @@ class EarconPlayer(
                 clip.recordAccepted(offset, written, playbackBufferRecorder)
                 offset += written
             }
+            lastPlayedId = id
             true
         } catch (e: Exception) {
             Timber.w(e, "[Earcon] play failed")

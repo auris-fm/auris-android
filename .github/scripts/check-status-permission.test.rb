@@ -38,8 +38,20 @@ SCRIPT = "      - name: finish\n        run: node \"$RUNNER_TEMP/claude-review.m
 NOTHING = "      - run: ./gradlew spotlessCheck\n"
 # A call that has been disabled by commenting it out — the case the naive detector misread.
 COMMENTED_OUT = "      - name: review\n        run: |\n          set -euo pipefail\n          # gh api \"repos/\${REPOSITORY}/statuses/\${HEAD_SHA}\" -f state=success\n          echo disabled\n"
-# A live call with a comment trailing on the SAME line, inside a BLOCK scalar. The block form is
-# what preserves the '#' for the matcher; a plain scalar would have it stripped by YAML.
+# A live call with a comment trailing on the SAME line, inside a BLOCK scalar.
+#
+# REQUIRED, NOT STYLE. The block form is what lets this case DISCRIMINATE, and a plain scalar
+# silently removes that without any test going red:
+#
+#   block fixture + loose filter   -> FAILS       (the case does its job)
+#   plain fixture + loose filter   -> PASSES      (the case has stopped doing its job)
+#   plain fixture + correct filter -> PASSES      (and looks identical to the line above)
+#
+# A plain scalar (`run: cmd # note`) has its trailing comment STRIPPED by the YAML parser, so the
+# '#' never reaches the matcher and the case collapses into the same assertion as INLINE. Nothing
+# fails — the suite stays 11/11 — the case just stops being able to tell this filter from a looser
+# one. Do not harmonise it with the other fixtures: the block form is REQUIRED for a detector that
+# reads a parsed document and merely SUFFICIENT for one that reads raw bytes.
 BLOCK_TRAILING_COMMENT = "      - name: Record\n        run: |\n          set -euo pipefail\n          gh api \"repos/\${REPOSITORY}/statuses/\${HEAD_SHA}\" -f state=success # record it\n"
 # An indented comment, to pin that leading whitespace is handled.
 INDENTED_COMMENT = "      - name: review\n        run: |\n          if true; then\n            # gh api \"repos/\${REPOSITORY}/statuses/\${HEAD_SHA}\"\n            echo skipped\n          fi\n"

@@ -53,11 +53,8 @@ class EarconPlayer(
         if (clip.samples.isEmpty()) return false
         return try {
             val audioTrack = ensureTrack(clip.sampleRateHz)
-            // The output plays the clip at its own rate; the reference gets a normalized copy, so
-            // audible bandwidth is not traded away for the correlation's convenience.
-            playbackBufferRecorder?.write(
-                clip.referenceSamples16kFloats(),
-            )
+            // Write first, then record only what the sink ACCEPTED, so a partial write cannot leave
+            // the reference claiming audio that was never submitted for playback.
             var offset = 0
             while (offset < clip.samples.size) {
                 val written = audioTrack.write(clip.samples, offset, clip.samples.size - offset)
@@ -65,6 +62,7 @@ class EarconPlayer(
                     Timber.w("[Earcon] AudioTrack.write returned $written")
                     return false
                 }
+                clip.recordAccepted(offset, written, playbackBufferRecorder)
                 offset += written
             }
             true
@@ -138,16 +136,22 @@ class EarconPlayer(
         val samples: ShortArray,
         val sampleRateHz: Int,
     ) {
-        private val reference16k: ShortArray by lazy {
-            if (sampleRateHz == REFERENCE_RATE_HZ) {
-                samples
+        /**
+         * Records the portion of this clip the sink accepted, on the reference's timeline.
+         *
+         * The accepted slice is converted to the reference rate, so a partial write leaves the
+         * reference holding exactly the audio that was submitted, not the whole clip.
+         */
+        fun recordAccepted(startSample: Int, count: Int, recorder: PlaybackBufferRecorder?) {
+            if (recorder == null || count <= 0) return
+            val slice = samples.copyOfRange(startSample, startSample + count)
+            val forReference = if (sampleRateHz == REFERENCE_RATE_HZ) {
+                slice
             } else {
-                EarconAudio.resampleMono(samples, sampleRateHz, REFERENCE_RATE_HZ)
+                EarconAudio.resampleMono(slice, sampleRateHz, REFERENCE_RATE_HZ)
             }
+            recorder.write(FloatArray(forReference.size) { forReference[it] / 32768f })
         }
-
-        /** The clip as float samples on the reference's timeline, for the echo reference. */
-        fun referenceSamples16kFloats(): FloatArray = FloatArray(reference16k.size) { reference16k[it] / 32768f }
     }
 
     private inline fun <K, V : Any> Iterable<K>.associateWithNotNull(valueSelector: (K) -> V?): Map<K, V> {

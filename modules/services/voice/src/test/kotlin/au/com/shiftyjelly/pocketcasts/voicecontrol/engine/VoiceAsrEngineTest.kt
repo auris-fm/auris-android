@@ -271,6 +271,178 @@ class VoiceAsrEngineTest {
     }
 
     @Test
+<<<<<<< HEAD
+||||||| parent of fe1d7c8 (fix(voice): a failed SCO setup stops capture instead of substituting the phone mic)
+    fun `start with BluetoothA2dpOnly starts capture even when SCO disconnects`() = runTest {
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+
+        verify(audioManager).startBluetoothSco()
+        verify(voiceAudioProcessor, never()).startProcessing()
+
+        simulateScoState(AudioManager.SCO_AUDIO_STATE_DISCONNECTED)
+        advanceUntilIdle()
+
+        verify(voiceAudioProcessor).startProcessing()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `start with BluetoothA2dpOnly falls back after SCO timeout`() = runTest {
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+
+        verify(audioManager).startBluetoothSco()
+        verify(voiceAudioProcessor, never()).startProcessing()
+
+        advanceTimeBy(3_001)
+        advanceUntilIdle()
+
+        verify(voiceAudioProcessor).startProcessing()
+
+        engine.stop()
+    }
+
+    // ── Cancellation / Stop ────────────────────────────────────────────
+
+    @Test
+    fun `stop during SCO await cancels wait and unregisters receiver`() = runTest {
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+
+        verify(audioManager).startBluetoothSco()
+        assertTrue("Expected receiver registered", capturedReceiver != null)
+
+        engine.stop()
+        advanceUntilIdle()
+
+        verify(context).unregisterReceiver(any<BroadcastReceiver>())
+        verify(voiceAudioProcessor, never()).startProcessing()
+    }
+
+    @Test
+    fun `stop after capture started closes SCO and keeps the backend warm`() = runTest {
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+
+        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
+        advanceUntilIdle()
+        verify(voiceAudioProcessor).startProcessing()
+
+        engine.stop()
+        advanceUntilIdle()
+
+        verify(audioManager).stopBluetoothSco()
+        // Deliberately not released: a listening pause must not cost a model reload on the
+        // next start. VoiceControlService releases the backend in its teardown.
+        verify(backend, never()).release()
+    }
+
+    @Test
+=======
+    fun `SCO disconnect does not start capture on an unconfirmed route`() = runTest {
+        // Reverses the previous expectation. A route that requires SCO and did not get it means the
+        // input the engine would read is not the one the route names: continuing captures from whatever
+        // the phone substitutes, with only a log line saying so. The attempt must stop instead.
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+
+        verify(audioManager).startBluetoothSco()
+        verify(voiceAudioProcessor, never()).startProcessing()
+
+        simulateScoState(AudioManager.SCO_AUDIO_STATE_DISCONNECTED)
+        advanceUntilIdle()
+
+        verify(voiceAudioProcessor, never()).startProcessing()
+        // And it says so, through the feedback path the other route failures use.
+        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+
+        engine.stop()
+    }
+
+    @Test
+    fun `SCO timeout does not start capture and reports the route failure`() = runTest {
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+
+        verify(audioManager).startBluetoothSco()
+        verify(voiceAudioProcessor, never()).startProcessing()
+
+        advanceTimeBy(3_001)
+        advanceUntilIdle()
+
+        verify(voiceAudioProcessor, never()).startProcessing()
+        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+
+        engine.stop()
+    }
+
+    @Test
+    fun `a later attempt after a failed SCO setup can still start`() = runTest {
+        // The flag must not outlive a setup that never completed, or the next attempt is skipped by a
+        // stale "already started" and the route can never be established for the rest of the session.
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+        advanceTimeBy(3_001)
+        advanceUntilIdle()
+        verify(voiceAudioProcessor, never()).startProcessing()
+        engine.stop()
+
+        // A second attempt on a route that does not need SCO must capture, which it cannot if the failed
+        // setup left the SCO flag set.
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+        verify(voiceAudioProcessor).startProcessing()
+        engine.stop()
+    }
+
+    // ── Cancellation / Stop ────────────────────────────────────────────
+
+    @Test
+    fun `stop during SCO await cancels wait and unregisters receiver`() = runTest {
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+
+        verify(audioManager).startBluetoothSco()
+        assertTrue("Expected receiver registered", capturedReceiver != null)
+
+        engine.stop()
+        advanceUntilIdle()
+
+        verify(context).unregisterReceiver(any<BroadcastReceiver>())
+        verify(voiceAudioProcessor, never()).startProcessing()
+    }
+
+    @Test
+    fun `stop after capture started closes SCO and keeps the backend warm`() = runTest {
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+
+        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
+        advanceUntilIdle()
+        verify(voiceAudioProcessor).startProcessing()
+
+        engine.stop()
+        advanceUntilIdle()
+
+        verify(audioManager).stopBluetoothSco()
+        // Deliberately not released: a listening pause must not cost a model reload on the
+        // next start. VoiceControlService releases the backend in its teardown.
+        verify(backend, never()).release()
+    }
+
+    @Test
+>>>>>>> fe1d7c8 (fix(voice): a failed SCO setup stops capture instead of substituting the phone mic)
     fun `transcription initializes recognizer before matching intent`() = runTest {
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
@@ -1221,6 +1393,274 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
+<<<<<<< HEAD
+||||||| parent of fe1d7c8 (fix(voice): a failed SCO setup stops capture instead of substituting the phone mic)
+    // ── SCO not reopened for subsequent starts ─────────────────────────
+
+    @Test
+    fun `stop then restart on Bluetooth re-opens SCO`() = runTest {
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+
+        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
+        advanceUntilIdle()
+
+        engine.stop()
+        advanceUntilIdle()
+        verify(audioManager).stopBluetoothSco()
+
+        // Restart — stop cleared scoStarted, so SCO must be re-opened
+        capturedReceiver = null
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
+        advanceUntilIdle()
+
+        verify(audioManager, times(2)).startBluetoothSco()
+        verify(voiceAudioProcessor, times(2)).startProcessing()
+
+        engine.stop()
+    }
+
+    // ── Route switching scenarios ──────────────────────────────────────
+
+    @Test
+    fun `restart from Speaker to Bluetooth triggers SCO await`() = runTest {
+        createEngine()
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+        verify(audioManager, never()).startBluetoothSco()
+
+        engine.stop()
+        capturedReceiver = null
+
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        advanceUntilIdle()
+
+        verify(audioManager, times(1)).startBluetoothSco()
+        assertTrue("Expected receiver registered", capturedReceiver != null)
+
+        engine.stop()
+    }
+
+    @Test
+    fun `restart from Bluetooth to Speaker closes SCO`() = runTest {
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+
+        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
+        advanceUntilIdle()
+
+        engine.stop()
+        advanceUntilIdle()
+        verify(audioManager).stopBluetoothSco()
+
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+        verify(voiceAudioProcessor, times(2)).startProcessing()
+
+        verify(audioManager, times(1)).startBluetoothSco()
+        verify(audioManager, times(1)).stopBluetoothSco()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `Bluetooth SCO setup exception falls back to phone mic capture`() = runTest {
+        createEngine()
+        `when`(
+            context.registerReceiver(
+                any<BroadcastReceiver>(),
+                any<IntentFilter>(),
+            ),
+        ).thenThrow(RuntimeException("registerReceiver failed"))
+
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        advanceUntilIdle()
+
+        verify(voiceAudioProcessor).startProcessing()
+        verify(audioManager, never()).startBluetoothSco()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `Bluetooth SCO startBluetoothSco exception unregisters receiver and restores audio mode`() = runTest {
+        createEngine()
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_IN_COMMUNICATION)
+        org.mockito.Mockito.doThrow(RuntimeException("startBluetoothSco failed"))
+            .`when`(audioManager).startBluetoothSco()
+
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        advanceUntilIdle()
+
+        verify(voiceAudioProcessor).startProcessing()
+        assertTrue("Expected receiver to have been registered", capturedReceiver != null)
+        verify(context).unregisterReceiver(capturedReceiver!!)
+        verify(audioManager).setMode(AudioManager.MODE_IN_COMMUNICATION)
+        // Fallback path must not leave scoStarted set — stop should not call stopBluetoothSco.
+        engine.stop()
+        verify(audioManager, never()).stopBluetoothSco()
+    }
+
+    @Test
+    fun `Bluetooth SCO CancellationException after register rolls back receiver and mode`() = runTest {
+        createEngine()
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_IN_COMMUNICATION)
+        org.mockito.Mockito.doThrow(kotlinx.coroutines.CancellationException("sco cancelled"))
+            .`when`(audioManager).startBluetoothSco()
+
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        advanceUntilIdle()
+
+        // Cancellation aborts the processing job before capture; rollback must still run.
+        verify(voiceAudioProcessor, never()).startProcessing()
+        assertTrue("Expected receiver to have been registered", capturedReceiver != null)
+        verify(context).unregisterReceiver(capturedReceiver!!)
+        verify(audioManager).setMode(AudioManager.MODE_IN_COMMUNICATION)
+
+        engine.stop()
+        verify(audioManager, never()).stopBluetoothSco()
+    }
+
+=======
+    // ── SCO not reopened for subsequent starts ─────────────────────────
+
+    @Test
+    fun `stop then restart on Bluetooth re-opens SCO`() = runTest {
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+
+        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
+        advanceUntilIdle()
+
+        engine.stop()
+        advanceUntilIdle()
+        verify(audioManager).stopBluetoothSco()
+
+        // Restart — stop cleared scoStarted, so SCO must be re-opened
+        capturedReceiver = null
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
+        advanceUntilIdle()
+
+        verify(audioManager, times(2)).startBluetoothSco()
+        verify(voiceAudioProcessor, times(2)).startProcessing()
+
+        engine.stop()
+    }
+
+    // ── Route switching scenarios ──────────────────────────────────────
+
+    @Test
+    fun `restart from Speaker to Bluetooth triggers SCO await`() = runTest {
+        createEngine()
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+        verify(audioManager, never()).startBluetoothSco()
+
+        engine.stop()
+        capturedReceiver = null
+
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        advanceUntilIdle()
+
+        verify(audioManager, times(1)).startBluetoothSco()
+        assertTrue("Expected receiver registered", capturedReceiver != null)
+
+        engine.stop()
+    }
+
+    @Test
+    fun `restart from Bluetooth to Speaker closes SCO`() = runTest {
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+
+        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
+        advanceUntilIdle()
+
+        engine.stop()
+        advanceUntilIdle()
+        verify(audioManager).stopBluetoothSco()
+
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+        verify(voiceAudioProcessor, times(2)).startProcessing()
+
+        verify(audioManager, times(1)).startBluetoothSco()
+        verify(audioManager, times(1)).stopBluetoothSco()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `Bluetooth SCO setup exception does not start capture`() = runTest {
+        // Was "falls back to phone mic capture": a failed setup is a failed route, and capturing anyway
+        // reads an input the route does not name without saying so.
+        createEngine()
+        `when`(
+            context.registerReceiver(
+                any<BroadcastReceiver>(),
+                any<IntentFilter>(),
+            ),
+        ).thenThrow(RuntimeException("registerReceiver failed"))
+
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        advanceUntilIdle()
+
+        verify(voiceAudioProcessor, never()).startProcessing()
+        verify(audioManager, never()).startBluetoothSco()
+        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+
+        engine.stop()
+    }
+
+    @Test
+    fun `Bluetooth SCO startBluetoothSco exception unregisters receiver and restores audio mode`() = runTest {
+        createEngine()
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_IN_COMMUNICATION)
+        org.mockito.Mockito.doThrow(RuntimeException("startBluetoothSco failed"))
+            .`when`(audioManager).startBluetoothSco()
+
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        advanceUntilIdle()
+
+        // Cleanup still runs, and capture still must not start.
+        verify(voiceAudioProcessor, never()).startProcessing()
+        assertTrue("Expected receiver to have been registered", capturedReceiver != null)
+        verify(context).unregisterReceiver(capturedReceiver!!)
+        verify(audioManager).setMode(AudioManager.MODE_IN_COMMUNICATION)
+        // Fallback path must not leave scoStarted set — stop should not call stopBluetoothSco.
+        engine.stop()
+        verify(audioManager, never()).stopBluetoothSco()
+    }
+
+    @Test
+    fun `Bluetooth SCO CancellationException after register rolls back receiver and mode`() = runTest {
+        createEngine()
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_IN_COMMUNICATION)
+        org.mockito.Mockito.doThrow(kotlinx.coroutines.CancellationException("sco cancelled"))
+            .`when`(audioManager).startBluetoothSco()
+
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        advanceUntilIdle()
+
+        // Cancellation aborts the processing job before capture; rollback must still run.
+        verify(voiceAudioProcessor, never()).startProcessing()
+        assertTrue("Expected receiver to have been registered", capturedReceiver != null)
+        verify(context).unregisterReceiver(capturedReceiver!!)
+        verify(audioManager).setMode(AudioManager.MODE_IN_COMMUNICATION)
+
+        engine.stop()
+        verify(audioManager, never()).stopBluetoothSco()
+    }
+
+>>>>>>> fe1d7c8 (fix(voice): a failed SCO setup stops capture instead of substituting the phone mic)
     // ── Wake-word detection paths ──────────────────────────────────────
 
     private fun CoroutineScope.createEngineWithSpeech(

@@ -72,7 +72,9 @@ class VoiceAsrEngine @Inject constructor(
 ) {
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var processingJob: Job? = null
-    private var playbackBufferProvider: (() -> FloatArray)? = null
+    private var scoStarted = false
+    private var savedAudioMode: Int? = null
+    private var playbackBufferProvider: (() -> PlaybackReference)? = null
 
     private var backend: AsrBackend? = null
     private var onIntent: ((VoiceIntent) -> Unit)? = null
@@ -86,7 +88,7 @@ class VoiceAsrEngine @Inject constructor(
         backend: AsrBackend,
         audioRoute: AudioRoute,
         listeningMode: ListeningMode,
-        playbackBufferProvider: () -> FloatArray,
+        playbackBufferProvider: () -> PlaybackReference,
         micExposureProvider: () -> MicExposure,
         onIntent: (VoiceIntent) -> Unit,
         // Invoked when the processing job ends for any reason, so the service can clear capture
@@ -287,8 +289,9 @@ class VoiceAsrEngine @Inject constructor(
         val floatSamples = request.samples
 
         // Filter out playback bleed before transcribing
-        val playbackBuffer = playbackBufferProvider?.invoke() ?: FloatArray(0)
-        if (!utteranceFilter.shouldProcess(floatSamples, false, 0, playbackBuffer)) {
+        val playbackReference = playbackBufferProvider?.invoke()
+            ?: PlaybackReference(FloatArray(0), sampleRateHz, startPositionMs = null)
+        if (!utteranceFilter.shouldProcessReference(floatSamples, false, 0, playbackReference)) {
             Timber.i("[VoicePipeline] → drop (bleed filter)")
             return
         }

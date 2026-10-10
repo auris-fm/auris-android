@@ -114,17 +114,17 @@ class VoiceControlService : Service() {
     }
 
     /**
-     * Production handling for a spoken reply that did not finish playing.
-     *
-     * This is a LOCAL delivery failure, distinct from the turn's own result: the command was still
-     * recognized and grace semantics are unchanged. It produces the same user-visible failure
-     * feedback the cloud path uses rather than setting a flag nobody reads, and it does not replay
-     * the reply or emit a successful-drain signal.
+     * Drives one turn's spoken response through the renderer with this service's failure handling
+     * attached. Extracted from the coroutine so the production connection — the assignment below —
+     * is observable to a test, which must fail if it is removed: a test that installs its own
+     * callback verifies the callback, not that the service installs one.
      */
-    private fun onSpokenReplyNotDelivered(error: Throwable) {
-        Timber.e(error, "voice_response_not_delivered: the spoken reply did not finish playing")
-        // The user hears that the reply was cut short, through the existing feedback path.
-        audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+    internal suspend fun renderWithFailureHandling(
+        intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
+    ) {
+        VoiceControlServiceWiring.attachPlaybackFailureHandling(audioFeedbackRenderer)
+        val response = voicePlaybackIntentExecutor.execute(intent)
+        audioFeedbackRenderer.render(response)
     }
 
     private fun startVoiceControl() {
@@ -390,11 +390,7 @@ class VoiceControlService : Service() {
         lastCommandTime = now
 
         serviceScope.launch(Dispatchers.IO) {
-            // Own the delivery failure here rather than leaving the renderer's default log: a reply
-            // that did not finish playing must be reported, not silently counted as delivered.
-            audioFeedbackRenderer.onPlaybackFailure = ::onSpokenReplyNotDelivered
-            val response = voicePlaybackIntentExecutor.execute(intent)
-            audioFeedbackRenderer.render(response)
+            renderWithFailureHandling(intent)
             gracePeriodSignal.onCommandRecognized(
                 fromGeneration = intent.windowGenerationOf(),
                 restoresAllowance = intent.restoresAllowance(),

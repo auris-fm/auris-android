@@ -213,12 +213,13 @@ class AndroidPlatformTtsEngine @Inject constructor(
         count: Int,
     ) {
         if (count <= 0) return
-        val slice = samples.copyOfRange(startSample, startSample + count)
-        val forReference = if (sampleRateHz == REFERENCE_RATE_HZ) {
-            slice
-        } else {
-            EarconAudio.resampleMono(slice, sampleRateHz, REFERENCE_RATE_HZ)
-        }
+        val forReference = EarconAudio.resampleRange(
+            samples = samples,
+            fromRate = sampleRateHz,
+            toRate = REFERENCE_RATE_HZ,
+            startSample = startSample,
+            count = count,
+        )
         playbackBufferRecorder.write(FloatArray(forReference.size) { forReference[it] / 32768f })
     }
 

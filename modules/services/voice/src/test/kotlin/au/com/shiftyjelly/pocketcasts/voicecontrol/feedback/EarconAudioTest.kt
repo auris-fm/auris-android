@@ -115,4 +115,21 @@ class EarconAudioTest {
         val same = EarconAudio.resampleMono(clip.samples, 16_000, 16_000)
         assertTrue("no conversion is a no-op", same === clip.samples)
     }
+
+    @Test
+    fun `resampling a slice preserves its local duration`() {
+        // The player records each ACCEPTED write on the reference timeline. Whatever the slice
+        // boundaries are, a converted slice must keep the proportion it had in the clip, or the
+        // reference drifts against playback across partial writes.
+        val clip = EarconAudio.decodeWavToMono(wav(0.4, 44_100, 440.0).inputStream())
+        val slice = clip.samples.copyOfRange(4_410, 4_410 + 8_820)
+        val converted = EarconAudio.resampleMono(slice, 44_100, 16_000)
+
+        val sliceMs = slice.size * 1000 / 44_100
+        val convertedMs = converted.size * 1000 / 16_000
+        assertTrue(
+            "a 200ms slice must still be 200ms after conversion ($sliceMs -> $convertedMs)",
+            abs(sliceMs - convertedMs) <= 3,
+        )
+    }
 }

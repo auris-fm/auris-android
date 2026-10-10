@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.audio
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.media.MediaCodec
@@ -127,6 +128,24 @@ class CloudAudioPlayer(
 
     /** True while audio is actively being played (not paused, not idle). */
     val isPlaying: Boolean get() = playing && !paused
+
+    /**
+     * Where this player's output is ACTUALLY routed, or null when that cannot be known.
+     *
+     * `AudioRouting.getRoutedDevice()` reports the device a live stream is routed to, which is a
+     * different question from the enumerated availability the route monitor reads: a paired headset
+     * that media is not using is enumerated and not routed. Null is returned rather than a guess when
+     * the track is absent, inactive, or the platform has no routing yet — an unknown route must stay
+     * unknown, because reporting it as the speaker would be a claim the API has not made.
+     */
+    fun routedOutputDevice(): AudioDeviceInfo? {
+        val track = audioTrack ?: return null
+        if (!isPlaying) return null
+        return runCatching {
+            // Valid only while the stream is active; a released or stopped track reports null.
+            track.routedDevice
+        }.getOrNull()
+    }
 
     /** True when at least one frame was successfully written to the AudioTrack. */
     var audioWritten = false

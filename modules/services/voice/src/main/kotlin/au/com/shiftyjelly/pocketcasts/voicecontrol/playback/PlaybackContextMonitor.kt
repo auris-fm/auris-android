@@ -42,6 +42,13 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
     fun isPrivacyClosed(): Boolean = gracePeriodSignal.isClosedByPrivacy()
 
     /**
+     * Monotonic count of privacy closures. A turn samples it when it takes its pause obligation and
+     * again at cleanup: a difference means a privacy event ended this turn, which a live boolean
+     * cannot show once a later wake has cleared it.
+     */
+    fun privacyClosureCount(): Long = gracePeriodSignal.privacyClosureCount()
+
+    /**
      * True when the host app (Pocket Casts) is actively playing audio. Used by
      * [OtherAppPlayingCondition], together with a short time-bounded recency window,
      * to distinguish the host's own audio from another app's during a play/pause/route

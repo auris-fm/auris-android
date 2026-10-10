@@ -1239,6 +1239,9 @@ class CloudRouteSinkTest {
         private val audioPlayer: au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer? = null,
         /** Whether a privacy event has closed the window during this turn. */
         var privacyClosed: Boolean = false,
+
+        /** Monotonic, so a closure during a turn is visible after a wake clears [privacyClosed]. */
+        var privacyClosures: Long = 0,
         // Keys built from the same constant the sink uses, so renaming the
         // wire code breaks these tests rather than silently detaching the
         // template from it.
@@ -1300,6 +1303,7 @@ class CloudRouteSinkTest {
             isHostPlaying = { host.playing },
             playbackCommandRevision = { commandRevision },
             isPrivacyClosed = { privacyClosed },
+            privacyClosureCount = { privacyClosures },
             audioPlayer = audioPlayer,
         )
     }
@@ -1475,6 +1479,35 @@ class CloudRouteSinkTest {
         assertTrue(
             "no turn-owned pause means no resume attempt (calls=${deps.playback.calls})",
             deps.playback.calls.none { it == "resume" },
+        )
+    }
+
+    @Test
+    fun `a privacy closure invalidates the turn before any successor registers`() = runTest(UnconfinedTestDispatcher()) {
+        // The interval @spec named: A owns the turn and has paused the host; privacy closes A; a new
+        // wake clears the closure flag; A's delayed cleanup then lands BEFORE any successor cloud turn
+        // registers. `activeTurnId` is still A's, so ownership alone would let A through, and the live
+        // flag has been cleared. Only a latch on A itself can hold.
+        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
+        val sink = deps.sink()
+
+        val turnA = launch { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.pauseStarted.await()
+
+        // Privacy ends A, then a wake reopens the window before A's cleanup arrives. No successor
+        // registers in between — this is the gap the newer-cloud-turn test cannot see.
+        deps.privacyClosed = true
+        deps.privacyClosures += 1
+        deps.privacyClosed = false
+
+        deps.playback.pauseGate?.complete(Unit)
+        turnA.join()
+
+        assertEquals(
+            "a privacy-invalidated turn must not resume, even before a successor registers (calls=${deps.playback.calls})",
+            listOf("pause"),
+            deps.playback.calls.filter { it == "pause" || it == "resume" || it == "restore" },
         )
     }
 }

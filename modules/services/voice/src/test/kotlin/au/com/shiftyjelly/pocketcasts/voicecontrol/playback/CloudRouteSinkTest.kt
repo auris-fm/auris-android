@@ -1234,6 +1234,7 @@ class CloudRouteSinkTest {
         var commandRevision: Long = 0,
         val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
         private val locale: java.util.Locale = java.util.Locale.ENGLISH,
+        private val audioPlayer: au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer? = null,
         // Keys built from the same constant the sink uses, so renaming the
         // wire code breaks these tests rather than silently detaching the
         // template from it.
@@ -1294,6 +1295,7 @@ class CloudRouteSinkTest {
             currentLocale = { locale },
             isHostPlaying = { host.playing },
             playbackCommandRevision = { commandRevision },
+            audioPlayer = audioPlayer,
         )
     }
 

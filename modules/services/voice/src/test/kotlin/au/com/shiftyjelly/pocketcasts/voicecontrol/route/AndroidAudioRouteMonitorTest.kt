@@ -29,17 +29,24 @@ class AndroidAudioRouteMonitorTest {
         val closuresBefore = signal.privacyClosureCount()
 
         monitor.onDevicesChanged()
-        // Past the monitor's 500ms debounce: sampling sooner would read the pre-event state and the
-        // assertion below would pass without the connection having run.
-        delay(1_200)
 
+        // The owning transition must not wait on the route-read debounce: the event is the fact and the
+        // read is derived. Sampled immediately, with no wait, so a closure that only happened after the
+        // 500ms read could not satisfy this.
         assertTrue(
-            "a device change must close the window (active=${signal.isActive.value})",
+            "grace must end as the event arrives, not after the debounce (active=${signal.isActive.value})",
             signal.isClosedByPrivacy(),
         )
         assertFalse("a privacy closure ends the window", signal.isActive.value)
         assertEquals(
-            "exactly one closure per route event",
+            "the event closes grace exactly once, not once per debounce",
+            closuresBefore + 1,
+            signal.privacyClosureCount(),
+        )
+        // Past the debounce: the route read still lands, and it must not close a second time.
+        delay(1_200)
+        assertEquals(
+            "the debounced route read must not close grace a second time",
             closuresBefore + 1,
             signal.privacyClosureCount(),
         )
@@ -171,5 +178,33 @@ class AndroidAudioRouteMonitorTest {
             inputDeviceTypes = emptyList(),
         )
         assertEquals(AudioRoute.Unknown, route)
+    }
+
+    @Test
+    fun `a wake during the debounce is not ended by the pending route read`() = runBlocking {
+        // A device event schedules the debounced read; the user wakes before it elapses, opening a new
+        // window; the stale read then lands. It must not end a window it never saw.
+        val signal = GracePeriodSignal(timeoutMs = 60_000L)
+        val monitor = AndroidAudioRouteMonitor(ApplicationProvider.getApplicationContext(), signal)
+
+        signal.onWakeWordDetected()
+        val closuresBefore = signal.privacyClosureCount()
+        monitor.onDevicesChanged()
+
+        // The wake's own closure already happened; reopen the window as a later wake would.
+        signal.onWakeWordDetected()
+        assertTrue("the wake opens a window", signal.isActive.value)
+
+        delay(1_200)
+        assertTrue(
+            "a stale debounced read must not end a window opened after it was scheduled",
+            signal.isActive.value,
+        )
+        assertFalse("and it must not mark that window as privacy-closed", signal.isClosedByPrivacy())
+        assertEquals(
+            "the stale read must not count a closure against the new window",
+            closuresBefore + 1,
+            signal.privacyClosureCount(),
+        )
     }
 }

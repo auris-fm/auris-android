@@ -93,6 +93,23 @@ int NativeVadProcessor::waitForEvent(int32_t timeoutMs) {
     return event;
 }
 
+NativeVadProcessor::VadDiagnostics NativeVadProcessor::getDiagnostics() {
+    VadDiagnostics d;
+    d.lastRms = mLastRms.load(std::memory_order_relaxed);
+    d.lastScore = mLastScore.load(std::memory_order_relaxed);
+    d.lastGatePassed = mLastGatePassed.load(std::memory_order_relaxed);
+    d.lastIsSpeech = mLastIsSpeech.load(std::memory_order_relaxed);
+    d.speechFrames = mDiagSpeechFrames.load(std::memory_order_relaxed);
+    d.speechActive = mDiagSpeechActive.load(std::memory_order_relaxed);
+    d.silentFrames = mDiagSilentFrames.load(std::memory_order_relaxed);
+    d.drainRemaining = mDiagDrainRemaining.load(std::memory_order_relaxed);
+    return d;
+}
+
+void NativeVadProcessor::setDiagnosticsEnabled(bool enabled) {
+    mDiagnosticsEnabled.store(enabled, std::memory_order_relaxed);
+}
+
 int64_t NativeVadProcessor::getFramesConsumed() {
     return mFramesConsumed.load(std::memory_order_relaxed);
 }
@@ -246,10 +263,29 @@ void NativeVadProcessor::runLoop() {
 
         // 4. Energy gate — skip Silero VAD for silent frames.
         bool hasEnergy = energyGate(chunk, kVadFrameSize);
+        float prob = 0.0f;
         bool isSpeech = false;
         if (hasEnergy) {
-            float prob = sileroVadPredict(chunk, kVadFrameSize);
+            prob = sileroVadPredict(chunk, kVadFrameSize);
             isSpeech = (prob >= kSpeechThreshold);
+        }
+        // Diagnosis only, and only when enabled: the values the detector compared for this frame. The
+        // RMS is recomputed rather than plumbed out of the gate so the gate's own contract stays a
+        // boolean predicate.
+        if (mDiagnosticsEnabled.load(std::memory_order_relaxed)) {
+            double sum = 0.0;
+            for (int32_t i = 0; i < kVadFrameSize; ++i) {
+                double v = static_cast<double>(chunk[i]);
+                sum += v * v;
+            }
+            mLastRms.store(std::sqrt(sum / static_cast<double>(kVadFrameSize)), std::memory_order_relaxed);
+            mLastScore.store(prob, std::memory_order_relaxed);
+            mLastGatePassed.store(hasEnergy, std::memory_order_relaxed);
+            mLastIsSpeech.store(isSpeech, std::memory_order_relaxed);
+            mDiagSpeechFrames.store(mSpeechFrames, std::memory_order_relaxed);
+            mDiagSpeechActive.store(mSpeechActive, std::memory_order_relaxed);
+            mDiagSilentFrames.store(mConsecutiveSilentFrames, std::memory_order_relaxed);
+            mDiagDrainRemaining.store(mDrainRemaining, std::memory_order_relaxed);
         }
 
         // 5. Speech detected.

@@ -61,6 +61,15 @@ class GracePeriodSignal @Inject constructor() {
     fun isClosedByPrivacy(): Boolean = closedByPrivacy
 
     /**
+     * How many times a privacy event has closed the window. Monotonic and never reset by a wake, so a
+     * caller that read it when it took an obligation can tell that a privacy event happened since —
+     * a live boolean cannot answer that, because a wake clears it before a suspended caller resumes.
+     */
+    fun privacyClosureCount(): Long = privacyClosures.get()
+
+    private val privacyClosures = java.util.concurrent.atomic.AtomicLong(0)
+
+    /**
      * One escalation to the cloud service is allowed per grace window: the
      * window is the user-initiated act, and this bounds a routing failure (or a
      * deliberate `no_match`) to a single dispatch per act rather than a stream.
@@ -176,6 +185,7 @@ class GracePeriodSignal @Inject constructor() {
     fun onAppBackgrounded() = closeByPrivacy()
 
     private fun closeByPrivacy() {
+        privacyClosures.incrementAndGet()
         timerJob?.cancel()
         _isActive.value = false
         closedByPrivacy = true

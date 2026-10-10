@@ -53,6 +53,32 @@ class PlaybackBufferRecorder @Inject constructor(
         tapJob = null
     }
 
+    /**
+     * Retires the reference at a real stop or route change, keeping only the acoustic delay tail.
+     *
+     * Clearing the whole buffer would drop the tail that legitimately still reaches the microphone
+     * just after playback stops; keeping it whole would let a stale reference match later user
+     * speech and discard it as bleed. So the newest [DELAY_TAIL_SAMPLES] survive and everything
+     * older is retired. The delay window is the same range the correlator searches (50–500 ms), so
+     * the tail is the part that could still be heard at the microphone.
+     */
+    fun retire() {
+        // Nothing was ever submitted: there is no tail to keep and no stale audio to retire.
+        if (!filled && writePos == 0) return
+        val keep = minOf(DELAY_TAIL_SAMPLES, buffer.size, if (filled) buffer.size else writePos)
+        val tail = FloatArray(keep)
+        // Copy the newest `keep` samples in order, wrapping as needed, then write them back so the
+        // buffer contains only the still-plausible tail and the write cursor sits after it.
+        for (i in 0 until keep) {
+            val from = ((writePos - keep + i) % buffer.size + buffer.size) % buffer.size
+            tail[i] = buffer[from]
+        }
+        buffer.fill(0f)
+        tail.copyInto(buffer, 0)
+        writePos = if (keep == buffer.size) 0 else keep
+        filled = false
+    }
+
     fun write(pcm: FloatArray) {
         for (sample in pcm) {
             buffer[writePos] = sample
@@ -79,6 +105,12 @@ class PlaybackBufferRecorder @Inject constructor(
     companion object {
         const val SAMPLE_RATE = 16000
         const val BUFFER_DURATION_SECONDS = 2
+
+        /**
+         * How much of the reference survives retirement. Matches the correlator's search window
+         * upper bound (500 ms): everything older than this cannot still be heard at the mic.
+         */
+        const val DELAY_TAIL_SAMPLES = SAMPLE_RATE / 2
 
         /**
          * Converts a tap chunk to the float samples the reference stores. Mirrors the existing

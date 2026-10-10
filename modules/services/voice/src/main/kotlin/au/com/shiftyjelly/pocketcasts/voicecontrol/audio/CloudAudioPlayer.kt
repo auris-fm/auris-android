@@ -218,6 +218,10 @@ class CloudAudioPlayer(
                 stopAudibleHeartbeat()
             }
         }
+        // The answer is no longer playing, so retire its reference contribution. Only the acoustic
+        // delay tail survives, so speech after the stop cannot be matched against audio that is
+        // already gone and dropped as bleed.
+        playbackBufferRecorder?.retire()
     }
 
     /**

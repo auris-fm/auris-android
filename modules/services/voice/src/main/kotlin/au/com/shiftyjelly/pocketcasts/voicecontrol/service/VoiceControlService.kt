@@ -114,6 +114,9 @@ class VoiceControlService : Service() {
     private var mediaSession: MediaSession? = null
     private var currentMode: ListeningMode = ListeningMode.Off
 
+    /** Last route seen by the mode/route observer, so a change (not a recomputation) retires. */
+    private var lastObservedRoute: AudioRoute? = null
+
     companion object {
         private const val COMMAND_DEBOUNCE_MS = 2000L
         internal const val STOP_ACTION = "au.com.shiftyjelly.pocketcasts.voicecontrol.action.STOP"
@@ -190,6 +193,13 @@ class VoiceControlService : Service() {
                     captureRestartSignal,
                 ) { mode, _, _, _ -> mode }.onEach { mode ->
                     val route = audioRouteMonitor.route.value
+                    // A route change alters the acoustic path, so the recorded reference no longer
+                    // describes what reaches the microphone at that delay. Retire it (keeping only
+                    // the delay tail) rather than letting a stale reference match later speech.
+                    if (route != lastObservedRoute) {
+                        if (lastObservedRoute != null) playbackBufferRecorder.retire()
+                        lastObservedRoute = route
+                    }
                     val micExposure = route.toMicExposure()
                     // Transitions, not repeated evaluations: the gate also emits for changes that
                     // leave this tuple alone (other rule state), and the composite decision — mode,

@@ -35,11 +35,26 @@ class TtsSinkValidationTest {
                 withTimeoutOrNull(30_000) { engine.speak("testing one two three", "en") }
             }
             val after = recorder.snapshot().size
-            Log.i(tag, "reference samples before=$before after=$after speakMs=$elapsed")
+            val written = engine.framesWritten()
+            val playedAtReturn = engine.framesPlayedAtReturn()
+            Log.i(
+                tag,
+                "reference before=$before after=$after speakMs=$elapsed " +
+                    "framesWritten=$written framesPlayedAtReturn=$playedAtReturn",
+            )
 
+            // Contribution: the answer is on the reference timeline.
             assertTrue("the spoken answer must contribute to the echo reference", after > before)
-            // A ~1s utterance cannot complete in a few ms; a synthesis-only return would.
-            assertTrue("speak must not return before playback drained (took ${elapsed}ms)", elapsed > 200)
+
+            // Drain, observed rather than inferred from elapsed time: at return, everything submitted
+            // must already have been played. A completion that returned while frames were still
+            // queued would show playedAtReturn < written, which is the failure this pins.
+            assertTrue("the sink must have been fed", written > 0)
+            assertTrue(
+                "speak() must return only after playback drained " +
+                    "(written=$written playedAtReturn=$playedAtReturn)",
+                playedAtReturn >= written,
+            )
         } finally {
             engine.release()
         }

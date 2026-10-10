@@ -132,4 +132,41 @@ class PlaybackBufferRecorderTest {
         recorder.retire()
         assertEquals(0, recorder.snapshot().size)
     }
+
+    @Test
+    fun `episode chunk timestamp is carried into the reference`() = runTest {
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+        val job = recorder.start(this)
+        runCurrent()
+
+        val format = AudioProcessor.AudioFormat(16_000, 1, C.ENCODING_PCM_16BIT)
+        val samples = shortArrayOf(1000, -1000, 2000, -2000) // 4 samples = 0.25 ms at 16 kHz
+        tap.onSinkBuffer(presentationTimeUs = 2_000_000) // 2.0 s
+        tap.onPcm(ByteBuffer.wrap(s16le(samples)), format)
+        runCurrent()
+        job.cancel()
+
+        assertEquals(
+            "the chunk's media position is carried, plus its own duration",
+            2_000L + (samples.size * 1_000L) / 16_000,
+            recorder.lastRecordedPositionMs(),
+        )
+    }
+
+    @Test
+    fun `timestamped and untimestamped writes keep the latest position`() {
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        recorder.write(FloatArray(16) { 0.1f }, positionMs = 1_000L)
+        assertEquals(1_001L, recorder.lastRecordedPositionMs())
+        // An untimestamped write must not erase the last known position.
+        recorder.write(FloatArray(16) { 0.1f })
+        assertEquals(1_001L, recorder.lastRecordedPositionMs())
+    }
+
+    @Test
+    fun `position is null until a timestamped write happens`() {
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        assertEquals(null, recorder.lastRecordedPositionMs())
+    }
 }

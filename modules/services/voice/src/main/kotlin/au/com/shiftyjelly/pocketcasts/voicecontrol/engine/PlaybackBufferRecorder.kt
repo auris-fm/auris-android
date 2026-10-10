@@ -36,14 +36,28 @@ class PlaybackBufferRecorder @Inject constructor(
 
     private var tapJob: Job? = null
 
+    /** Player-timeline position (ms) of the newest timestamped sample; null until one is written. */
+    private var lastPositionMs: Long? = null
+
     /**
      * Subscribes to the player's sink-submission tap so episode PCM is recorded once, as it is
      * accepted by the sink. Call once per capture session; the returned job is owned by [scope].
+     *
+     * The chunk's presentation time is carried into the write, so the reference is aligned by the
+     * player's own timeline rather than by arrival order. Arrival order is adequate only while one
+     * source is writing; episode and cloud answer can interleave, and without the timestamp they
+     * would be concatenated in delivery order rather than placed at the position they were played.
      */
     fun start(scope: CoroutineScope): Job {
         tapJob?.cancel()
         return fingerprintPcmTap.chunks
-            .onEach { chunk -> write(chunkToFloats(chunk)) }
+            .onEach { chunk ->
+                write(
+                    pcm = chunkToFloats(chunk),
+                    // The tap's position is seconds of media time; the reference tracks milliseconds.
+                    positionMs = (chunk.positionSec * 1_000.0).toLong(),
+                )
+            }
             .launchIn(scope)
             .also { tapJob = it }
     }
@@ -79,13 +93,24 @@ class PlaybackBufferRecorder @Inject constructor(
         filled = false
     }
 
-    fun write(pcm: FloatArray) {
+    fun write(pcm: FloatArray, positionMs: Long? = null) {
         for (sample in pcm) {
             buffer[writePos] = sample
             writePos = (writePos + 1) % buffer.size
             if (writePos == 0) filled = true
         }
+        if (positionMs != null) {
+            // The position of the newest sample: the chunk's start plus its duration at 16 kHz.
+            lastPositionMs = positionMs + (pcm.size * 1_000L) / SAMPLE_RATE
+        }
     }
+
+    /**
+     * The player-timeline position of the newest recorded sample, or null when nothing was
+     * written with a timestamp. Lets the correlation align a mic segment to a position rather than
+     * to buffer offset, which is what holds when sources share the buffer.
+     */
+    fun lastRecordedPositionMs(): Long? = lastPositionMs
 
     fun snapshot(): FloatArray {
         if (!filled && writePos == 0) return FloatArray(0)

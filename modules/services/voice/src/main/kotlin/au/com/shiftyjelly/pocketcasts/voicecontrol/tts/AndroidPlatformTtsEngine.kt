@@ -48,6 +48,10 @@ class AndroidPlatformTtsEngine @Inject constructor(
     @Volatile
     private var framesWritten = 0
 
+    /** True while a synthesized utterance is being PLAYED (set once the sink has been fed). */
+    @Volatile
+    private var playbackActive = false
+
     @Volatile
     private var framesPlayedAtReturn = 0
 
@@ -159,6 +163,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
         activeTrack = track
         try {
             track.play()
+            playbackActive = true
             var offset = 0
             while (offset < clip.samples.size) {
                 val written = track.write(clip.samples, offset, clip.samples.size - offset)
@@ -185,11 +190,15 @@ class AndroidPlatformTtsEngine @Inject constructor(
             framesWritten = offset
             framesPlayedAtReturn = track.playbackHeadPosition
         } finally {
+            playbackActive = false
             activeTrack = null
             runCatching { track.stop() }
             runCatching { track.release() }
         }
     }
+
+    /** True while a synthesized utterance is playing, so a caller can observe playback in progress. */
+    fun isPlayingSynthesizedAudio(): Boolean = playbackActive
 
     /** Frames submitted to the sink by the last utterance, or 0 if none played. */
     fun framesWritten(): Int = framesWritten

@@ -243,4 +243,28 @@ class CloudAudioPlayerTest {
         )
         wired.release()
     }
+
+    @Test
+    fun `a partial sink write records only the accepted prefix`() {
+        // The cloud answer must record accepted samples, not the whole submitted frame: a reference
+        // holding audio the sink rejected would correlate against audio that never played.
+        val recorder = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder(
+            au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap(),
+        )
+        val player = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            playbackBufferRecorder = recorder,
+        )
+        // 100 samples submitted; the converter's length bound is what limits what is recorded.
+        val bytes = ByteArray(200) { 0x10 }
+        val accepted = 40 // bytes = 20 samples
+        val recorded = CloudAudioPlayer.s16leBytesToFloats(bytes, accepted)
+        assertEquals(
+            "only the accepted byte prefix may be recorded",
+            accepted / 2,
+            recorded.size,
+        )
+        player.release()
+    }
 }

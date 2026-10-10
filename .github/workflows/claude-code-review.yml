@@ -183,6 +183,19 @@ jobs:
           set -euo pipefail
           gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body 'Automated review skipped: this PR modifies `.github/workflows/claude-code-review.yml`, and the Claude App token check requires the workflow to match the default branch. No `Claude review` status is recorded, so this head is not marked reviewed.'
 
+      - name: Fetch the guard scripts the assert step reads
+        # The assert step below runs BEFORE the reviewed-head checkout, so it has no repository
+        # on the runner unless this step fetches one. It previously had none and failed on every
+        # run with `No such file or directory` — the guard was live and never once executed.
+        #
+        # A separate path, not the default one, so the reviewed checkout below is unaffected.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve-target.outputs.head-sha }}
+          path: .ci-guard
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Assert the status permission is declared
         # The read-back check adopted as the fifth requirement: every job that writes a commit
         # status must declare statuses: write, because GitHub sets absent permissions to none and
@@ -194,9 +207,14 @@ jobs:
         # The test runs FIRST, so a detector that has stopped matching fails here rather than
         # quietly certifying nothing. Its cases include the scope claim itself as a failing pair,
         # which is what stops a future editor from narrowing the detector and keeping a green run.
+        #
+        # DELIBERATELY HAS NO `if:`. The reviewed-head checkout below is gated on the review not
+        # being skipped, and a workflow-touching PR is exactly one whose file this check must
+        # read — inheriting that gate would turn a loud failure into the silent pass this exists
+        # to prevent. That is why the scripts are fetched separately above rather than reused.
         run: |
-          ruby .github/scripts/check-status-permission.test.rb
-          ruby .github/scripts/check-status-permission.rb .github/workflows/claude-code-review.yml
+          ruby .ci-guard/.github/scripts/check-status-permission.test.rb
+          ruby .ci-guard/.github/scripts/check-status-permission.rb .ci-guard/.github/workflows/claude-code-review.yml
 
       - name: Checkout the reviewed head
         if: steps.workflow-changes.outputs.skip != 'true'

@@ -190,7 +190,13 @@ jobs:
         # the permissions block shows it alone, only their relationship does — so this asserts
         # the relationship. Scope: an INLINE `.../statuses/...` call, which is this repo's shape;
         # the script refuses (rather than passes) a shape it cannot read.
-        run: ruby .github/scripts/check-status-permission.rb .github/workflows/claude-code-review.yml
+        #
+        # The test runs FIRST, so a detector that has stopped matching fails here rather than
+        # quietly certifying nothing. Its cases include the scope claim itself as a failing pair,
+        # which is what stops a future editor from narrowing the detector and keeping a green run.
+        run: |
+          ruby .github/scripts/check-status-permission.test.rb
+          ruby .github/scripts/check-status-permission.rb .github/workflows/claude-code-review.yml
 
       - name: Checkout the reviewed head
         if: steps.workflow-changes.outputs.skip != 'true'

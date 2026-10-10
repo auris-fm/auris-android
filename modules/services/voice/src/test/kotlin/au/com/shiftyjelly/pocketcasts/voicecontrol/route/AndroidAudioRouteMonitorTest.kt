@@ -1,10 +1,49 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.route
 
 import android.media.AudioDeviceInfo
+import androidx.test.core.app.ApplicationProvider
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
+@RunWith(RobolectricTestRunner::class)
 class AndroidAudioRouteMonitorTest {
+
+    @Test
+    fun `a device change closes the window through the production route monitor`() = runBlocking {
+        // The production connection the sink's privacy guard depends on: a device event reaches
+        // GracePeriodSignal through the monitor's own registered callback, not through a test-installed
+        // one. The debounce and route read that follow are production.
+        val signal = GracePeriodSignal(timeoutMs = 60_000L)
+        val monitor = AndroidAudioRouteMonitor(ApplicationProvider.getApplicationContext(), signal)
+
+        signal.onWakeWordDetected()
+        assertTrue("the wake must open the window", signal.isActive.value)
+        assertFalse("an open window is not a privacy closure", signal.isClosedByPrivacy())
+        val closuresBefore = signal.privacyClosureCount()
+
+        monitor.onDevicesChanged()
+        // Past the monitor's 500ms debounce: sampling sooner would read the pre-event state and the
+        // assertion below would pass without the connection having run.
+        delay(1_200)
+
+        assertTrue(
+            "a device change must close the window (active=${signal.isActive.value})",
+            signal.isClosedByPrivacy(),
+        )
+        assertFalse("a privacy closure ends the window", signal.isActive.value)
+        assertEquals(
+            "exactly one closure per route event",
+            closuresBefore + 1,
+            signal.privacyClosureCount(),
+        )
+    }
 
     @Test
     fun `wired headset with mic`() {

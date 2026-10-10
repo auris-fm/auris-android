@@ -34,13 +34,23 @@ class AndroidAudioRouteMonitor @Inject constructor(
 
     private val audioDeviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
-            scheduleRouteUpdate()
+            onDevicesChanged()
         }
 
         override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
-            scheduleRouteUpdate()
+            onDevicesChanged()
         }
     }
+
+    /**
+     * The device-event entry point, as the system invokes it.
+     *
+     * Kept internal so a test can deliver the event Android would deliver and observe the production
+     * debounce, route read and privacy closure that follow — the connection cannot be exercised from
+     * outside the process otherwise, and a test that assigns its own callback would only prove that a
+     * callback does what it says.
+     */
+    internal fun onDevicesChanged() = scheduleRouteUpdate()
 
     private fun scheduleRouteUpdate() {
         debounceJob?.cancel()

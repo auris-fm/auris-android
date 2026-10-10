@@ -46,12 +46,17 @@ class PlaybackDuckingDeviceTest {
         // IT as a duckable loss. Requesting the focus ourselves would make us the holder and we would
         // never receive the loss, which is why the first version of this test logged
         // duckableLossSeen=false — a value that could not have been true.
-        var hostSawDuckableLoss = false
-        var hostGainedFocus = false
+        // Latches, not plain vars: onAudioFocusChange is delivered on AudioManager's handler thread
+        // while the body runs on the instrumentation thread, so a plain var gives no happens-before
+        // edge — the read may never observe the write, and the JIT may hoist a polling read out of its
+        // loop. That would be a value read in a way that cannot see what it asserts, and it would fail
+        // on a device while the callback had fired.
+        val sawDuckableLoss = java.util.concurrent.CountDownLatch(1)
+        val regainedFocus = java.util.concurrent.CountDownLatch(1)
         val hostListener = AudioManager.OnAudioFocusChangeListener { change ->
             when (change) {
-                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> hostSawDuckableLoss = true
-                AudioManager.AUDIOFOCUS_GAIN -> hostGainedFocus = true
+                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> sawDuckableLoss.countDown()
+                AudioManager.AUDIOFOCUS_GAIN -> regainedFocus.countDown()
                 else -> {}
             }
         }
@@ -86,16 +91,13 @@ class PlaybackDuckingDeviceTest {
 
         // Restore is abandoning that focus, which returns the host to full volume.
         val restoreMs = measureTimeMillis { manager.abandonAudioFocus(listener) }
-        // The restored gain is delivered to the host holder on another thread, so wait on the CONDITION
-        // with a bound rather than a fixed sleep: a fixed sleep cannot time out, and it would pass
-        // whether or not the gain ever arrived.
-        withTimeoutOrNull(2_000) {
-            while (!hostGainedFocus) delay(20)
-        }
+        // The restored gain is delivered on another thread, so wait on the latch with a bound. The latch
+        // is also what makes the wait correct: it establishes the happens-before edge a plain var lacks.
+        val regained = regainedFocus.await(2, java.util.concurrent.TimeUnit.SECONDS)
         manager.abandonAudioFocus(hostListener)
         Log.i(
             tag,
-            "duck=${duckMs}ms restore=${restoreMs}ms hostDuckableLoss=$hostSawDuckableLoss hostGained=$hostGainedFocus",
+            "duck=${duckMs}ms restore=${restoreMs}ms hostDuckableLoss=${sawDuckableLoss.count == 0L} hostGained=$regained",
         )
 
         // Both operations must complete promptly: a duck that takes long leaves the answer competing with
@@ -106,13 +108,13 @@ class PlaybackDuckingDeviceTest {
         // signal the host acts on, since the request being granted is only the precondition.
         assertTrue(
             "the host player must receive the duckable loss, or nothing lowers its volume",
-            hostSawDuckableLoss,
+            sawDuckableLoss.await(0, java.util.concurrent.TimeUnit.SECONDS),
         )
         // And the restore must give the focus back: a duck that never returns the focus leaves the host
         // player quiet for the rest of the episode, which is the other half of the same row.
         assertTrue(
             "the host player must regain focus when the cloud restores, or it stays ducked",
-            hostGainedFocus,
+            regained,
         )
     }
 

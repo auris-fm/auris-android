@@ -175,6 +175,27 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      - name: Resolve the review model
+        # The model is one of the two levers on what a review costs, so a substitution must not be
+        # silent: an undefined secret evaluates to the empty string, and a fallback here would pick a
+        # model without anything in the run saying so. The resolved name is echoed and reported on the
+        # PR, so a spend comparison is founded on what actually ran.
+        id: resolve-model
+        if: steps.workflow-changes.outputs.skip != 'true'
+        env:
+          CONFIGURED_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+        run: |
+          set -euo pipefail
+          if [ -n "${CONFIGURED_MODEL:-}" ]; then
+            MODEL="$CONFIGURED_MODEL"
+            echo "Review model: ${MODEL} (from ANTHROPIC_MODEL)"
+          else
+            MODEL="sonnet"
+            echo "::warning::ANTHROPIC_MODEL is not set; falling back to '${MODEL}'. The review cost comparison assumes this value, so set the secret to remove the ambiguity."
+            echo "Review model: ${MODEL} (fallback — ANTHROPIC_MODEL unset)"
+          fi
+          echo "model=${MODEL}" >> "$GITHUB_OUTPUT"
+
       - name: Run Claude Code Review
         if: steps.workflow-changes.outputs.skip != 'true'
         id: claude-review
@@ -249,7 +270,7 @@ jobs:
             - If nothing new and nothing open, say so in one sentence and stop.
 
           claude_args: |
-            --model ${{ secrets.ANTHROPIC_MODEL || 'sonnet' }}
+            --model ${{ steps.resolve-model.outputs.model }}
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*)"
 
       - name: Report a review that did not complete
@@ -291,11 +312,12 @@ jobs:
           HEAD_SHA: ${{ needs.resolve-target.outputs.head-sha }}
           PR_NUMBER: ${{ needs.resolve-target.outputs.pr-number }}
           MODEL_CONCLUSION: ${{ steps.claude-review.outputs.conclusion }}
+          MODEL: ${{ steps.resolve-model.outputs.model }}
         run: |
           set -euo pipefail
           gh api "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \
             -f state=success \
             -f context="Claude review" \
-            -f description="Reviewed head ${HEAD_SHA:0:7}" \
+            -f description="Reviewed ${HEAD_SHA:0:7} with ${MODEL}" \
             -f target_url="https://github.com/${REPOSITORY}/pull/${PR_NUMBER}" >/dev/null
-          echo "Recorded 'Claude review' success on ${HEAD_SHA}" 
+          echo "Recorded 'Claude review' success on ${HEAD_SHA} (model=${MODEL})" 

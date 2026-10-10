@@ -1237,6 +1237,8 @@ class CloudRouteSinkTest {
         val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
         private val locale: java.util.Locale = java.util.Locale.ENGLISH,
         private val audioPlayer: au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer? = null,
+        /** Whether a privacy event has closed the window during this turn. */
+        var privacyClosed: Boolean = false,
         // Keys built from the same constant the sink uses, so renaming the
         // wire code breaks these tests rather than silently detaching the
         // template from it.
@@ -1297,6 +1299,7 @@ class CloudRouteSinkTest {
             currentLocale = { locale },
             isHostPlaying = { host.playing },
             playbackCommandRevision = { commandRevision },
+            isPrivacyClosed = { privacyClosed },
             audioPlayer = audioPlayer,
         )
     }
@@ -1417,5 +1420,28 @@ class CloudRouteSinkTest {
         } finally {
             player.release()
         }
+    }
+
+    @Test
+    fun `a privacy closure blocks the restore, which the command revision cannot see`() = runTest(UnconfinedTestDispatcher()) {
+        // A privacy event (route loss, backgrounding) closes the voice window and does NOT pass
+        // through the playback layer, so it cannot advance the command revision. The turn must still
+        // decline to resume: restoring would restart playback the user's privacy action ended.
+        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
+
+        val route = launch { deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.pauseStarted.await()
+
+        // Privacy closes while the turn's own pause is in flight; the revision is untouched.
+        deps.privacyClosed = true
+        deps.playback.pauseGate?.complete(Unit)
+        route.join()
+
+        assertEquals(
+            "a privacy closure must not be resumed over (calls=${deps.playback.calls})",
+            listOf("pause"),
+            deps.playback.calls,
+        )
     }
 }

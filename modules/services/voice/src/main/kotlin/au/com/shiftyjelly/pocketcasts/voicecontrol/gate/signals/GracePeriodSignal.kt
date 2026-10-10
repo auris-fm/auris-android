@@ -53,6 +53,14 @@ class GracePeriodSignal @Inject constructor() {
     private var closedByPrivacy = false
 
     /**
+     * True when the window is closed because a privacy event ended it and no wake has reopened it.
+     *
+     * Exposed because a privacy closure does not pass through the playback layer, so code that
+     * restores playback state cannot detect it via the playback command revision.
+     */
+    fun isClosedByPrivacy(): Boolean = closedByPrivacy
+
+    /**
      * One escalation to the cloud service is allowed per grace window: the
      * window is the user-initiated act, and this bounds a routing failure (or a
      * deliberate `no_match`) to a single dispatch per act rather than a stream.

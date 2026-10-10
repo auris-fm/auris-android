@@ -214,4 +214,33 @@ class CloudAudioPlayerTest {
         val out = CloudAudioPlayer.s16leBytesToFloats(bytes, 3)
         assertEquals(1, out.size)
     }
+
+    @Test
+    fun `stopping the player retires the echo reference`() {
+        // The production lifecycle must retire on stop: a stopped answer must not leave reference
+        // audio that later user speech could be matched against and dropped as bleed.
+        val recorder = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder(
+            au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap(),
+        )
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            playbackBufferRecorder = recorder,
+        )
+        recorder.write(FloatArray(au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.SAMPLE_RATE) { 0.4f })
+        assertEquals(
+            "precondition: reference holds audio",
+            au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.SAMPLE_RATE,
+            recorder.snapshot().size,
+        )
+
+        wired.stop()
+
+        assertEquals(
+            "stop retires the reference to the delay tail",
+            au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.DELAY_TAIL_SAMPLES,
+            recorder.snapshot().size,
+        )
+        wired.release()
+    }
 }

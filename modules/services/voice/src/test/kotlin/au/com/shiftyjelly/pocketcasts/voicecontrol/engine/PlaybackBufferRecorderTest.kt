@@ -10,6 +10,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -86,6 +87,49 @@ class PlaybackBufferRecorderTest {
     @Test
     fun `snapshot is empty until something is submitted`() {
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        assertEquals(0, recorder.snapshot().size)
+    }
+
+    @Test
+    fun `retire keeps only the acoustic delay tail so stale audio cannot match later speech`() {
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        // Fill well past the delay tail with a distinctive signal.
+        recorder.write(FloatArray(PlaybackBufferRecorder.SAMPLE_RATE) { 0.5f })
+        val before = recorder.snapshot().size
+        assertTrue("precondition: the reference holds audio", before > PlaybackBufferRecorder.DELAY_TAIL_SAMPLES)
+
+        recorder.retire()
+
+        val after = recorder.snapshot()
+        assertEquals(
+            "only the delay tail survives retirement",
+            PlaybackBufferRecorder.DELAY_TAIL_SAMPLES,
+            after.size,
+        )
+    }
+
+    @Test
+    fun `retire preserves the newest samples, not the oldest`() {
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val tail = PlaybackBufferRecorder.DELAY_TAIL_SAMPLES
+        // Old, retired audio is 0.25; the newest `tail` samples are 0.75.
+        recorder.write(FloatArray(PlaybackBufferRecorder.SAMPLE_RATE) { 0.25f })
+        recorder.write(FloatArray(tail) { 0.75f })
+
+        recorder.retire()
+
+        val after = recorder.snapshot()
+        assertEquals(tail, after.size)
+        assertTrue(
+            "the surviving tail is the newest audio, not the oldest",
+            after.all { kotlin.math.abs(it - 0.75f) < 0.0001f },
+        )
+    }
+
+    @Test
+    fun `retiring an empty reference does not invent audio`() {
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        recorder.retire()
         assertEquals(0, recorder.snapshot().size)
     }
 }

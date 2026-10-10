@@ -27,7 +27,11 @@ class PlaybackContextActiveConditionTest {
             on { playbackStateFlow } doReturn playbackState as Flow<PlaybackState>
         }
 
-        val monitor = PlaybackContextMonitor(playbackManager, backgroundScope)
+        val monitor = PlaybackContextMonitor(
+            playbackManager,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(),
+            backgroundScope,
+        )
         runCurrent()
 
         assertEquals(PlaybackContext.Active(currentEpisodeUuid = "episode-id", isPlaying = false), monitor.context.value)

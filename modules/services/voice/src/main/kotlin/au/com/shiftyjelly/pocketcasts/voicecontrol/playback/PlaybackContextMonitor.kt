@@ -18,6 +18,7 @@ sealed interface PlaybackContext {
 @Singleton
 class PlaybackContextMonitor @javax.inject.Inject constructor(
     private val playbackManager: PlaybackManager,
+    private val gracePeriodSignal: au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal,
     @ApplicationScope
     scope: CoroutineScope,
 ) {
@@ -32,6 +33,13 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
      * lag the command it is meant to describe.
      */
     fun playbackCommandRevision(): Long = playbackManager.playbackCommandRevision()
+
+    /**
+     * True when a privacy event closed the window. Read by the cloud turn so it does not restore a
+     * pause over playback the user's own privacy action ended; a privacy closure does not reach the
+     * playback layer, so it cannot be seen through the command revision.
+     */
+    fun isPrivacyClosed(): Boolean = gracePeriodSignal.isClosedByPrivacy()
 
     /**
      * True when the host app (Pocket Casts) is actively playing audio. Used by

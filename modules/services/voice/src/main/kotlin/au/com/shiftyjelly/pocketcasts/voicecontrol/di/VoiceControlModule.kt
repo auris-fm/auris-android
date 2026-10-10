@@ -258,7 +258,10 @@ abstract class VoiceControlModule {
 
         @Provides
         @Singleton
-        fun provideEarconPlayer(@ApplicationContext context: Context): EarconPlayer = EarconPlayer(context)
+        fun provideEarconPlayer(
+            @ApplicationContext context: Context,
+            playbackBufferRecorder: PlaybackBufferRecorder,
+        ): EarconPlayer = EarconPlayer(context, playbackBufferRecorder)
 
         @Provides
         @Singleton

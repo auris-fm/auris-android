@@ -1,8 +1,12 @@
 #include <jni.h>
+#include <android/log.h>
 #include <mutex>
 #include "OboeAudioCapture.h"
 #include "NativeVadProcessor.h"
 #include "RetireableProcessorHandle.h"
+
+#define LOG_TAG "VoicePipeline"
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "[VoicePipeline] " __VA_ARGS__)
 
 // gCapture is protected by gCaptureMutex. gVadProcessor owns the NativeVadProcessor through a
 // usage-counting handle: the VAD event getters run on the collector thread and can be parked in
@@ -30,6 +34,18 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeIsCaptur
 // ---------------------------------------------------------------------------
 
 extern "C" bool vadEnsureInitialized(JNIEnv* env, jobject assetManager);
+extern "C" const char* vadLastError();
+
+// Logs the reason a start step failed. The combined entry is what production calls, so an opaque
+// false here is a failure with no way to tell the asset, the ORT library and the model session
+// apart — the sibling entry already reports its reason, and this one should not be less useful.
+static void logStartFailure(const char* step, const char* reason) {
+    if (reason != nullptr && reason[0] != '\0') {
+        LOGE("Capture/VAD start failed at %s: %s", step, reason);
+    } else {
+        LOGE("Capture/VAD start failed at %s", step);
+    }
+}
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartCaptureAndVad(
@@ -42,6 +58,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartCap
     // Initialize the Silero VAD ONNX session before starting the VAD processor.
     // Uses std::call_once internally — repeated calls are cheap.
     if (!vadEnsureInitialized(env, assetManager)) {
+        logStartFailure("vad init", vadLastError());
         return JNI_FALSE;
     }
 
@@ -87,9 +104,18 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeOpenInpu
 
     auto* capture = new OboeAudioCapture();
     if (!capture->open()) {
+        logStartFailure("oboe open", nullptr);
         delete capture;
         return -1;
     }
+
+    if (!capture->start()) {
+        logStartFailure("oboe start", nullptr);
+        capture->close();
+        delete capture;
+        return JNI_FALSE;
+    }
+
     gCapture = capture;
     return capture->getDeviceId();
 }
@@ -102,6 +128,13 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartInp
 {
     std::lock_guard<std::mutex> lock(gCaptureMutex);
     if (gCapture == nullptr) {
+        return JNI_FALSE;
+    }
+    if (!gVadProcessor->start()) {
+        logStartFailure("vad processor thread", nullptr);
+        delete gVadProcessor;
+        gVadProcessor = nullptr;
+        // Capture is still valid — caller will stop/close it
         return JNI_FALSE;
     }
     if (gCapture->isActive()) {

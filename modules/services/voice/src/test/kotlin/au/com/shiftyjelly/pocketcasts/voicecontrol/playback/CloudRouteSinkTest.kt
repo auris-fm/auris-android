@@ -34,6 +34,8 @@ import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 
+@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
+@org.robolectric.annotation.Config(sdk = [30])
 @kotlinx.coroutines.ExperimentalCoroutinesApi
 class CloudRouteSinkTest {
 
@@ -1367,6 +1369,53 @@ class CloudRouteSinkTest {
 
         override fun recordTurn(outcome: String, inputTokens: Int?, outputTokens: Int?) {
             calls += CloudRouteAnalyticsCall(outcome, inputTokens, outputTokens)
+        }
+    }
+
+    @Test
+    fun `a refused answer traces through the sink to error feedback with the server outcome preserved`() = runTest {
+        // The whole acceptance: the injected writer refuses, the real player reports it, the sink
+        // turns it into user-visible feedback, AND the server's terminal outcome is still handled.
+        // A player callback alone would be narrower than this.
+        val player = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16_000,
+        ).apply {
+            var accepted = 0
+            writeToSink = { _, _, _, count -> if (accepted++ < 1) count else -1 }
+        }
+        val deps = TestDeps(
+            events = flow {
+                emit(CloudRouteEvent.Connected("pcm_s16le"))
+                emit(CloudRouteEvent.AudioFrame("pcm_s16le", ByteArray(4096) { 1 }))
+                emit(CloudRouteEvent.AudioFrame("pcm_s16le", ByteArray(4096) { 1 }))
+                emit(CloudRouteEvent.Done(0, 0))
+            },
+            audioPlayer = player,
+        )
+        try {
+            val response = deps.sink().routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext)
+            assertEquals(
+                "a refused answer must reach the user as an error, not a delivered reply",
+                VoiceResponse.Earcon(EarconId.ERROR),
+                response,
+            )
+            // The server outcome still arrived and was processed: the turn is recorded as done even
+            // though local playback failed, because the two are different facts.
+            assertTrue("the server terminal outcome must still be handled", deps.routeCalls.isNotEmpty())
+            // Output cleanup: the host player was ducked while the answer played, so it must be
+            // restored even though the answer was cut short — otherwise the user is left with a
+            // ducked episode and no answer.
+            assertTrue(
+                "output cleanup must restore the host player (calls=${deps.playback.calls})",
+                deps.playback.calls.contains("restore"),
+            )
+            assertTrue(
+                "the host must not be left ducked or paused (calls=${deps.playback.calls})",
+                deps.playback.calls.last() == "resume",
+            )
+        } finally {
+            player.release()
         }
     }
 }

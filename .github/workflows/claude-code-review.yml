@@ -118,6 +118,11 @@ jobs:
           echo "should-review=true" >> "$GITHUB_OUTPUT"
           echo "Reviewing PR #${PR} at head ${HEAD_SHA}"
 
+  claude-review:
+    needs: resolve-target
+    # The resolve job already applied every guard (draft, fork, dependabot, permission,
+    # exact command, same-head success), so this job has one condition rather than five.
+    if: needs.resolve-target.outputs.should-review == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read

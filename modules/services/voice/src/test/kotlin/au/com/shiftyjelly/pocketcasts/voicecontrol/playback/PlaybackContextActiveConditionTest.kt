@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.kotlin.doReturn
 import org.mockito.kotlin.mock
@@ -49,5 +51,25 @@ class PlaybackContextActiveConditionTest {
         val condition = PlaybackContextActiveCondition(MutableStateFlow(PlaybackContext.Inactive))
 
         assertEquals(VoiceControlRuleState.Blocked("playback_context_inactive"), condition.evaluate())
+    }
+
+    @Test
+    fun `the monitor forwards the real signal's privacy state and closure count`() = runTest {
+        // The sink reads privacy through the monitor, so this forwarding is part of the production
+        // connection the guard depends on. Driven through a REAL signal so the value has a producer.
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val monitor = PlaybackContextMonitor(mock(), signal, backgroundScope)
+
+        assertFalse("an open window reports no privacy closure", monitor.isPrivacyClosed())
+        val before = monitor.privacyClosureCount()
+
+        signal.onAppBackgrounded()
+
+        assertTrue("a privacy close must be visible through the monitor", monitor.isPrivacyClosed())
+        assertEquals(
+            "the monitor must reflect the signal's count, not a copy of its own",
+            before + 1,
+            monitor.privacyClosureCount(),
+        )
     }
 }

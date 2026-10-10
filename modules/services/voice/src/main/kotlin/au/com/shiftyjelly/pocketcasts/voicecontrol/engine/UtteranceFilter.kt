@@ -32,6 +32,23 @@ class UtteranceFilter @Inject constructor(
         hasSpeakerId: Boolean,
         speakerIndex: Int,
         playbackBuffer: FloatArray,
+    ): Boolean = shouldProcessReference(
+        audio = audio,
+        hasSpeakerId = hasSpeakerId,
+        speakerIndex = speakerIndex,
+        reference = PlaybackReference(playbackBuffer, 16_000, startPositionMs = null),
+    )
+
+    /**
+     * As above, but with the playback reference's player-timeline position. Prefer this overload
+     * whenever the recorder could stamp the window: the position is what lets the correlator align
+     * to a moment rather than to a buffer offset.
+     */
+    fun shouldProcessReference(
+        audio: FloatArray,
+        hasSpeakerId: Boolean,
+        speakerIndex: Int,
+        reference: PlaybackReference,
     ): Boolean {
         if (hasSpeakerId) {
             if (sessionTargetSpeaker == null) {
@@ -42,7 +59,7 @@ class UtteranceFilter @Inject constructor(
         }
 
         if (audioRouteMonitor.route.value !is AudioRoute.Headset) {
-            if (playbackCorrelator.isPlaybackBleed(audio, playbackBuffer)) {
+            if (playbackCorrelator.isPlaybackBleed(audio, reference)) {
                 return false
             }
         }

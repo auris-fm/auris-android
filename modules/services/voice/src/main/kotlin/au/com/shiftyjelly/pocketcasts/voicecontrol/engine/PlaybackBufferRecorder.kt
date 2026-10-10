@@ -112,6 +112,21 @@ class PlaybackBufferRecorder @Inject constructor(
      */
     fun lastRecordedPositionMs(): Long? = lastPositionMs
 
+    /**
+     * The reference window with the player position of its oldest retained sample.
+     *
+     * The oldest sample's position is derived from the newest ([lastPositionMs]) minus the window's
+     * duration, which is exact for a contiguous window; sources that interleave are placed by their
+     * own submission positions, so the span is the range the buffer actually covers. Null when no
+     * timestamped source has contributed.
+     */
+    fun reference(): PlaybackReference {
+        val samples = snapshot()
+        val end = lastPositionMs
+        val start = end?.let { it - (samples.size * 1_000L) / SAMPLE_RATE }
+        return PlaybackReference(samples, SAMPLE_RATE, start)
+    }
+
     fun snapshot(): FloatArray {
         if (!filled && writePos == 0) return FloatArray(0)
         val size = if (filled) buffer.size else writePos

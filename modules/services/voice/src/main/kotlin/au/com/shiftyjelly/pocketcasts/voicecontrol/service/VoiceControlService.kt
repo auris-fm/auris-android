@@ -332,7 +332,7 @@ class VoiceControlService : Service() {
                 backend = backend,
                 audioRoute = audioRouteMonitor.route.value,
                 listeningMode = mode,
-                playbackBufferProvider = playbackBufferRecorder::snapshot,
+                playbackBufferProvider = playbackBufferRecorder::reference,
                 micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
                 onIntent = { intent -> handleIntent(intent) },
             )

@@ -130,7 +130,7 @@ class VoiceAsrEngineTest {
             backend = backend,
             audioRoute = route,
             listeningMode = mode,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -338,7 +338,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
 
         // Wake word not detected: full segment flows through during grace
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
@@ -366,7 +366,7 @@ class VoiceAsrEngineTest {
             backend = FakeAsrBackend("pause"),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = { handledIntents += it },
         )
@@ -575,7 +575,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,
@@ -600,7 +600,7 @@ class VoiceAsrEngineTest {
             backend = FakeAsrBackend("unclear question"),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = { intents += it },
         )
@@ -625,7 +625,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,
@@ -651,7 +651,7 @@ class VoiceAsrEngineTest {
             backend = FakeAsrBackend("unclear question"),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = { intents += it },
         )
@@ -698,7 +698,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = true,
@@ -723,7 +723,7 @@ class VoiceAsrEngineTest {
             backend = FakeAsrBackend(transcript),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.WakeWord,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -756,7 +756,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = wakeDetected,
@@ -786,7 +786,7 @@ class VoiceAsrEngineTest {
             backend = FakeAsrBackend(transcript),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = { intents += it },
         )
@@ -809,7 +809,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,
@@ -835,7 +835,7 @@ class VoiceAsrEngineTest {
             backend = ResultBackend(AsrResult(text = "你好", detectedLanguage = "zh")),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -866,7 +866,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             WakeWordResult(detected = false, confidence = 0f),
         )
@@ -890,7 +890,7 @@ class VoiceAsrEngineTest {
             backend = ResultBackend(AsrResult(text = "倒回去3分钟。", detectedLanguage = "zh")),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -918,7 +918,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             WakeWordResult(detected = false, confidence = 0f),
         )
@@ -939,7 +939,7 @@ class VoiceAsrEngineTest {
             backend = ResultBackend(AsrResult(text = "pause", detectedLanguage = "en")),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -969,7 +969,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             WakeWordResult(detected = false, confidence = 0f),
         )
@@ -994,7 +994,7 @@ class VoiceAsrEngineTest {
             backend = ResultBackend(canaryResult, canTranslateToEnglish = true),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -1034,7 +1034,7 @@ class VoiceAsrEngineTest {
                     ),
                 ),
             )
-            `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+            `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
             `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
                 WakeWordResult(detected = false, confidence = 0f),
             )
@@ -1057,7 +1057,7 @@ class VoiceAsrEngineTest {
                 backend = ResultBackend(AsrResult(text = "播放。", detectedLanguage = "yue")),
                 audioRoute = AudioRoute.Speaker,
                 listeningMode = ListeningMode.Continuous,
-                playbackBufferProvider = { FloatArray(0) },
+                playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
                 micExposureProvider = { MicExposure.Exposed },
                 onIntent = {},
             )
@@ -1107,7 +1107,7 @@ class VoiceAsrEngineTest {
                     ),
                 ),
             )
-            `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+            `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
             `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
                 WakeWordResult(detected = false, confidence = 0f),
             )
@@ -1132,7 +1132,7 @@ class VoiceAsrEngineTest {
                 backend = ResultBackend(AsrResult(text = "你好", detectedLanguage = "zh")),
                 audioRoute = AudioRoute.Speaker,
                 listeningMode = ListeningMode.Continuous,
-                playbackBufferProvider = { FloatArray(0) },
+                playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
                 micExposureProvider = { MicExposure.Exposed },
                 onIntent = {},
             )
@@ -1162,7 +1162,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,
@@ -1186,7 +1186,7 @@ class VoiceAsrEngineTest {
             backend = ResultBackend(AsrResult(text = "pause", detectedLanguage = "en")),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -1343,7 +1343,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
         kotlinx.coroutines.runBlocking {
             `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(wakeWordResult)
         }
@@ -1385,7 +1385,7 @@ class VoiceAsrEngineTest {
             ),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.WakeWord,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = { handledIntents += it },
         )
@@ -1418,7 +1418,7 @@ class VoiceAsrEngineTest {
             ),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.WakeWord,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -1450,7 +1450,7 @@ class VoiceAsrEngineTest {
             backend = FakeAsrBackend("pause"),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.WakeWord,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )

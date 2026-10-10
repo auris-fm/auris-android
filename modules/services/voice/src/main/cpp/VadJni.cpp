@@ -265,4 +265,11 @@ bool vadEnsureInitialized(JNIEnv* env, jobject assetManager) {
     return g_session != nullptr;
 }
 
+// Reason the last VAD initialization failed, or an empty string when it succeeded. The combined
+// start entry runs on the path production actually uses, so it must report why it failed rather
+// than returning an opaque false the way its sibling already avoids.
+extern "C" const char* vadLastError() {
+    return g_errorMsg.c_str();
+}
+
 } // extern "C"

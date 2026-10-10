@@ -46,6 +46,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -387,6 +388,7 @@ class VoiceAsrEngineTest {
         // is the consequence, which is what "no accepted activity" means.
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         val backend = FakeAsrBackend("pause")
+        var resets = 0
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(
@@ -400,6 +402,8 @@ class VoiceAsrEngineTest {
         // The filter refuses this segment: it is the playback the app itself submitted, returning to
         // the mic. No speaker diarization runs (hasSpeakerId=false), so the bleed check is what decides.
         `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(false)
+        // Counted so the row's "no reset" half is observed rather than assumed.
+        `when`(utteranceFilter.reset()).thenAnswer { resets += 1 }
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,
@@ -408,12 +412,20 @@ class VoiceAsrEngineTest {
             ),
         )
 
+        // A REAL signal rather than the class-level mock, so signal-visible effects are observed
+        // instead of mock defaults. The row's allowance half is deliberately NOT asserted here: under
+        // runTest the signal's Dispatchers.Main timer IS the test dispatcher, so advancing far enough to
+        // process the segment also expires the window, and the allowance's state after the drop cannot
+        // be separated from the window's expiry at this level. That half needs the device run the row
+        // asks for. What this test establishes is the downstream drop.
+        val realSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        realSignal.onWakeWordDetected()
         engine = VoiceAsrEngine(
             voiceAudioProcessor = voiceAudioProcessor,
             utteranceFilter = utteranceFilter,
             intentRecognizer = recognizer,
             wakeWordDetector = wakeWordDetector,
-            gracePeriodSignal = gracePeriodSignal,
+            gracePeriodSignal = realSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
             context = context,
@@ -438,6 +450,10 @@ class VoiceAsrEngineTest {
             0,
             backend.transcribeCalls,
         )
+        // A dropped segment must not be treated as a listening session beginning, which would reset the
+        // session's speaker target. start() resets once, before processing, so exactly one reset is the
+        // drop adding none of its own.
+        assertEquals("a rejected segment must not reset the session filter", 1, resets)
 
         engine.stop()
     }

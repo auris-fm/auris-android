@@ -136,6 +136,16 @@ class CloudAudioPlayer(
     private var audioWriteFailed = false
         private set
 
+    /**
+     * Called when the sink refuses answer audio mid-turn.
+     *
+     * A refusal stops the answer, and without a path to the turn's result the caller could not tell
+     * it from a clean end — the same gap the TTS path had. This reports the failure so the turn is
+     * not recorded as completed; it is deliberately separate from any server terminal outcome, which
+     * is a different fact and is not overwritten by a local playback failure.
+     */
+    var onWriteFailure: ((framesSubmitted: Long) -> Unit)? = null
+
     init {
         ensureAudioTrack()
     }
@@ -342,10 +352,11 @@ class CloudAudioPlayer(
                         AudioTrack.WRITE_BLOCKING,
                     )
                     if (written <= 0) {
-                        // An explicit failure rather than a silent drop: stop this answer and let the
-                        // caller surface it, instead of continuing with a gap in the audio.
+                        // An explicit failure rather than a silent drop: stop this answer and report
+                        // it, so the turn is not treated as a clean end.
                         Timber.w("[CloudAudio] AudioTrack.write returned $written; stopping answer")
                         audioWriteFailed = true
+                        onWriteFailure?.invoke(submittedSamples)
                         break
                     }
                     audioWritten = true

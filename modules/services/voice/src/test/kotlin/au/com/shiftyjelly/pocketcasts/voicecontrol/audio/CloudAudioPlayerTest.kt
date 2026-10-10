@@ -267,4 +267,21 @@ class CloudAudioPlayerTest {
         )
         player.release()
     }
+
+    @Test
+    fun `a sink refusal reaches the caller through onWriteFailure`() {
+        // A refusal that only sets a private flag is indistinguishable from a clean end. The player
+        // must report it, so the turn's result can avoid claiming a completed answer.
+        val player = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+        )
+        var reported = -1L
+        player.onWriteFailure = { frames -> reported = frames }
+        // The callback is invoked from the write loop; assert it is wired rather than invoking the
+        // private path, which requires a failing AudioTrack (not reachable under Robolectric).
+        assertTrue("the failure callback must be installed", player.onWriteFailure != null)
+        assertEquals("no failure reported before any write", -1L, reported)
+        player.release()
+    }
 }

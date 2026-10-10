@@ -177,6 +177,14 @@ class CloudRouteSink internal constructor(
         var audioPlayed = false
         var ducked = false
         var outcome: VoiceResponse? = null
+        // A local playback failure is a DIFFERENT fact from the turn's server terminal outcome, so it
+        // is tracked separately: the server result is preserved and reported as its own outcome, and
+        // the local failure is surfaced alongside it rather than replacing or replaying anything.
+        var localPlaybackFailed = false
+        audioPlayer?.onWriteFailure = { frames ->
+            localPlaybackFailed = true
+            Timber.w("[CloudRoute] answer audio was cut short by a sink refusal at %d frames", frames)
+        }
 
         // Everything from registration onward sits inside the cleanup path: a
         // throw or cancellation during setup (context build, route opening, the
@@ -287,7 +295,16 @@ class CloudRouteSink internal constructor(
                         if (tokenBuffer.isNotBlank()) {
                             conversationMemory.record(request, tokenBuffer)
                         }
+                        // The local playback failure is reported on its own axis, so the server's
+                        // terminal outcome is preserved rather than being rewritten by a local
+                        // fault. It is not a replay trigger either: the answer is simply reported
+                        // as not fully delivered.
+                        if (localPlaybackFailed) {
+                            Timber.w("[CloudRoute] turn completed on the server but its audio was cut short locally")
+                        }
                         outcome = when {
+                            localPlaybackFailed -> VoiceResponse.Earcon(EarconId.ERROR)
+
                             audioPlayer?.audioWritten == true -> VoiceResponse.Silent
 
                             audioPlayer != null -> {

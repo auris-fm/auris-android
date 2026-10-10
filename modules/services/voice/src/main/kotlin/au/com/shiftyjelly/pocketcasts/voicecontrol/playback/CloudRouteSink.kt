@@ -244,9 +244,11 @@ class CloudRouteSink internal constructor(
             // the revision is sampled before it so a command that arrives during the suspension
             // is not swallowed into the value expected at restore.
             turnMutex.withLock {
-                // Latch before deciding to suspend: once a privacy event has ended this turn, the
-                // obligation it takes must never be honoured, even if a later wake clears the flag
-                // before this turn's cleanup runs.
+                // Sample the monotonic closure count as the obligation is taken, under the same mutex
+                // that serializes registration and cleanup: a closure that lands while this turn is
+                // suspended is invisible to a live flag once a wake clears it, but stays visible as a
+                // count difference. A turn that starts after a closure samples the new count, so the
+                // closure neither blocks it nor excuses a resume it did not take.
                 if (activeTurnId == myId && !playerAutoPaused && isHostPlaying() && !isPrivacyClosed()) {
                     privacyClosuresAtPause = privacyClosureCount()
                     pauseCommandRevision = playbackCommandRevision()

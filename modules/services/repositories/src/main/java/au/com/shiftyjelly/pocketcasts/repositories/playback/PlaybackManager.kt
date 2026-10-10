@@ -138,7 +138,6 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.rx2.asFlow
 import kotlinx.coroutines.rx2.asFlowable
-import kotlinx.coroutines.rx2.await
 import kotlinx.coroutines.rx2.awaitSingleOrNull
 import kotlinx.coroutines.rx2.rxCompletable
 import kotlinx.coroutines.sync.Mutex
@@ -317,6 +316,13 @@ open class PlaybackManager @Inject constructor(
 
     private val _playerFlow = MutableStateFlow<Player?>(null)
     val playerFlow = _playerFlow.asStateFlow()
+
+    private val _videoSurfaceState = MutableStateFlow(VideoSurfaceState.NONE)
+    val videoSurfaceState = _videoSurfaceState.asStateFlow()
+
+    fun setVideoSurfaceState(state: VideoSurfaceState) {
+        _videoSurfaceState.value = state
+    }
 
     // HLS starts Unknown until the player's tracks resolve it to HasVideo or AudioOnly; the video
     // surface is shown only once HasVideo is known.
@@ -2201,14 +2207,7 @@ open class PlaybackManager @Inject constructor(
 
             is UserEpisode -> {
                 if (episode.serverStatus == UserEpisodeServerStatus.UPLOADED) {
-                    try {
-                        val newDownloadUrl = userEpisodeManager.getPlaybackUrlRxSingle(episode).await()
-                        episode.downloadUrl = newDownloadUrl
-                    } catch (e: Exception) {
-                        onPlayerError(PlayerEvent.PlayerError("Could not load cloud file ${e.message}"))
-                        removeEpisode(episode, source = sourceView)
-                        return
-                    }
+                    episode.downloadUrl = userEpisodeManager.getPlaybackUrl(episode)
                 }
             }
         }

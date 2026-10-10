@@ -69,6 +69,8 @@ interface SyncManager : NamedSettingsCaller {
     suspend fun loginWithToken(token: RefreshToken, loginIdentity: LoginIdentity, signInSource: SignInSource): LoginResult
     suspend fun deviceAuthorize(): DeviceAuthorizeResponse
 
+    suspend fun deviceApprove(userCode: String, approve: Boolean)
+
     /**
      * [isNewAccount] is a caller assertion that this pairing is a signup, not server truth the way
      * AuthResultModel.isNewAccount carries it elsewhere. It drives new-account analytics attribution
@@ -94,7 +96,8 @@ interface SyncManager : NamedSettingsCaller {
     fun getFileUsageRxSingle(): Single<FileAccount>
     fun deleteImageFromServerRxSingle(episode: UserEpisode): Single<Response<Void>>
     fun deleteFromServerRxSingle(episode: UserEpisode): Single<Response<Void>>
-    fun getPlaybackUrlRxSingle(episode: UserEpisode): Single<String>
+    fun getPlaybackUrl(episode: UserEpisode): String
+    suspend fun getSignedPlaybackUrl(episode: UserEpisode): String
 
     // History
     fun historySyncRxSingle(request: HistorySyncRequest): Single<HistorySyncResponse>
@@ -107,7 +110,6 @@ interface SyncManager : NamedSettingsCaller {
     fun validatePromoCodeRxSingle(code: String): Single<PromoCodeResponse>
 
     // Sync
-    fun getLastSyncAtRxSingle(): Single<String>
     suspend fun getLastSyncAtOrThrow(): String
     suspend fun getHomeFolderOrThrow(): UserPodcastListResponse
     suspend fun getPlaylistsOrThrow(): UserPlaylistListResponse

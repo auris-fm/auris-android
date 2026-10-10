@@ -11,6 +11,7 @@ import au.com.shiftyjelly.pocketcasts.analytics.testing.TestEventSink
 import au.com.shiftyjelly.pocketcasts.preferences.AccountConstants
 import au.com.shiftyjelly.pocketcasts.servers.di.NetworkModule
 import au.com.shiftyjelly.pocketcasts.servers.sync.SyncServiceManager
+import au.com.shiftyjelly.pocketcasts.utils.AppPlatform
 import com.automattic.eventhorizon.EventHorizon
 import dagger.Lazy
 import java.io.File
@@ -74,7 +75,7 @@ class PocketCastsAccountAuthenticatorTest {
         val syncAccountManager = SyncAccountManagerImpl(tokenErrorNotification, accountManager)
         // The fork's gateway cutover added a provider; a mock leaves it inactive, so
         // this test still exercises the direct-upstream path it was written for.
-        val syncServiceManager = SyncServiceManager(retrofit.create(), mock(), Lazy { okhttpCache }, mock())
+        val syncServiceManager = SyncServiceManager(retrofit.create(), mock(), Lazy { okhttpCache }, mock(), AppPlatform.Phone)
 
         val syncManager = SyncManagerImpl(
             eventHorizon = EventHorizon(TestEventSink()),
@@ -132,6 +133,11 @@ class PocketCastsAccountAuthenticatorTest {
         // check the token refresh endpoint was called
         val request = mockWebServer.takeRequest(5, TimeUnit.SECONDS)
         assertEquals("/user/token", request?.path)
+        // no scope is sent so the server keeps the scope the refresh token was issued with
+        assertEquals(
+            """{"grant_type":"refresh_token","refresh_token":"refresh_token"}""",
+            request?.body?.readUtf8(),
+        )
     }
 
     /**

@@ -234,6 +234,36 @@ class AndroidAudioRouteMonitorTest {
     }
 
     @Test
+    fun `readRoute rejects the substitution when a device is available but nothing is routed`() {
+        // @spec's case, and the one the earlier tests could not pin: with a controllable enumeration the
+        // monitor is given an available A2DP device and NO live routed observation. The route must stay
+        // Unknown — restoring the enumeration fallback in readRoute makes this fail, which is what keeps
+        // the regression actually pinned rather than only its consequence through the policy.
+        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val monitor = AndroidAudioRouteMonitor(
+            context = ctx,
+            gracePeriodSignal = GracePeriodSignal(),
+            routedOutputObserver = null,
+            enumeratedDeviceTypes = {
+                AndroidAudioRouteMonitor.EnumeratedDevices(
+                    outputs = listOf(android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP),
+                    inputs = listOf(android.media.AudioDeviceInfo.TYPE_BUILTIN_MIC),
+                )
+            },
+        )
+
+        assertTrue(
+            "with A2DP available and nothing routed, the route must be Unknown (got=${monitor.route.value})",
+            monitor.route.value is AudioRoute.Unknown,
+        )
+        assertEquals(
+            "while availability reports the available device, which is its separate job",
+            AudioRoute.BluetoothA2dpOnly,
+            monitor.availability.value,
+        )
+    }
+
+    @Test
     fun `route decisions read the observed route, so availability cannot be substituted downstream`() {
         // @spec's question: does keeping availability separate reintroduce the substitution at a
         // downstream caller? The check is that the route-dependent decisions take the OBSERVED route —

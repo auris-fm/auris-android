@@ -30,7 +30,15 @@ class AndroidAudioRouteMonitor @Inject constructor(
      * answer as the speaker would be a claim the platform has not made.
      */
     private val routedOutputObserver: RoutedOutputObserver? = null,
+    /**
+     * The device types the platform offers, injectable so a test can present an available device that
+     * no stream is routed to — the case that distinguishes the two surfaces.
+     */
+    private val enumeratedDeviceTypes: (() -> EnumeratedDevices)? = null,
 ) : AudioRouteMonitor {
+
+    /** Output and input types the platform enumerates, as one value so they cannot be read apart. */
+    data class EnumeratedDevices(val outputs: List<Int>, val inputs: List<Int>)
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val mutableRoute = MutableStateFlow(readRoute())
     private val mutableAvailability = MutableStateFlow(readAvailability())
@@ -89,8 +97,9 @@ class AndroidAudioRouteMonitor @Inject constructor(
 
     @Suppress("DEPRECATION") // isBluetoothScoOn deprecated in API 34; used to distinguish enumerated-but-inactive SCO
     private fun readRoute(): AudioRoute {
-        val outputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
-        val inputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).toList()
+        val devices = enumerated()
+        val outputDevices = devices.outputs
+        val inputDevices = devices.inputs
 
         // Observed routing only. With no live stream reporting an output there is no routed answer, and
         // Unknown is the honest one: falling back to enumeration here would substitute availability for
@@ -98,20 +107,25 @@ class AndroidAudioRouteMonitor @Inject constructor(
         val routed = routedOutputObserver?.current() ?: return AudioRoute.Unknown
         return classifyRoute(
             outputDeviceTypes = listOf(routed),
-            inputDeviceTypes = inputDevices.map { it.type },
+            inputDeviceTypes = inputDevices,
             bluetoothScoActive = audioManager.isBluetoothScoOn,
         )
     }
 
+    /** The injected enumeration when present, otherwise the platform's. */
+    private fun enumerated(): EnumeratedDevices = enumeratedDeviceTypes?.invoke() ?: EnumeratedDevices(
+        outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.type },
+        inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).map { it.type },
+    )
+
     /** What the system offers, for setup and discovery. Never used to derive [route]. */
     @Suppress("DEPRECATION") // isBluetoothScoOn deprecated in API 34; used to distinguish enumerated-but-inactive SCO
     private fun readAvailability(): AudioRoute {
-        val outputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
-        val inputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).toList()
+        val devices = enumerated()
 
         return classifyRoute(
-            outputDeviceTypes = outputDevices.map { it.type },
-            inputDeviceTypes = inputDevices.map { it.type },
+            outputDeviceTypes = devices.outputs,
+            inputDeviceTypes = devices.inputs,
             // SCO I/O devices are enumerated for AirPods even when the SCO link is off
             // (A2DP music path). Only treat BT as a live headset mic when SCO is actually on.
             bluetoothScoActive = audioManager.isBluetoothScoOn,

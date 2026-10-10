@@ -7,8 +7,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsEngine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsPlaybackIncompleteException
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mockito.mock
@@ -56,4 +58,41 @@ class VoiceControlServiceRenderTest {
     }
 
     private fun noopIntent(): VoiceIntent = VoiceIntent.Playback.Pause
+
+    @Test
+    fun `a delivery failure does not skip the turn's grace cleanup`() = runTest {
+        // Cleanup runs after the render, so a render failure that escaped would skip it — leaving the
+        // window un-advanced for a command the user did give. The failure is reported from inside the
+        // render job, so the call still completes.
+        val recorder = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder(
+            au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap(),
+        )
+        val failing = object : TtsEngine {
+            override suspend fun warmUp(language: String) = Unit
+            override suspend fun speak(text: String, language: String) {
+                throw TtsPlaybackIncompleteException(framesWritten = 4, framesPlayed = 1)
+            }
+
+            override fun release() = Unit
+        }
+        val earcons = EarconPlayer(org.robolectric.RuntimeEnvironment.getApplication(), recorder)
+        val renderer = AudioFeedbackRenderer(earcons, failing)
+        val service = VoiceControlService().apply {
+            audioFeedbackRenderer = renderer
+            voicePlaybackIntentExecutor = mock(VoicePlaybackIntentExecutor::class.java).also { executor ->
+                whenever(executor.execute(org.mockito.kotlin.any())).thenReturn(VoiceResponse.Spoken("a reply"))
+            }
+        }
+        var cleanupRan = false
+        try {
+            service.renderWithFailureHandling(noopIntent())
+            // Reaching here is the property: the failure was handled inside the render, so the
+            // service's post-render cleanup still runs for a command the user did give.
+            cleanupRan = true
+            assertNotNull("the renderer's failure handling must be installed", renderer.onPlaybackFailure)
+        } finally {
+            renderer.release()
+        }
+        assertTrue("cleanup must not be skipped by a delivery failure", cleanupRan)
+    }
 }

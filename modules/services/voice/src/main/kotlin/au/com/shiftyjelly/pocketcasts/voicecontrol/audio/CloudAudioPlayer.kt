@@ -75,6 +75,9 @@ class CloudAudioPlayer(
     private val frameBuffer = mutableListOf<ByteArray>()
     private var playing = false
     private var paused = false
+
+    /** Cumulative samples this player has submitted, used as the answer's playback position. */
+    private var submittedSamples = 0L
     private var released = false
     private var decodeCodec: MediaCodec? = null
     private var decodeBuffering = false
@@ -338,7 +341,12 @@ class CloudAudioPlayer(
                 // Record what was just sent to the output, so the shared echo reference holds this
                 // renderer's contribution. Only the accepted prefix is recorded, matching the sink.
                 if (written > 0) {
-                    playbackBufferRecorder?.write(s16leBytesToFloats(pcmBytes, written))
+                    val floats = s16leBytesToFloats(pcmBytes, written)
+                    // Position the answer on its own submitted-sample timeline so the reference
+                    // carries a timestamp rather than relying on arrival order.
+                    val positionMs = (submittedSamples * 1_000L) / sampleRateHz
+                    playbackBufferRecorder?.write(floats, positionMs)
+                    submittedSamples += floats.size
                 }
             }
         }

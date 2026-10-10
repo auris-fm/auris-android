@@ -379,6 +379,69 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
+    @Test
+    fun `playback bleed is dropped before transcription and produces no accepted activity`() = runTest {
+        // The acceptance property for echo, at the level where it is decided: a segment the bleed
+        // filter rejects must not reach ASR, the recognizer, or feedback, so no transcript, no intent,
+        // no request and no spend can follow. The filter's own return value is covered separately; this
+        // is the consequence, which is what "no accepted activity" means.
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        val backend = FakeAsrBackend("pause")
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        // The filter refuses this segment: it is the playback the app itself submitted, returning to
+        // the mic. No speaker diarization runs (hasSpeakerId=false), so the bleed check is what decides.
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(false)
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = false,
+                confidence = 0f,
+                completionSample = 4000,
+            ),
+        )
+
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+        val handledIntents = mutableListOf<VoiceIntent>()
+
+        engine.start(
+            backend = backend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { handledIntents += it },
+        )
+        advanceUntilIdle()
+
+        assertEquals("a bleed-rejected segment must not reach the recognizer", emptyList<String>(), recognizer.calls)
+        assertEquals("and no intent may be accepted", emptyList<VoiceIntent>(), handledIntents)
+        assertEquals(
+            "nor may the segment have been transcribed",
+            0,
+            backend.transcribeCalls,
+        )
+
+        engine.stop()
+    }
+
     // ── Escalation on a routing failure ───────────────────────────────
 
     @Test
@@ -1534,9 +1597,16 @@ class VoiceAsrEngineTest {
         private val transcript: String,
         private val tokens: List<AsrToken>? = null,
     ) : AsrBackend {
+        /** Counted so a test can assert a segment never reached transcription. */
+        var transcribeCalls = 0
+            private set
+
         override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
 
-        override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult = AsrResult(transcript, tokens = tokens)
+        override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult {
+            transcribeCalls += 1
+            return AsrResult(transcript, tokens = tokens)
+        }
 
         override val requiredModel: ModelSpec = ModelSpec(files = emptyList(), targetDir = "")
 

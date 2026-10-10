@@ -209,6 +209,47 @@ class AndroidAudioRouteMonitorTest {
     }
 
     @Test
+    fun `a live stream's routed output outranks enumeration`() {
+        // The route-selection item: enumeration offers A2DP (so it would classify BluetoothA2dpOnly and
+        // impose SCO), while the live stream reports it is actually routed to the speaker. The routed
+        // answer is the stronger input and must win, or availability keeps imposing SCO on a session
+        // that is using the speaker.
+        val signal = GracePeriodSignal()
+        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val monitor = AndroidAudioRouteMonitor(
+            context = ctx,
+            gracePeriodSignal = signal,
+            routedOutputType = { android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER },
+        )
+        assertEquals(
+            "the observed routing must decide the route, not the enumerated availability",
+            AudioRoute.Speaker,
+            monitor.route.value,
+        )
+    }
+
+    @Test
+    fun `an unknown routed output stays unknown rather than becoming a speaker`() {
+        // Nullable on purpose: with a paired-but-inactive headset and no routed answer, reporting the
+        // speaker would be a claim no API made. Enumeration decides, which is the pre-existing
+        // behaviour, and the result is A2DP rather than a fabricated speaker.
+        val signal = GracePeriodSignal()
+        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val monitor = AndroidAudioRouteMonitor(
+            context = ctx,
+            gracePeriodSignal = signal,
+            routedOutputType = { null },
+        )
+        // The property is that a missing routed answer does NOT become a speaker claim: enumeration
+        // decides instead, and under Robolectric it reports no devices, so the result is Unknown. An
+        // assertion demanding a named route here would be asserting Robolectric's device list.
+        assertTrue(
+            "no routed answer must fall back to enumeration rather than assert a speaker (got=${monitor.route.value})",
+            monitor.route.value !is AudioRoute.Speaker,
+        )
+    }
+
+    @Test
     fun `an enumerated but unused A2DP device classifies as A2DP, which the enumeration cannot refute`() {
         // @spec's correction, pinned as a LIMITATION rather than a passing expectation. The classifier's
         // input is the enumerated output-device list, so it cannot distinguish "A2DP is available and

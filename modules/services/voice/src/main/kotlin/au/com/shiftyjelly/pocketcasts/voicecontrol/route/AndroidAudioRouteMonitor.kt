@@ -21,6 +21,15 @@ import kotlinx.coroutines.launch
 class AndroidAudioRouteMonitor @Inject constructor(
     @ApplicationContext context: Context,
     private val gracePeriodSignal: GracePeriodSignal,
+    /**
+     * Where an owned stream reports its output actually goes, or null when that is not knowable.
+     *
+     * Enumeration says what COULD be an output; this says what one IS routed to, so it is the stronger
+     * input when present. It is a provider rather than a value because the answer belongs to whichever
+     * stream is live, and it is nullable because an unknown route must stay unknown: treating a missing
+     * answer as the speaker would be a claim the platform has not made.
+     */
+    private val routedOutputType: () -> Int? = { null },
 ) : AudioRouteMonitor {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val mutableRoute = MutableStateFlow(readRoute())
@@ -79,6 +88,16 @@ class AndroidAudioRouteMonitor @Inject constructor(
     private fun readRoute(): AudioRoute {
         val outputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
         val inputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).toList()
+
+        // A live stream's reported output is the routed answer and outranks enumeration. When it is
+        // unknown, enumeration is used as before rather than asserting a speaker that was never seen.
+        routedOutputType()?.let { routed ->
+            return classifyRoute(
+                outputDeviceTypes = listOf(routed),
+                inputDeviceTypes = inputDevices.map { it.type },
+                bluetoothScoActive = audioManager.isBluetoothScoOn,
+            )
+        }
 
         return classifyRoute(
             outputDeviceTypes = outputDevices.map { it.type },

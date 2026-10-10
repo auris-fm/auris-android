@@ -376,4 +376,53 @@ class CloudAudioPlayerTest {
             player.release()
         }
     }
+
+    @Test
+    fun `a player claims the routed observation and clears it when it retires`() {
+        // The production connection @spec directed: a player must actually participate in the shared
+        // routed observation, and must withdraw it on release so a stopped player does not leave a route
+        // behind for whatever runs next. Removing either call fails this.
+        val observer = au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver()
+        val player = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            routedOutputObserver = observer,
+        )
+        try {
+            // Claimed at construction, so the observation belongs to this stream even before it sounds.
+            assertTrue("the player must hold an observation", observer.holdsAClaim())
+        } finally {
+            player.release()
+        }
+        // Released: the stream is gone, so the route must go back to unknown rather than persist.
+        assertFalse(
+            "a retired player must not leave its route behind",
+            observer.holdsAClaim(),
+        )
+    }
+
+    @Test
+    fun `a replaced player does not clear its successor's observation`() {
+        val observer = au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver()
+        val first = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            routedOutputObserver = observer,
+        )
+        val second = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            routedOutputObserver = observer,
+        )
+        try {
+            // The first retires after the second has claimed: the successor keeps the observation.
+            first.release()
+            assertTrue(
+                "a superseded player must not withdraw its successor's observation",
+                observer.holdsAClaim(),
+            )
+        } finally {
+            second.release()
+        }
+    }
 }

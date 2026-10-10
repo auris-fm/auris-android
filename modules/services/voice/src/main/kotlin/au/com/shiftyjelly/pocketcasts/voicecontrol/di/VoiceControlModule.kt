@@ -257,9 +257,13 @@ abstract class VoiceControlModule {
             @ApplicationContext context: Context,
             audioFeedbackRenderer: AudioFeedbackRenderer,
             playbackBufferRecorder: PlaybackBufferRecorder,
+            routedOutputObserver: au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver,
         ): au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer(
             context = context,
             playbackBufferRecorder = playbackBufferRecorder,
+            // The production connection: the monitor reads what this player observes, so a live stream
+            // decides the route instead of the enumerated availability.
+            routedOutputObserver = routedOutputObserver,
         ).apply {
             // The cloud answer is audible output, but it is not produced by the feedback
             // renderer — so without this the gate's "we are making sound" stamp goes stale

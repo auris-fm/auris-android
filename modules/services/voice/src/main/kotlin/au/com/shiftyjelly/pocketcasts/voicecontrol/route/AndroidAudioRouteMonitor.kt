@@ -29,10 +29,11 @@ class AndroidAudioRouteMonitor @Inject constructor(
      * stream is live, and it is nullable because an unknown route must stay unknown: treating a missing
      * answer as the speaker would be a claim the platform has not made.
      */
-    private val routedOutputType: () -> Int? = { null },
+    private val routedOutputObserver: RoutedOutputObserver? = null,
 ) : AudioRouteMonitor {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val mutableRoute = MutableStateFlow(readRoute())
+    private val mutableAvailability = MutableStateFlow(readAvailability())
     private val scope = CoroutineScope(Dispatchers.Default)
     private var debounceJob: Job? = null
 
@@ -40,6 +41,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
     // A 500ms debounce prevents transient Headset(hasMicrophone=false) → NoMic
     // from killing the engine during the connection gap.
     override val route: StateFlow<AudioRoute> = mutableRoute.asStateFlow()
+    override val availability: StateFlow<AudioRoute> = mutableAvailability.asStateFlow()
 
     private val audioDeviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
@@ -77,6 +79,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
         debounceJob = scope.launch {
             delay(500L)
             mutableRoute.value = readRoute()
+            mutableAvailability.value = readAvailability()
         }
     }
 
@@ -89,15 +92,22 @@ class AndroidAudioRouteMonitor @Inject constructor(
         val outputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
         val inputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).toList()
 
-        // A live stream's reported output is the routed answer and outranks enumeration. When it is
-        // unknown, enumeration is used as before rather than asserting a speaker that was never seen.
-        routedOutputType()?.let { routed ->
-            return classifyRoute(
-                outputDeviceTypes = listOf(routed),
-                inputDeviceTypes = inputDevices.map { it.type },
-                bluetoothScoActive = audioManager.isBluetoothScoOn,
-            )
-        }
+        // Observed routing only. With no live stream reporting an output there is no routed answer, and
+        // Unknown is the honest one: falling back to enumeration here would substitute availability for
+        // the observation and impose headset setup on a session that may use the speaker.
+        val routed = routedOutputObserver?.current() ?: return AudioRoute.Unknown
+        return classifyRoute(
+            outputDeviceTypes = listOf(routed),
+            inputDeviceTypes = inputDevices.map { it.type },
+            bluetoothScoActive = audioManager.isBluetoothScoOn,
+        )
+    }
+
+    /** What the system offers, for setup and discovery. Never used to derive [route]. */
+    @Suppress("DEPRECATION") // isBluetoothScoOn deprecated in API 34; used to distinguish enumerated-but-inactive SCO
+    private fun readAvailability(): AudioRoute {
+        val outputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
+        val inputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).toList()
 
         return classifyRoute(
             outputDeviceTypes = outputDevices.map { it.type },

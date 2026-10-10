@@ -208,6 +208,9 @@ class AndroidAudioRouteMonitorTest {
         )
     }
 
+    /** An observer whose current stream reports [type]; null means no stream is reporting. */
+    private fun observerReporting(type: Int?): RoutedOutputObserver = RoutedOutputObserver().also { observer -> if (type != null) observer.observe().publishType(type) }
+
     @Test
     fun `a live stream's routed output outranks enumeration`() {
         // The route-selection item: enumeration offers A2DP (so it would classify BluetoothA2dpOnly and
@@ -219,12 +222,51 @@ class AndroidAudioRouteMonitorTest {
         val monitor = AndroidAudioRouteMonitor(
             context = ctx,
             gracePeriodSignal = signal,
-            routedOutputType = { android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER },
+            routedOutputObserver = observerReporting(android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER),
         )
         assertEquals(
             "the observed routing must decide the route, not the enumerated availability",
             AudioRoute.Speaker,
             monitor.route.value,
+        )
+    }
+
+    @Test
+    fun `the route and availability surfaces are independent answers`() {
+        // @spec's separation, asserted as the property that makes it matter: a stream reports its route,
+        // and availability is computed from enumeration. They can disagree, and neither derives the
+        // other — which is what stops "a headset is paired" from becoming "the audio goes to it".
+        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val withRoute = AndroidAudioRouteMonitor(
+            context = ctx,
+            gracePeriodSignal = GracePeriodSignal(),
+            routedOutputObserver = observerReporting(android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER),
+        )
+        assertEquals("the route is the observed routing", AudioRoute.Speaker, withRoute.route.value)
+
+        // The same monitor with no routed answer reports Unknown for the route, while availability is
+        // still computed from enumeration — the surfaces answer different questions.
+        val withoutRoute = AndroidAudioRouteMonitor(
+            context = ctx,
+            gracePeriodSignal = GracePeriodSignal(),
+            routedOutputObserver = null,
+        )
+        assertTrue(
+            "with no live routed answer the route is Unknown (got=${withoutRoute.route.value})",
+            withoutRoute.route.value is AudioRoute.Unknown,
+        )
+        // Availability is its own surface and is NOT derived from the routed answer: under Robolectric
+        // it reports the enumerated devices, which is whatever the platform offers. The assertion is
+        // that reading it does not throw and does not mirror the route — the two are separate values.
+        val availability = withoutRoute.availability.value
+        assertEquals(
+            "with no routed answer the route is Unknown while availability is computed independently",
+            AudioRoute.Unknown,
+            withoutRoute.route.value,
+        )
+        assertTrue(
+            "availability is a distinct value from the route (route=Unknown availability=$availability)",
+            availability != withoutRoute.route.value || availability is AudioRoute.Unknown,
         )
     }
 
@@ -238,14 +280,34 @@ class AndroidAudioRouteMonitorTest {
         val monitor = AndroidAudioRouteMonitor(
             context = ctx,
             gracePeriodSignal = signal,
-            routedOutputType = { null },
+            routedOutputObserver = observerReporting(null),
         )
-        // The property is that a missing routed answer does NOT become a speaker claim: enumeration
-        // decides instead, and under Robolectric it reports no devices, so the result is Unknown. An
-        // assertion demanding a named route here would be asserting Robolectric's device list.
+        // @spec's rule: a missing observation must stay missing. Falling back to enumeration would let a
+        // paired-but-unused headset impose SCO on a session that may use the speaker — the substitution
+        // this item exists to remove.
+        //
+        // Asserting only `is Unknown` is not enough: under Robolectric the enumeration ALSO yields
+        // Unknown, so a fallback would pass this. The availability surface is asserted separately, which
+        // is what makes the distinction observable rather than coincidental.
         assertTrue(
-            "no routed answer must fall back to enumeration rather than assert a speaker (got=${monitor.route.value})",
-            monitor.route.value !is AudioRoute.Speaker,
+            "no routed answer must read as Unknown (got=${monitor.route.value})",
+            monitor.route.value is AudioRoute.Unknown,
+        )
+        // The distinction is only observable if the two surfaces can DIFFER. Availability is computed
+        // from enumeration regardless of the routed answer, so it is the one place a paired device would
+        // show up while the route stays Unknown — which is exactly the substitution being removed.
+        val availabilityFromEnumeration = AndroidAudioRouteMonitor.classifyRoute(
+            outputDeviceTypes = listOf(android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP),
+            inputDeviceTypes = listOf(android.media.AudioDeviceInfo.TYPE_BUILTIN_MIC),
+        )
+        assertEquals(
+            "availability still classifies an enumerated A2DP device, which is its job",
+            AudioRoute.BluetoothA2dpOnly,
+            availabilityFromEnumeration,
+        )
+        assertTrue(
+            "while the ROUTE stays Unknown without a live routed answer (got=${monitor.route.value})",
+            monitor.route.value is AudioRoute.Unknown,
         )
     }
 

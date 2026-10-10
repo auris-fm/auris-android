@@ -42,7 +42,13 @@ class CloudAudioPlayer(
     // Fed with the PCM this player actually sends to the output, so the shared echo reference holds
     // the cloud answer as it is played. Null in contexts that do not run the echo filter.
     private val playbackBufferRecorder: PlaybackBufferRecorder? = null,
+    // Publishes this player's observed output routing, so route-dependent decisions read where the audio
+    // actually goes rather than what is merely available. Null in contexts with no route consumer.
+    private val routedOutputObserver: au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver? = null,
 ) {
+    /** This stream's claim on the routed observation; cleared when the player retires. */
+    private val observedRoute = routedOutputObserver?.observe()
+
     /**
      * Audio attributes that route through the shared STREAM_MUSIC output path.
      *
@@ -286,6 +292,9 @@ class CloudAudioPlayer(
      * "consuming audio", the paused case breaks with it.
      */
     private fun startAudibleHeartbeat() {
+        // Sample the routed output alongside the audible stamp: the heartbeat already runs while this
+        // player is producing sound, which is exactly when its routing is the answer for route decisions.
+        observedRoute?.publish(audioTrack?.routedDevice)
         audibleHeartbeat?.cancel()
         onPlaybackAudibleChanged?.invoke(true)
         audibleHeartbeat = heartbeatScope.launch {
@@ -307,6 +316,7 @@ class CloudAudioPlayer(
 
     /** Release all resources. Must be called before the player is discarded. */
     fun release() {
+        observedRoute?.clear()
         if (released) return
         released = true
         stop()

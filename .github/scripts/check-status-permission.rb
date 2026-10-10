@@ -23,8 +23,28 @@ d = YAML.load_file(path)
 fails = []
 matched = 0
 
+# A `run:` body is raw text that INCLUDES its own shell comments, so matching `/statuses/`
+# anywhere in it makes a step that merely MENTIONS the endpoint satisfy the detector. Measured
+# on the merged file: a commented-out call
+#
+#     # gh api "repos/${REPOSITORY}/statuses/${HEAD_SHA}" -f state=success
+#
+# was read as an ACTIVE one, so a job would be required to declare `statuses: write` for code
+# that does nothing. That is the guard's own defect shape one level down — a disabled call read
+# as an enabled one — so the detector accepts only a line that IS A COMMAND.
+#
+# This is not a YAML parse and not a trade between the two directions: it narrows the accepted
+# shape to the shape this repo actually uses, distinguishing command from comment inside a
+# string the parser has already handed us.
+def writes_status?(run)
+  run.to_s.lines.any? do |line|
+    stripped = line.sub(/\A\s+/, '')
+    !stripped.start_with?('#') && stripped.include?('/statuses/')
+  end
+end
+
 (d['jobs'] || {}).each do |name, job|
-  writes = (job['steps'] || []).any? { |s| (s['run'] || '').include?('/statuses/') }
+  writes = (job['steps'] || []).any? { |s| writes_status?(s['run']) }
   next unless writes
 
   matched += 1

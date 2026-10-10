@@ -4,6 +4,7 @@ import android.os.SystemClock
 import au.com.shiftyjelly.pocketcasts.voicecontrol.BuildConfig
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsEngine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsPlaybackIncompleteException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -59,6 +60,14 @@ class AudioFeedbackRenderer(
     private var currentJob: Job? = null
     private var released = false
 
+    /**
+     * Called when a spoken reply did not finish playing. Defaulted to the structured log so an
+     * incomplete answer is never silent; a host can replace it to surface the failure upward.
+     */
+    var onPlaybackFailure: (Throwable) -> Unit = { error ->
+        Timber.e(error, "[VoiceResponse] spoken reply did not finish playing")
+    }
+
     fun render(response: VoiceResponse, language: String = "en") {
         if (released) return
         // Debug-only diagnostic: what the app is about to say, before TTS. This is the one
@@ -108,7 +117,21 @@ class AudioFeedbackRenderer(
      */
     private suspend fun speakWithHeartbeat(text: String, language: String) = coroutineScope {
         noteEmitted()
-        val utterance = launch { ttsEngine.speak(text, language) }
+        val utterance = launch {
+            // An incomplete playback must reach this failure path rather than let the render job
+            // report success: a reply that did not finish playing is not a delivered reply.
+            try {
+                ttsEngine.speak(text, language)
+            } catch (e: TtsPlaybackIncompleteException) {
+                Timber.e(
+                    e,
+                    "[VoiceResponse] TTS playback incomplete: played %d of %d frames",
+                    e.framesPlayed,
+                    e.framesWritten,
+                )
+                onPlaybackFailure(e)
+            }
+        }
         while (utterance.isActive) {
             delay(EMISSION_HEARTBEAT_MS)
             if (utterance.isActive) noteEmitted()

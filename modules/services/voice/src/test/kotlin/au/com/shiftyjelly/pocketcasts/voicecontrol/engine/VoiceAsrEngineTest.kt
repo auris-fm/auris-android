@@ -256,7 +256,10 @@ class VoiceAsrEngineTest {
     }
 
     @Test
-    fun `start with BluetoothA2dpOnly starts capture even when SCO disconnects`() = runTest {
+    fun `SCO disconnect does not start capture on an unconfirmed route`() = runTest {
+        // Reverses the previous expectation. A route that requires SCO and did not get it means the
+        // input the engine would read is not the one the route names: continuing captures from whatever
+        // the phone substitutes, with only a log line saying so. The attempt must stop instead.
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
         runCurrent()
@@ -267,13 +270,15 @@ class VoiceAsrEngineTest {
         simulateScoState(AudioManager.SCO_AUDIO_STATE_DISCONNECTED)
         advanceUntilIdle()
 
-        verify(voiceAudioProcessor).startProcessing()
+        verify(voiceAudioProcessor, never()).startProcessing()
+        // And it says so, through the feedback path the other route failures use.
+        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
 
         engine.stop()
     }
 
     @Test
-    fun `start with BluetoothA2dpOnly falls back after SCO timeout`() = runTest {
+    fun `SCO timeout does not start capture and reports the route failure`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
         runCurrent()
@@ -284,8 +289,29 @@ class VoiceAsrEngineTest {
         advanceTimeBy(3_001)
         advanceUntilIdle()
 
-        verify(voiceAudioProcessor).startProcessing()
+        verify(voiceAudioProcessor, never()).startProcessing()
+        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
 
+        engine.stop()
+    }
+
+    @Test
+    fun `a later attempt after a failed SCO setup can still start`() = runTest {
+        // The flag must not outlive a setup that never completed, or the next attempt is skipped by a
+        // stale "already started" and the route can never be established for the rest of the session.
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+        advanceTimeBy(3_001)
+        advanceUntilIdle()
+        verify(voiceAudioProcessor, never()).startProcessing()
+        engine.stop()
+
+        // A second attempt on a route that does not need SCO must capture, which it cannot if the failed
+        // setup left the SCO flag set.
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+        verify(voiceAudioProcessor).startProcessing()
         engine.stop()
     }
 
@@ -1350,7 +1376,9 @@ class VoiceAsrEngineTest {
     }
 
     @Test
-    fun `Bluetooth SCO setup exception falls back to phone mic capture`() = runTest {
+    fun `Bluetooth SCO setup exception does not start capture`() = runTest {
+        // Was "falls back to phone mic capture": a failed setup is a failed route, and capturing anyway
+        // reads an input the route does not name without saying so.
         createEngine()
         `when`(
             context.registerReceiver(
@@ -1362,8 +1390,9 @@ class VoiceAsrEngineTest {
         startEngine(AudioRoute.BluetoothA2dpOnly)
         advanceUntilIdle()
 
-        verify(voiceAudioProcessor).startProcessing()
+        verify(voiceAudioProcessor, never()).startProcessing()
         verify(audioManager, never()).startBluetoothSco()
+        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
 
         engine.stop()
     }
@@ -1378,7 +1407,8 @@ class VoiceAsrEngineTest {
         startEngine(AudioRoute.BluetoothA2dpOnly)
         advanceUntilIdle()
 
-        verify(voiceAudioProcessor).startProcessing()
+        // Cleanup still runs, and capture still must not start.
+        verify(voiceAudioProcessor, never()).startProcessing()
         assertTrue("Expected receiver to have been registered", capturedReceiver != null)
         verify(context).unregisterReceiver(capturedReceiver!!)
         verify(audioManager).setMode(AudioManager.MODE_IN_COMMUNICATION)

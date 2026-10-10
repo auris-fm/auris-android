@@ -183,7 +183,26 @@ jobs:
           set -euo pipefail
           gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body 'Automated review skipped: this PR modifies `.github/workflows/claude-code-review.yml`, and the Claude App token check requires the workflow to match the default branch. No `Claude review` status is recorded, so this head is not marked reviewed.'
 
+      - name: Fetch the guard scripts the assert step reads
+        # The assert step below runs BEFORE the reviewed-head checkout, so it has no repository
+        # on the runner unless this step fetches one. It previously had none and failed on every
+        # run with `No such file or directory` — the guard was live and never once executed.
+        #
+        # A separate path, not the default one, so the reviewed checkout below is unaffected.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve-target.outputs.head-sha }}
+          path: .ci-guard
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Assert the status permission is declared
+        # DEPENDS ON: "Fetch the guard scripts the assert step reads" (immediately above). This
+        # step reads `.ci-guard/.github/scripts/*` and `.ci-guard/.github/workflows/*`, which
+        # exist only because that step checked them out. Nothing in the YAML enforces the order,
+        # so the dependency is named here, beside the read — this is the whole bug: this step
+        # previously read a path no earlier step had created, and failed on every run.
+        #
         # The read-back check adopted as the fifth requirement: every job that writes a commit
         # status must declare statuses: write, because GitHub sets absent permissions to none and
         # the rejected write fails the job. The defect is CROSS-ARTIFACT — neither the step nor
@@ -194,12 +213,23 @@ jobs:
         # The test runs FIRST, so a detector that has stopped matching fails here rather than
         # quietly certifying nothing. Its cases include the scope claim itself as a failing pair,
         # which is what stops a future editor from narrowing the detector and keeping a green run.
+        #
+        # DELIBERATELY HAS NO `if:`. The reviewed-head checkout below is gated on the review not
+        # being skipped, and a workflow-touching PR is exactly one whose file this check must
+        # read — inheriting that gate would turn a loud failure into the silent pass this exists
+        # to prevent. That is why the scripts are fetched separately above rather than reused.
         run: |
-          ruby .github/scripts/check-status-permission.test.rb
-          ruby .github/scripts/check-status-permission.rb .github/workflows/claude-code-review.yml
+          ruby .ci-guard/.github/scripts/check-status-permission.test.rb
+          ruby .ci-guard/.github/scripts/check-status-permission.rb .ci-guard/.github/workflows/claude-code-review.yml
 
       - name: Checkout the reviewed head
         if: steps.workflow-changes.outputs.skip != 'true'
+        # CAUTION: no `path:` AND no `clean:`, so `clean` defaults to true and this checkout runs
+        # `git clean -ffdx` at the workspace root — which REMOVES the untracked `.ci-guard`
+        # directory fetched above. That is harmless only because the assert above has already read
+        # it. NOTHING AFTER THIS STEP MAY DEPEND ON `.ci-guard`. A later reader would fail silently
+        # (a missing path reads as "found nothing"), so it must not be added without moving the
+        # fetch, or setting `clean: false` here.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The RESOLVED head, not the event's default ref: a comment-triggered run has no

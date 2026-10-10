@@ -6,6 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.AndroidPlatformTtsEngine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsPlaybackIncompleteException
 import kotlin.system.measureTimeMillis
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancelAndJoin
@@ -123,6 +124,35 @@ class TtsSinkValidationTest {
         try {
             engine.warmUp("en")
             assertTrue("engine constructs with a media-stream sink", true)
+        } finally {
+            engine.release()
+        }
+    }
+
+    @Test
+    fun anIncompleteDrainReachesTheCallersFailurePath() = runBlocking<Unit> {
+        // A diagnostic flag alone cannot stop a success report, so the incomplete outcome must be
+        // THROWN. Forcing the drain bound to zero makes every utterance incomplete, which proves the
+        // failure reaches the caller rather than being swallowed as success.
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val engine = AndroidPlatformTtsEngine(ctx, recorder).apply { drainWaitMs = 0L }
+        try {
+            engine.warmUp("en")
+            var caught: TtsPlaybackIncompleteException? = null
+            try {
+                engine.speak("this utterance must be reported as incomplete", "en")
+            } catch (e: TtsPlaybackIncompleteException) {
+                caught = e
+            }
+            Log.i(tag, "forced drain timeout: caught=$caught incomplete=${engine.wasPlaybackIncomplete()}")
+            assertTrue("an incomplete drain must surface as a thrown failure", caught != null)
+            assertTrue("the engine must also record the incomplete outcome", engine.wasPlaybackIncomplete())
+            // Nothing played to completion, so the failure reports frames still outstanding.
+            assertTrue(
+                "the failure must name the outstanding frames",
+                caught != null && caught.framesWritten >= caught.framesPlayed,
+            )
         } finally {
             engine.release()
         }

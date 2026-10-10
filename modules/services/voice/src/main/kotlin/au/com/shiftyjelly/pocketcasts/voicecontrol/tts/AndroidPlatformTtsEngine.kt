@@ -40,6 +40,12 @@ class AndroidPlatformTtsEngine @Inject constructor(
     private var initialized = false
     private var released = false
 
+    /**
+     * How long to wait for queued audio to drain before reporting an incomplete playback. Exposed
+     * for tests that must force the timeout; the default is the production bound.
+     */
+    var drainWaitMs: Long = MAX_DRAIN_WAIT_MS
+
     /** Set while a synthesized file is being played, so cancellation can stop it. */
     @Volatile
     private var activeTrack: AudioTrack? = null
@@ -188,7 +194,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
             // outcome is recorded so a test can assert it happened, rather than inferring it from
             // elapsed time — synthesis, startup and waiting can all consume time without draining.
             var waited = 0L
-            while (track.playbackHeadPosition < offset && waited < MAX_DRAIN_WAIT_MS) {
+            while (track.playbackHeadPosition < offset && waited < drainWaitMs) {
                 delay(10)
                 waited += 10
             }
@@ -199,11 +205,11 @@ class AndroidPlatformTtsEngine @Inject constructor(
             // audio is still outstanding.
             if (framesPlayedAtReturn < framesWritten) {
                 playbackIncomplete = true
-                Timber.w(
-                    "TTS: playback incomplete at return (played=%d written=%d after %dms)",
-                    framesPlayedAtReturn,
-                    framesWritten,
-                    waited,
+                // Throw rather than only warn: a diagnostic flag cannot stop a caller reporting
+                // success, and this outcome must reach the failure path.
+                throw TtsPlaybackIncompleteException(
+                    framesWritten = framesWritten,
+                    framesPlayed = framesPlayedAtReturn,
                 )
             }
         } finally {

@@ -130,6 +130,10 @@ class CloudAudioPlayer(
 
     /** True when at least one frame was successfully written to the AudioTrack. */
     var audioWritten = false
+
+    /** Set when the sink refuses audio mid-answer, so the turn is stopped rather than silently gapped. */
+    @Volatile
+    private var audioWriteFailed = false
         private set
 
     init {
@@ -327,27 +331,33 @@ class CloudAudioPlayer(
             }
 
             if (pcmBytes.isNotEmpty()) {
-                val written = track.write(
-                    pcmBytes,
-                    0,
-                    pcmBytes.size,
-                    AudioTrack.WRITE_BLOCKING,
-                )
-                if (written < 0) {
-                    Timber.w("[CloudAudio] AudioTrack.write returned $written")
-                    break
-                }
-                audioWritten = true
-                // Record what was just sent to the output, so the shared echo reference holds this
-                // renderer's contribution. Only the accepted prefix is recorded, matching the sink.
-                if (written > 0) {
+                // Write the whole frame, tracking the accepted prefix: a short write must not drop
+                // the remainder, or answer audio is silently lost while the turn is still active.
+                var offset = 0
+                while (offset < pcmBytes.size) {
+                    val written = track.write(
+                        pcmBytes,
+                        offset,
+                        pcmBytes.size - offset,
+                        AudioTrack.WRITE_BLOCKING,
+                    )
+                    if (written <= 0) {
+                        // An explicit failure rather than a silent drop: stop this answer and let the
+                        // caller surface it, instead of continuing with a gap in the audio.
+                        Timber.w("[CloudAudio] AudioTrack.write returned $written; stopping answer")
+                        audioWriteFailed = true
+                        break
+                    }
+                    audioWritten = true
+                    // Record only what the sink accepted, so the reference never holds audio the
+                    // output rejected, and position it on the submitted-sample timeline.
                     val floats = s16leBytesToFloats(pcmBytes, written)
-                    // Position the answer on its own submitted-sample timeline so the reference
-                    // carries a timestamp rather than relying on arrival order.
                     val positionMs = (submittedSamples * 1_000L) / sampleRateHz
                     playbackBufferRecorder?.write(floats, positionMs)
                     submittedSamples += floats.size
+                    offset += written
                 }
+                if (audioWriteFailed) break
             }
         }
     }

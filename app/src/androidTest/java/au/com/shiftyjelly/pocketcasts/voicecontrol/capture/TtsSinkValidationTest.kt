@@ -5,6 +5,10 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.AndroidPlatformTtsEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsPlaybackIncompleteException
 import kotlin.system.measureTimeMillis
@@ -130,31 +134,41 @@ class TtsSinkValidationTest {
     }
 
     @Test
-    fun anIncompleteDrainReachesTheCallersFailurePath() = runBlocking<Unit> {
-        // A diagnostic flag alone cannot stop a success report, so the incomplete outcome must be
-        // THROWN. Forcing the drain bound to zero makes every utterance incomplete, which proves the
-        // failure reaches the caller rather than being swallowed as success.
+    fun anIncompleteDrainReachesTheCallersFailureFeedback() = runBlocking<Unit> {
+        // The acceptance is the CALLER's outcome, not that an exception was thrown: a throw assertion
+        // passes both when the caller handles the failure and when it never sees it. So this drives
+        // the real renderer, which owns the failure callback, and observes that feedback.
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
         val engine = AndroidPlatformTtsEngine(ctx, recorder).apply { drainWaitMs = 0L }
+        val renderer = AudioFeedbackRenderer(
+            earconPlayer = EarconPlayer(ctx, recorder),
+            ttsEngine = engine,
+        )
         try {
             engine.warmUp("en")
-            var caught: TtsPlaybackIncompleteException? = null
-            try {
-                engine.speak("this utterance must be reported as incomplete", "en")
-            } catch (e: TtsPlaybackIncompleteException) {
-                caught = e
+            var feedback: Throwable? = null
+            renderer.onPlaybackFailure = { error -> feedback = error }
+
+            renderer.render(VoiceResponse.Spoken("this reply must not finish playing"))
+            // Let the render job run to completion.
+            var waited = 0L
+            while (feedback == null && waited < 20_000) {
+                delay(100)
+                waited += 100
             }
-            Log.i(tag, "forced drain timeout: caught=$caught incomplete=${engine.wasPlaybackIncomplete()}")
-            assertTrue("an incomplete drain must surface as a thrown failure", caught != null)
-            assertTrue("the engine must also record the incomplete outcome", engine.wasPlaybackIncomplete())
-            // Nothing played to completion, so the failure reports frames still outstanding.
+
+            Log.i(tag, "caller failure feedback received=$feedback")
             assertTrue(
-                "the failure must name the outstanding frames",
-                caught != null && caught.framesWritten >= caught.framesPlayed,
+                "the caller's failure handling must see the undelivered reply",
+                feedback != null,
+            )
+            assertTrue(
+                "the reported failure must carry the playback outcome",
+                feedback is TtsPlaybackIncompleteException,
             )
         } finally {
-            engine.release()
+            renderer.release()
         }
     }
 }

@@ -207,4 +207,39 @@ class AndroidAudioRouteMonitorTest {
             signal.privacyClosureCount(),
         )
     }
+
+    @Test
+    fun `an enumerated but unused A2DP device classifies as A2DP, which the enumeration cannot refute`() {
+        // @spec's correction, pinned as a LIMITATION rather than a passing expectation. The classifier's
+        // input is the enumerated output-device list, so it cannot distinguish "A2DP is available and
+        // unused" from "A2DP is carrying the audio" — both present TYPE_BLUETOOTH_A2DP here and both
+        // yield BluetoothA2dpOnly. The engine then opens SCO for a device that may not be the emitted
+        // route, so if route classification ever gates echo policy, this is the pair it must separate.
+        val pairedButUnused = AndroidAudioRouteMonitor.classifyRoute(
+            outputDeviceTypes = listOf(
+                AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
+                AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+            ),
+            inputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BUILTIN_MIC),
+        )
+        val actuallyCarryingAudio = AndroidAudioRouteMonitor.classifyRoute(
+            outputDeviceTypes = listOf(
+                AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
+                AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+            ),
+            inputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BUILTIN_MIC),
+        )
+
+        // The assertion is the AMBIGUITY: identical inputs give identical answers, because enumeration
+        // carries no information about which output is live. Encoding a different expectation would
+        // assert behaviour the API cannot provide.
+        assertTrue(
+            "the classifier is given no input that separates available-and-unused from available-and-used",
+            pairedButUnused == actuallyCarryingAudio,
+        )
+        assertTrue(
+            "and with A2DP present it reports A2DP rather than the speaker media may still be using",
+            pairedButUnused is AudioRoute.BluetoothA2dpOnly,
+        )
+    }
 }

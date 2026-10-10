@@ -8,6 +8,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
+import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import java.nio.ByteBuffer
 import kotlin.math.max
 import kotlinx.coroutines.CoroutineScope
@@ -37,6 +38,9 @@ class CloudAudioPlayer(
     private val sampleRateHz: Int = 16000,
     private val channelConfig: Int = AudioFormat.CHANNEL_OUT_MONO,
     private val audioFormat: Int = AudioFormat.ENCODING_PCM_16BIT,
+    // Fed with the PCM this player actually sends to the output, so the shared echo reference holds
+    // the cloud answer as it is played. Null in contexts that do not run the echo filter.
+    private val playbackBufferRecorder: PlaybackBufferRecorder? = null,
 ) {
     /**
      * Audio attributes that route through the shared STREAM_MUSIC output path.
@@ -327,6 +331,11 @@ class CloudAudioPlayer(
                     break
                 }
                 audioWritten = true
+                // Record what was just sent to the output, so the shared echo reference holds this
+                // renderer's contribution. Only the accepted prefix is recorded, matching the sink.
+                if (written > 0) {
+                    playbackBufferRecorder?.write(s16leBytesToFloats(pcmBytes, written))
+                }
             }
         }
     }
@@ -402,6 +411,23 @@ class CloudAudioPlayer(
 
     companion object {
         private const val TAG = "CloudAudio"
+
+        /**
+         * Converts 16-bit little-endian PCM bytes to the float samples the echo reference stores.
+         * [lengthBytes] bounds what is read, so a partial AudioTrack write records only what the
+         * sink actually accepted rather than the whole decoded buffer.
+         */
+        internal fun s16leBytesToFloats(bytes: ByteArray, lengthBytes: Int): FloatArray {
+            val samples = lengthBytes / 2
+            val out = FloatArray(samples)
+            for (i in 0 until samples) {
+                val lo = bytes[i * 2].toInt() and 0xFF
+                val hi = bytes[i * 2 + 1].toInt()
+                val v = (hi shl 8) or lo
+                out[i] = v.toShort() / 32768f
+            }
+            return out
+        }
 
         /**
          * How often to refresh the audible stamp while playing.

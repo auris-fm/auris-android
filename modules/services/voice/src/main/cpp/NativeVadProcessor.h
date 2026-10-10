@@ -70,7 +70,9 @@ public:
 
 private:
     void runLoop();
-    static bool energyGate(const int16_t* samples, int32_t count);
+    // Not static: the gate records the RMS it compared when diagnostics are on, so the diagnosis
+    // reports the gate's own value rather than recomputing the same formula elsewhere.
+    bool energyGate(const int16_t* samples, int32_t count);
 
     // Parameters (matching spec thresholds)
     static constexpr int32_t kVadFrameSize = 1024;        // 64ms @ 16kHz

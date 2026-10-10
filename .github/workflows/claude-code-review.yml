@@ -130,7 +130,11 @@ jobs:
       # Unused while github_token is passed below (App OIDC exchange skipped).
       id-token: write
     steps:
-      - name: Check workflow changes
+      # Named for what it decides, not what it runs. A skipped review reports here as a
+      # SUCCESSFUL step that did nothing, because GitHub has no third state; the status
+      # below is what carries "a review actually completed", and it is only written when
+      # the review step succeeded.
+      - name: Check workflow changes (may skip the review)
         id: workflow-changes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -146,6 +150,20 @@ jobs:
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Note that this PR's review is skipped
+        # Says on the PR why no review will run, so the absence is attributable rather than
+        # silent. GitHub has no third state for a job, so a skipped review otherwise reads as
+        # a passing check on the changed file. No status is recorded, so the head is not
+        # marked reviewed either.
+        if: steps.workflow-changes.outputs.skip == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.resolve-target.outputs.pr-number }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body 'Automated review skipped: this PR modifies `.github/workflows/claude-code-review.yml`, and the Claude App token check requires the workflow to match the default branch. No `Claude review` status is recorded, so this head is not marked reviewed.'
 
       - name: Checkout the reviewed head
         if: steps.workflow-changes.outputs.skip != 'true'
@@ -238,7 +256,11 @@ jobs:
         # A commit status ON THE REVIEWED SHA, so freshness is a fact about a commit rather
         # than a note about a PR. A later commit carries no such status, so a stale verdict
         # cannot be inherited. Repository protection is NOT changed here: this only records.
-        if: steps.workflow-changes.outputs.skip != 'true'
+        #
+        # Reached only when the review actually ran: a skipped review writes NO status, so
+        # "completed review" is never recorded for a review that did not happen. Failures in
+        # the review step skip this too, because a failed action is not a completed review.
+        if: steps.workflow-changes.outputs.skip != 'true' && steps.claude-review.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}

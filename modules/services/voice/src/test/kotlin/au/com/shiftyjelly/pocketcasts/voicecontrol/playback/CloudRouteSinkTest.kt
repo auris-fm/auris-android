@@ -1444,4 +1444,37 @@ class CloudRouteSinkTest {
             deps.playback.calls,
         )
     }
+
+    @Test
+    fun `a later turn is not blocked by an old closure flag once privacy reopens`() = runTest(UnconfinedTestDispatcher()) {
+        // The guard is scoped to whether the window is closed NOW, not to whether it ever was: a
+        // stale flag must not become a blanket ban on an unrelated later turn's cleanup.
+        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        // The closure was earlier and privacy has since reopened (a wake clears it).
+        deps.privacyClosed = false
+
+        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // The property is that an open window lets the turn restore its own pause: the host ends
+        // playing again. A stale flag would leave it paused.
+        assertTrue(
+            "a turn with an open window must resume what it paused (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("resume") && deps.host.playing,
+        )
+    }
+
+    @Test
+    fun `the guard does not block capture when no turn paused anything`() = runTest(UnconfinedTestDispatcher()) {
+        // A privacy closure must not be a blanket ban on ordinary playback: with no turn-owned pause
+        // there is nothing to restore, so nothing may be resumed or suppressed either.
+        val deps = TestDeps(hostPlaying = false, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        deps.privacyClosed = true
+
+        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertTrue(
+            "no turn-owned pause means no resume attempt (calls=${deps.playback.calls})",
+            deps.playback.calls.none { it == "resume" },
+        )
+    }
 }

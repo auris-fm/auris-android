@@ -2,6 +2,8 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.route
 
 import android.media.AudioDeviceInfo
 import androidx.test.core.app.ApplicationProvider
+import au.com.shiftyjelly.pocketcasts.preferences.model.VoiceControlAudioRoutePolicy
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -228,6 +230,61 @@ class AndroidAudioRouteMonitorTest {
             "the observed routing must decide the route, not the enumerated availability",
             AudioRoute.Speaker,
             monitor.route.value,
+        )
+    }
+
+    @Test
+    fun `route decisions read the observed route, so availability cannot be substituted downstream`() {
+        // @spec's question: does keeping availability separate reintroduce the substitution at a
+        // downstream caller? The check is that the route-dependent decisions take the OBSERVED route —
+        // a paired-but-unused headset must not reach them. When no stream reports, the route is Unknown
+        // and the policy refuses rather than allowing headset-gated control on an unused device.
+        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val monitor = AndroidAudioRouteMonitor(
+            context = ctx,
+            gracePeriodSignal = GracePeriodSignal(),
+            routedOutputObserver = null,
+        )
+        assertTrue(
+            "with no routed answer the route stays Unknown (got=${monitor.route.value})",
+            monitor.route.value is AudioRoute.Unknown,
+        )
+        // Unknown is the value the route decisions receive, and the policy treats it as disallowed
+        // rather than as headset-present — so availability, which may still list a device, cannot leak in.
+        val rule = AudioRoutePolicyRule(
+            route = monitor.route,
+            policy = kotlinx.coroutines.flow.MutableStateFlow(VoiceControlAudioRoutePolicy.HeadsetOnly),
+        )
+        // The distinguishing case, and it must be constructed rather than observed: Robolectric's audio
+        // service enumerates nothing, so both the observed route and availability read Unknown there and
+        // a fallback would be invisible. The classifier is called with a paired-but-unused A2DP device —
+        // the substitution's exact input — and the two surfaces are shown to disagree: availability
+        // reports the device, while the route decision is fed Unknown.
+        val availabilityWithPairedDevice = AndroidAudioRouteMonitor.classifyRoute(
+            outputDeviceTypes = listOf(android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP),
+            inputDeviceTypes = listOf(android.media.AudioDeviceInfo.TYPE_BUILTIN_MIC),
+        )
+        assertEquals(
+            "availability reports the paired device",
+            AudioRoute.BluetoothA2dpOnly,
+            availabilityWithPairedDevice,
+        )
+        val stateFromRoute = rule.evaluate()
+        assertEquals(
+            "while the route decision sees Unknown, so the paired device cannot gate control",
+            VoiceControlRuleState.Blocked("audio_route_disallowed"),
+            stateFromRoute,
+        )
+        // And the policy would have ALLOWED that same input had availability been substituted, which is
+        // what makes the assertion above load-bearing rather than a coincidence of both being Unknown.
+        val ifAvailabilityWereSubstituted = AudioRoutePolicyRule(
+            route = kotlinx.coroutines.flow.MutableStateFlow(availabilityWithPairedDevice),
+            policy = kotlinx.coroutines.flow.MutableStateFlow(VoiceControlAudioRoutePolicy.HeadsetOnly),
+        ).evaluate()
+        assertEquals(
+            "the substitution would have allowed control on an unused device",
+            VoiceControlRuleState.Allowed,
+            ifAvailabilityWereSubstituted,
         )
     }
 

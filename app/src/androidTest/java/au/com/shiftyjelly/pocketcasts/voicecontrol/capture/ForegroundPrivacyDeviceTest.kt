@@ -36,8 +36,10 @@ class ForegroundPrivacyDeviceTest {
         val provider = AppLifecycleProviderImpl()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val monitor = ForegroundStateMonitor(provider, scope, signal)
-        // The owner is not used by the provider's callbacks; it only satisfies the observer signature.
-        val owner = monitorLifecycleOwner()
+        // AppLifecycleProviderImpl ignores its LifecycleOwner argument — it only sets the flow — so no
+        // real registry is needed. Passing one would build an object that carries no behaviour and
+        // would imply the lifecycle participates when it does not.
+        val owner = inertOwner()
 
         // The app is in the foreground before anything else: the monitor's edge detector needs to have
         // SEEN a foreground state, or a later loss is not a transition and closure never fires.
@@ -71,8 +73,12 @@ class ForegroundPrivacyDeviceTest {
         assertTrue("the closure must still stand after the return", signal.isClosedByPrivacy())
     }
 
-    private fun monitorLifecycleOwner(): androidx.lifecycle.LifecycleOwner = object : androidx.lifecycle.LifecycleOwner {
+    /**
+     * A LifecycleOwner that does nothing, for a callback that does not read it. Named for that, so a
+     * reader does not take it for a driven lifecycle.
+     */
+    private fun inertOwner(): androidx.lifecycle.LifecycleOwner = object : androidx.lifecycle.LifecycleOwner {
         override val lifecycle: androidx.lifecycle.Lifecycle
-            get() = androidx.lifecycle.LifecycleRegistry(this)
+            get() = throw UnsupportedOperationException("the provider does not read the owner")
     }
 }

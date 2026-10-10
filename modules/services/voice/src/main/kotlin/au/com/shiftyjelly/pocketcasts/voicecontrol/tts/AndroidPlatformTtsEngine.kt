@@ -65,6 +65,10 @@ class AndroidPlatformTtsEngine @Inject constructor(
     @Volatile
     private var playbackIncomplete = false
 
+    /** Counts entries into speak(), so a caller can prove a failure does not replay the turn. */
+    @Volatile
+    private var speakCount = 0
+
     init {
         tts = TextToSpeech(appContext) { status ->
             initialized = (status == TextToSpeech.SUCCESS)
@@ -87,6 +91,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
 
     override suspend fun speak(text: String, language: String) {
         if (released || tts == null || !initialized) return
+        speakCount++
         val engine = tts ?: return
         val locale = localeForLanguageTag(language)
         withContext(Dispatchers.Main) {
@@ -231,6 +236,15 @@ class AndroidPlatformTtsEngine @Inject constructor(
 
     /** True when the last utterance returned with queued audio still unplayed. */
     fun wasPlaybackIncomplete(): Boolean = playbackIncomplete
+
+    /**
+     * True when the last utterance actually finished playing. A refusal or an expired wait must leave
+     * this false so nothing downstream can read an incomplete reply as a completed one.
+     */
+    fun wasPlaybackDrained(): Boolean = framesWritten > 0 && framesPlayedAtReturn >= framesWritten
+
+    /** How many times speak() has been entered, so a test can assert a failure does not re-run it. */
+    fun speakInvocations(): Int = speakCount
 
     private fun recordAccepted(
         samples: ShortArray,

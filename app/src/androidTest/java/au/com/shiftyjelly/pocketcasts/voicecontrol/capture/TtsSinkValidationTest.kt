@@ -18,6 +18,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -167,6 +169,60 @@ class TtsSinkValidationTest {
                 "the reported failure must carry the playback outcome",
                 feedback is TtsPlaybackIncompleteException,
             )
+        } finally {
+            renderer.release()
+        }
+    }
+
+    @Test
+    fun forcedDrainTimeoutProducesUserVisibleFeedbackWithNoReplayOrDrainSignal() = runBlocking<Unit> {
+        // The production renderer + service handler shape, assembled here rather than duplicated: the
+        // handler the service installs is the production one, driven with a forced drain timeout.
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val engine = AndroidPlatformTtsEngine(ctx, recorder).apply { drainWaitMs = 0L }
+        val renderer = AudioFeedbackRenderer(
+            earconPlayer = EarconPlayer(ctx, recorder),
+            ttsEngine = engine,
+        )
+        try {
+            engine.warmUp("en")
+            val failures = java.util.Collections.synchronizedList(mutableListOf<Throwable>())
+            // Production handler shape: report the failure and raise user-visible feedback.
+            renderer.onPlaybackFailure = { error ->
+                failures += error
+                renderer.playEarcon(EarconId.ERROR)
+            }
+
+            val beforeReplayCount = engine.speakInvocations()
+            renderer.render(VoiceResponse.Spoken("this reply must not finish playing"))
+            var waited = 0L
+            while (failures.isEmpty() && waited < 20_000) {
+                delay(100)
+                waited += 100
+            }
+            // Let any automatic replay attempt surface before counting again.
+            delay(1_000)
+
+            val afterReplayCount = engine.speakInvocations()
+            val drained = engine.wasPlaybackDrained()
+            Log.i(
+                tag,
+                "forced timeout: failures=${failures.size} speakBefore=$beforeReplayCount " +
+                    "speakAfter=$afterReplayCount drained=$drained incomplete=${engine.wasPlaybackIncomplete()}",
+            )
+
+            assertTrue("the caller's failure handling must observe the failure", failures.isNotEmpty())
+            assertTrue("the failure must be the playback outcome", failures.first() is TtsPlaybackIncompleteException)
+            // Exactly one utterance for one render: a replay would show a second entry after the
+            // failure, so the failure path must not add one.
+            assertEquals(
+                "no replay: the failure must not re-speak the turn (before=$beforeReplayCount after=$afterReplayCount)",
+                beforeReplayCount + 1,
+                afterReplayCount,
+            )
+            assertFalse("no successful-drain signal may be produced", drained)
+            assertTrue("the engine must record the incomplete outcome", engine.wasPlaybackIncomplete())
         } finally {
             renderer.release()
         }

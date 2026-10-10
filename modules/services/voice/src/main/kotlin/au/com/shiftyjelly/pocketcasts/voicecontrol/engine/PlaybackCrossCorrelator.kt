@@ -112,6 +112,15 @@ class PlaybackCrossCorrelator @Inject constructor() {
 
     companion object {
         private const val BLEED_THRESHOLD = 0.3
+
+        /**
+         * The acoustic-delay window, as a property of the built-in speaker path, NOT of every route.
+         *
+         * The correlator searches only this range: a route whose real delay falls outside it is not
+         * caught, and the anchoring above NARROWS to the window rather than widening it to suit a
+         * route. These are therefore a limitation to report for a route that measures outside them,
+         * never a constant to adjust until a route fits.
+         */
         private const val MIN_DELAY_SECONDS = 0.050
         private const val MAX_DELAY_SECONDS = 0.500
         private const val SAMPLE_RATE_HZ = 16_000

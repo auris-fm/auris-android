@@ -24,6 +24,12 @@ class MicrophoneCapture @Inject constructor(
         internal const val SAMPLE_RATE_HZ = 16_000
         internal const val CHANNELS = 1
         internal const val BYTES_PER_SAMPLE = 2
+
+        /**
+         * Whether libonnxruntime.so is already loaded in this process. Exposed so a test can assert
+         * that capture succeeds without wake/embedding/transcriber setup having loaded it first.
+         */
+        fun isOnnxRuntimeLoaded(): Boolean = OboeNative.nativeIsOrtLoaded()
     }
 
     private var activeEngine: OboeCaptureEngine? = null

@@ -28,6 +28,12 @@ internal object OboeNative {
     external fun nativeStopCaptureAndVad()
 
     external fun nativeIsCapturing(): Boolean
+
+    /**
+     * Whether libonnxruntime.so is already loaded in this process. Lets a test assert that capture
+     * succeeds without wake/embedding/transcriber setup having run first.
+     */
+    external fun nativeIsOrtLoaded(): Boolean
     external fun nativeWaitForVadEvent(timeoutMs: Int): Int
     external fun nativeGetSpeechPcm(buffer: ShortArray): Int
     external fun nativeGetSpeechPcmSize(): Int

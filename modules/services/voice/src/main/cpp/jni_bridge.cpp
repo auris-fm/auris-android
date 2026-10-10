@@ -1,5 +1,6 @@
 #include <jni.h>
 #include <android/log.h>
+#include <dlfcn.h>
 #include <mutex>
 #include "OboeAudioCapture.h"
 #include "NativeVadProcessor.h"
@@ -22,6 +23,22 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeIsCaptur
 {
     std::lock_guard<std::mutex> lock(gCaptureMutex);
     return (gCapture != nullptr && gCapture->isActive()) ? JNI_TRUE : JNI_FALSE;
+}
+
+// Whether libonnxruntime.so is already loaded in this process. Uses the same RTLD_NOLOAD idiom the
+// capture path uses, so a test can assert the ordering property directly: capture must succeed even
+// when this returns false (i.e. when wake/embedding/transcriber setup has not run first).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeIsOrtLoaded(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/)
+{
+    void* ortLib = dlopen("libonnxruntime.so", RTLD_NOLOAD);
+    if (ortLib != nullptr) {
+        dlclose(ortLib);
+        return JNI_TRUE;
+    }
+    return JNI_FALSE;
 }
 
 // ---------------------------------------------------------------------------

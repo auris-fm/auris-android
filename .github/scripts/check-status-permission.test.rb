@@ -67,6 +67,11 @@ CASES = {
   # code — the guard's defect shape one level down. If the comment-scoping is removed, this fails.
   'a COMMENTED-OUT status call is not a writer' => [job(COMMENTED_OUT, perms: ['contents: read']), 1, /detector did not match/],
   'a real call after an INDENTED comment is still a writer' => [job(INDENTED_COMMENT + INLINE, perms: ['contents: read']), 1, /does not declare statuses: write/],
+  # ROW 4 (@ios's, ported): commented out AND the permission declared. The previous version passed
+  # this silently — a dead guard satisfied by a permission that no longer guards anything. The
+  # wanted behaviour is that it fails loudly instead, so the divergence is pinned rather than
+  # left as a behaviour nobody would notice changing.
+  'a COMMENTED-OUT call with the permission declared still fails loudly' => [job(COMMENTED_OUT, perms: ['contents: read', 'statuses: write']), 1, /detector did not match/],
   'no status writer anywhere (positive control)' => [job(NOTHING, perms: ['contents: read']).sub(/claude-review/, 'lint'), 1, /detector did not match/],
   # THE SCOPE CLAIM, AS A CASE. If a future editor narrows the detector, or widens the scope
   # note without widening the detector, this pair stops producing two DIFFERENT messages.

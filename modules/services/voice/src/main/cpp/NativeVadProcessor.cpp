@@ -14,8 +14,6 @@
 extern float sileroVadPredict(const int16_t* samples, int32_t count);
 extern void sileroVadResetState();
 
-using Clock = std::chrono::steady_clock;
-
 // ---------------------------------------------------------------------------
 // NativeVadProcessor
 // ---------------------------------------------------------------------------
@@ -71,7 +69,6 @@ void NativeVadProcessor::stop() {
     mSpeechActive = false;
     mConsecutiveSilentFrames = 0;
     mDrainRemaining = 0;
-    mCooldownUntilUs = 0;
 
     {
         std::lock_guard<std::mutex> lock(mSpeechMutex);
@@ -204,46 +201,40 @@ void NativeVadProcessor::runLoop() {
         }
 
 
-        // 2. Cooldown gate — discard frames while cooldown is active.
-        int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
-            Clock::now().time_since_epoch()).count();
-        if (nowUs < mCooldownUntilUs) {
-            // Still in cooldown: add to context buffer (so we have pre-speech
-            // audio when cooldown expires) but don't process.
-            addToContext(mContextBuffer, mContextHead, mContextCount,
-                chunk, kMaxContextFrames, kVadFrameSize);
-            continue;
-        }
+        // 2. No cooldown gate and no forced duration endpoint. Internal framing retains and joins
+        // audio until the natural endpoint, so no captured frames are discarded and no truncated
+        // request is ever published. A duration limit, if one is introduced, must surface as an
+        // explicit fault rather than a silent endpoint (see the guard below).
 
-        // 3. Max-duration check.
-        if (mSpeechActive && mSpeechFrames >= kMaxSpeechFrames) {
-            LOGI("VAD: max duration exceeded (%d frames), finalizing",
+        // 3. Fault guard — a detector stuck active past a hard ceiling is a surfaced fault, not
+        // ordinary long speech. It must NOT emit a completed utterance: the frames are neither
+        // finalised nor handed to ASR. Returning the stop sentinel ends the stream so the caller
+        // sees a fault instead of a plausible-looking truncated segment.
+        if (mSpeechActive && mSpeechFrames >= kStuckDetectorFrameLimit) {
+            LOGE("VAD: detector stuck active (%d frames); surfacing fault, no segment emitted",
                 mSpeechFrames);
-
             {
                 std::lock_guard<std::mutex> lock(mSpeechMutex);
-                mSnapshotBuffer = std::move(mSpeechBuffer);
-                mSnapshotSpeechOnsetSample = mSpeechOnsetSample;
-                        mSnapshotSpeechEndSample = mSpeechEndSample;
+                mSnapshotBuffer.clear();
+                mSnapshotSpeechOnsetSample = 0;
+                mSnapshotSpeechEndSample = 0;
                 mSpeechBuffer.clear();
             }
-
             mSpeechFrames = 0;
             mSpeechOnsetSample = 0;
-                    mSpeechEndSample = 0;
+            mSpeechEndSample = 0;
             mSpeechActive = false;
             mConsecutiveSilentFrames = 0;
             mDrainRemaining = 0;
             mContextCount = 0;
             mContextHead = 0;
-            mCooldownUntilUs = nowUs + kCooldownMs * 1000;
 
+            mActive.store(false, std::memory_order_release);
             std::lock_guard<std::mutex> lock(mEventMutex);
-            mPendingEvent = 2; // speech ended
+            mPendingEvent = -1; // stopped: fault, not a speech end
             mEventReady = true;
             mEventCv.notify_one();
-
-            continue;
+            break;
         }
 
         // 4. Energy gate — skip Silero VAD for silent frames.
@@ -342,7 +333,6 @@ void NativeVadProcessor::runLoop() {
                     mDrainRemaining = 0;
                     mContextCount = 0;
                     mContextHead = 0;
-                    mCooldownUntilUs = nowUs + kCooldownMs * 1000;
 
                     std::lock_guard<std::mutex> lock(mEventMutex);
                     mPendingEvent = 2; // speech ended

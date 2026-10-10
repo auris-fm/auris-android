@@ -292,6 +292,33 @@ jobs:
           set -euo pipefail
           gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body "Automated review did not complete (step=${STEP_OUTCOME:-unknown}, model=${MODEL_CONCLUSION:-unknown}). No \`Claude review\` status is recorded, so this head is not marked reviewed."
 
+      - name: Confirm the head did not move during the review
+        # A review is a statement about a commit. If a commit lands while the review runs, the verdict
+        # is about a head that is no longer current, and recording success on it would let a later
+        # commit inherit a review it never had. Checked AFTER the review, because that is when the
+        # window closes — the pin taken before it proves which commit was read, not that it is still
+        # the head.
+        id: head-still-current
+        if: >-
+          steps.workflow-changes.outputs.skip != 'true' &&
+          steps.claude-review.outcome == 'success' &&
+          steps.claude-review.outputs.conclusion == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.resolve-target.outputs.pr-number }}
+          REVIEWED_SHA: ${{ needs.resolve-target.outputs.head-sha }}
+        run: |
+          set -euo pipefail
+          CURRENT=$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')
+          if [ "$CURRENT" != "$REVIEWED_SHA" ]; then
+            echo "::error::Head moved during the review: reviewed ${REVIEWED_SHA}, current ${CURRENT}. Not recording a completed review; request /review again after local review."
+            echo "still-current=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "Head unchanged at ${REVIEWED_SHA}"
+          echo "still-current=true" >> "$GITHUB_OUTPUT"
+
       - name: Record the reviewed head
         # A commit status ON THE REVIEWED SHA, so freshness is a fact about a commit rather
         # than a note about a PR. A later commit carries no such status, so a stale verdict
@@ -305,6 +332,7 @@ jobs:
         # that exits 0 after a model error would otherwise record a completed review.
         if: >-
           steps.workflow-changes.outputs.skip != 'true' &&
+          steps.head-still-current.outputs.still-current == 'true' &&
           steps.claude-review.outcome == 'success' &&
           steps.claude-review.outputs.conclusion == 'success'
         env:

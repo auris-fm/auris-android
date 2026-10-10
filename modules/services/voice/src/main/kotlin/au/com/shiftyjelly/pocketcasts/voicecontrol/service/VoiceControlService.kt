@@ -94,6 +94,10 @@ class VoiceControlService : Service() {
     /** Last route seen by the mode/route observer, so a change (not a recomputation) retires. */
     private var lastObservedRoute: AudioRoute? = null
 
+    /** Set when a spoken reply did not finish playing; distinct from the turn's own result. */
+    @Volatile
+    private var spokenReplyNotDelivered = false
+
     companion object {
         private const val COMMAND_DEBOUNCE_MS = 2000L
         internal const val STOP_ACTION = "au.com.shiftyjelly.pocketcasts.voicecontrol.action.STOP"
@@ -111,6 +115,18 @@ class VoiceControlService : Service() {
         }
         startVoiceControl()
         return START_NOT_STICKY
+    }
+
+    /**
+     * Production handling for a spoken reply that did not finish playing.
+     *
+     * This is a LOCAL delivery failure, distinct from the turn's own result: the command was still
+     * recognized and grace semantics are unchanged, but the reply is reported as not fully
+     * delivered rather than silently counted as one. Nothing is replayed.
+     */
+    private fun onSpokenReplyNotDelivered(error: Throwable) {
+        Timber.e(error, "voice_response_not_delivered: the spoken reply did not finish playing")
+        spokenReplyNotDelivered = true
     }
 
     private fun startVoiceControl() {
@@ -376,6 +392,9 @@ class VoiceControlService : Service() {
         lastCommandTime = now
 
         serviceScope.launch(Dispatchers.IO) {
+            // Own the delivery failure here rather than leaving the renderer's default log: a reply
+            // that did not finish playing must be reported, not silently counted as delivered.
+            audioFeedbackRenderer.onPlaybackFailure = ::onSpokenReplyNotDelivered
             val response = voicePlaybackIntentExecutor.execute(intent)
             audioFeedbackRenderer.render(response)
             gracePeriodSignal.onCommandRecognized(

@@ -82,17 +82,29 @@ class AudioFeedbackRenderer(
         // Launched coroutine inherits the Job cancellation: when we cancel currentJob
         // above, any child suspend calls (like TtsEngine.speak) will be cancelled.
         currentJob = scope.launch {
-            when (response) {
-                is VoiceResponse.Silent -> { /* no-op */ }
+            try {
+                when (response) {
+                    is VoiceResponse.Silent -> { /* no-op */ }
 
-                is VoiceResponse.Earcon -> playEarcon(response.id)
+                    is VoiceResponse.Earcon -> playEarcon(response.id)
 
-                is VoiceResponse.Spoken -> speakWithHeartbeat(response.text, language)
+                    is VoiceResponse.Spoken -> speakWithHeartbeat(response.text, language)
 
-                is VoiceResponse.Combined -> {
-                    playEarcon(response.earcon)
-                    speakWithHeartbeat(response.spokenText, language)
+                    is VoiceResponse.Combined -> {
+                        playEarcon(response.earcon)
+                        speakWithHeartbeat(response.spokenText, language)
+                    }
                 }
+            } catch (e: TtsPlaybackIncompleteException) {
+                // The reply did not finish playing. Report it as a delivery failure rather than a
+                // completed reply, and let the caller own whatever cleanup that implies.
+                Timber.e(
+                    e,
+                    "[VoiceResponse] reply did not finish playing: played %d of %d frames",
+                    e.framesPlayed,
+                    e.framesWritten,
+                )
+                onPlaybackFailure(e)
             }
         }
     }
@@ -117,25 +129,16 @@ class AudioFeedbackRenderer(
      */
     private suspend fun speakWithHeartbeat(text: String, language: String) = coroutineScope {
         noteEmitted()
-        val utterance = launch {
-            // An incomplete playback must reach this failure path rather than let the render job
-            // report success: a reply that did not finish playing is not a delivered reply.
-            try {
-                ttsEngine.speak(text, language)
-            } catch (e: TtsPlaybackIncompleteException) {
-                Timber.e(
-                    e,
-                    "[VoiceResponse] TTS playback incomplete: played %d of %d frames",
-                    e.framesPlayed,
-                    e.framesWritten,
-                )
-                onPlaybackFailure(e)
-            }
-        }
+        // The utterance runs in a child so the heartbeat can tick alongside it, but its failure must
+        // propagate OUT of this function: catching it inside the launch would let the child finish
+        // normally and this call return as though the reply had been delivered.
+        val utterance = launch { ttsEngine.speak(text, language) }
         while (utterance.isActive) {
             delay(EMISSION_HEARTBEAT_MS)
             if (utterance.isActive) noteEmitted()
         }
+        // Surfaces TtsPlaybackIncompleteException (or any other failure) to the caller.
+        utterance.join()
     }
 
     fun release() {

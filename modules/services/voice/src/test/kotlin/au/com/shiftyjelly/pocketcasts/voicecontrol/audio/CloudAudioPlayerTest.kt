@@ -284,4 +284,29 @@ class CloudAudioPlayerTest {
         assertEquals("no failure reported before any write", -1L, reported)
         player.release()
     }
+
+    @Test
+    fun `a refused write reports through onWriteFailure with the frames already submitted`() {
+        // End-to-end through the real player: the sink refuses after accepting part of the answer,
+        // and the refusal reaches the caller so the turn cannot read as a clean end. A hand-set flag
+        // would prove the branch, not the connection.
+        val reported = java.util.concurrent.atomic.AtomicLong(-1)
+        val player = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+        ).apply {
+            onWriteFailure = { frames -> reported.set(frames) }
+            var accepted = 0
+            writeToSink = { _, _, _, count -> if (accepted++ < 1) count else -1 }
+        }
+        try {
+            player.submitFrame(ByteArray(4096) { 1 })
+            player.play()
+            player.submitFrame(ByteArray(4096) { 1 })
+
+            assertTrue("the refusal must be reported", reported.get() >= 0)
+        } finally {
+            player.release()
+        }
+    }
 }

@@ -86,8 +86,12 @@ class PlaybackDuckingDeviceTest {
 
         // Restore is abandoning that focus, which returns the host to full volume.
         val restoreMs = measureTimeMillis { manager.abandonAudioFocus(listener) }
-        // The restored gain is delivered to the host holder, and may arrive on another thread.
-        withTimeoutOrNull(2_000) { delay(200) }
+        // The restored gain is delivered to the host holder on another thread, so wait on the CONDITION
+        // with a bound rather than a fixed sleep: a fixed sleep cannot time out, and it would pass
+        // whether or not the gain ever arrived.
+        withTimeoutOrNull(2_000) {
+            while (!hostGainedFocus) delay(20)
+        }
         manager.abandonAudioFocus(hostListener)
         Log.i(
             tag,
@@ -103,6 +107,12 @@ class PlaybackDuckingDeviceTest {
         assertTrue(
             "the host player must receive the duckable loss, or nothing lowers its volume",
             hostSawDuckableLoss,
+        )
+        // And the restore must give the focus back: a duck that never returns the focus leaves the host
+        // player quiet for the rest of the episode, which is the other half of the same row.
+        assertTrue(
+            "the host player must regain focus when the cloud restores, or it stays ducked",
+            hostGainedFocus,
         )
     }
 

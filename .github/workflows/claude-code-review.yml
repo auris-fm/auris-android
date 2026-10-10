@@ -135,9 +135,16 @@ jobs:
     # exact command, same-head success), so this job has one condition rather than five.
     if: needs.resolve-target.outputs.should-review == 'true'
     runs-on: ubuntu-latest
+    # Bounds a review that hangs, so a stuck run cannot hold a runner for the default budget. The
+    # review is a single model call; this is generous enough not to cut a slow one short.
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
+      # Required to record the reviewed head as a commit status below. GitHub sets any
+      # permission ABSENT from this list to `none`, so without this line the status write is
+      # rejected — which fails the job (a red check on the default branch), not silently.
+      statuses: write
       # Unused while github_token is passed below (App OIDC exchange skipped).
       id-token: write
     steps:
@@ -175,6 +182,21 @@ jobs:
         run: |
           set -euo pipefail
           gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body 'Automated review skipped: this PR modifies `.github/workflows/claude-code-review.yml`, and the Claude App token check requires the workflow to match the default branch. No `Claude review` status is recorded, so this head is not marked reviewed.'
+
+      - name: Assert the status permission is declared
+        # The read-back check adopted as the fifth requirement: every job that writes a commit
+        # status must declare statuses: write, because GitHub sets absent permissions to none and
+        # the rejected write fails the job. The defect is CROSS-ARTIFACT — neither the step nor
+        # the permissions block shows it alone, only their relationship does — so this asserts
+        # the relationship. Scope: an INLINE `.../statuses/...` call, which is this repo's shape;
+        # the script refuses (rather than passes) a shape it cannot read.
+        #
+        # The test runs FIRST, so a detector that has stopped matching fails here rather than
+        # quietly certifying nothing. Its cases include the scope claim itself as a failing pair,
+        # which is what stops a future editor from narrowing the detector and keeping a green run.
+        run: |
+          ruby .github/scripts/check-status-permission.test.rb
+          ruby .github/scripts/check-status-permission.rb .github/workflows/claude-code-review.yml
 
       - name: Checkout the reviewed head
         if: steps.workflow-changes.outputs.skip != 'true'

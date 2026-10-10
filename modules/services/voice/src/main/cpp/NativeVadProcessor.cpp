@@ -151,6 +151,12 @@ bool NativeVadProcessor::energyGate(const int16_t* samples, int32_t count) {
         sum += v * v;
     }
     double rms = std::sqrt(sum / static_cast<double>(count));
+    // Record the value this gate compared when diagnostics are on, so the diagnosis reports the gate's
+    // own number rather than recomputing it: two copies of one formula drift apart the moment either
+    // frame size or threshold changes.
+    if (mDiagnosticsEnabled.load(std::memory_order_relaxed)) {
+        mLastRms.store(rms, std::memory_order_relaxed);
+    }
     return rms >= kRmsThreshold;
 }
 
@@ -270,15 +276,8 @@ void NativeVadProcessor::runLoop() {
             isSpeech = (prob >= kSpeechThreshold);
         }
         // Diagnosis only, and only when enabled: the values the detector compared for this frame. The
-        // RMS is recomputed rather than plumbed out of the gate so the gate's own contract stays a
-        // boolean predicate.
+        // RMS comes from the gate itself (recorded above), so there is one formula, not two.
         if (mDiagnosticsEnabled.load(std::memory_order_relaxed)) {
-            double sum = 0.0;
-            for (int32_t i = 0; i < kVadFrameSize; ++i) {
-                double v = static_cast<double>(chunk[i]);
-                sum += v * v;
-            }
-            mLastRms.store(std::sqrt(sum / static_cast<double>(kVadFrameSize)), std::memory_order_relaxed);
             mLastScore.store(prob, std::memory_order_relaxed);
             mLastGatePassed.store(hasEnergy, std::memory_order_relaxed);
             mLastIsSpeech.store(isSpeech, std::memory_order_relaxed);

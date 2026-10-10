@@ -112,6 +112,7 @@ class EchoReferenceFilterTest {
             PlaybackCrossCorrelator(),
             object : AudioRouteMonitor {
                 override val route = kotlinx.coroutines.flow.MutableStateFlow<AudioRoute>(AudioRoute.Speaker)
+                override val availability = kotlinx.coroutines.flow.MutableStateFlow<AudioRoute>(AudioRoute.Speaker)
             },
         )
         assertFalse(
@@ -123,6 +124,9 @@ class EchoReferenceFilterTest {
             PlaybackCrossCorrelator(),
             object : AudioRouteMonitor {
                 override val route = kotlinx.coroutines.flow.MutableStateFlow<AudioRoute>(
+                    AudioRoute.Headset(hasMicrophone = true),
+                )
+                override val availability = kotlinx.coroutines.flow.MutableStateFlow<AudioRoute>(
                     AudioRoute.Headset(hasMicrophone = true),
                 )
             },

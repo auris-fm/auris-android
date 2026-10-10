@@ -224,6 +224,12 @@ jobs:
 
       - name: Checkout the reviewed head
         if: steps.workflow-changes.outputs.skip != 'true'
+        # CAUTION: no `path:` AND no `clean:`, so `clean` defaults to true and this checkout runs
+        # `git clean -ffdx` at the workspace root — which REMOVES the untracked `.ci-guard`
+        # directory fetched above. That is harmless only because the assert above has already read
+        # it. NOTHING AFTER THIS STEP MAY DEPEND ON `.ci-guard`. A later reader would fail silently
+        # (a missing path reads as "found nothing"), so it must not be added without moving the
+        # fetch, or setting `clean: false` here.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The RESOLVED head, not the event's default ref: a comment-triggered run has no

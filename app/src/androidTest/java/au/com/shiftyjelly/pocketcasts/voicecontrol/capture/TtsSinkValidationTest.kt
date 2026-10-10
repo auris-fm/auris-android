@@ -59,6 +59,10 @@ class TtsSinkValidationTest {
                     "(written=$written playedAtReturn=$playedAtReturn)",
                 playedAtReturn >= written,
             )
+            assertTrue(
+                "an incomplete drain must be reported as such, not as success",
+                !engine.wasPlaybackIncomplete(),
+            )
         } finally {
             engine.release()
         }

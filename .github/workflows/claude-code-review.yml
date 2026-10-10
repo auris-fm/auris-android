@@ -313,11 +313,39 @@ jobs:
           CURRENT=$(gh api "repos/${REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')
           if [ "$CURRENT" != "$REVIEWED_SHA" ]; then
             echo "::error::Head moved during the review: reviewed ${REVIEWED_SHA}, current ${CURRENT}. Not recording a completed review; request /review again after local review."
+            # Say it ON THE PR. Without this the review ran and was discarded, yet the PR shows
+            # nothing — identical to "not reviewed yet" — and the only trace is a job log. The
+            # remedy is an action a person must take, so it has to reach them, which is the same
+            # reason the "did not complete" path comments.
+            gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body "Automated review ran against \`${REVIEWED_SHA:0:7}\` but the head has since moved to \`${CURRENT:0:7}\`, so the verdict is stale and was NOT recorded. No \`Claude review\` status exists for this head. Run \`/review\` again once local review passes."
             echo "still-current=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
           echo "Head unchanged at ${REVIEWED_SHA}"
           echo "still-current=true" >> "$GITHUB_OUTPUT"
+
+      - name: Report any completed review that was not recorded
+        # The complement of the recording step, stated so no combination is silent. A completed review
+        # that reached neither the status nor an earlier comment — for instance if the confirmation
+        # step did not run at all, leaving its output empty — would otherwise leave the PR showing
+        # nothing, which a reader cannot distinguish from "not reviewed yet".
+        #
+        # This is deliberately the LAST statement of the outcome, so every completed review ends in
+        # exactly one of: a status, or a comment naming why not.
+        if: >-
+          steps.workflow-changes.outputs.skip != 'true' &&
+          steps.claude-review.outcome == 'success' &&
+          steps.claude-review.outputs.conclusion == 'success' &&
+          steps.head-still-current.outputs.still-current != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.resolve-target.outputs.pr-number }}
+          STILL_CURRENT: ${{ steps.head-still-current.outputs.still-current }}
+          HEAD_SHA: ${{ needs.resolve-target.outputs.head-sha }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body "Automated review of \`${HEAD_SHA:0:7}\` completed but was NOT recorded (freshness check result: \`${STILL_CURRENT:-unset}\`). No \`Claude review\` status exists for this head; run \`/review\` again after local review."
 
       - name: Record the reviewed head
         # A commit status ON THE REVIEWED SHA, so freshness is a fact about a commit rather

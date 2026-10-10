@@ -32,6 +32,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentE
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.restoresAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.windowGenerationOf
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
 import dagger.hilt.android.AndroidEntryPoint
@@ -89,6 +90,9 @@ class VoiceControlService : Service() {
     private var acquisitionLogged = false
     private var mediaSession: MediaSession? = null
     private var currentMode: ListeningMode = ListeningMode.Off
+
+    /** Last route seen by the mode/route observer, so a change (not a recomputation) retires. */
+    private var lastObservedRoute: AudioRoute? = null
 
     companion object {
         private const val COMMAND_DEBOUNCE_MS = 2000L
@@ -152,6 +156,13 @@ class VoiceControlService : Service() {
                     audioRouteMonitor.route,
                 ) { mode, _ -> mode }.onEach { mode ->
                     val route = audioRouteMonitor.route.value
+                    // A route change alters the acoustic path, so the recorded reference no longer
+                    // describes what reaches the microphone at that delay. Retire it (keeping only
+                    // the delay tail) rather than letting a stale reference match later speech.
+                    if (route != lastObservedRoute) {
+                        if (lastObservedRoute != null) playbackBufferRecorder.retire()
+                        lastObservedRoute = route
+                    }
                     val micExposure = route.toMicExposure()
                     when (mode) {
                         ListeningMode.Off -> {

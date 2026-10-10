@@ -132,4 +132,42 @@ class EarconAudioTest {
             abs(sliceMs - convertedMs) <= 3,
         )
     }
+
+    @Test
+    fun `slices recorded across partial writes do not drift from the whole clip`() {
+        // The player records each ACCEPTED write. If each slice were resampled independently, its
+        // length would round and the roundings would accumulate, sliding the reference against
+        // playback. Converting by absolute source position must give the same total as converting
+        // the clip in one pass.
+        val clip = EarconAudio.decodeWavToMono(wav(1.0, 44_100, 440.0).inputStream())
+        val whole = EarconAudio.resampleMono(clip.samples, 44_100, 16_000)
+
+        var total = 0
+        var offset = 0
+        val chunk = 1024 // a plausible AudioTrack write size
+        while (offset < clip.samples.size) {
+            val count = minOf(chunk, clip.samples.size - offset)
+            total += EarconAudio.resampleRange(clip.samples, 44_100, 16_000, offset, count).size
+            offset += count
+        }
+
+        assertTrue(
+            "sliced conversion must match the whole-clip conversion (sliced=$total whole=${whole.size})",
+            abs(total - whole.size) <= 2,
+        )
+    }
+
+    @Test
+    fun `a range conversion is positioned by absolute sample, not by slice start`() {
+        val clip = EarconAudio.decodeWavToMono(wav(0.5, 44_100, 440.0).inputStream())
+        val atStart = EarconAudio.resampleRange(clip.samples, 44_100, 16_000, 0, 1024)
+        val later = EarconAudio.resampleRange(clip.samples, 44_100, 16_000, 10_240, 1024)
+
+        assertTrue("both ranges produce samples", atStart.isNotEmpty() && later.isNotEmpty())
+        // The later slice must be a different part of the waveform, not a repeat of the head.
+        assertTrue(
+            "a later range must not reproduce the clip's opening samples",
+            !atStart.contentEquals(later),
+        )
+    }
 }

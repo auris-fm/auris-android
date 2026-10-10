@@ -144,12 +144,13 @@ class EarconPlayer(
          */
         fun recordAccepted(startSample: Int, count: Int, recorder: PlaybackBufferRecorder?) {
             if (recorder == null || count <= 0) return
-            val slice = samples.copyOfRange(startSample, startSample + count)
-            val forReference = if (sampleRateHz == REFERENCE_RATE_HZ) {
-                slice
-            } else {
-                EarconAudio.resampleMono(slice, sampleRateHz, REFERENCE_RATE_HZ)
-            }
+            val forReference = EarconAudio.resampleRange(
+                samples = samples,
+                fromRate = sampleRateHz,
+                toRate = REFERENCE_RATE_HZ,
+                startSample = startSample,
+                count = count,
+            )
             recorder.write(FloatArray(forReference.size) { forReference[it] / 32768f })
         }
     }

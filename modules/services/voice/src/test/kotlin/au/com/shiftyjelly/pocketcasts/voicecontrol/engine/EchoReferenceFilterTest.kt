@@ -4,6 +4,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
 import kotlin.math.PI
 import kotlin.math.sin
 import org.junit.Assert.assertFalse
@@ -80,6 +81,55 @@ class EchoReferenceFilterTest {
         assertTrue(
             "an empty reference cannot reject anything",
             filter.shouldProcess(tone(1600, 700.0), hasSpeakerId = false, speakerIndex = 0, playbackBuffer = recorder.snapshot()),
+        )
+    }
+
+    @Test
+    fun `on a headset the bleed check is skipped, so the reference cannot drop speech`() {
+        // With a headset there is no acoustic path from the speaker to the microphone, so anything the
+        // mic hears is the user and the correlator must not be consulted at all. This is the branch that
+        // decides whether the check runs, and getting it wrong is silent in both directions: trusting
+        // the correlator here would drop genuine speech whenever it happened to match the playback.
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        // The reference is accumulating playback, so it is longer than one mic segment: the correlator
+        // searches reference offsets, which only exist when there is room for the segment past them.
+        val submitted = FloatArray(48_000) { (0.6 * sin(2 * PI * 220.0 * it / sampleRate)).toFloat() }
+        recorder.write(submitted)
+
+        // The mic segment is the playback delayed by 120 ms — inside the correlator's 50..500 ms
+        // window, so a consulted correlator rejects it. A segment at zero delay sits outside the window
+        // and would be accepted either way, which would make this test unable to see the branch.
+        val delaySamples = (sampleRate * 0.120).toInt()
+        val delayedMic = FloatArray(8000) { i ->
+            val src = i - delaySamples
+            if (src >= 0) submitted[src] else 0f
+        }
+
+        // First establish that the correlator DOES reject this input on a route with an acoustic path,
+        // so the assertion on the headset below is about the branch and not about a correlator that
+        // cannot fire on this stimulus.
+        val speakerFilter = UtteranceFilter(
+            PlaybackCrossCorrelator(),
+            object : AudioRouteMonitor {
+                override val route = kotlinx.coroutines.flow.MutableStateFlow<AudioRoute>(AudioRoute.Speaker)
+            },
+        )
+        assertFalse(
+            "precondition: this delayed echo must be rejected on a speaker route",
+            speakerFilter.shouldProcessReference(delayedMic, hasSpeakerId = false, speakerIndex = 0, reference = recorder.reference()),
+        )
+
+        val headsetFilter = UtteranceFilter(
+            PlaybackCrossCorrelator(),
+            object : AudioRouteMonitor {
+                override val route = kotlinx.coroutines.flow.MutableStateFlow<AudioRoute>(
+                    AudioRoute.Headset(hasMicrophone = true),
+                )
+            },
+        )
+        assertTrue(
+            "on a headset the same utterance must be processed without consulting the correlator",
+            headsetFilter.shouldProcessReference(delayedMic, hasSpeakerId = false, speakerIndex = 0, reference = recorder.reference()),
         )
     }
 }

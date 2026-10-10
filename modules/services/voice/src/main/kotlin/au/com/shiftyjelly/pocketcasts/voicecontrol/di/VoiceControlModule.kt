@@ -271,6 +271,9 @@ abstract class VoiceControlModule {
         ): AudioFeedbackRenderer = AudioFeedbackRenderer(earconPlayer, ttsEngine)
 
         @Provides
+        fun provideEnumeratedDeviceTypes(): (() -> AndroidAudioRouteMonitor.EnumeratedDevices)? = null
+
+        @Provides
         @Singleton
         fun provideCloudAudioPlayer(
             @ApplicationContext context: Context,

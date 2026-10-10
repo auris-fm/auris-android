@@ -45,8 +45,10 @@ private:
     static constexpr int32_t kMinPostSpeechFrames = 10;    // ~640ms drain floor
     static constexpr int32_t kTargetTotalFrames = 55;      // ~3.5s target
     static constexpr int32_t kMaxContextFrames = 20;       // ~1.28s pre-speech
-    static constexpr int32_t kMaxSpeechFrames = 78;         // ~5s max
-    static constexpr int32_t kCooldownMs = 1500;
+    // No forced speech-duration endpoint: framing retains and joins until the natural end. This
+    // ceiling only exists to surface a detector STUCK active as an explicit fault; it must be far
+    // above any plausible utterance so ordinary long speech is never affected.
+    static constexpr int32_t kStuckDetectorFrameLimit = 3750;  // ~240s @ 64ms frames
     static constexpr double kRmsThreshold = 200.0;
     static constexpr float kSpeechThreshold = 0.2f;
 
@@ -76,7 +78,6 @@ private:
 
     int32_t mConsecutiveSilentFrames = 0;
     int32_t mDrainRemaining = 0;
-    int64_t mCooldownUntilUs = 0;
 
     std::mutex mEventMutex;
     std::condition_variable mEventCv;

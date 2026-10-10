@@ -66,9 +66,9 @@ class FakeCapture : public OboeAudioCapture {
 public:
     // loud = speech; quiet = silence. Consumed in order, one frame per readRingBuffer.
     std::deque<bool> script;
-    // A close starts a wall-clock cooldown (kCooldownMs = 1500) during which frames are discarded,
-    // and this loop only burns real time on its waits — so a scripted burst would land inside the
-    // cooldown. The test parks here to let it elapse.
+    // Optional per-read wall-clock delay. The processor no longer discards frames after a
+    // segment (the blind 1500ms cooldown is removed), so no test needs this to pass; it is kept
+    // only as a lever for timing-sensitive scripts.
     int pauseAfterFrames = -1;
     std::chrono::milliseconds pauseFor{0};
     int served = 0;
@@ -197,16 +197,72 @@ int main() {
         const std::deque<bool> trailing = frames(80, false);
         script.insert(script.end(), trailing.begin(), trailing.end());
 
-        // ~50ms per read from after the burst: enough for the 1500ms cooldown to elapse while the
-        // gap plays out, without encoding where the segment closes.
-        const std::vector<Segment> segs = run(script, /*pauseAfter=*/5,
-                                             std::chrono::milliseconds(50));
+        // No wall-clock pause: the blind 1500ms discard cooldown is gone, so a second utterance
+        // after a long silent gap must close on framing alone. (This case previously needed a
+        // ~50ms-per-read pause purely to let the cooldown elapse, which also hid its removal.)
+        const std::vector<Segment> segs = run(script);
         check(segs.size() >= 2, "a second utterance after a long gap produces a second segment");
         if (segs.size() >= 2) {
             const Segment& s = segs[1];
             std::printf("      second: onset=%d end=%d pcmSize=%d\n", s.onset, s.end, s.pcmSize);
             check(s.end <= s.pcmSize, "second segment's end sample is inside its own segment");
             check(s.end > 0, "second segment's end sample is set");
+        }
+    }
+
+    // (3) RETENTION: unbroken speech longer than the old ~5s forced endpoint (kMaxSpeechFrames = 78)
+    // must be retained whole. The bound used to finalise here as an ORDINARY speech-end, so the
+    // remainder was silently dropped and the truncated audio reached ASR indistinguishable from a
+    // natural end. Internal framing retains and joins until the natural endpoint instead.
+    {
+        std::deque<bool> script = frames(3, false);            // small pre-roll
+        const std::deque<bool> speech = frames(150, true);     // 150 * 64ms = 9.6s, far past 5s
+        script.insert(script.end(), speech.begin(), speech.end());
+        const std::deque<bool> trailing = frames(80, false);   // drain + close
+        script.insert(script.end(), trailing.begin(), trailing.end());
+
+        const std::vector<Segment> segs = run(script);
+        check(segs.size() == 1, "long unbroken speech closes exactly once");
+        if (!segs.empty()) {
+            const Segment& s = segs[0];
+            std::printf("      long: onset=%d end=%d pcmSize=%d frames=%d\n",
+                        s.onset, s.end, s.pcmSize, s.pcmSize / kFrame);
+            // Every one of the 150 speech frames must survive inside the emitted PCM: 3 pre-roll
+            // + 150 speech + drain, and nothing may be dropped at the 5s mark.
+            check(s.pcmSize >= 153 * kFrame,
+                  "all speech frames are retained (no truncation at the ~5s bound)");
+            check(s.end == s.onset + 150 * kFrame,
+                  "end sample is the last speech frame, not the old bound");
+        }
+    }
+
+    // (4) RETENTION: speech that resumes during the drain window is part of the SAME utterance.
+    // The old path accumulated drain silence but a resumed utterance must join, not become a
+    // second segment or be lost to the cooldown.
+    {
+        std::deque<bool> script;
+        const std::deque<bool> first = frames(5, true);
+        script.insert(script.end(), first.begin(), first.end());
+        const std::deque<bool> pause = frames(8, false);       // < full drain, a mid-utterance pause
+        script.insert(script.end(), pause.begin(), pause.end());
+        const std::deque<bool> resumed = frames(5, true);
+        script.insert(script.end(), resumed.begin(), resumed.end());
+        const std::deque<bool> trailing = frames(80, false);   // now drain and close for real
+        script.insert(script.end(), trailing.begin(), trailing.end());
+
+        const std::vector<Segment> segs = run(script);
+        check(segs.size() == 1, "a pause then resumed speech is one utterance, not two");
+        if (!segs.empty()) {
+            const Segment& s = segs[0];
+            std::printf("      resumed: onset=%d end=%d pcmSize=%d frames=%d\n",
+                        s.onset, s.end, s.pcmSize, s.pcmSize / kFrame);
+            // The resumed run joins the same utterance. Its end sample is the position of the
+            // last speech frame in the retained buffer — the 8 bridged pause frames sit between
+            // the two runs, so the end is past the first run's 5 frames, not equal to it.
+            check(s.pcmSize >= 18 * kFrame,
+                  "resumed speech is retained in the same segment");
+            check(s.end >= s.onset + 5 * kFrame,
+                  "end sample advances past the first speech run into the resumed one");
         }
     }
 

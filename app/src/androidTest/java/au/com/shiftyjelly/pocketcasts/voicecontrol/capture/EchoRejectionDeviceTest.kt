@@ -120,4 +120,40 @@ class EchoRejectionDeviceTest {
         job.cancel()
         capture.stopCapture()
     }
+
+    @Test
+    fun theDetectionPathAcceptsGenuineSpeechLevelAudio() = runBlocking<Unit> {
+        // The positive control @spec requires, and the reason it is not optional: with no control, zero
+        // segments cannot distinguish correct echo rejection from a scenario that would never have
+        // produced a segment whatever the input. This drives the shipped detector with speech-level PCM
+        // so the path is shown to be capable of accepting speech; the echo run below then has a baseline.
+        val segmenter = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.EnergyVoiceAudioSegmenter()
+
+        // Speech-like bursts well above the detector's own threshold, alternating with trailing silence
+        // so a segment closes naturally rather than being truncated.
+        fun frame(amplitude: Double): au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame {
+            val samples = ShortArray(512) { i ->
+                val env = 0.6 + 0.4 * kotlin.math.sin(2.0 * kotlin.math.PI * 5.0 * i / 512.0)
+                (amplitude * env * kotlin.math.sin(2.0 * kotlin.math.PI * 220.0 * i / 16_000.0)).toInt().toShort()
+            }
+            return au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame(samples, 16_000)
+        }
+
+        val results = mutableListOf<VoiceSegmenterResult>()
+        repeat(12) { results += segmenter.process(frame(8_000.0)) }
+        repeat(8) { results += segmenter.process(frame(0.0)) }
+
+        val segments = results.filterIsInstance<VoiceSegmenterResult.SpeechEnded>()
+        // Counted, not dumped: the frame contents are large and their shape is already asserted by the
+        // segmenter's own tests.
+        Log.i(
+            tag,
+            "positive control: segments=${segments.size} frames=${segments.sumOf { it.frames.size }} " +
+                "kinds=${results.map { it::class.simpleName }.distinct()}",
+        )
+        assertTrue(
+            "the detection path must accept speech-level audio, or a zero-segment echo run proves nothing",
+            segments.isNotEmpty(),
+        )
+    }
 }

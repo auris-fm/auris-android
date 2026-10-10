@@ -95,6 +95,44 @@ internal object EarconAudio {
         return out
     }
 
+    /**
+     * Converts the source range `[startSample, startSample + count)` to [toRate] using the running
+     * mapping rather than resampling the slice on its own.
+     *
+     * Resampling each slice independently rounds its length, and those roundings accumulate: a few
+     * hundred 1024-sample slices at 44.1 kHz drift a few milliseconds against the output. Converting
+     * by absolute source position makes the mapping continuous, so slices can be recorded as the sink
+     * accepts them without the reference slowly sliding against playback.
+     */
+    fun resampleRange(
+        samples: ShortArray,
+        fromRate: Int,
+        toRate: Int,
+        startSample: Int,
+        count: Int,
+    ): ShortArray {
+        require(fromRate > 0 && toRate > 0) { "rates must be positive" }
+        if (count <= 0) return ShortArray(0)
+        val end = (startSample + count).coerceAtMost(samples.size)
+        if (fromRate == toRate) return samples.copyOfRange(startSample, end)
+
+        val startOut = (startSample.toLong() * toRate / fromRate).toInt()
+        val endOut = (end.toLong() * toRate / fromRate).toInt()
+        val outLength = (endOut - startOut).coerceAtLeast(0)
+        val out = ShortArray(outLength)
+        val step = fromRate.toDouble() / toRate
+        for (i in 0 until outLength) {
+            // Position in the source timeline, so the phase does not reset at each slice boundary.
+            val src = (startOut + i) * step
+            val idx = src.toInt()
+            val frac = src - idx
+            val a = samples[idx.coerceAtMost(samples.size - 1)].toInt()
+            val b = samples[(idx + 1).coerceAtMost(samples.size - 1)].toInt()
+            out[i] = (a + (b - a) * frac).roundToInt().coerceIn(-32768, 32767).toShort()
+        }
+        return out
+    }
+
     private fun readAscii(data: DataInputStream, length: Int): String {
         val bytes = ByteArray(length)
         data.readFully(bytes)

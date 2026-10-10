@@ -38,6 +38,9 @@ SCRIPT = "      - name: finish\n        run: node \"$RUNNER_TEMP/claude-review.m
 NOTHING = "      - run: ./gradlew spotlessCheck\n"
 # A call that has been disabled by commenting it out — the case the naive detector misread.
 COMMENTED_OUT = "      - name: review\n        run: |\n          set -euo pipefail\n          # gh api \"repos/\${REPOSITORY}/statuses/\${HEAD_SHA}\" -f state=success\n          echo disabled\n"
+# A live call with a comment trailing on the SAME line, inside a BLOCK scalar. The block form is
+# what preserves the '#' for the matcher; a plain scalar would have it stripped by YAML.
+BLOCK_TRAILING_COMMENT = "      - name: Record\n        run: |\n          set -euo pipefail\n          gh api \"repos/\${REPOSITORY}/statuses/\${HEAD_SHA}\" -f state=success # record it\n"
 # An indented comment, to pin that leading whitespace is handled.
 INDENTED_COMMENT = "      - name: review\n        run: |\n          if true; then\n            # gh api \"repos/\${REPOSITORY}/statuses/\${HEAD_SHA}\"\n            echo skipped\n          fi\n"
 
@@ -67,6 +70,14 @@ CASES = {
   # code — the guard's defect shape one level down. If the comment-scoping is removed, this fails.
   'a COMMENTED-OUT status call is not a writer' => [job(COMMENTED_OUT, perms: ['contents: read']), 1, /detector did not match/],
   'a real call after an INDENTED comment is still a writer' => [job(INDENTED_COMMENT + INLINE, perms: ['contents: read']), 1, /does not declare statuses: write/],
+  # THE ANCHOR-BOUNDARY CASE, and the fixture that makes it discriminating. The cases above put a
+  # comment ABOVE the call, which cannot separate the fix from a looser filter: the call's own line
+  # contains no '#', so both keep it. A BLOCK scalar (run: |) preserves a trailing comment — a
+  # PLAIN scalar (run: cmd # note) has it stripped by the YAML parser, so it never reaches the
+  # matcher at all. The input that distinguishes them is therefore a command with a trailing
+  # comment inside a block scalar: `start_with?('#')` keeps it, `include?('#')` drops it and the
+  # writer disappears. Verified: under the loose filter this case fails.
+  'a live call with a TRAILING comment in a BLOCK scalar is still a writer' => [job(BLOCK_TRAILING_COMMENT, perms: ['contents: read']), 1, /does not declare statuses: write/],
   # ROW 4 (@ios's, ported): commented out AND the permission declared. The previous version passed
   # this silently — a dead guard satisfied by a permission that no longer guards anything. The
   # wanted behaviour is that it fails loudly instead, so the divergence is pinned rather than

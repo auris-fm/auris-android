@@ -37,6 +37,14 @@ internal object OboeNative {
 
     /** Frames the VAD has consumed from capture since start, for reachability diagnostics. */
     external fun nativeGetFramesConsumed(): Long
+
+    /**
+     * Aggregate detector diagnosis, or null when diagnostics are off. Order matches the native
+     * contract: rms x1000, score x1000, speechFrames, silentFrames, drainRemaining, then gatePassed,
+     * isSpeech and speechActive as 0/1. Aggregates only; no audio crosses this boundary.
+     */
+    external fun nativeGetVadDiagnostics(): LongArray
+    external fun nativeSetVadDiagnosticsEnabled(enabled: Boolean)
     external fun nativeWaitForVadEvent(timeoutMs: Int): Int
     external fun nativeGetSpeechPcm(buffer: ShortArray): Int
     external fun nativeGetSpeechPcmSize(): Int

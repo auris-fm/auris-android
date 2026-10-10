@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.audio
 import android.Manifest
 import android.content.Context
 import androidx.annotation.RequiresPermission
+import au.com.shiftyjelly.pocketcasts.voicecontrol.BuildConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -36,6 +37,47 @@ class MicrophoneCapture @Inject constructor(
          * captured audio actually reaches the VAD, which a liveness check cannot show in silence.
          */
         fun framesConsumed(): Long = OboeNative.nativeGetFramesConsumed()
+
+        /**
+         * Detector aggregates for capture diagnosis, or null when unavailable.
+         *
+         * Returns null in a release build, so the diagnostic cannot be reached from a shipped app: the
+         * boundary is a build property rather than a runtime flag a caller could flip. The values are a
+         * level, a probability and the detector's own state counters — no audio.
+         */
+        fun diagnostics(): VadDiagnostics? {
+            if (!BuildConfig.DEBUG) return null
+            val values = OboeNative.nativeGetVadDiagnostics()
+            if (values.size < 8) return null
+            return VadDiagnostics(
+                rms = values[0] / 1000.0,
+                score = values[1] / 1000.0f,
+                speechFrames = values[2].toInt(),
+                silentFrames = values[3].toInt(),
+                drainRemaining = values[4].toInt(),
+                gatePassed = values[5] == 1L,
+                isSpeech = values[6] == 1L,
+                speechActive = values[7] == 1L,
+            )
+        }
+
+        /** Starts or stops collection. Off by default, and inert in a release build. */
+        fun setDiagnosticsEnabled(enabled: Boolean) {
+            if (!BuildConfig.DEBUG) return
+            OboeNative.nativeSetVadDiagnosticsEnabled(enabled)
+        }
+
+        /** The detector's own view of the most recent frame. A level and its decision, never audio. */
+        data class VadDiagnostics(
+            val rms: Double,
+            val score: Float,
+            val speechFrames: Int,
+            val silentFrames: Int,
+            val drainRemaining: Int,
+            val gatePassed: Boolean,
+            val isSpeech: Boolean,
+            val speechActive: Boolean,
+        )
     }
 
     private var activeEngine: OboeCaptureEngine? = null

@@ -42,6 +42,32 @@ public:
      */
     int64_t getFramesConsumed();
 
+    /**
+     * Aggregate diagnosis of the detector, for capture debugging only.
+     *
+     * Aggregates rather than raw audio: the fields are the last frame's energy-gate RMS and Silero
+     * score, the ones the detector itself compared, plus how many consecutive speech frames it has
+     * accepted and its endpoint state. No sample is exported, and the values carry no user content
+     * beyond a level. All fields are atomics read across threads.
+     */
+    struct VadDiagnostics {
+        double lastRms = 0.0;          // energy gate input for the most recent frame
+        float lastScore = 0.0f;        // Silero probability for the most recent frame
+        bool lastGatePassed = false;   // whether the energy gate let the frame through
+        bool lastIsSpeech = false;     // the detector's decision for the most recent frame
+        int32_t speechFrames = 0;      // frames accepted into the current utterance
+        bool speechActive = false;     // whether an utterance is open
+        int32_t silentFrames = 0;      // consecutive silent frames, for the endpoint
+        int32_t drainRemaining = 0;    // endpoint drain countdown
+    };
+    VadDiagnostics getDiagnostics();
+
+    /**
+     * Whether diagnostics are collected at all. Off unless a debug/test build turns them on, so a
+     * release build does not pay for them and cannot expose them.
+     */
+    void setDiagnosticsEnabled(bool enabled);
+
 private:
     void runLoop();
     static bool energyGate(const int16_t* samples, int32_t count);
@@ -66,6 +92,17 @@ private:
 
     /** Frames read from the capture ring buffer since start(); read across threads for diagnostics. */
     std::atomic<int64_t> mFramesConsumed{0};
+
+    /** Diagnostics: written by the VAD thread, read by Kotlin. Disabled in release builds. */
+    std::atomic<bool> mDiagnosticsEnabled{false};
+    std::atomic<double> mLastRms{0.0};
+    std::atomic<float> mLastScore{0.0f};
+    std::atomic<bool> mLastGatePassed{false};
+    std::atomic<bool> mLastIsSpeech{false};
+    std::atomic<int32_t> mDiagSpeechFrames{0};
+    std::atomic<bool> mDiagSpeechActive{false};
+    std::atomic<int32_t> mDiagSilentFrames{0};
+    std::atomic<int32_t> mDiagDrainRemaining{0};
 
     // Circular pre-speech context buffer: stores up to kMaxContextFrames of
     // silent audio frames before speech onset.

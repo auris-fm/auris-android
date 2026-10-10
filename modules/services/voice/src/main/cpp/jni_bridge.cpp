@@ -212,6 +212,58 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetFrame
     return static_cast<jlong>(processor->getFramesConsumed());
 }
 
+// Aggregate detector diagnosis for capture debugging, as a long array so one call returns the frame
+// state atomically. Order: rms, score, speechFrames, silentFrames, drainRemaining, then the three
+// booleans as 0/1 (gatePassed, isSpeech, speechActive). Aggregates only — no audio is exported.
+// Collection is off unless nativeSetVadDiagnosticsEnabled(true) was called, which release builds do
+// not do.
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetVadDiagnostics(
+    JNIEnv* env,
+    jclass /*clazz*/)
+{
+    NativeVadProcessor* processor = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(gCaptureMutex);
+        processor = gVadProcessor;
+    }
+    jlong values[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    if (processor != nullptr) {
+        NativeVadProcessor::VadDiagnostics d = processor->getDiagnostics();
+        // The RMS and score are scaled to integers: a level and a probability do not need float
+        // precision to answer "did the loopback reach the detector".
+        values[0] = static_cast<jlong>(d.lastRms * 1000.0);
+        values[1] = static_cast<jlong>(d.lastScore * 1000.0f);
+        values[2] = d.speechFrames;
+        values[3] = d.silentFrames;
+        values[4] = d.drainRemaining;
+        values[5] = d.lastGatePassed ? 1 : 0;
+        values[6] = d.lastIsSpeech ? 1 : 0;
+        values[7] = d.speechActive ? 1 : 0;
+    }
+    jlongArray out = env->NewLongArray(8);
+    if (out != nullptr) {
+        env->SetLongArrayRegion(out, 0, 8, values);
+    }
+    return out;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeSetVadDiagnosticsEnabled(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/,
+    jboolean enabled)
+{
+    NativeVadProcessor* processor = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(gCaptureMutex);
+        processor = gVadProcessor;
+    }
+    if (processor != nullptr) {
+        processor->setDiagnosticsEnabled(enabled == JNI_TRUE);
+    }
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeechOnsetSample(
     JNIEnv* /*env*/,

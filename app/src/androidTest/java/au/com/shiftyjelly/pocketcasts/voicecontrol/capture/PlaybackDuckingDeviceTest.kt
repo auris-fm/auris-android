@@ -89,6 +89,12 @@ class PlaybackDuckingDeviceTest {
             )
         }
 
+        // The duckable loss is the same kind of asynchronous delivery from the same thread as the gain,
+        // so it is bounded the same way. Reading it non-blocking at the assertion instead would assume
+        // an ordering between two callbacks that the platform does not promise, and would report a loss
+        // that had not been delivered yet as a loss that never arrived.
+        val sawLoss = sawDuckableLoss.await(2, java.util.concurrent.TimeUnit.SECONDS)
+
         // Restore is abandoning that focus, which returns the host to full volume.
         val restoreMs = measureTimeMillis { manager.abandonAudioFocus(listener) }
         // The restored gain is delivered on another thread, so wait on the latch with a bound. The latch
@@ -97,7 +103,7 @@ class PlaybackDuckingDeviceTest {
         manager.abandonAudioFocus(hostListener)
         Log.i(
             tag,
-            "duck=${duckMs}ms restore=${restoreMs}ms hostDuckableLoss=${sawDuckableLoss.count == 0L} hostGained=$regained",
+            "duck=${duckMs}ms restore=${restoreMs}ms hostDuckableLoss=$sawLoss hostGained=$regained",
         )
 
         // Both operations must complete promptly: a duck that takes long leaves the answer competing with
@@ -108,7 +114,7 @@ class PlaybackDuckingDeviceTest {
         // signal the host acts on, since the request being granted is only the precondition.
         assertTrue(
             "the host player must receive the duckable loss, or nothing lowers its volume",
-            sawDuckableLoss.await(0, java.util.concurrent.TimeUnit.SECONDS),
+            sawLoss,
         )
         // And the restore must give the focus back: a duck that never returns the focus leaves the host
         // player quiet for the rest of the episode, which is the other half of the same row.

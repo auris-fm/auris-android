@@ -65,6 +65,12 @@ class CloudRouteSink internal constructor(
      * restore over them.
      */
     private val playbackCommandRevision: () -> Long = { 0L },
+    /**
+     * Whether a privacy event has closed the window, so restoring the turn's pause would resume
+     * playback the user's own privacy action ended. A privacy closure does not go through the
+     * playback layer, so it does not advance the command revision and must be consulted separately.
+     */
+    private val isPrivacyClosed: () -> Boolean = { false },
     /** Audio player for cloud-delivered binary audio frames. */
     private val audioPlayer: CloudAudioPlayer? = null,
 ) : VoiceCloudRouteSink {
@@ -97,6 +103,7 @@ class CloudRouteSink internal constructor(
         currentLocale = currentLocale,
         isHostPlaying = { playbackContextMonitor.isHostAudioActive.value },
         playbackCommandRevision = playbackContextMonitor::playbackCommandRevision,
+        isPrivacyClosed = playbackContextMonitor::isPrivacyClosed,
     )
 
     /**
@@ -477,6 +484,10 @@ class CloudRouteSink internal constructor(
         // Ownership is a question about commands, not state: a user who pressed
         // pause leaves the player in the same state the turn left it, so only a
         // command revision can tell their action from nobody acting.
+        if (isPrivacyClosed()) {
+            Timber.i("[VoicePipeline] cloud turn left playback alone (privacy closed)")
+            return
+        }
         if (playbackCommandRevision() != pauseCommandRevision) {
             Timber.i("[VoicePipeline] cloud turn left playback alone (someone else acted)")
             return

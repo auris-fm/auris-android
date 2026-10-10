@@ -197,6 +197,12 @@ jobs:
           persist-credentials: false
 
       - name: Assert the status permission is declared
+        # DEPENDS ON: "Fetch the guard scripts the assert step reads" (immediately above). This
+        # step reads `.ci-guard/.github/scripts/*` and `.ci-guard/.github/workflows/*`, which
+        # exist only because that step checked them out. Nothing in the YAML enforces the order,
+        # so the dependency is named here, beside the read — this is the whole bug: this step
+        # previously read a path no earlier step had created, and failed on every run.
+        #
         # The read-back check adopted as the fifth requirement: every job that writes a commit
         # status must declare statuses: write, because GitHub sets absent permissions to none and
         # the rejected write fails the job. The defect is CROSS-ARTIFACT — neither the step nor

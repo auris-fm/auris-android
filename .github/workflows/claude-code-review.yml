@@ -252,6 +252,24 @@ jobs:
             --model ${{ secrets.ANTHROPIC_MODEL || 'sonnet' }}
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*)"
 
+      - name: Report a review that did not complete
+        # The third state GitHub cannot express: the action ran, the step succeeded, but the MODEL
+        # did not complete a review. Recording nothing is right, and saying nothing would leave the
+        # absence indistinguishable from a skip, so this states it on the PR.
+        if: >-
+          steps.workflow-changes.outputs.skip != 'true' &&
+          (steps.claude-review.outcome != 'success' ||
+           steps.claude-review.outputs.conclusion != 'success')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ needs.resolve-target.outputs.pr-number }}
+          STEP_OUTCOME: ${{ steps.claude-review.outcome }}
+          MODEL_CONCLUSION: ${{ steps.claude-review.outputs.conclusion }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body "Automated review did not complete (step=${STEP_OUTCOME:-unknown}, model=${MODEL_CONCLUSION:-unknown}). No \`Claude review\` status is recorded, so this head is not marked reviewed."
+
       - name: Record the reviewed head
         # A commit status ON THE REVIEWED SHA, so freshness is a fact about a commit rather
         # than a note about a PR. A later commit carries no such status, so a stale verdict
@@ -260,12 +278,19 @@ jobs:
         # Reached only when the review actually ran: a skipped review writes NO status, so
         # "completed review" is never recorded for a review that did not happen. Failures in
         # the review step skip this too, because a failed action is not a completed review.
-        if: steps.workflow-changes.outputs.skip != 'true' && steps.claude-review.outcome == 'success'
+        # 'outcome == success' only says the STEP did not crash. The action reports the MODEL's
+        # execution status separately, and that is the one that means a review happened: an action
+        # that exits 0 after a model error would otherwise record a completed review.
+        if: >-
+          steps.workflow-changes.outputs.skip != 'true' &&
+          steps.claude-review.outcome == 'success' &&
+          steps.claude-review.outputs.conclusion == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPOSITORY: ${{ github.repository }}
           HEAD_SHA: ${{ needs.resolve-target.outputs.head-sha }}
           PR_NUMBER: ${{ needs.resolve-target.outputs.pr-number }}
+          MODEL_CONCLUSION: ${{ steps.claude-review.outputs.conclusion }}
         run: |
           set -euo pipefail
           gh api "repos/${REPOSITORY}/statuses/${HEAD_SHA}" \

@@ -55,6 +55,10 @@ class AndroidPlatformTtsEngine @Inject constructor(
     @Volatile
     private var framesPlayedAtReturn = 0
 
+    /** Set when an utterance returned with queued audio still unplayed (drain timed out). */
+    @Volatile
+    private var playbackIncomplete = false
+
     init {
         tts = TextToSpeech(appContext) { status ->
             initialized = (status == TextToSpeech.SUCCESS)
@@ -152,6 +156,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
     }
 
     private suspend fun playSynthesizedInternal(wav: File) = withContext(Dispatchers.IO) {
+        playbackIncomplete = false
         val clip = runCatching {
             wav.inputStream().use { EarconAudio.decodeWavToMono(it) }
         }.onFailure { Timber.w(it, "TTS: failed to decode synthesized audio") }.getOrNull() ?: return@withContext
@@ -189,6 +194,18 @@ class AndroidPlatformTtsEngine @Inject constructor(
             }
             framesWritten = offset
             framesPlayedAtReturn = track.playbackHeadPosition
+            // A bounded wait that expires is an EXPLICIT incomplete-playback outcome, not a
+            // successful completion: the caller must not be told the answer finished when queued
+            // audio is still outstanding.
+            if (framesPlayedAtReturn < framesWritten) {
+                playbackIncomplete = true
+                Timber.w(
+                    "TTS: playback incomplete at return (played=%d written=%d after %dms)",
+                    framesPlayedAtReturn,
+                    framesWritten,
+                    waited,
+                )
+            }
         } finally {
             playbackActive = false
             activeTrack = null
@@ -205,6 +222,9 @@ class AndroidPlatformTtsEngine @Inject constructor(
 
     /** Playback position at the moment the last utterance completed. */
     fun framesPlayedAtReturn(): Int = framesPlayedAtReturn
+
+    /** True when the last utterance returned with queued audio still unplayed. */
+    fun wasPlaybackIncomplete(): Boolean = playbackIncomplete
 
     private fun recordAccepted(
         samples: ShortArray,

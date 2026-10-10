@@ -35,6 +35,13 @@ public:
     int32_t getSpeechOnsetSample();
     int32_t getSpeechEndSample();
 
+    /**
+     * Frames this processor has consumed from the capture ring buffer since start(), whether or not
+     * they produced an event. Distinguishes "capture is running" from "captured audio is actually
+     * reaching the VAD", which a liveness check alone cannot tell apart in silence.
+     */
+    int64_t getFramesConsumed();
+
 private:
     void runLoop();
     static bool energyGate(const int16_t* samples, int32_t count);
@@ -56,6 +63,9 @@ private:
 
     std::unique_ptr<std::thread> mThread;
     std::atomic<bool> mActive{false};
+
+    /** Frames read from the capture ring buffer since start(); read across threads for diagnostics. */
+    std::atomic<int64_t> mFramesConsumed{0};
 
     // Circular pre-speech context buffer: stores up to kMaxContextFrames of
     // silent audio frames before speech onset.

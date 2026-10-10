@@ -180,4 +180,38 @@ class CloudAudioPlayerTest {
         // the sound, or it would swallow a foreign app for the length of the window.
         assertEquals("the final report must be that we stopped", false, states.last())
     }
+
+    @Test
+    fun `s16le converter maps full-scale and silence to the reference range`() {
+        // 0x7FFF -> +1.0, 0x8000 -> -1.0, 0x0000 -> 0.0 in the shared reference's float domain.
+        val bytes = byteArrayOf(
+            0xFF.toByte(),
+            0x7F.toByte(), // +32767
+            0x00,
+            0x80.toByte(), // -32768
+            0x00,
+            0x00, // 0
+        )
+        val out = CloudAudioPlayer.s16leBytesToFloats(bytes, bytes.size)
+        assertEquals(3, out.size)
+        assertTrue("max positive", out[0] > 0.999f)
+        assertTrue("max negative", out[1] <= -0.999f)
+        assertEquals("zero", 0f, out[2], 0.0001f)
+    }
+
+    @Test
+    fun `s16le converter honours the accepted length, not the whole buffer`() {
+        // AudioTrack.write reports how many bytes it took; a partial write must record only that
+        // prefix, so the reference never claims audio the sink did not accept.
+        val bytes = byteArrayOf(0x10, 0x20, 0x30, 0x40)
+        val out = CloudAudioPlayer.s16leBytesToFloats(bytes, 2)
+        assertEquals(1, out.size)
+    }
+
+    @Test
+    fun `odd remaining byte is truncated to whole samples`() {
+        val bytes = byteArrayOf(0x10, 0x20, 0x30)
+        val out = CloudAudioPlayer.s16leBytesToFloats(bytes, 3)
+        assertEquals(1, out.size)
+    }
 }

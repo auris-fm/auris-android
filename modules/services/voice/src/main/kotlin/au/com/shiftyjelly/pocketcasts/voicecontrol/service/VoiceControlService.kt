@@ -124,6 +124,9 @@ class VoiceControlService : Service() {
         try {
             val notification = notificationManager.createDownloadingNotification()
             startForeground(notificationManager.notificationId, notification)
+            // Record the playback reference for the lifetime of this capture session, so the
+            // signal filter has what the client submitted for playback to correlate against.
+            playbackBufferRecorder.start(serviceScope)
             // Only now is the service really running: Android refuses a microphone foreground
             // service started from an ineligible app state, and that refusal throws below.
             voiceControlServiceController.onServiceStarted()
@@ -403,6 +406,7 @@ class VoiceControlService : Service() {
     private fun stopVoiceControl() {
         Timber.i("Stopping voice control service")
         modeJob?.cancel()
+        playbackBufferRecorder.stop()
         stopEngine()
         wiredBackend?.release()
         wiredBackend = null

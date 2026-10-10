@@ -142,9 +142,8 @@ jobs:
       contents: read
       pull-requests: write
       # Required to record the reviewed head as a commit status below. GitHub sets any
-      # permission ABSENT from this list to `none`, so without this line the status write
-      # fails while the job still reports green — a silent failure inside the mechanism
-      # that exists to prevent them.
+      # permission ABSENT from this list to `none`, so without this line the status write is
+      # rejected — which fails the job (a red check on the default branch), not silently.
       statuses: write
       # Unused while github_token is passed below (App OIDC exchange skipped).
       id-token: write
@@ -187,8 +186,10 @@ jobs:
       - name: Assert the status permission is declared
         # The read-back check adopted as the fifth requirement: every job that writes a commit
         # status must declare statuses: write, because GitHub sets absent permissions to none and
-        # the resulting failure looks exactly like success — the job is green and no status exists.
-        # Shell guards cannot catch it and no green run reveals it, so it is asserted here.
+        # the rejected write fails the job. The defect is CROSS-ARTIFACT — neither the step nor
+        # the permissions block shows it alone, only their relationship does — so this asserts
+        # the relationship. Scope: an INLINE `.../statuses/...` call, which is this repo's shape;
+        # the script refuses (rather than passes) a shape it cannot read.
         run: ruby .github/scripts/check-status-permission.rb .github/workflows/claude-code-review.yml
 
       - name: Checkout the reviewed head

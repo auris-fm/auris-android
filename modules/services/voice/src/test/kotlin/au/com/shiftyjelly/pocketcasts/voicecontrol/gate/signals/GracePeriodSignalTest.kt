@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals
 import au.com.shiftyjelly.pocketcasts.sharedtest.MainCoroutineRule
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
@@ -248,5 +249,41 @@ class GracePeriodSignalTest {
         assertTrue(signal.isActive.value)
         signal.onAppBackgrounded()
         assertFalse(signal.isActive.value)
+    }
+
+    @Test
+    fun `a privacy close advances the closure counter and a wake does not`() {
+        // The sink's guard depends on this count being monotonic: it is compared across a suspension,
+        // and a wake clears the live boolean before the suspended turn's cleanup runs, so a boolean
+        // cannot answer "did a privacy event happen since?". This pins the property the fix rests on,
+        // through the real signal rather than a test-supplied value.
+        val signal = GracePeriodSignal()
+
+        signal.onWakeWordDetected()
+        val afterWake = signal.privacyClosureCount()
+
+        signal.onAudioRouteChanged()
+        assertEquals(
+            "a route-loss privacy close must advance the counter",
+            afterWake + 1,
+            signal.privacyClosureCount(),
+        )
+
+        // A wake reopens the window and clears the live flag; the count must survive it, since that
+        // survival is exactly what lets a suspended turn detect the closure.
+        signal.onWakeWordDetected()
+        assertFalse("the wake clears the live flag", signal.isClosedByPrivacy())
+        assertEquals(
+            "a wake must not reset the counter",
+            afterWake + 1,
+            signal.privacyClosureCount(),
+        )
+
+        signal.onAppBackgrounded()
+        assertEquals(
+            "backgrounding is the other privacy close and must advance it too",
+            afterWake + 2,
+            signal.privacyClosureCount(),
+        )
     }
 }

@@ -9,7 +9,9 @@ import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlin.system.measureTimeMillis
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -40,10 +42,33 @@ class PlaybackDuckingDeviceTest {
 
         // The production duck: transient focus that may duck, the signal PlaybackManager lowers its
         // volume for. A listener is required by this overload, and is where a real duck would surface.
-        var sawDuckableLoss = false
-        val listener = AudioManager.OnAudioFocusChangeListener { change ->
-            if (change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK) sawDuckableLoss = true
+        // The HOST PLAYER's focus listener: it is the prior holder, so the cloud duck is delivered to
+        // IT as a duckable loss. Requesting the focus ourselves would make us the holder and we would
+        // never receive the loss, which is why the first version of this test logged
+        // duckableLossSeen=false — a value that could not have been true.
+        var hostSawDuckableLoss = false
+        var hostGainedFocus = false
+        val hostListener = AudioManager.OnAudioFocusChangeListener { change ->
+            when (change) {
+                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> hostSawDuckableLoss = true
+                AudioManager.AUDIOFOCUS_GAIN -> hostGainedFocus = true
+                else -> {}
+            }
         }
+        // A playing host player holds focus; the test stands in for it with the same request a player
+        // makes, so the cloud duck below has someone to duck.
+        val hostGranted = manager.requestAudioFocus(
+            hostListener,
+            AudioManager.STREAM_MUSIC,
+            AudioManager.AUDIOFOCUS_GAIN,
+        )
+        assertEquals(
+            "precondition: the host player must hold focus before the cloud ducks",
+            AudioManager.AUDIOFOCUS_REQUEST_GRANTED,
+            hostGranted,
+        )
+
+        val listener = AudioManager.OnAudioFocusChangeListener { /* the cloud turn's own listener */ }
 
         val duckMs = measureTimeMillis {
             val granted = manager.requestAudioFocus(
@@ -61,12 +86,24 @@ class PlaybackDuckingDeviceTest {
 
         // Restore is abandoning that focus, which returns the host to full volume.
         val restoreMs = measureTimeMillis { manager.abandonAudioFocus(listener) }
-        Log.i(tag, "duck=${duckMs}ms restore=${restoreMs}ms duckableLossSeen=$sawDuckableLoss")
+        // The restored gain is delivered to the host holder, and may arrive on another thread.
+        withTimeoutOrNull(2_000) { delay(200) }
+        manager.abandonAudioFocus(hostListener)
+        Log.i(
+            tag,
+            "duck=${duckMs}ms restore=${restoreMs}ms hostDuckableLoss=$hostSawDuckableLoss hostGained=$hostGainedFocus",
+        )
 
         // Both operations must complete promptly: a duck that takes long leaves the answer competing with
         // the host player, which is the audible symptom the row is about.
         assertTrue("the duck must be prompt on this device (${duckMs}ms)", duckMs < 1_000)
         assertTrue("and the restore (${restoreMs}ms)", restoreMs < 1_000)
+        // The row is that the HOST PLAYER lowers, not merely that the focus was obtainable: assert the
+        // signal the host acts on, since the request being granted is only the precondition.
+        assertTrue(
+            "the host player must receive the duckable loss, or nothing lowers its volume",
+            hostSawDuckableLoss,
+        )
     }
 
     @Test

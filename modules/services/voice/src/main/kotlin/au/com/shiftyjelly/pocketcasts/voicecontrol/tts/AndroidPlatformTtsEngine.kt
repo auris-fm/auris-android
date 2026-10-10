@@ -44,6 +44,13 @@ class AndroidPlatformTtsEngine @Inject constructor(
     @Volatile
     private var activeTrack: AudioTrack? = null
 
+    /** Frames submitted by the last utterance and how far playback had advanced when it returned. */
+    @Volatile
+    private var framesWritten = 0
+
+    @Volatile
+    private var framesPlayedAtReturn = 0
+
     init {
         tts = TextToSpeech(appContext) { status ->
             initialized = (status == TextToSpeech.SUCCESS)
@@ -167,18 +174,28 @@ class AndroidPlatformTtsEngine @Inject constructor(
                 )
                 offset += written
             }
-            // Let the buffered audio drain before the caller treats the utterance as finished, which
-            // is what the previous implementation's onDone waited for.
-            while (track.playbackHeadPosition < offset && !Thread.currentThread().isInterrupted) {
-                if (track.playState != AudioTrack.PLAYSTATE_PLAYING) break
+            // Let the buffered audio drain before the caller treats the utterance as finished. The
+            // outcome is recorded so a test can assert it happened, rather than inferring it from
+            // elapsed time — synthesis, startup and waiting can all consume time without draining.
+            var waited = 0L
+            while (track.playbackHeadPosition < offset && waited < MAX_DRAIN_WAIT_MS) {
                 delay(10)
+                waited += 10
             }
+            framesWritten = offset
+            framesPlayedAtReturn = track.playbackHeadPosition
         } finally {
             activeTrack = null
             runCatching { track.stop() }
             runCatching { track.release() }
         }
     }
+
+    /** Frames submitted to the sink by the last utterance, or 0 if none played. */
+    fun framesWritten(): Int = framesWritten
+
+    /** Playback position at the moment the last utterance completed. */
+    fun framesPlayedAtReturn(): Int = framesPlayedAtReturn
 
     private fun recordAccepted(
         samples: ShortArray,
@@ -238,5 +255,8 @@ class AndroidPlatformTtsEngine @Inject constructor(
     private companion object {
         /** The rate the shared echo reference and the correlator work at. */
         const val REFERENCE_RATE_HZ = 16_000
+
+        /** Upper bound on waiting for queued audio to drain, so a stuck sink cannot hang speak(). */
+        const val MAX_DRAIN_WAIT_MS = 10_000L
     }
 }

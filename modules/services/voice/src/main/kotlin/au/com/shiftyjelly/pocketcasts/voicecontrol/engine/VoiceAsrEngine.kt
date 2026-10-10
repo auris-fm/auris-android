@@ -120,6 +120,12 @@ class VoiceAsrEngine @Inject constructor(
             // as attached. The caller hands the stream over only on a true signal, so a start
             // that ends here leaves the stream owned by the caller and closed, never live with
             // no consumer.
+            //
+            // SCO ownership: a Bluetooth candidate is ACQUIRED before the engine starts, and the
+            // stream opened by acquisition is the one this pipeline attaches to. Opening SCO here
+            // would deadlock under the isolated-microphone rule (voice-control-core.md > Route
+            // acquisition), so the engine does not perform its own SCO setup even when the route
+            // is BluetoothA2dpOnly.
             if (!voiceAudioProcessor.attachCapture()) {
                 Timber.e("[VoicePipeline] capture attach failed — not listening")
                 return@launch
@@ -569,6 +575,108 @@ class VoiceAsrEngine @Inject constructor(
         // The ASR backend is owned by VoiceControlService and released in its teardown.
         backend = null
         Timber.i("[VoicePipeline] engine stopped")
+    }
+
+    /**
+     * @return true when SCO is confirmed connected, false when setup failed or timed out.
+     *
+     * The caller MUST NOT start capture on false: an unconfirmed route means the microphone the engine
+     * would read is not the one the route names, which is a silent substitution rather than a fallback.
+     */
+    @Suppress("DEPRECATION") // startBluetoothSco + SCO broadcast deprecated in API 33; no replacement
+    private suspend fun awaitBluetoothSco(): Boolean {
+        if (scoStarted) return true
+        var registeredReceiver: BroadcastReceiver? = null
+        var modeCaptured = false
+        try {
+            val connected = withTimeoutOrNull(SCO_CONNECT_TIMEOUT_MS) {
+                suspendCancellableCoroutine { cont ->
+                    val receiver = object : BroadcastReceiver() {
+                        override fun onReceive(ctx: Context, intent: Intent) {
+                            val state = intent.getIntExtra(
+                                AudioManager.EXTRA_SCO_AUDIO_STATE,
+                                AudioManager.SCO_AUDIO_STATE_ERROR,
+                            )
+                            Timber.i("[VoicePipeline] sco state=%d", state)
+                            if (state == AudioManager.SCO_AUDIO_STATE_CONNECTED ||
+                                state == AudioManager.SCO_AUDIO_STATE_DISCONNECTED
+                            ) {
+                                context.unregisterReceiver(this)
+                                if (cont.isActive) cont.resumeWith(Result.success(state == AudioManager.SCO_AUDIO_STATE_CONNECTED))
+                            }
+                        }
+                    }
+                    context.registerReceiver(
+                        receiver,
+                        IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED),
+                    )
+                    registeredReceiver = receiver
+                    savedAudioMode = audioManager.mode
+                    modeCaptured = true
+                    audioManager.mode = AudioManager.MODE_NORMAL
+                    audioManager.startBluetoothSco()
+                    scoStarted = true
+                    Timber.i("[VoicePipeline] sco requested, waiting")
+
+                    cont.invokeOnCancellation {
+                        try {
+                            context.unregisterReceiver(receiver)
+                        } catch (_: Exception) {
+                        }
+                        registeredReceiver = null
+                    }
+                }
+            }
+            if (connected != true) {
+                // Reported as a failure rather than a fallback: the caller stops the attempt. The flag
+                // is cleared so a later attempt is not skipped by a setup that never completed, and the
+                // SCO request issued above is torn down here since no stream will consume it.
+                Timber.w("[VoicePipeline] sco not confirmed — route setup failed")
+                rollbackFailedScoSetup(registeredReceiver, modeCaptured)
+                return false
+            }
+            return true
+        } catch (e: CancellationException) {
+            // Cancellation can land after register/mode change but before scoStarted —
+            // rollback restores mode / clears savedAudioMode (unregister is idempotent).
+            rollbackFailedScoSetup(registeredReceiver, modeCaptured)
+            throw e
+        } catch (e: Exception) {
+            // A failed setup is a failed route, not a fallback: the caller must not capture.
+            Timber.w(e, "[VoicePipeline] sco setup failed — route unavailable")
+            rollbackFailedScoSetup(registeredReceiver, modeCaptured)
+            return false
+        }
+    }
+
+    private fun rollbackFailedScoSetup(receiver: BroadcastReceiver?, modeCaptured: Boolean) {
+        if (receiver != null) {
+            try {
+                context.unregisterReceiver(receiver)
+            } catch (_: Exception) {
+            }
+        }
+        if (modeCaptured) {
+            try {
+                savedAudioMode?.let { audioManager.mode = it }
+            } catch (_: Exception) {
+            }
+            savedAudioMode = null
+        }
+        scoStarted = false
+    }
+
+    @Suppress("DEPRECATION") // stopBluetoothSco deprecated in API 33; no replacement
+    private fun closeBluetoothSco() {
+        if (!scoStarted) return
+        try {
+            audioManager.stopBluetoothSco()
+            savedAudioMode?.let { audioManager.mode = it }
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to stop Bluetooth SCO")
+        } finally {
+            scoStarted = false
+        }
     }
 
     /**

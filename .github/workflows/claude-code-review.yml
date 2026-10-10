@@ -203,6 +203,13 @@ jobs:
         # so the dependency is named here, beside the read — this is the whole bug: this step
         # previously read a path no earlier step had created, and failed on every run.
         #
+        # IN-PLACE BY DESIGN. This guard lives INSIDE the workflow it guards, unlike iOS and core,
+        # which need a separate workflow. It can, because the fetch above exists precisely so this
+        # step runs unconditionally: a separate workflow would lose that arrangement, and a step
+        # moved below the reviewed-head checkout below would silently stand down on exactly the
+        # workflow-touching PRs it is for. A repo-level check for "is there a guard workflow here"
+        # will not find one for Android, and that is correct rather than a gap.
+        #
         # The read-back check adopted as the fifth requirement: every job that writes a commit
         # status must declare statuses: write, because GitHub sets absent permissions to none and
         # the rejected write fails the job. The defect is CROSS-ARTIFACT — neither the step nor

@@ -36,6 +36,10 @@ end
 INLINE = "      - name: Record\n        run: gh api \"repos/\${REPOSITORY}/statuses/\${HEAD_SHA}\" -f state=success\n"
 SCRIPT = "      - name: finish\n        run: node \"$RUNNER_TEMP/claude-review.mjs\" finish\n"
 NOTHING = "      - run: ./gradlew spotlessCheck\n"
+# A call that has been disabled by commenting it out — the case the naive detector misread.
+COMMENTED_OUT = "      - name: review\n        run: |\n          set -euo pipefail\n          # gh api \"repos/\${REPOSITORY}/statuses/\${HEAD_SHA}\" -f state=success\n          echo disabled\n"
+# An indented comment, to pin that leading whitespace is handled.
+INDENTED_COMMENT = "      - name: review\n        run: |\n          if true; then\n            # gh api \"repos/\${REPOSITORY}/statuses/\${HEAD_SHA}\"\n            echo skipped\n          fi\n"
 
 # Two jobs: one really writes a status, one writes nothing. The writing job must be checked
 # and the silent job must NOT be reported — otherwise the control becomes noise and gets muted.
@@ -58,6 +62,11 @@ CASES = {
   'inline + permission ABSENT (the shipped defect)' => [job(INLINE, perms: ['contents: read']), 1, /does not declare statuses: write/],
   'inline + NO permissions block' => [job(INLINE, perms: []), 1, /declares no permissions block/],
   'a silent job alongside a writer is NOT reported (negative control)' => [MIXED, 0, /OK: 1 status-writing job/],
+  # THE FIX'S OWN FALSIFIER, from the merged file: a call that has been COMMENTED OUT is not an
+  # active one. The naive text match read it as a writer and demanded the permission for disabled
+  # code — the guard's defect shape one level down. If the comment-scoping is removed, this fails.
+  'a COMMENTED-OUT status call is not a writer' => [job(COMMENTED_OUT, perms: ['contents: read']), 1, /detector did not match/],
+  'a real call after an INDENTED comment is still a writer' => [job(INDENTED_COMMENT + INLINE, perms: ['contents: read']), 1, /does not declare statuses: write/],
   'no status writer anywhere (positive control)' => [job(NOTHING, perms: ['contents: read']).sub(/claude-review/, 'lint'), 1, /detector did not match/],
   # THE SCOPE CLAIM, AS A CASE. If a future editor narrows the detector, or widens the scope
   # note without widening the detector, this pair stops producing two DIFFERENT messages.

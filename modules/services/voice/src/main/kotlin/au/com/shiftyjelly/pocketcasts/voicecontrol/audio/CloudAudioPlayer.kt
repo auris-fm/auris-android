@@ -137,6 +137,13 @@ class CloudAudioPlayer(
         private set
 
     /**
+     * Submits one frame to the output and returns how many bytes the sink accepted (<= 0 for a
+     * refusal). Defaults to the real AudioTrack; a test can substitute a refusing writer so the
+     * refusal path is exercised deterministically rather than inferred from a code reading.
+     */
+    var writeToSink: ((track: AudioTrack, bytes: ByteArray, offset: Int, count: Int) -> Int)? = null
+
+    /**
      * Called when the sink refuses answer audio mid-turn.
      *
      * A refusal stops the answer, and without a path to the turn's result the caller could not tell
@@ -345,12 +352,17 @@ class CloudAudioPlayer(
                 // the remainder, or answer audio is silently lost while the turn is still active.
                 var offset = 0
                 while (offset < pcmBytes.size) {
-                    val written = track.write(
-                        pcmBytes,
-                        offset,
-                        pcmBytes.size - offset,
-                        AudioTrack.WRITE_BLOCKING,
-                    )
+                    val writer = writeToSink
+                    val written = if (writer != null) {
+                        writer(track, pcmBytes, offset, pcmBytes.size - offset)
+                    } else {
+                        track.write(
+                            pcmBytes,
+                            offset,
+                            pcmBytes.size - offset,
+                            AudioTrack.WRITE_BLOCKING,
+                        )
+                    }
                     if (written <= 0) {
                         // An explicit failure rather than a silent drop: stop this answer and report
                         // it, so the turn is not treated as a clean end.

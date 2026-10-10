@@ -175,26 +175,27 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Resolve the review model
-        # The model is one of the two levers on what a review costs, so a substitution must not be
-        # silent: an undefined secret evaluates to the empty string, and a fallback here would pick a
-        # model without anything in the run saying so. The resolved name is echoed and reported on the
-        # PR, so a spend comparison is founded on what actually ran.
+      - name: Require the review model to be configured
+        # FAILS BEFORE ANY MODEL ACCESS. A fallback here would run the review under a model nobody
+        # chose and, worse, SPEND on it: the setting exists to govern that spend, so discovering it was
+        # absent after the tokens are gone is the wrong order. An undefined secret evaluates to the
+        # empty string rather than erroring, so the absence has to be turned into a failure here.
+        #
+        # The value is not printed — existence is the requirement, not content.
         id: resolve-model
         if: steps.workflow-changes.outputs.skip != 'true'
         env:
           CONFIGURED_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
         run: |
           set -euo pipefail
-          if [ -n "${CONFIGURED_MODEL:-}" ]; then
-            MODEL="$CONFIGURED_MODEL"
-            echo "Review model: ${MODEL} (from ANTHROPIC_MODEL)"
-          else
-            MODEL="sonnet"
-            echo "::warning::ANTHROPIC_MODEL is not set; falling back to '${MODEL}'. The review cost comparison assumes this value, so set the secret to remove the ambiguity."
-            echo "Review model: ${MODEL} (fallback — ANTHROPIC_MODEL unset)"
+          if [ -z "${CONFIGURED_MODEL:-}" ]; then
+            echo "::error::ANTHROPIC_MODEL is not set (or resolves to empty). Refusing to run the review: it would select a model silently and spend on it. Set the repository secret and re-request the review."
+            exit 1
           fi
-          echo "model=${MODEL}" >> "$GITHUB_OUTPUT"
+          # Named, not valued: the model is one of the two levers on review cost, so a run must be
+          # attributable to the model that produced it.
+          echo "Review model: ${CONFIGURED_MODEL}"
+          echo "model=${CONFIGURED_MODEL}" >> "$GITHUB_OUTPUT"
 
       - name: Run Claude Code Review
         if: steps.workflow-changes.outputs.skip != 'true'

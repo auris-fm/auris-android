@@ -39,6 +39,15 @@ class VadCaptureReachabilityTest {
 
     @Test
     fun productionCapturePathReachesTheNativeVad() = runBlocking<Unit> {
+        // ORDERING REGRESSION. Capture must own its ONNX Runtime dependency: it previously resolved it
+        // with RTLD_NOLOAD only and so failed whenever wake/embedding/transcriber setup had not run
+        // first. Assert the precondition explicitly, so this test fails if that dependency returns —
+        // reverting the load fallback makes the assertion below unreachable (capture cannot start).
+        assertTrue(
+            "precondition: this process has NOT loaded onnxruntime via another component",
+            !MicrophoneCapture.isOnnxRuntimeLoaded(),
+        )
+
         // The TARGET app's context, not the test APK's: the native VAD reads the model from this
         // AssetManager, and the model ships in the app, not in the instrumentation APK.
         val targetContext = InstrumentationRegistry.getInstrumentation().targetContext
@@ -62,7 +71,7 @@ class VadCaptureReachabilityTest {
             // Give Oboe + the native VAD time to start, then assert the path is live.
             delay(3_000)
             assertTrue(
-                "native capture must be active on the production path",
+                "capture must start with onnxruntime not pre-loaded by another component",
                 capture.isRecording,
             )
             assertTrue("the capture flow must not fault", flowedWithoutFault)

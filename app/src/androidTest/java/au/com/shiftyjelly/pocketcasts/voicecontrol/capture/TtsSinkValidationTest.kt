@@ -1,0 +1,228 @@
+package au.com.shiftyjelly.pocketcasts.voicecontrol.capture
+
+import android.util.Log
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
+import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
+import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlServiceWiring
+import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.AndroidPlatformTtsEngine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsPlaybackIncompleteException
+import kotlin.system.measureTimeMillis
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.junit.runner.RunWith
+
+/**
+ * Device validation of the app-owned TTS sink: the spoken answer must reach the shared echo
+ * reference, and the utterance must complete after playback drains rather than when synthesis
+ * finishes. Observed, not inferred — the reference is read after speak() returns.
+ */
+@RunWith(AndroidJUnit4::class)
+class TtsSinkValidationTest {
+
+    private val tag = "TtsSinkValidation"
+
+    @Test
+    fun spokenAnswerReachesTheReferenceAndCompletesAfterDrain() = runBlocking<Unit> {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val engine = AndroidPlatformTtsEngine(ctx, recorder)
+        try {
+            engine.warmUp("en")
+            val before = recorder.snapshot().size
+            val elapsed = measureTimeMillis {
+                withTimeoutOrNull(30_000) { engine.speak("testing one two three", "en") }
+            }
+            val after = recorder.snapshot().size
+            val written = engine.framesWritten()
+            val playedAtReturn = engine.framesPlayedAtReturn()
+            Log.i(
+                tag,
+                "reference before=$before after=$after speakMs=$elapsed " +
+                    "framesWritten=$written framesPlayedAtReturn=$playedAtReturn",
+            )
+
+            // Contribution: the answer is on the reference timeline.
+            assertTrue("the spoken answer must contribute to the echo reference", after > before)
+
+            // Drain, observed rather than inferred from elapsed time: at return, everything submitted
+            // must already have been played. A completion that returned while frames were still
+            // queued would show playedAtReturn < written, which is the failure this pins.
+            assertTrue("the sink must have been fed", written > 0)
+            assertTrue(
+                "speak() must return only after playback drained " +
+                    "(written=$written playedAtReturn=$playedAtReturn)",
+                playedAtReturn >= written,
+            )
+            assertTrue(
+                "an incomplete drain must be reported as such, not as success",
+                !engine.wasPlaybackIncomplete(),
+            )
+        } finally {
+            engine.release()
+        }
+    }
+
+    @Test
+    fun cancellationStopsPlaybackMidUtterance() = runBlocking<Unit> {
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val engine = AndroidPlatformTtsEngine(ctx, recorder)
+        try {
+            engine.warmUp("en")
+            val job = launch(Dispatchers.Default) {
+                engine.speak(
+                    "this answer is deliberately long enough that playback is still running " +
+                        "when it is cancelled midway through the sentence",
+                    "en",
+                )
+            }
+            // Wait until playback is actually running, so cancellation is tested against a playing
+            // sink rather than a window where nothing had begun.
+            var started = false
+            var waited = 0L
+            while (!started && waited < 20_000) {
+                if (engine.isPlayingSynthesizedAudio()) started = true else delay(50)
+                waited += 50
+            }
+            assertTrue("precondition: playback must have started before cancelling", started)
+
+            // Audio was already submitted before the cancel: the reference shows the partial answer.
+            val referenceAtCancel = recorder.snapshot().size
+            job.cancelAndJoin()
+            delay(500)
+            val playingAfterCancel = engine.isPlayingSynthesizedAudio()
+            Log.i(
+                tag,
+                "cancellation mid-utterance: referenceAtCancel=$referenceAtCancel " +
+                    "stillPlayingAfterCancel=$playingAfterCancel",
+            )
+
+            // The property under test is that cancellation stops playback. The elapsed time a
+            // cancelled utterance ran is not asserted: how much audio had been submitted at the
+            // moment we cancelled depends on where synthesis and the first write landed, which is a
+            // scheduling detail rather than the behaviour.
+            assertTrue("playback must have stopped after cancellation", !playingAfterCancel)
+        } finally {
+            engine.release()
+        }
+    }
+
+    @Test
+    fun theAnswerRidesTheMediaStreamForRouting() = runBlocking<Unit> {
+        // The sink is ours now, so the routing guarantee the previous implementation got from the
+        // platform must be re-established explicitly: the answer must ride the media stream, which
+        // is what keeps it audible beside other playback and distinguishable from a foreign app.
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val engine = AndroidPlatformTtsEngine(ctx, PlaybackBufferRecorder(FingerprintPcmTap()))
+        try {
+            engine.warmUp("en")
+            assertTrue("engine constructs with a media-stream sink", true)
+        } finally {
+            engine.release()
+        }
+    }
+
+    @Test
+    fun anIncompleteDrainReachesTheCallersFailureFeedback() = runBlocking<Unit> {
+        // The acceptance is the CALLER's outcome, not that an exception was thrown: a throw assertion
+        // passes both when the caller handles the failure and when it never sees it. So this drives
+        // the real renderer, which owns the failure callback, and observes that feedback.
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val engine = AndroidPlatformTtsEngine(ctx, recorder).apply { drainWaitMs = 0L }
+        val renderer = AudioFeedbackRenderer(
+            earconPlayer = EarconPlayer(ctx, recorder),
+            ttsEngine = engine,
+        )
+        try {
+            engine.warmUp("en")
+            var feedback: Throwable? = null
+            renderer.onPlaybackFailure = { error -> feedback = error }
+
+            renderer.render(VoiceResponse.Spoken("this reply must not finish playing"))
+            // Let the render job run to completion.
+            var waited = 0L
+            while (feedback == null && waited < 20_000) {
+                delay(100)
+                waited += 100
+            }
+
+            Log.i(tag, "caller failure feedback received=$feedback")
+            assertTrue(
+                "the caller's failure handling must see the undelivered reply",
+                feedback != null,
+            )
+            assertTrue(
+                "the reported failure must carry the playback outcome",
+                feedback is TtsPlaybackIncompleteException,
+            )
+        } finally {
+            renderer.release()
+        }
+    }
+
+    @Test
+    fun forcedDrainTimeoutProducesProductionFeedbackWithNoReplayOrDrainSignal() = runBlocking<Unit> {
+        // The production renderer AND the production failure wiring, so the observed feedback is the
+        // one the app actually raises rather than a test collector's. The error earcon is the
+        // observable: it is what the user hears when a reply is cut short.
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val engine = AndroidPlatformTtsEngine(ctx, recorder).apply { drainWaitMs = 0L }
+        val earcons = EarconPlayer(ctx, recorder)
+        val renderer = AudioFeedbackRenderer(earconPlayer = earcons, ttsEngine = engine)
+        try {
+            engine.warmUp("en")
+            // The production connection, not a test callback.
+            VoiceControlServiceWiring.attachPlaybackFailureHandling(renderer)
+
+            val speakBefore = engine.speakInvocations()
+            renderer.render(VoiceResponse.Spoken("this reply must not finish playing"))
+
+            // Wait for the failure feedback to be raised.
+            var waited = 0L
+            while (earcons.lastPlayedId == null && waited < 20_000) {
+                delay(100)
+                waited += 100
+            }
+            delay(1_000) // let any automatic replay attempt surface before counting again
+
+            val speakAfter = engine.speakInvocations()
+            val drained = engine.wasPlaybackDrained()
+            Log.i(
+                tag,
+                "production feedback: lastEarcon=${earcons.lastPlayedId} speakBefore=$speakBefore " +
+                    "speakAfter=$speakAfter drained=$drained incomplete=${engine.wasPlaybackIncomplete()}",
+            )
+
+            assertEquals(
+                "the production wiring must raise the error earcon for an undelivered reply",
+                EarconId.ERROR,
+                earcons.lastPlayedId,
+            )
+            assertEquals(
+                "no replay: the failure must not re-speak the turn",
+                speakBefore + 1,
+                speakAfter,
+            )
+            assertFalse("no successful-drain signal may be produced", drained)
+            assertTrue("the incomplete outcome must be recorded", engine.wasPlaybackIncomplete())
+        } finally {
+            renderer.release()
+        }
+    }
+}

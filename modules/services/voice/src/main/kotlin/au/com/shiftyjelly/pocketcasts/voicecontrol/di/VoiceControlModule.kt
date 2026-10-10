@@ -9,6 +9,7 @@ import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.repositories.chromecast.CastManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.GoogleMlKitTranslator
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
+import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.foreground.ForegroundStateMonitor
@@ -238,7 +239,10 @@ abstract class VoiceControlModule {
 
         @Provides
         @Singleton
-        fun provideEarconPlayer(@ApplicationContext context: Context): EarconPlayer = EarconPlayer(context)
+        fun provideEarconPlayer(
+            @ApplicationContext context: Context,
+            playbackBufferRecorder: PlaybackBufferRecorder,
+        ): EarconPlayer = EarconPlayer(context, playbackBufferRecorder)
 
         @Provides
         @Singleton
@@ -252,7 +256,15 @@ abstract class VoiceControlModule {
         fun provideCloudAudioPlayer(
             @ApplicationContext context: Context,
             audioFeedbackRenderer: AudioFeedbackRenderer,
-        ): au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer(context).apply {
+            playbackBufferRecorder: PlaybackBufferRecorder,
+            routedOutputObserver: au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver,
+        ): au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer(
+            context = context,
+            playbackBufferRecorder = playbackBufferRecorder,
+            // The production connection: the monitor reads what this player observes, so a live stream
+            // decides the route instead of the enumerated availability.
+            routedOutputObserver = routedOutputObserver,
+        ).apply {
             // The cloud answer is audible output, but it is not produced by the feedback
             // renderer — so without this the gate's "we are making sound" stamp goes stale
             // while an answer plays, the answer is read as a foreign app, and the microphone

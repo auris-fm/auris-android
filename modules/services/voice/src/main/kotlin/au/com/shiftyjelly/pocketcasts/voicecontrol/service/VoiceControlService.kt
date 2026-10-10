@@ -32,6 +32,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentE
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.restoresAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.windowGenerationOf
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
 import dagger.hilt.android.AndroidEntryPoint
@@ -90,6 +91,9 @@ class VoiceControlService : Service() {
     private var mediaSession: MediaSession? = null
     private var currentMode: ListeningMode = ListeningMode.Off
 
+    /** Last route seen by the mode/route observer, so a change (not a recomputation) retires. */
+    private var lastObservedRoute: AudioRoute? = null
+
     companion object {
         private const val COMMAND_DEBOUNCE_MS = 2000L
         internal const val STOP_ACTION = "au.com.shiftyjelly.pocketcasts.voicecontrol.action.STOP"
@@ -109,6 +113,20 @@ class VoiceControlService : Service() {
         return START_NOT_STICKY
     }
 
+    /**
+     * Drives one turn's spoken response through the renderer with this service's failure handling
+     * attached. Extracted from the coroutine so the production connection — the assignment below —
+     * is observable to a test, which must fail if it is removed: a test that installs its own
+     * callback verifies the callback, not that the service installs one.
+     */
+    internal suspend fun renderWithFailureHandling(
+        intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
+    ) {
+        VoiceControlServiceWiring.attachPlaybackFailureHandling(audioFeedbackRenderer)
+        val response = voicePlaybackIntentExecutor.execute(intent)
+        audioFeedbackRenderer.render(response)
+    }
+
     private fun startVoiceControl() {
         if (engineStarted) {
             Timber.i("Voice control already started")
@@ -124,6 +142,9 @@ class VoiceControlService : Service() {
         try {
             val notification = notificationManager.createDownloadingNotification()
             startForeground(notificationManager.notificationId, notification)
+            // Record the playback reference for the lifetime of this capture session, so the
+            // signal filter has what the client submitted for playback to correlate against.
+            playbackBufferRecorder.start(serviceScope)
             // Only now is the service really running: Android refuses a microphone foreground
             // service started from an ineligible app state, and that refusal throws below.
             voiceControlServiceController.onServiceStarted()
@@ -149,6 +170,13 @@ class VoiceControlService : Service() {
                     audioRouteMonitor.route,
                 ) { mode, _ -> mode }.onEach { mode ->
                     val route = audioRouteMonitor.route.value
+                    // A route change alters the acoustic path, so the recorded reference no longer
+                    // describes what reaches the microphone at that delay. Retire it (keeping only
+                    // the delay tail) rather than letting a stale reference match later speech.
+                    if (route != lastObservedRoute) {
+                        if (lastObservedRoute != null) playbackBufferRecorder.retire()
+                        lastObservedRoute = route
+                    }
                     val micExposure = route.toMicExposure()
                     when (mode) {
                         ListeningMode.Off -> {
@@ -318,7 +346,7 @@ class VoiceControlService : Service() {
                 backend = backend,
                 audioRoute = audioRouteMonitor.route.value,
                 listeningMode = mode,
-                playbackBufferProvider = playbackBufferRecorder::snapshot,
+                playbackBufferProvider = playbackBufferRecorder::reference,
                 micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
                 onIntent = { intent -> handleIntent(intent) },
             )
@@ -362,8 +390,7 @@ class VoiceControlService : Service() {
         lastCommandTime = now
 
         serviceScope.launch(Dispatchers.IO) {
-            val response = voicePlaybackIntentExecutor.execute(intent)
-            audioFeedbackRenderer.render(response)
+            renderWithFailureHandling(intent)
             gracePeriodSignal.onCommandRecognized(
                 fromGeneration = intent.windowGenerationOf(),
                 restoresAllowance = intent.restoresAllowance(),
@@ -403,6 +430,7 @@ class VoiceControlService : Service() {
     private fun stopVoiceControl() {
         Timber.i("Stopping voice control service")
         modeJob?.cancel()
+        playbackBufferRecorder.stop()
         stopEngine()
         wiredBackend?.release()
         wiredBackend = null

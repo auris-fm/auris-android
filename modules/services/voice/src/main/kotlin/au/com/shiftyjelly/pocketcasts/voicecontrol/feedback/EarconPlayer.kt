@@ -2,43 +2,177 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.feedback
 
 import android.content.Context
 import android.media.AudioAttributes
-import android.media.SoundPool
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
+import android.media.MediaPlayer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
+import java.io.InputStream
+import javax.inject.Inject
+import kotlin.math.roundToInt
+import timber.log.Timber
 
-class EarconPlayer(context: Context) {
-    private val soundPool: SoundPool
-    private val idToSoundId: Map<EarconId, Int>
+/**
+ * Plays the bundled earcons through an [AudioTrack] this app owns, so the samples sent to the output
+ * are known and can be recorded into the shared echo reference.
+ *
+ * Audible fidelity is preserved: the clip is played at its own rate. Only the *copy* that enters the
+ * reference is normalized to the reference's 16 kHz, so the output sink and the reference are
+ * allowed different rates and the cue is not band-limited just to simplify the correlator.
+ */
+class EarconPlayer(
+    context: Context,
+    private val playbackBufferRecorder: PlaybackBufferRecorder? = null,
+) {
+    private val appContext = context.applicationContext
+    private val clips: Map<EarconId, EarconClip>
+    private var track: AudioTrack? = null
     private var released = false
 
     init {
-        val attrs = earconAudioAttributes()
-        soundPool = SoundPool.Builder()
-            .setMaxStreams(1)
-            .setAudioAttributes(attrs)
-            .build()
-
-        idToSoundId = EarconId.entries.associateWith { id ->
-            val resId = context.resources.getIdentifier(
+        clips = EarconId.entries.associateWithNotNull { id ->
+            val resId = appContext.resources.getIdentifier(
                 "earcon_${id.name.lowercase()}",
                 "raw",
-                context.packageName,
+                appContext.packageName,
             )
-            if (resId != 0) soundPool.load(context, resId, 1) else 0
+            if (resId == 0) {
+                null
+            } else {
+                runCatching {
+                    appContext.resources.openRawResource(resId).use { decodeWavToMono(it) }
+                }.onFailure { Timber.w(it, "[Earcon] failed to decode %s", id) }.getOrNull()
+            }
         }
     }
 
+    /** The last earcon this player started, so a caller or test can observe that feedback sounded. */
+    @Volatile
+    var lastPlayedId: EarconId? = null
+        private set
+
+    /** Plays [id] and reports whether it actually started. */
     fun play(id: EarconId): Boolean {
         if (released) return false
-        val soundId = idToSoundId[id] ?: return false
-        if (soundId == 0) return false
-        soundPool.play(soundId, 1.0f, 1.0f, 1, 0, 1.0f)
-        return true
+        val clip = clips[id] ?: return false
+        if (clip.samples.isEmpty()) return false
+        return try {
+            val audioTrack = ensureTrack(clip.sampleRateHz)
+            // Write first, then record only what the sink ACCEPTED, so a partial write cannot leave
+            // the reference claiming audio that was never submitted for playback.
+            var offset = 0
+            while (offset < clip.samples.size) {
+                val written = audioTrack.write(clip.samples, offset, clip.samples.size - offset)
+                if (written <= 0) {
+                    Timber.w("[Earcon] AudioTrack.write returned $written")
+                    return false
+                }
+                clip.recordAccepted(offset, written, playbackBufferRecorder)
+                offset += written
+            }
+            lastPlayedId = id
+            true
+        } catch (e: Exception) {
+            Timber.w(e, "[Earcon] play failed")
+            false
+        }
     }
 
     fun release() {
         released = true
-        soundPool.release()
+        track?.runCatching {
+            stop()
+            release()
+        }
+        track = null
     }
+
+    private fun ensureTrack(sampleRateHz: Int): AudioTrack {
+        val current = track
+        if (current != null) {
+            if (current.sampleRate == sampleRateHz) return current
+            // The bundled clips share a rate; if one ever differs, recreate rather than play it at
+            // the wrong rate, which would change its pitch and duration.
+            current.runCatching {
+                stop()
+                release()
+            }
+            track = null
+        }
+        val minBuffer = AudioTrack.getMinBufferSize(
+            sampleRateHz,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        val created = AudioTrack.Builder()
+            .setAudioAttributes(earconAudioAttributes())
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(sampleRateHz)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .build(),
+            )
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .setBufferSizeInBytes(minBuffer)
+            .build()
+        created.play()
+        track = created
+        return created
+    }
+
+    /**
+     * Decodes a PCM WAV resource to mono 16 kHz 16-bit samples.
+     *
+     * Handles the format the bundles actually use (16-bit PCM, possibly stereo); anything else is
+     * rejected rather than silently mis-read, since a wrong interpretation would put wrong audio in
+     * the reference.
+     */
+    private fun decodeWavToMono(input: InputStream): EarconClip {
+        val clip = EarconAudio.decodeWavToMono(input)
+        return EarconClip(clip.samples, clip.sampleRateHz)
+    }
+
+    /**
+     * A decoded earcon: the samples to PLAY at their own [sampleRateHz], plus the normalized copy
+     * that goes into the reference. The two are deliberately separate — playback keeps its full
+     * bandwidth, and only the correlation works at the reference's rate.
+     */
+    private inner class EarconClip(
+        val samples: ShortArray,
+        val sampleRateHz: Int,
+    ) {
+        /**
+         * Records the portion of this clip the sink accepted, on the reference's timeline.
+         *
+         * The accepted slice is converted to the reference rate, so a partial write leaves the
+         * reference holding exactly the audio that was submitted, not the whole clip.
+         */
+        fun recordAccepted(startSample: Int, count: Int, recorder: PlaybackBufferRecorder?) {
+            if (recorder == null || count <= 0) return
+            val forReference = EarconAudio.resampleRange(
+                samples = samples,
+                fromRate = sampleRateHz,
+                toRate = REFERENCE_RATE_HZ,
+                startSample = startSample,
+                count = count,
+            )
+            recorder.write(FloatArray(forReference.size) { forReference[it] / 32768f })
+        }
+    }
+
+    private inline fun <K, V : Any> Iterable<K>.associateWithNotNull(valueSelector: (K) -> V?): Map<K, V> {
+        val result = LinkedHashMap<K, V>()
+        for (key in this) {
+            valueSelector(key)?.let { result[key] = it }
+        }
+        return result
+    }
+
     internal companion object {
+        /** The rate the shared echo reference and the correlator work at. */
+        const val REFERENCE_RATE_HZ = 16_000
+
         /**
          * The stream earcons ride.
          *

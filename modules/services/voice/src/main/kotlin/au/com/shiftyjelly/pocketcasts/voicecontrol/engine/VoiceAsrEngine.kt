@@ -69,7 +69,7 @@ class VoiceAsrEngine @Inject constructor(
     private var processingJob: Job? = null
     private var scoStarted = false
     private var savedAudioMode: Int? = null
-    private var playbackBufferProvider: (() -> FloatArray)? = null
+    private var playbackBufferProvider: (() -> PlaybackReference)? = null
 
     private var backend: AsrBackend? = null
     private var onIntent: ((VoiceIntent) -> Unit)? = null
@@ -83,7 +83,7 @@ class VoiceAsrEngine @Inject constructor(
         backend: AsrBackend,
         audioRoute: AudioRoute,
         listeningMode: ListeningMode,
-        playbackBufferProvider: () -> FloatArray,
+        playbackBufferProvider: () -> PlaybackReference,
         micExposureProvider: () -> MicExposure,
         onIntent: (VoiceIntent) -> Unit,
     ) {
@@ -107,7 +107,16 @@ class VoiceAsrEngine @Inject constructor(
                 return@launch
             }
             if (audioRoute is AudioRoute.BluetoothA2dpOnly) {
-                awaitBluetoothSco()
+                // A route that requires SCO must not proceed on an unconfirmed input. Continuing would
+                // capture from whatever the phone falls back to — a different microphone from the one
+                // the route claims — and nothing would say so: the user would hear the wake earcon,
+                // speak, and get a transcript from the wrong input. That is silent degradation, so the
+                // attempt stops here and says so instead.
+                if (!awaitBluetoothSco()) {
+                    Timber.w("[VoicePipeline] SCO unavailable for route=%s — not starting capture", audioRoute)
+                    audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+                    return@launch
+                }
             }
             try {
                 voiceAudioProcessor.startProcessing().collect { result ->
@@ -261,8 +270,9 @@ class VoiceAsrEngine @Inject constructor(
         val floatSamples = request.samples
 
         // Filter out playback bleed before transcribing
-        val playbackBuffer = playbackBufferProvider?.invoke() ?: FloatArray(0)
-        if (!utteranceFilter.shouldProcess(floatSamples, false, 0, playbackBuffer)) {
+        val playbackReference = playbackBufferProvider?.invoke()
+            ?: PlaybackReference(FloatArray(0), sampleRateHz, startPositionMs = null)
+        if (!utteranceFilter.shouldProcessReference(floatSamples, false, 0, playbackReference)) {
             Timber.i("[VoicePipeline] → drop (bleed filter)")
             return
         }
@@ -539,9 +549,15 @@ class VoiceAsrEngine @Inject constructor(
         Timber.i("[VoicePipeline] engine stopped")
     }
 
+    /**
+     * @return true when SCO is confirmed connected, false when setup failed or timed out.
+     *
+     * The caller MUST NOT start capture on false: an unconfirmed route means the microphone the engine
+     * would read is not the one the route names, which is a silent substitution rather than a fallback.
+     */
     @Suppress("DEPRECATION") // startBluetoothSco + SCO broadcast deprecated in API 33; no replacement
-    private suspend fun awaitBluetoothSco() {
-        if (scoStarted) return
+    private suspend fun awaitBluetoothSco(): Boolean {
+        if (scoStarted) return true
         var registeredReceiver: BroadcastReceiver? = null
         var modeCaptured = false
         try {
@@ -584,18 +600,24 @@ class VoiceAsrEngine @Inject constructor(
                 }
             }
             if (connected != true) {
-                Timber.w("[VoicePipeline] sco timeout/fallback — proceeding without confirmed SCO")
-                // Leave scoStarted as set if startBluetoothSco was issued; closeBluetoothSco
-                // still cleans up on stop. Capture continues on the best available input.
+                // Reported as a failure rather than a fallback: the caller stops the attempt. The flag
+                // is cleared so a later attempt is not skipped by a setup that never completed, and the
+                // SCO request issued above is torn down here since no stream will consume it.
+                Timber.w("[VoicePipeline] sco not confirmed — route setup failed")
+                rollbackFailedScoSetup(registeredReceiver, modeCaptured)
+                return false
             }
+            return true
         } catch (e: CancellationException) {
             // Cancellation can land after register/mode change but before scoStarted —
             // rollback restores mode / clears savedAudioMode (unregister is idempotent).
             rollbackFailedScoSetup(registeredReceiver, modeCaptured)
             throw e
         } catch (e: Exception) {
-            Timber.w(e, "[VoicePipeline] sco setup failed — falling back to phone mic")
+            // A failed setup is a failed route, not a fallback: the caller must not capture.
+            Timber.w(e, "[VoicePipeline] sco setup failed — route unavailable")
             rollbackFailedScoSetup(registeredReceiver, modeCaptured)
+            return false
         }
     }
 

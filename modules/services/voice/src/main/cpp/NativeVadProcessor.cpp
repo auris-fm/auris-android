@@ -14,8 +14,6 @@
 extern float sileroVadPredict(const int16_t* samples, int32_t count);
 extern void sileroVadResetState();
 
-using Clock = std::chrono::steady_clock;
-
 // ---------------------------------------------------------------------------
 // NativeVadProcessor
 // ---------------------------------------------------------------------------
@@ -71,7 +69,6 @@ void NativeVadProcessor::stop() {
     mSpeechActive = false;
     mConsecutiveSilentFrames = 0;
     mDrainRemaining = 0;
-    mCooldownUntilUs = 0;
 
     {
         std::lock_guard<std::mutex> lock(mSpeechMutex);
@@ -94,6 +91,27 @@ int NativeVadProcessor::waitForEvent(int32_t timeoutMs) {
     mPendingEvent = 0;
     mEventReady = false;
     return event;
+}
+
+NativeVadProcessor::VadDiagnostics NativeVadProcessor::getDiagnostics() {
+    VadDiagnostics d;
+    d.lastRms = mLastRms.load(std::memory_order_relaxed);
+    d.lastScore = mLastScore.load(std::memory_order_relaxed);
+    d.lastGatePassed = mLastGatePassed.load(std::memory_order_relaxed);
+    d.lastIsSpeech = mLastIsSpeech.load(std::memory_order_relaxed);
+    d.speechFrames = mDiagSpeechFrames.load(std::memory_order_relaxed);
+    d.speechActive = mDiagSpeechActive.load(std::memory_order_relaxed);
+    d.silentFrames = mDiagSilentFrames.load(std::memory_order_relaxed);
+    d.drainRemaining = mDiagDrainRemaining.load(std::memory_order_relaxed);
+    return d;
+}
+
+void NativeVadProcessor::setDiagnosticsEnabled(bool enabled) {
+    mDiagnosticsEnabled.store(enabled, std::memory_order_relaxed);
+}
+
+int64_t NativeVadProcessor::getFramesConsumed() {
+    return mFramesConsumed.load(std::memory_order_relaxed);
 }
 
 int32_t NativeVadProcessor::getSpeechPcmSize() {
@@ -133,6 +151,12 @@ bool NativeVadProcessor::energyGate(const int16_t* samples, int32_t count) {
         sum += v * v;
     }
     double rms = std::sqrt(sum / static_cast<double>(count));
+    // Record the value this gate compared when diagnostics are on, so the diagnosis reports the gate's
+    // own number rather than recomputing it: two copies of one formula drift apart the moment either
+    // frame size or threshold changes.
+    if (mDiagnosticsEnabled.load(std::memory_order_relaxed)) {
+        mLastRms.store(rms, std::memory_order_relaxed);
+    }
     return rms >= kRmsThreshold;
 }
 
@@ -202,56 +226,65 @@ void NativeVadProcessor::runLoop() {
         if (read < kVadFrameSize) {
             continue; // timeout — retry
         }
+        // A full frame was read: count it, so callers can tell "capture is running" from "captured
+        // audio is actually reaching the VAD" even while no speech event fires.
+        mFramesConsumed.fetch_add(1, std::memory_order_relaxed);
 
 
-        // 2. Cooldown gate — discard frames while cooldown is active.
-        int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
-            Clock::now().time_since_epoch()).count();
-        if (nowUs < mCooldownUntilUs) {
-            // Still in cooldown: add to context buffer (so we have pre-speech
-            // audio when cooldown expires) but don't process.
-            addToContext(mContextBuffer, mContextHead, mContextCount,
-                chunk, kMaxContextFrames, kVadFrameSize);
-            continue;
-        }
+        // 2. No cooldown gate and no forced duration endpoint. Internal framing retains and joins
+        // audio until the natural endpoint, so no captured frames are discarded and no truncated
+        // request is ever published. A duration limit, if one is introduced, must surface as an
+        // explicit fault rather than a silent endpoint (see the guard below).
 
-        // 3. Max-duration check.
-        if (mSpeechActive && mSpeechFrames >= kMaxSpeechFrames) {
-            LOGI("VAD: max duration exceeded (%d frames), finalizing",
+        // 3. Fault guard — a detector stuck active past a hard ceiling is a surfaced fault, not
+        // ordinary long speech. It must NOT emit a completed utterance: the frames are neither
+        // finalised nor handed to ASR. Returning the stop sentinel ends the stream so the caller
+        // sees a fault instead of a plausible-looking truncated segment.
+        if (mSpeechActive && mSpeechFrames >= kStuckDetectorFrameLimit) {
+            LOGE("VAD: detector stuck active (%d frames); surfacing fault, no segment emitted",
                 mSpeechFrames);
-
             {
                 std::lock_guard<std::mutex> lock(mSpeechMutex);
-                mSnapshotBuffer = std::move(mSpeechBuffer);
-                mSnapshotSpeechOnsetSample = mSpeechOnsetSample;
-                        mSnapshotSpeechEndSample = mSpeechEndSample;
+                mSnapshotBuffer.clear();
+                mSnapshotSpeechOnsetSample = 0;
+                mSnapshotSpeechEndSample = 0;
                 mSpeechBuffer.clear();
             }
-
             mSpeechFrames = 0;
             mSpeechOnsetSample = 0;
-                    mSpeechEndSample = 0;
+            mSpeechEndSample = 0;
             mSpeechActive = false;
             mConsecutiveSilentFrames = 0;
             mDrainRemaining = 0;
             mContextCount = 0;
             mContextHead = 0;
-            mCooldownUntilUs = nowUs + kCooldownMs * 1000;
 
+            mActive.store(false, std::memory_order_release);
             std::lock_guard<std::mutex> lock(mEventMutex);
-            mPendingEvent = 2; // speech ended
+            mPendingEvent = -1; // stopped: fault, not a speech end
             mEventReady = true;
             mEventCv.notify_one();
-
-            continue;
+            break;
         }
 
         // 4. Energy gate — skip Silero VAD for silent frames.
         bool hasEnergy = energyGate(chunk, kVadFrameSize);
+        float prob = 0.0f;
         bool isSpeech = false;
         if (hasEnergy) {
-            float prob = sileroVadPredict(chunk, kVadFrameSize);
+            prob = sileroVadPredict(chunk, kVadFrameSize);
             isSpeech = (prob >= kSpeechThreshold);
+        }
+        // Diagnosis only, and only when enabled: the values the detector compared for this frame. The
+        // RMS comes from the gate itself (recorded above), so there is one formula, not two.
+        if (mDiagnosticsEnabled.load(std::memory_order_relaxed)) {
+            mLastScore.store(prob, std::memory_order_relaxed);
+            mLastGatePassed.store(hasEnergy, std::memory_order_relaxed);
+            mLastIsSpeech.store(isSpeech, std::memory_order_relaxed);
+            mDiagSpeechFrames.store(mSpeechFrames, std::memory_order_relaxed);
+            mDiagSpeechActive.store(mSpeechActive, std::memory_order_relaxed);
+            mDiagSilentFrames.store(mConsecutiveSilentFrames, std::memory_order_relaxed);
+            mDiagDrainRemaining.store(mDrainRemaining, std::memory_order_relaxed);
         }
 
         // 5. Speech detected.
@@ -342,7 +375,6 @@ void NativeVadProcessor::runLoop() {
                     mDrainRemaining = 0;
                     mContextCount = 0;
                     mContextHead = 0;
-                    mCooldownUntilUs = nowUs + kCooldownMs * 1000;
 
                     std::lock_guard<std::mutex> lock(mEventMutex);
                     mPendingEvent = 2; // speech ended

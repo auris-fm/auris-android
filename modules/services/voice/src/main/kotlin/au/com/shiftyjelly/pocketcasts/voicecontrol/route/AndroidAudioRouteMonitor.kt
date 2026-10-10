@@ -21,9 +21,27 @@ import kotlinx.coroutines.launch
 class AndroidAudioRouteMonitor @Inject constructor(
     @ApplicationContext context: Context,
     private val gracePeriodSignal: GracePeriodSignal,
+    /**
+     * Where an owned stream reports its output actually goes, or null when that is not knowable.
+     *
+     * Enumeration says what COULD be an output; this says what one IS routed to, so it is the stronger
+     * input when present. It is a provider rather than a value because the answer belongs to whichever
+     * stream is live, and it is nullable because an unknown route must stay unknown: treating a missing
+     * answer as the speaker would be a claim the platform has not made.
+     */
+    private val routedOutputObserver: RoutedOutputObserver? = null,
+    /**
+     * The device types the platform offers, injectable so a test can present an available device that
+     * no stream is routed to — the case that distinguishes the two surfaces.
+     */
+    private val enumeratedDeviceTypes: (() -> EnumeratedDevices)? = null,
 ) : AudioRouteMonitor {
+
+    /** Output and input types the platform enumerates, as one value so they cannot be read apart. */
+    data class EnumeratedDevices(val outputs: List<Int>, val inputs: List<Int>)
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val mutableRoute = MutableStateFlow(readRoute())
+    private val mutableAvailability = MutableStateFlow(readAvailability())
     private val scope = CoroutineScope(Dispatchers.Default)
     private var debounceJob: Job? = null
 
@@ -31,23 +49,45 @@ class AndroidAudioRouteMonitor @Inject constructor(
     // A 500ms debounce prevents transient Headset(hasMicrophone=false) → NoMic
     // from killing the engine during the connection gap.
     override val route: StateFlow<AudioRoute> = mutableRoute.asStateFlow()
+    override val availability: StateFlow<AudioRoute> = mutableAvailability.asStateFlow()
 
     private val audioDeviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
-            scheduleRouteUpdate()
+            onDevicesChanged()
         }
 
         override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
-            scheduleRouteUpdate()
+            onDevicesChanged()
         }
     }
 
+    /**
+     * The device-event entry point, as the system invokes it.
+     *
+     * Kept internal so a test can deliver the event Android would deliver and observe the production
+     * debounce, route read and privacy closure that follow — the connection cannot be exercised from
+     * outside the process otherwise, and a test that assigns its own callback would only prove that a
+     * callback does what it says.
+     */
+    internal fun onDevicesChanged() = scheduleRouteUpdate()
+
     private fun scheduleRouteUpdate() {
+        // The privacy closure is the owning transition and must not wait on the debounce: grace ends
+        // when the device event arrives, not 500ms later when the route has stabilised. Taking it here
+        // also means a burst of events cannot defer it, and it is taken against the window that was
+        // current when the event arrived.
+        // The event is the fact; the route read is the derived value. Bluetooth devices enumerate
+        // incrementally, so reading immediately can catch a transient Headset(noMic) — that is what the
+        // debounce is for. Ending grace is not derived from the read, so it is taken here, once, on
+        // arrival: waiting would defer the owning transition, and a burst of events would defer it
+        // further, since each new event cancels the pending job.
+        gracePeriodSignal.onAudioRouteChanged()
+
         debounceJob?.cancel()
         debounceJob = scope.launch {
             delay(500L)
             mutableRoute.value = readRoute()
-            gracePeriodSignal.onAudioRouteChanged()
+            mutableAvailability.value = readAvailability()
         }
     }
 
@@ -57,12 +97,35 @@ class AndroidAudioRouteMonitor @Inject constructor(
 
     @Suppress("DEPRECATION") // isBluetoothScoOn deprecated in API 34; used to distinguish enumerated-but-inactive SCO
     private fun readRoute(): AudioRoute {
-        val outputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
-        val inputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).toList()
+        val devices = enumerated()
+        val outputDevices = devices.outputs
+        val inputDevices = devices.inputs
+
+        // Observed routing only. With no live stream reporting an output there is no routed answer, and
+        // Unknown is the honest one: falling back to enumeration here would substitute availability for
+        // the observation and impose headset setup on a session that may use the speaker.
+        val routed = routedOutputObserver?.current() ?: return AudioRoute.Unknown
+        return classifyRoute(
+            outputDeviceTypes = listOf(routed),
+            inputDeviceTypes = inputDevices,
+            bluetoothScoActive = audioManager.isBluetoothScoOn,
+        )
+    }
+
+    /** The injected enumeration when present, otherwise the platform's. */
+    private fun enumerated(): EnumeratedDevices = enumeratedDeviceTypes?.invoke() ?: EnumeratedDevices(
+        outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.type },
+        inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).map { it.type },
+    )
+
+    /** What the system offers, for setup and discovery. Never used to derive [route]. */
+    @Suppress("DEPRECATION") // isBluetoothScoOn deprecated in API 34; used to distinguish enumerated-but-inactive SCO
+    private fun readAvailability(): AudioRoute {
+        val devices = enumerated()
 
         return classifyRoute(
-            outputDeviceTypes = outputDevices.map { it.type },
-            inputDeviceTypes = inputDevices.map { it.type },
+            outputDeviceTypes = devices.outputs,
+            inputDeviceTypes = devices.inputs,
             // SCO I/O devices are enumerated for AirPods even when the SCO link is off
             // (A2DP music path). Only treat BT as a live headset mic when SCO is actually on.
             bluetoothScoActive = audioManager.isBluetoothScoOn,

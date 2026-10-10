@@ -2,12 +2,14 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.audio
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
+import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import java.nio.ByteBuffer
 import kotlin.math.max
 import kotlinx.coroutines.CoroutineScope
@@ -37,7 +39,16 @@ class CloudAudioPlayer(
     private val sampleRateHz: Int = 16000,
     private val channelConfig: Int = AudioFormat.CHANNEL_OUT_MONO,
     private val audioFormat: Int = AudioFormat.ENCODING_PCM_16BIT,
+    // Fed with the PCM this player actually sends to the output, so the shared echo reference holds
+    // the cloud answer as it is played. Null in contexts that do not run the echo filter.
+    private val playbackBufferRecorder: PlaybackBufferRecorder? = null,
+    // Publishes this player's observed output routing, so route-dependent decisions read where the audio
+    // actually goes rather than what is merely available. Null in contexts with no route consumer.
+    private val routedOutputObserver: au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver? = null,
 ) {
+    /** This stream's claim on the routed observation; cleared when the player retires. */
+    private val observedRoute = routedOutputObserver?.observe()
+
     /**
      * Audio attributes that route through the shared STREAM_MUSIC output path.
      *
@@ -71,6 +82,9 @@ class CloudAudioPlayer(
     private val frameBuffer = mutableListOf<ByteArray>()
     private var playing = false
     private var paused = false
+
+    /** Cumulative samples this player has submitted, used as the answer's playback position. */
+    private var submittedSamples = 0L
     private var released = false
     private var decodeCodec: MediaCodec? = null
     private var decodeBuffering = false
@@ -121,9 +135,48 @@ class CloudAudioPlayer(
     /** True while audio is actively being played (not paused, not idle). */
     val isPlaying: Boolean get() = playing && !paused
 
+    /**
+     * Where this player's output is ACTUALLY routed, or null when that cannot be known.
+     *
+     * `AudioRouting.getRoutedDevice()` reports the device a live stream is routed to, which is a
+     * different question from the enumerated availability the route monitor reads: a paired headset
+     * that media is not using is enumerated and not routed. Null is returned rather than a guess when
+     * the track is absent, inactive, or the platform has no routing yet — an unknown route must stay
+     * unknown, because reporting it as the speaker would be a claim the API has not made.
+     */
+    fun routedOutputDevice(): AudioDeviceInfo? {
+        val track = audioTrack ?: return null
+        if (!isPlaying) return null
+        return runCatching {
+            // Valid only while the stream is active; a released or stopped track reports null.
+            track.routedDevice
+        }.getOrNull()
+    }
+
     /** True when at least one frame was successfully written to the AudioTrack. */
     var audioWritten = false
+
+    /** Set when the sink refuses audio mid-answer, so the turn is stopped rather than silently gapped. */
+    @Volatile
+    private var audioWriteFailed = false
         private set
+
+    /**
+     * Submits one frame to the output and returns how many bytes the sink accepted (<= 0 for a
+     * refusal). Defaults to the real AudioTrack; a test can substitute a refusing writer so the
+     * refusal path is exercised deterministically rather than inferred from a code reading.
+     */
+    var writeToSink: ((track: AudioTrack, bytes: ByteArray, offset: Int, count: Int) -> Int)? = null
+
+    /**
+     * Called when the sink refuses answer audio mid-turn.
+     *
+     * A refusal stops the answer, and without a path to the turn's result the caller could not tell
+     * it from a clean end — the same gap the TTS path had. This reports the failure so the turn is
+     * not recorded as completed; it is deliberately separate from any server terminal outcome, which
+     * is a different fact and is not overwritten by a local playback failure.
+     */
+    var onWriteFailure: ((framesSubmitted: Long) -> Unit)? = null
 
     init {
         ensureAudioTrack()
@@ -214,6 +267,10 @@ class CloudAudioPlayer(
                 stopAudibleHeartbeat()
             }
         }
+        // The answer is no longer playing, so retire its reference contribution. Only the acoustic
+        // delay tail survives, so speech after the stop cannot be matched against audio that is
+        // already gone and dropped as bleed.
+        playbackBufferRecorder?.retire()
     }
 
     /**
@@ -235,6 +292,9 @@ class CloudAudioPlayer(
      * "consuming audio", the paused case breaks with it.
      */
     private fun startAudibleHeartbeat() {
+        // Sample the routed output alongside the audible stamp: the heartbeat already runs while this
+        // player is producing sound, which is exactly when its routing is the answer for route decisions.
+        observedRoute?.publish(audioTrack?.routedDevice)
         audibleHeartbeat?.cancel()
         onPlaybackAudibleChanged?.invoke(true)
         audibleHeartbeat = heartbeatScope.launch {
@@ -256,6 +316,7 @@ class CloudAudioPlayer(
 
     /** Release all resources. Must be called before the player is discarded. */
     fun release() {
+        observedRoute?.clear()
         if (released) return
         released = true
         stop()
@@ -316,17 +377,39 @@ class CloudAudioPlayer(
             }
 
             if (pcmBytes.isNotEmpty()) {
-                val written = track.write(
-                    pcmBytes,
-                    0,
-                    pcmBytes.size,
-                    AudioTrack.WRITE_BLOCKING,
-                )
-                if (written < 0) {
-                    Timber.w("[CloudAudio] AudioTrack.write returned $written")
-                    break
+                // Write the whole frame, tracking the accepted prefix: a short write must not drop
+                // the remainder, or answer audio is silently lost while the turn is still active.
+                var offset = 0
+                while (offset < pcmBytes.size) {
+                    val writer = writeToSink
+                    val written = if (writer != null) {
+                        writer(track, pcmBytes, offset, pcmBytes.size - offset)
+                    } else {
+                        track.write(
+                            pcmBytes,
+                            offset,
+                            pcmBytes.size - offset,
+                            AudioTrack.WRITE_BLOCKING,
+                        )
+                    }
+                    if (written <= 0) {
+                        // An explicit failure rather than a silent drop: stop this answer and report
+                        // it, so the turn is not treated as a clean end.
+                        Timber.w("[CloudAudio] AudioTrack.write returned $written; stopping answer")
+                        audioWriteFailed = true
+                        onWriteFailure?.invoke(submittedSamples)
+                        break
+                    }
+                    audioWritten = true
+                    // Record only what the sink accepted, so the reference never holds audio the
+                    // output rejected, and position it on the submitted-sample timeline.
+                    val floats = s16leBytesToFloats(pcmBytes, written, offset)
+                    val positionMs = (submittedSamples * 1_000L) / sampleRateHz
+                    playbackBufferRecorder?.write(floats, positionMs)
+                    submittedSamples += floats.size
+                    offset += written
                 }
-                audioWritten = true
+                if (audioWriteFailed) break
             }
         }
     }
@@ -402,6 +485,27 @@ class CloudAudioPlayer(
 
     companion object {
         private const val TAG = "CloudAudio"
+
+        /**
+         * Converts 16-bit little-endian PCM bytes to the float samples the echo reference stores.
+         * [lengthBytes] bounds what is read, so a partial AudioTrack write records only what the
+         * sink actually accepted rather than the whole decoded buffer.
+         */
+        internal fun s16leBytesToFloats(bytes: ByteArray, lengthBytes: Int, offset: Int = 0): FloatArray {
+            val samples = lengthBytes / 2
+            val out = FloatArray(samples)
+            for (i in 0 until samples) {
+                // Read from the chunk's own offset. Converting the remainder of a partially accepted
+                // frame from index 0 re-reads the frame's opening bytes for every chunk, so the
+                // reference holds duplicated, misaligned audio of a length that never matches what
+                // the sink took.
+                val lo = bytes[offset + i * 2].toInt() and 0xFF
+                val hi = bytes[offset + i * 2 + 1].toInt()
+                val v = (hi shl 8) or lo
+                out[i] = v.toShort() / 32768f
+            }
+            return out
+        }
 
         /**
          * How often to refresh the audible stamp while playing.

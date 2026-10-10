@@ -34,6 +34,8 @@ import org.mockito.kotlin.any
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
 
+@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
+@org.robolectric.annotation.Config(sdk = [30])
 @kotlinx.coroutines.ExperimentalCoroutinesApi
 class CloudRouteSinkTest {
 
@@ -1234,6 +1236,12 @@ class CloudRouteSinkTest {
         var commandRevision: Long = 0,
         val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
         private val locale: java.util.Locale = java.util.Locale.ENGLISH,
+        private val audioPlayer: au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer? = null,
+        /** Whether a privacy event has closed the window during this turn. */
+        var privacyClosed: Boolean = false,
+
+        /** Monotonic, so a closure during a turn is visible after a wake clears [privacyClosed]. */
+        var privacyClosures: Long = 0,
         // Keys built from the same constant the sink uses, so renaming the
         // wire code breaks these tests rather than silently detaching the
         // template from it.
@@ -1294,6 +1302,9 @@ class CloudRouteSinkTest {
             currentLocale = { locale },
             isHostPlaying = { host.playing },
             playbackCommandRevision = { commandRevision },
+            isPrivacyClosed = { privacyClosed },
+            privacyClosureCount = { privacyClosures },
+            audioPlayer = audioPlayer,
         )
     }
 
@@ -1366,5 +1377,137 @@ class CloudRouteSinkTest {
         override fun recordTurn(outcome: String, inputTokens: Int?, outputTokens: Int?) {
             calls += CloudRouteAnalyticsCall(outcome, inputTokens, outputTokens)
         }
+    }
+
+    @Test
+    fun `a refused answer traces through the sink to error feedback with the server outcome preserved`() = runTest {
+        // The whole acceptance: the injected writer refuses, the real player reports it, the sink
+        // turns it into user-visible feedback, AND the server's terminal outcome is still handled.
+        // A player callback alone would be narrower than this.
+        val player = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16_000,
+        ).apply {
+            var accepted = 0
+            writeToSink = { _, _, _, count -> if (accepted++ < 1) count else -1 }
+        }
+        val deps = TestDeps(
+            events = flow {
+                emit(CloudRouteEvent.Connected("pcm_s16le"))
+                emit(CloudRouteEvent.AudioFrame("pcm_s16le", ByteArray(4096) { 1 }))
+                emit(CloudRouteEvent.AudioFrame("pcm_s16le", ByteArray(4096) { 1 }))
+                emit(CloudRouteEvent.Done(0, 0))
+            },
+            audioPlayer = player,
+        )
+        try {
+            val response = deps.sink().routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext)
+            assertEquals(
+                "a refused answer must reach the user as an error, not a delivered reply",
+                VoiceResponse.Earcon(EarconId.ERROR),
+                response,
+            )
+            // The server outcome still arrived and was processed: the turn is recorded as done even
+            // though local playback failed, because the two are different facts.
+            assertTrue("the server terminal outcome must still be handled", deps.routeCalls.isNotEmpty())
+            // Output cleanup: the host player was ducked while the answer played, so it must be
+            // restored even though the answer was cut short — otherwise the user is left with a
+            // ducked episode and no answer.
+            assertTrue(
+                "output cleanup must restore the host player (calls=${deps.playback.calls})",
+                deps.playback.calls.contains("restore"),
+            )
+            assertTrue(
+                "the host must not be left ducked or paused (calls=${deps.playback.calls})",
+                deps.playback.calls.last() == "resume",
+            )
+        } finally {
+            player.release()
+        }
+    }
+
+    @Test
+    fun `a privacy closure blocks the restore, which the command revision cannot see`() = runTest(UnconfinedTestDispatcher()) {
+        // A privacy event (route loss, backgrounding) closes the voice window and does NOT pass
+        // through the playback layer, so it cannot advance the command revision. The turn must still
+        // decline to resume: restoring would restart playback the user's privacy action ended.
+        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
+
+        val route = launch { deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.pauseStarted.await()
+
+        // Privacy closes while the turn's own pause is in flight; the revision is untouched.
+        deps.privacyClosed = true
+        deps.playback.pauseGate?.complete(Unit)
+        route.join()
+
+        assertEquals(
+            "a privacy closure must not be resumed over (calls=${deps.playback.calls})",
+            listOf("pause"),
+            deps.playback.calls,
+        )
+    }
+
+    @Test
+    fun `a later turn is not blocked by an old closure flag once privacy reopens`() = runTest(UnconfinedTestDispatcher()) {
+        // The guard is scoped to whether the window is closed NOW, not to whether it ever was: a
+        // stale flag must not become a blanket ban on an unrelated later turn's cleanup.
+        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        // The closure was earlier and privacy has since reopened (a wake clears it).
+        deps.privacyClosed = false
+
+        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // The property is that an open window lets the turn restore its own pause: the host ends
+        // playing again. A stale flag would leave it paused.
+        assertTrue(
+            "a turn with an open window must resume what it paused (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("resume") && deps.host.playing,
+        )
+    }
+
+    @Test
+    fun `the guard does not block capture when no turn paused anything`() = runTest(UnconfinedTestDispatcher()) {
+        // A privacy closure must not be a blanket ban on ordinary playback: with no turn-owned pause
+        // there is nothing to restore, so nothing may be resumed or suppressed either.
+        val deps = TestDeps(hostPlaying = false, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        deps.privacyClosed = true
+
+        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertTrue(
+            "no turn-owned pause means no resume attempt (calls=${deps.playback.calls})",
+            deps.playback.calls.none { it == "resume" },
+        )
+    }
+
+    @Test
+    fun `a privacy closure invalidates the turn before any successor registers`() = runTest(UnconfinedTestDispatcher()) {
+        // The interval @spec named: A owns the turn and has paused the host; privacy closes A; a new
+        // wake clears the closure flag; A's delayed cleanup then lands BEFORE any successor cloud turn
+        // registers. `activeTurnId` is still A's, so ownership alone would let A through, and the live
+        // flag has been cleared. Only a latch on A itself can hold.
+        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
+        val sink = deps.sink()
+
+        val turnA = launch { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.pauseStarted.await()
+
+        // Privacy ends A, then a wake reopens the window before A's cleanup arrives. No successor
+        // registers in between — this is the gap the newer-cloud-turn test cannot see.
+        deps.privacyClosed = true
+        deps.privacyClosures += 1
+        deps.privacyClosed = false
+
+        deps.playback.pauseGate?.complete(Unit)
+        turnA.join()
+
+        assertEquals(
+            "a privacy-invalidated turn must not resume, even before a successor registers (calls=${deps.playback.calls})",
+            listOf("pause"),
+            deps.playback.calls.filter { it == "pause" || it == "resume" || it == "restore" },
+        )
     }
 }

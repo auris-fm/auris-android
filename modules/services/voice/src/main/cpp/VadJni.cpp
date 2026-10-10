@@ -67,10 +67,26 @@ static void cleanupOrt() {
 static bool initOrt(JNIEnv* env, jobject assetManager) {
     if (g_session) return true;
 
-    // libonnxruntime.so is already loaded by Moonshine's Transcriber.
-    // Resolve ORT from onnxruntime-android (loaded by System.loadLibrary).
+    // Resolve ORT from onnxruntime-android. Prefer an already-loaded copy (RTLD_NOLOAD avoids a
+    // second load), but load it ourselves when nothing has: this entry is reachable without
+    // WakeWordJni/EmbeddingJni having run first, and depending on their lifecycle made capture fail
+    // with "libonnxruntime.so not loaded" whenever it ran before them.
     void* ortLib = dlopen("libonnxruntime.so", RTLD_NOLOAD);
-    if (!ortLib) { g_errorMsg = "libonnxruntime.so not loaded"; return false; }
+    if (!ortLib) {
+        // Clear any stale error so the reason below is this attempt's, not an earlier call's.
+        dlerror();
+        ortLib = dlopen("libonnxruntime.so", RTLD_NOW);
+        if (!ortLib) {
+            // Keep the loader's own reason: with a load attempted, a failure can be a missing
+            // library, an ABI mismatch or an unresolved symbol, and folding them into one
+            // "not loaded" string would send a reader looking for the wrong problem.
+            const char* reason = dlerror();
+            g_errorMsg = reason != nullptr
+                ? std::string("libonnxruntime.so could not be loaded: ") + reason
+                : std::string("libonnxruntime.so could not be loaded");
+            return false;
+        }
+    }
 
     auto fnGetApiBase = (FnOrtGetApiBase)dlsym(ortLib, "OrtGetApiBase");
     if (!fnGetApiBase) { g_errorMsg = "OrtGetApiBase not found"; dlclose(ortLib); return false; }
@@ -263,6 +279,13 @@ bool vadEnsureInitialized(JNIEnv* env, jobject assetManager) {
         initOrt(env, assetManager);
     });
     return g_session != nullptr;
+}
+
+// Reason the last VAD initialization failed, or an empty string when it succeeded. The combined
+// start entry runs on the path production actually uses, so it must report why it failed rather
+// than returning an opaque false the way its sibling already avoids.
+extern "C" const char* vadLastError() {
+    return g_errorMsg.c_str();
 }
 
 } // extern "C"

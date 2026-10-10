@@ -35,9 +35,44 @@ public:
     int32_t getSpeechOnsetSample();
     int32_t getSpeechEndSample();
 
+    /**
+     * Frames this processor has consumed from the capture ring buffer since start(), whether or not
+     * they produced an event. Distinguishes "capture is running" from "captured audio is actually
+     * reaching the VAD", which a liveness check alone cannot tell apart in silence.
+     */
+    int64_t getFramesConsumed();
+
+    /**
+     * Aggregate diagnosis of the detector, for capture debugging only.
+     *
+     * Aggregates rather than raw audio: the fields are the last frame's energy-gate RMS and Silero
+     * score, the ones the detector itself compared, plus how many consecutive speech frames it has
+     * accepted and its endpoint state. No sample is exported, and the values carry no user content
+     * beyond a level. All fields are atomics read across threads.
+     */
+    struct VadDiagnostics {
+        double lastRms = 0.0;          // energy gate input for the most recent frame
+        float lastScore = 0.0f;        // Silero probability for the most recent frame
+        bool lastGatePassed = false;   // whether the energy gate let the frame through
+        bool lastIsSpeech = false;     // the detector's decision for the most recent frame
+        int32_t speechFrames = 0;      // frames accepted into the current utterance
+        bool speechActive = false;     // whether an utterance is open
+        int32_t silentFrames = 0;      // consecutive silent frames, for the endpoint
+        int32_t drainRemaining = 0;    // endpoint drain countdown
+    };
+    VadDiagnostics getDiagnostics();
+
+    /**
+     * Whether diagnostics are collected at all. Off unless a debug/test build turns them on, so a
+     * release build does not pay for them and cannot expose them.
+     */
+    void setDiagnosticsEnabled(bool enabled);
+
 private:
     void runLoop();
-    static bool energyGate(const int16_t* samples, int32_t count);
+    // Not static: the gate records the RMS it compared when diagnostics are on, so the diagnosis
+    // reports the gate's own value rather than recomputing the same formula elsewhere.
+    bool energyGate(const int16_t* samples, int32_t count);
 
     // Parameters (matching spec thresholds)
     static constexpr int32_t kVadFrameSize = 1024;        // 64ms @ 16kHz
@@ -45,8 +80,10 @@ private:
     static constexpr int32_t kMinPostSpeechFrames = 10;    // ~640ms drain floor
     static constexpr int32_t kTargetTotalFrames = 55;      // ~3.5s target
     static constexpr int32_t kMaxContextFrames = 20;       // ~1.28s pre-speech
-    static constexpr int32_t kMaxSpeechFrames = 78;         // ~5s max
-    static constexpr int32_t kCooldownMs = 1500;
+    // No forced speech-duration endpoint: framing retains and joins until the natural end. This
+    // ceiling only exists to surface a detector STUCK active as an explicit fault; it must be far
+    // above any plausible utterance so ordinary long speech is never affected.
+    static constexpr int32_t kStuckDetectorFrameLimit = 3750;  // ~240s @ 64ms frames
     static constexpr double kRmsThreshold = 200.0;
     static constexpr float kSpeechThreshold = 0.2f;
 
@@ -54,6 +91,20 @@ private:
 
     std::unique_ptr<std::thread> mThread;
     std::atomic<bool> mActive{false};
+
+    /** Frames read from the capture ring buffer since start(); read across threads for diagnostics. */
+    std::atomic<int64_t> mFramesConsumed{0};
+
+    /** Diagnostics: written by the VAD thread, read by Kotlin. Disabled in release builds. */
+    std::atomic<bool> mDiagnosticsEnabled{false};
+    std::atomic<double> mLastRms{0.0};
+    std::atomic<float> mLastScore{0.0f};
+    std::atomic<bool> mLastGatePassed{false};
+    std::atomic<bool> mLastIsSpeech{false};
+    std::atomic<int32_t> mDiagSpeechFrames{0};
+    std::atomic<bool> mDiagSpeechActive{false};
+    std::atomic<int32_t> mDiagSilentFrames{0};
+    std::atomic<int32_t> mDiagDrainRemaining{0};
 
     // Circular pre-speech context buffer: stores up to kMaxContextFrames of
     // silent audio frames before speech onset.
@@ -76,7 +127,6 @@ private:
 
     int32_t mConsecutiveSilentFrames = 0;
     int32_t mDrainRemaining = 0;
-    int64_t mCooldownUntilUs = 0;
 
     std::mutex mEventMutex;
     std::condition_variable mEventCv;

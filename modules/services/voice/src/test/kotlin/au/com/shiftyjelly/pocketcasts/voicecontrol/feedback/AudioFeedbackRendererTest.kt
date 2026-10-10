@@ -1,7 +1,12 @@
+@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+
 package au.com.shiftyjelly.pocketcasts.voicecontrol.feedback
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsEngine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsPlaybackIncompleteException
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -165,5 +170,59 @@ class AudioFeedbackRendererTest {
 
         assertTrue(silent, silent.contains("kind=silent"))
         assertTrue(earcon, earcon.contains("nothing_spoken"))
+    }
+
+    @Test
+    fun `an incomplete spoken reply reaches the caller's failure handling`() = runTest {
+        // Through the connection, not just the throw: a failing TTS engine must arrive at the
+        // renderer's failure callback. Asserting only that speak() throws would pass while the caller
+        // still saw success, which is the trap this test exists to avoid.
+        val failing = object : TtsEngine {
+            override suspend fun warmUp(language: String) = Unit
+            override suspend fun speak(text: String, language: String) {
+                throw TtsPlaybackIncompleteException(framesWritten = 100, framesPlayed = 40)
+            }
+
+            override fun release() = Unit
+        }
+        val renderer = AudioFeedbackRenderer(earconPlayer, failing)
+        var reported: Throwable? = null
+        var delivered = false
+        renderer.onPlaybackFailure = { error ->
+            reported = error
+            delivered = true
+        }
+
+        renderer.render(VoiceResponse.Spoken("a reply that will not finish"))
+        advanceUntilIdle()
+
+        assertTrue("the delivery failure must reach the caller's failure handling", delivered)
+        val error = reported
+        assertTrue("the failure must carry the playback outcome", error is TtsPlaybackIncompleteException)
+        assertEquals(40, (error as TtsPlaybackIncompleteException).framesPlayed)
+    }
+
+    @Test
+    fun `a delivery failure produces user-visible feedback, not just a flag`() = runTest {
+        // The service's handler for an undelivered reply plays the ERROR earcon, which is the same
+        // user-visible feedback the cloud path raises. This asserts the producing half: a renderer
+        // failure whose callback raises feedback. A flag nothing reads would satisfy neither.
+        val failing = object : TtsEngine {
+            override suspend fun warmUp(language: String) = Unit
+            override suspend fun speak(text: String, language: String) {
+                throw TtsPlaybackIncompleteException(framesWritten = 10, framesPlayed = 2)
+            }
+
+            override fun release() = Unit
+        }
+        val feedbackPlayer = mock<EarconPlayer>()
+        val renderer = AudioFeedbackRenderer(feedbackPlayer, failing)
+        // Mirrors VoiceControlService.onSpokenReplyNotDelivered.
+        renderer.onPlaybackFailure = { renderer.playEarcon(EarconId.ERROR) }
+
+        renderer.render(VoiceResponse.Spoken("a reply that will not finish"))
+        advanceUntilIdle()
+
+        verify(feedbackPlayer).play(EarconId.ERROR)
     }
 }

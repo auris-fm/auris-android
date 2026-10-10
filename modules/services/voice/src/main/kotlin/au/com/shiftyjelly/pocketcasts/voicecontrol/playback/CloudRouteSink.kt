@@ -65,6 +65,14 @@ class CloudRouteSink internal constructor(
      * restore over them.
      */
     private val playbackCommandRevision: () -> Long = { 0L },
+    /**
+     * Whether a privacy event has closed the window, so restoring the turn's pause would resume
+     * playback the user's own privacy action ended. A privacy closure does not go through the
+     * playback layer, so it does not advance the command revision and must be consulted separately.
+     */
+    private val isPrivacyClosed: () -> Boolean = { false },
+    /** Monotonic privacy-closure count; a change across the turn means privacy ended it. */
+    private val privacyClosureCount: () -> Long = { 0L },
     /** Audio player for cloud-delivered binary audio frames. */
     private val audioPlayer: CloudAudioPlayer? = null,
 ) : VoiceCloudRouteSink {
@@ -97,6 +105,8 @@ class CloudRouteSink internal constructor(
         currentLocale = currentLocale,
         isHostPlaying = { playbackContextMonitor.isHostAudioActive.value },
         playbackCommandRevision = playbackContextMonitor::playbackCommandRevision,
+        isPrivacyClosed = playbackContextMonitor::isPrivacyClosed,
+        privacyClosureCount = playbackContextMonitor::privacyClosureCount,
     )
 
     /**
@@ -176,7 +186,20 @@ class CloudRouteSink internal constructor(
         var handledResult = false
         var audioPlayed = false
         var ducked = false
+        // Latched: once a privacy event ends this turn, a later wake must not re-authorise it. Kept
+        // per-turn so an unrelated turn's closure cannot block this one either. Compared as a count
+        // taken when the turn commits to suspending, because a closure during the suspension is not
+        // observable afterwards: a wake clears the flag before this turn's cleanup runs.
+        var privacyClosuresAtPause: Long? = null
         var outcome: VoiceResponse? = null
+        // A local playback failure is a DIFFERENT fact from the turn's server terminal outcome, so it
+        // is tracked separately: the server result is preserved and reported as its own outcome, and
+        // the local failure is surfaced alongside it rather than replacing or replaying anything.
+        var localPlaybackFailed = false
+        audioPlayer?.onWriteFailure = { frames ->
+            localPlaybackFailed = true
+            Timber.w("[CloudRoute] answer audio was cut short by a sink refusal at %d frames", frames)
+        }
 
         // Everything from registration onward sits inside the cleanup path: a
         // throw or cancellation during setup (context build, route opening, the
@@ -221,7 +244,13 @@ class CloudRouteSink internal constructor(
             // the revision is sampled before it so a command that arrives during the suspension
             // is not swallowed into the value expected at restore.
             turnMutex.withLock {
-                if (activeTurnId == myId && !playerAutoPaused && isHostPlaying()) {
+                // Sample the monotonic closure count as the obligation is taken, under the same mutex
+                // that serializes registration and cleanup: a closure that lands while this turn is
+                // suspended is invisible to a live flag once a wake clears it, but stays visible as a
+                // count difference. A turn that starts after a closure samples the new count, so the
+                // closure neither blocks it nor excuses a resume it did not take.
+                if (activeTurnId == myId && !playerAutoPaused && isHostPlaying() && !isPrivacyClosed()) {
+                    privacyClosuresAtPause = privacyClosureCount()
                     pauseCommandRevision = playbackCommandRevision()
                     playerAutoPaused = true
                     playbackSink.pause()
@@ -287,7 +316,16 @@ class CloudRouteSink internal constructor(
                         if (tokenBuffer.isNotBlank()) {
                             conversationMemory.record(request, tokenBuffer)
                         }
+                        // The local playback failure is reported on its own axis, so the server's
+                        // terminal outcome is preserved rather than being rewritten by a local
+                        // fault. It is not a replay trigger either: the answer is simply reported
+                        // as not fully delivered.
+                        if (localPlaybackFailed) {
+                            Timber.w("[CloudRoute] turn completed on the server but its audio was cut short locally")
+                        }
                         outcome = when {
+                            localPlaybackFailed -> VoiceResponse.Earcon(EarconId.ERROR)
+
                             audioPlayer?.audioWritten == true -> VoiceResponse.Silent
 
                             audioPlayer != null -> {
@@ -406,7 +444,7 @@ class CloudRouteSink internal constructor(
                             playbackSink.restore()
                             ducked = false
                         }
-                        restoreTransientAudioState()
+                        restoreTransientAudioState(privacyInvalidatedSince(privacyClosuresAtPause))
                         activeTurnId = 0
                         activeTurn = null
                     }
@@ -452,14 +490,28 @@ class CloudRouteSink internal constructor(
     /** A client-owned line for [key], or empty when this locale must not be spoken to: [SpokenLine]. */
     private fun localizedTemplate(key: String): String = SpokenLine.forKey(key, templateResolver, currentLocale())
 
+    /**
+     * Whether a privacy closure happened after the turn took its pause obligation. A live flag cannot
+     * answer this: a later wake clears it while this turn is still suspended.
+     */
+    private fun privacyInvalidatedSince(atPause: Long?): Boolean = atPause != null && (isPrivacyClosed() || privacyClosureCount() != atPause)
+
     /** Owner-only: resume the player if this turn chain auto-paused it. */
-    private suspend fun restoreTransientAudioState() {
+    private suspend fun restoreTransientAudioState(privacyInvalidated: Boolean) {
         if (!playerAutoPaused) return
         playerAutoPaused = false
         // The turn is a long suspension, and playback can move underneath it.
         // Ownership is a question about commands, not state: a user who pressed
         // pause leaves the player in the same state the turn left it, so only a
         // command revision can tell their action from nobody acting.
+        //
+        // `privacyInvalidated` is this turn's own latch, not the live flag: a later wake clears the
+        // flag, and in the interval before its turn registers ownership is still this turn's, so the
+        // live flag would re-authorise a restore the user's privacy action ended.
+        if (privacyInvalidated) {
+            Timber.i("[VoicePipeline] cloud turn left playback alone (privacy closed)")
+            return
+        }
         if (playbackCommandRevision() != pauseCommandRevision) {
             Timber.i("[VoicePipeline] cloud turn left playback alone (someone else acted)")
             return

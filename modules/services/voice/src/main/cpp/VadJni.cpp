@@ -67,9 +67,14 @@ static void cleanupOrt() {
 static bool initOrt(JNIEnv* env, jobject assetManager) {
     if (g_session) return true;
 
-    // libonnxruntime.so is already loaded by Moonshine's Transcriber.
-    // Resolve ORT from onnxruntime-android (loaded by System.loadLibrary).
+    // Resolve ORT from onnxruntime-android. Prefer an already-loaded copy (RTLD_NOLOAD avoids a
+    // second load), but load it ourselves when nothing has: this entry is reachable without
+    // WakeWordJni/EmbeddingJni having run first, and depending on their lifecycle made capture fail
+    // with "libonnxruntime.so not loaded" whenever it ran before them.
     void* ortLib = dlopen("libonnxruntime.so", RTLD_NOLOAD);
+    if (!ortLib) {
+        ortLib = dlopen("libonnxruntime.so", RTLD_NOW);
+    }
     if (!ortLib) { g_errorMsg = "libonnxruntime.so not loaded"; return false; }
 
     auto fnGetApiBase = (FnOrtGetApiBase)dlsym(ortLib, "OrtGetApiBase");

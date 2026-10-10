@@ -30,6 +30,12 @@ class MicrophoneCapture @Inject constructor(
          * that capture succeeds without wake/embedding/transcriber setup having loaded it first.
          */
         fun isOnnxRuntimeLoaded(): Boolean = OboeNative.nativeIsOrtLoaded()
+
+        /**
+         * Frames the native VAD has consumed from capture since it started. Lets a test assert that
+         * captured audio actually reaches the VAD, which a liveness check cannot show in silence.
+         */
+        fun framesConsumed(): Long = OboeNative.nativeGetFramesConsumed()
     }
 
     private var activeEngine: OboeCaptureEngine? = null

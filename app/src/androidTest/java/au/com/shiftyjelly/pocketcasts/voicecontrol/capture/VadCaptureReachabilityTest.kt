@@ -75,6 +75,15 @@ class VadCaptureReachabilityTest {
                 capture.isRecording,
             )
             assertTrue("the capture flow must not fault", flowedWithoutFault)
+            // Captured audio must actually REACH the VAD, not merely have the capture running. A
+            // liveness check cannot show this in silence, because no speech event fires; the frame
+            // counter can.
+            val framesConsumed = MicrophoneCapture.framesConsumed()
+            Log.i(tag, "vad frames consumed=$framesConsumed")
+            assertTrue(
+                "captured frames must reach the native VAD (consumed=$framesConsumed)",
+                framesConsumed > 0,
+            )
         } finally {
             job.cancel()
             capture.stopCapture()

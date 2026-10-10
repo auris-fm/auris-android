@@ -93,6 +93,10 @@ int NativeVadProcessor::waitForEvent(int32_t timeoutMs) {
     return event;
 }
 
+int64_t NativeVadProcessor::getFramesConsumed() {
+    return mFramesConsumed.load(std::memory_order_relaxed);
+}
+
 int32_t NativeVadProcessor::getSpeechPcmSize() {
     std::lock_guard<std::mutex> lock(mSpeechMutex);
     return static_cast<int32_t>(mSnapshotBuffer.size());
@@ -199,6 +203,9 @@ void NativeVadProcessor::runLoop() {
         if (read < kVadFrameSize) {
             continue; // timeout — retry
         }
+        // A full frame was read: count it, so callers can tell "capture is running" from "captured
+        // audio is actually reaching the VAD" even while no speech event fires.
+        mFramesConsumed.fetch_add(1, std::memory_order_relaxed);
 
 
         // 2. No cooldown gate and no forced duration endpoint. Internal framing retains and joins

@@ -34,6 +34,9 @@ internal object OboeNative {
      * succeeds without wake/embedding/transcriber setup having run first.
      */
     external fun nativeIsOrtLoaded(): Boolean
+
+    /** Frames the VAD has consumed from capture since start, for reachability diagnostics. */
+    external fun nativeGetFramesConsumed(): Long
     external fun nativeWaitForVadEvent(timeoutMs: Int): Int
     external fun nativeGetSpeechPcm(buffer: ShortArray): Int
     external fun nativeGetSpeechPcmSize(): Int

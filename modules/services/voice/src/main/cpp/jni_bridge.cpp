@@ -194,6 +194,24 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
     return processor->getSpeechPcmSize();
 }
 
+// Frames the VAD has consumed from capture since start. Exposed so a test can assert captured audio
+// reaches the VAD, which a liveness check alone cannot show while no speech event fires.
+extern "C" JNIEXPORT jlong JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetFramesConsumed(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/)
+{
+    NativeVadProcessor* processor = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(gCaptureMutex);
+        processor = gVadProcessor;
+    }
+    if (processor == nullptr) {
+        return 0;
+    }
+    return static_cast<jlong>(processor->getFramesConsumed());
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeechOnsetSample(
     JNIEnv* /*env*/,

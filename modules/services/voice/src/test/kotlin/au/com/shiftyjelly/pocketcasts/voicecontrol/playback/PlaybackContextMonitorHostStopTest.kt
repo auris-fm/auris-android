@@ -126,6 +126,39 @@ class PlaybackContextMonitorHostStopTest {
     }
 
     @Test
+    fun `an external stop that follows a turn-owned pause at the same revision is still counted`() = runTest {
+        // Revision lifetime. The sink's own pause goes through VOICE_COMMANDS, which does NOT advance
+        // the revision, so the mark records the pre-pause revision. A later stop observed at that SAME
+        // revision would be skipped by a mark that is never consumed -- turning a one-shot exception
+        // into a permanent exemption for a revision the app does not own.
+        val h = harness()
+        h.awaitHostPlaying(true)
+
+        val revision = h.manager.playbackCommandRevision()
+        h.signal.markTurnOwnedStop(revision)
+
+        // First stop at that revision: the app's own pause. Skipped.
+        h.signal.onAppBackgrounded()
+        h.flow.value = paused
+        h.awaitHostPlaying(false)
+        assertEquals("the app's own stop is not counted", 0L, h.signal.playbackStopClosureCount())
+
+        // A later stop arriving at the SAME revision is not the app's own pause and must count: the
+        // mark applies to the stop it was made for, not to every stop sharing its revision.
+        h.flow.value = playing
+        h.awaitHostPlaying(true)
+        h.signal.onAppBackgrounded()
+        h.flow.value = paused
+        h.awaitHostPlaying(false)
+
+        assertEquals(
+            "a later stop at the same revision must not inherit the turn's exemption",
+            1L,
+            h.signal.playbackStopClosureCount(),
+        )
+    }
+
+    @Test
     fun `a stop processed while the window is open is not counted`() = runTest {
         val h = harness()
         h.awaitHostPlaying(true)

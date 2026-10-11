@@ -554,4 +554,56 @@ class AndroidAudioRouteMonitorTest {
             pairedButUnused is AudioRoute.BluetoothA2dpOnly,
         )
     }
+
+    @Test
+    fun `the setup input is availability, so a paired headset still gets SCO`() {
+        // The blocking case: the SCO setup decision asks "should I set this up?", which is what
+        // availability answers -- a paired classic-Bluetooth headset is present. Reading the OBSERVED
+        // route there instead left it Unknown for every turn in which no cloud answer was playing,
+        // because the only publisher is the cloud player and it publishes only while an answer sounds.
+        // The SCO branch then never ran and capture could bind the phone's microphone rather than the
+        // headset's.
+        //
+        // The two surfaces are made to DISAGREE, which is what makes this discriminating: with a
+        // paired-but-unrouted A2DP device, availability reports the device while the observed route
+        // stays Unknown. A setup path reading the wrong one is then visible.
+        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val monitor = AndroidAudioRouteMonitor(
+            context = ctx,
+            gracePeriodSignal = GracePeriodSignal(),
+            routedOutputObserver = null,
+            enumeratedDeviceTypes = {
+                AndroidAudioRouteMonitor.EnumeratedDevices(
+                    outputs = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP),
+                    inputs = listOf(AudioDeviceInfo.TYPE_BUILTIN_MIC),
+                )
+            },
+        )
+
+        // The observation has no answer yet: nothing reports a routed output.
+        assertTrue(
+            "no stream reports, so the route is Unknown (got=${monitor.route.value})",
+            monitor.route.value is AudioRoute.Unknown,
+        )
+        // Availability still names the device, and it is the surface the setup decision must read.
+        assertEquals(
+            "availability must name the paired device the setup decision needs",
+            AudioRoute.BluetoothA2dpOnly,
+            monitor.availability.value,
+        )
+        // Route-dependent decisions keep reading the observed route, which is the separate question the
+        // interface documents: a paired-but-unused headset must not gate voice control.
+        assertTrue(
+            "the route decision must still see Unknown rather than the paired device",
+            monitor.route.value !is AudioRoute.BluetoothA2dpOnly,
+        )
+        // And this is the connection the service actually uses: the VALUE the engine is started with
+        // comes from setupRoute, so it is checkable rather than a call-site convention. The two
+        // surfaces disagree above, so returning the observed route here fails.
+        assertEquals(
+            "the value the engine is started with must be availability, not the observed route",
+            AudioRoute.BluetoothA2dpOnly,
+            AudioRouteMonitor.setupRoute(monitor),
+        )
+    }
 }

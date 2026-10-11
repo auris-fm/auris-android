@@ -270,6 +270,19 @@ abstract class VoiceControlModule {
             ttsEngine: TtsEngine,
         ): AudioFeedbackRenderer = AudioFeedbackRenderer(earconPlayer, ttsEngine)
 
+        /**
+         * Supplies the monitor's optional enumeration seam to Dagger.
+         *
+         * A default value on an `@Inject` constructor parameter does NOT satisfy Dagger: the graph
+         * still needs a binding for `Function0<EnumeratedDevices>`, and without this one the whole
+         * Hilt graph fails to build (`[Dagger/MissingBinding]` at `hiltJavaCompileDebug`).
+         *
+         * It returns `null`, which is what the monitor's own default was: "no injected enumeration,
+         * use the platform's". Returning an empty enumeration instead would be a behaviour change —
+         * it would report that the device offers no outputs and no inputs, and `readAvailability()`
+         * is built from this. The seam stays on the constructor so a test can present one directly;
+         * `AndroidAudioRouteMonitorTest` does that by constructing the monitor without Hilt.
+         */
         @Provides
         fun provideEnumeratedDeviceTypes(): (() -> AndroidAudioRouteMonitor.EnumeratedDevices)? = null
 

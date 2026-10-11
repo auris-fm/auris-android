@@ -9,6 +9,8 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentE
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsPlaybackIncompleteException
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -170,6 +172,84 @@ class VoiceControlServiceRenderTest {
             verify(earconPlayer, org.mockito.Mockito.never()).play(EarconId.ERROR)
         } finally {
             renderer.release()
+        }
+    }
+
+    /**
+     * @spec's assigned service-level case: the FIRST execution throws, feedback and grace cleanup
+     * occur, and the SECOND command is handled.
+     *
+     * The two-command shape is the point. The earlier test shows the first command recovers; this one
+     * drives `handleIntent` -- the production entry point -- so the grace window is the real
+     * `GracePeriodSignal`, and the second command is asserted HANDLED rather than inferred from
+     * `SupervisorJob` semantics. That inference was flagged as unmeasured by @reviewer and is what this
+     * closes.
+     */
+    @Test
+    fun `an ordinary failure keeps feedback and grace cleanup, and the next command is handled`() = runTest {
+        val earconPlayer = mock(EarconPlayer::class.java)
+        val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
+        val executor = mock(VoicePlaybackIntentExecutor::class.java)
+        whenever(executor.execute(org.mockito.kotlin.any()))
+            .thenThrow(IllegalStateException("Cloud route: channel full, could not deliver terminal Error"))
+            .thenReturn(VoiceResponse.Silent)
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
+        val service = VoiceControlService().apply {
+            audioFeedbackRenderer = renderer
+            voicePlaybackIntentExecutor = executor
+            gracePeriodSignal = signal
+            // Dispatcher.Main under Robolectric so the service's own scope can run.
+            voiceControlServiceController = mock(au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlServiceController::class.java)
+        }
+        signal.onWakeWordDetected()
+        // Spend this window's single escalation so the window state is distinguishable afterwards.
+        signal.issueEscalation()
+        assertEquals("the probe needs a spent escalation", "allowance spent in this window", signal.escalationRefusal())
+        try {
+            // Command 1 -- throws. Drive the production entry point, which owns the grace cleanup.
+            // The window's OWN state is what the cleanup moves, so sample it before and after: a
+            // non-CloudRoute intent has no generation, and onCommandRecognized then resets the open
+            // window rather than closing it, so "still active" is the correct outcome here and the
+            // cleanup is visible as the window being touched for a command that failed.
+            service.handleIntentForTest(VoiceIntent.Playback.Pause)
+            // The launch is on Dispatchers.IO, which runTest's virtual time does not advance: wait on
+            // REAL time until the first command has been attempted.
+            awaitRealTime { org.mockito.Mockito.mockingDetails(executor).invocations.size >= 1 }
+
+            // Feedback: the service must have produced a failure response rather than letting the
+            // throw escape. The renderer dispatches on Main.immediate, so idle the looper for it.
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            verify(earconPlayer, org.mockito.Mockito.atLeastOnce()).play(EarconId.ERROR)
+            // AND the cleanup ran, shown through an effect only the cleanup can produce: an ordinary
+            // intent has no generation, so onCommandRecognized opens a NEW window and advances the
+            // generation. Spending the old window's single escalation first makes the difference
+            // visible -- a spent escalation in the OLD generation stays refused, while a fresh window
+            // accepts one. A launch that died before the cleanup leaves the spent escalation refused.
+            assertEquals(
+                "the cleanup must begin a new window for the command the user gave: " +
+                    "refusal=${signal.escalationRefusal()}",
+                "available",
+                signal.escalationRefusal(),
+            )
+
+            // Command 2 -- handled normally. A different intent type avoids the service's debounce.
+            service.handleIntentForTest(VoiceIntent.Playback.Resume)
+            awaitRealTime { org.mockito.Mockito.mockingDetails(executor).invocations.size >= 2 }
+            verify(executor, org.mockito.Mockito.times(2)).execute(org.mockito.kotlin.any())
+        } finally {
+            renderer.release()
+        }
+    }
+
+    /** Poll on real time: the service's scope dispatches off the test scheduler. */
+    private suspend fun awaitRealTime(
+        timeoutMs: Long = 5_000,
+        condition: () -> Boolean,
+    ) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (condition()) return
+            Thread.sleep(20)
         }
     }
 }

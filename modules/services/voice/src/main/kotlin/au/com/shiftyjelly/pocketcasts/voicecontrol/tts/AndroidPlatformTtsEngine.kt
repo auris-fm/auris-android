@@ -12,6 +12,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.util.Locale
 import javax.inject.Inject
+import kotlin.concurrent.withLock
 import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.resume
 import kotlinx.coroutines.Dispatchers
@@ -86,6 +87,30 @@ class AndroidPlatformTtsEngine @Inject constructor(
     @Volatile
     private var synthesisGeneration = 0
 
+    /**
+     * Serialises the cancellation handler against a successor's startup.
+     *
+     * The handler is a check-then-stop on the shared generation, so without a shared lock a
+     * successor can claim the engine between the check and the stop -- the same read-then-act window
+     * that let a released claim publish in the route observer.
+     */
+    private val synthesisLock = java.util.concurrent.locks.ReentrantLock()
+
+    /** Claims the synthesis slot under the boundary, as a starting utterance does. */
+    internal fun claimSynthesisForTest() {
+        synthesisLock.withLock { synthesisGeneration += 1 }
+    }
+
+    /** Runs [block] while holding the synthesis boundary, so a test can arrange the interleaving. */
+    internal fun runSerialisedForTest(block: () -> Unit) {
+        synthesisLock.lock()
+        try {
+            block()
+        } finally {
+            synthesisLock.unlock()
+        }
+    }
+
     init {
         val factory = synthesizerFactory
         tts = if (factory != null) {
@@ -153,10 +178,14 @@ class AndroidPlatformTtsEngine @Inject constructor(
                 // still the current one. This handler is registered before the call and runs
                 // asynchronously, so it can execute after a successor has already started on the
                 // shared engine -- stopping then silences the successor rather than this utterance.
-                val mine = ++synthesisGeneration
+                // Claim and stop under the same boundary a successor claims under, so a successor
+                // cannot start between the ownership check and the stop.
+                val mine = synthesisLock.withLock { ++synthesisGeneration }
                 continuation.invokeOnCancellation {
-                    if (synthesisGeneration == mine) {
-                        engine.stop()
+                    synthesisLock.withLock {
+                        if (synthesisGeneration == mine) {
+                            engine.stop()
+                        }
                     }
                 }
                 // QUEUE_FLUSH preserves the previous single-utterance behaviour: a superseded reply

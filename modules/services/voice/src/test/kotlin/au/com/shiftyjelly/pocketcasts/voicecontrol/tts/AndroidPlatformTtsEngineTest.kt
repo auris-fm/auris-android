@@ -12,6 +12,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -152,6 +153,43 @@ class AndroidPlatformTtsEngineTest {
             fake.stopCalls,
         )
         scope.cancel()
+    }
+
+    @Test
+    fun `a cancellation cannot stop the engine once a successor holds the boundary`() {
+        // A controlled interleaving rather than a stress run: holding the synthesis boundary, a
+        // successor cannot claim it, so a cancellation that checked ownership before the successor
+        // started must not still be able to stop the engine afterwards. Without the shared lock the
+        // check and the stop are separate steps and the successor can slip between them -- the same
+        // read-then-act window that let a released claim publish in the route observer.
+        val (wired, fake) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+
+        var successorClaimed = false
+        wired.runSerialisedForTest {
+            // Inside the boundary, a successor's startup must not be able to complete.
+            val done = java.util.concurrent.CountDownLatch(1)
+            Thread {
+                wired.claimSynthesisForTest()
+                done.countDown()
+            }.start()
+            successorClaimed = done.await(150, java.util.concurrent.TimeUnit.MILLISECONDS)
+        }
+        assertFalse(
+            "a successor must not claim the synthesis boundary while it is held",
+            successorClaimed,
+        )
+
+        // And once free, claiming proceeds and the engine is left usable.
+        val claimed = java.util.concurrent.CountDownLatch(1)
+        Thread {
+            wired.claimSynthesisForTest()
+            claimed.countDown()
+        }.start()
+        assertTrue(
+            "claiming completes once the boundary is free",
+            claimed.await(2, java.util.concurrent.TimeUnit.SECONDS),
+        )
     }
 
     /**

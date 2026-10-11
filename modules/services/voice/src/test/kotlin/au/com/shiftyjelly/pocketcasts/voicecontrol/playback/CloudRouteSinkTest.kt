@@ -1320,6 +1320,43 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a user pause during an answer hold survives a FAILED termination`() = runTest {
+        // The owning rule is "a user pause and an answer hold have separate ownership", and it must
+        // hold on every way the turn ends, not only a clean one. A failed turn takes the same restore
+        // path (`finally`), so a user who paused while the answer was in flight keeps their pause --
+        // otherwise the failure would silently undo a deliberate user action.
+        lateinit var deps: TestDeps
+        deps = TestDeps(
+            hostPlaying = true,
+            routeInvoker = {
+                kotlinx.coroutines.flow.flow {
+                    // The user presses pause while the answer is in flight, then the turn FAILS
+                    // instead of completing. Both terminations share the restore path.
+                    deps.commandRevision += 1
+                    throw RuntimeException("provider error")
+                }
+            },
+        )
+        deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
+        val sink = deps.sink()
+
+        // The turn's failure is the scenario, so it is caught here: what is asserted is the player's
+        // final state, which is what the user's pause depends on.
+        val turn = launch {
+            runCatching { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        }
+        deps.playback.pauseStarted.await()
+        deps.playback.pauseGate?.complete(Unit)
+        turn.join()
+
+        assertEquals(
+            "a user pause must survive a failed termination (calls=${deps.playback.calls})",
+            listOf("pause"),
+            deps.playback.calls.filter { it == "pause" || it == "resume" },
+        )
+    }
+
+    @Test
     fun `a turn does not override a user pause that changed nothing`() = runTest {
         // The case a state sample cannot see: the player is already paused (by
         // the turn), the user presses pause, and nothing about the state

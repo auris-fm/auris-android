@@ -32,6 +32,12 @@ import kotlinx.coroutines.flow.onEach
  *    does not. A missing render clock corrupts WHEN it was held -- and the gap is the player's buffer
  *    latency, which for an echo-bleed filter is the quantity being decided.
  *
+ * Adding a render clock would NOT change what this class stores -- the contract above is unaffected.
+ * It would change what a consumer can ASK of the stored samples: whether they can be related to wall
+ * time at all. That distinction is the reason the two consequences are separate claims rather than one
+ * bug, and it is the reason "add a render clock" is an addition to this class's interpretation rather
+ * than a correction to its contract.
+ *
  * Rolling buffer of recently-played audio for cross-correlation.
  *
  * It holds the PCm the client actually submitted for playback, so the signal filter can reject

@@ -207,4 +207,38 @@ class EarconPlayerTest {
         player.release()
         fresh.release()
     }
+
+    /**
+     * Disposal releases the worker, and a later session still gets one.
+     *
+     * @spec's teardown correction: documenting a retained thread does not close it. The player is a
+     * Hilt `@Singleton` reused by every service session, so the worker must be RELEASED on disposal
+     * without making the object permanently unusable -- which is why the executor is created on demand
+     * rather than held forever or shut down once.
+     */
+    @Test
+    fun `release shuts the worker down and the next use still runs`() {
+        val player = EarconPlayer(context)
+        // Start the worker by using it.
+        player.play(EarconId.SUCCESS)
+        val firstWorker = player.workerThreadForTest()
+        assertTrue("using the player must start its worker", firstWorker != null)
+
+        player.release()
+
+        assertTrue(
+            "disposal must release the worker thread, not retain it for the process",
+            player.workerIsShutdownForTest(),
+        )
+
+        // And a later session must still be served: a shut-down executor would refuse here.
+        player.play(EarconId.SUCCESS)
+        val secondWorker = player.workerThreadForTest()
+        assertTrue("a later session must get a worker again", secondWorker != null)
+        assertFalse(
+            "the new worker must be a live one, not the shut-down instance",
+            player.workerIsShutdownForTest(),
+        )
+        player.release()
+    }
 }

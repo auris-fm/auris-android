@@ -264,7 +264,12 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `seek_to falls back to reference ms as playback when unmapped`() = runTest {
+    fun `a reference seek with no usable mapping is refused, not approximated`() = runTest {
+        // `timeline-alignment`: reference_position_ms is null when alignment is unavailable and the
+        // SERVER falls back to client_position_ms. Treating the reference milliseconds as sink time
+        // assumes the timelines coincide, which is what dynamic ad insertion breaks -- the seek would
+        // land on the wrong audio and report success. Nothing authorizes the substitution, so the
+        // action is refused.
         val fingerprint = mock<FingerprintTimingManager>()
         whenever(fingerprint.playbackTimeMs(1_130.0)).thenReturn(null)
         val deps = TestDeps(
@@ -282,7 +287,10 @@ class CloudRouteSinkTest {
 
         sink.routeToCloud("go back", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        assertTrue(deps.playback.calls.contains("seekTo:1130"))
+        assertTrue(
+            "an unmapped reference target must not be seeked to (calls=${deps.playback.calls})",
+            deps.playback.calls.none { it.startsWith("seekTo") },
+        )
     }
 
     @Test
@@ -1350,8 +1358,14 @@ class CloudRouteSinkTest {
         private val userId: String = "user_test",
         clientPositionMs: Long = 50_000L,
         // Mockito defaults Int? to 0; unmapped seeks must see null so we fall back to referenceMs.
+        // An IDENTITY mapping by default: reference seconds map to the same sink seconds. A reference
+        // seek now requires a usable mapping, so tests that are about seeking must supply one; the
+        // unmapped case is asserted separately, where the action must be refused.
         private val fingerprintTimingManager: FingerprintTimingManager = mock<FingerprintTimingManager>().also {
-            whenever(it.playbackTimeMs(any())).thenReturn(null)
+            whenever(it.playbackTimeMs(any())).thenAnswer { invocation ->
+                val seconds = invocation.getArgument<Double>(0)
+                (seconds * 1000).toInt()
+            }
         },
         private val cloudPlaybackContextState: CloudPlaybackContextState = CloudPlaybackContextState(),
         private val events: kotlinx.coroutines.flow.Flow<CloudRouteEvent> = flowOf(CloudRouteEvent.Done(0, 0)),

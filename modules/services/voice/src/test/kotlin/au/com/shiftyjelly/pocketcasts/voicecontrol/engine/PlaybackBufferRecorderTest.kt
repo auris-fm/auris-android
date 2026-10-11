@@ -318,4 +318,38 @@ class PlaybackBufferRecorderTest {
         listOf(writer, reader).forEach { it.join(2_000) }
         assertEquals("a coherent window must never be degenerate or oversized", 0, violations.get())
     }
+
+    @Test
+    fun `a media position and a monotonic time must not be mixed into one span`() {
+        // THE HAZARD @spec identified: two sources write positions on DIFFERENT AXES into one field.
+        // The episode tap writes a MEDIA position (seconds into the episode); the cloud answer writes
+        // a MONOTONIC time (the render clock). Subtracting one from the other produces a number that is
+        // neither, and pairing it against the microphone instant would report a delay that is really
+        // the difference between two unrelated origins.
+        //
+        // A media position near zero and a monotonic time in the billions are consecutive writes here.
+        // The recorder must NOT blend them into a span; it must report that the window has no single
+        // axis rather than a confidently wrong one.
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+
+        // An episode chunk at media position 0.5 s -- the axis the episode tap supplies.
+        recorder.write(FloatArray(1_600) { 0.5f }, positionMs = 500L, axis = PositionAxis.Media)
+
+        // A rendered cloud-answer block at 9_000_000 ms of MONOTONIC time -- the axis the render clock
+        // supplies. These are the two axes the production sources actually use.
+        recorder.write(FloatArray(1_600) { -0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
+
+        val reference = recorder.reference()
+
+        // Whatever the policy, the reported start must not be a value derived from subtracting across
+        // the two axes. 9_000_000 - 100 ms of cloud audio is ~8_999_900; a blended value near that is
+        // the failure. The window is two different clocks, so the position must be treated as absent.
+        assertEquals(
+            "a window holding two incompatible axes must report no single position, " +
+                "not one derived by subtracting across them (start=${reference.startPositionMs})",
+            null,
+            reference.startPositionMs,
+        )
+    }
 }

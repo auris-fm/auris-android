@@ -29,6 +29,22 @@ class EarconPlayer(
     private var track: AudioTrack? = null
     private var released = false
 
+    /**
+     * Serialises play and release onto one thread.
+     *
+     * `track` is shared mutable state and was written from both Main (`VoiceControlService`'s
+     * listening cue) and IO (`VoiceAsrEngine`'s collect coroutine): two overlapping cues could each
+     * build a track and orphan the first -- still playing, never released -- and a `release()` landing
+     * mid-write left the newly created track playing forever. A single-threaded executor makes
+     * play/release one-at-a-time in call order without changing the synchronous result callers use.
+     */
+    private val executor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "earcon-player").apply { isDaemon = true }
+    }
+
+    /** Runs [block] on the player's own thread and returns its result, so call order is preserved. */
+    private fun <T> onPlayerThread(block: () -> T): T = executor.submit(block).get()
+
     init {
         clips = EarconId.entries.associateWithNotNull { id ->
             val resId = appContext.resources.getIdentifier(
@@ -52,7 +68,11 @@ class EarconPlayer(
         private set
 
     /** Plays [id] and reports whether it actually started. */
-    fun play(id: EarconId): Boolean {
+    fun play(id: EarconId): Boolean = onPlayerThread {
+        playOnPlayerThread(id)
+    }
+
+    private fun playOnPlayerThread(id: EarconId): Boolean {
         if (released) return false
         val clip = clips[id] ?: return false
         if (clip.samples.isEmpty()) return false
@@ -79,12 +99,18 @@ class EarconPlayer(
     }
 
     fun release() {
-        released = true
-        track?.runCatching {
-            stop()
-            release()
+        // The executor is NOT shut down here. `release()` must leave the player usable-as-a-no-op
+        // (the existing contract asserts a later play() does not crash), and a shut-down executor
+        // rejects the next submit with RejectedExecutionException -- turning a documented no-op into a
+        // throw. The thread is a daemon, so leaving it idle costs nothing.
+        onPlayerThread {
+            released = true
+            track?.runCatching {
+                stop()
+                release()
+            }
+            track = null
         }
-        track = null
     }
 
     private fun ensureTrack(sampleRateHz: Int): AudioTrack {

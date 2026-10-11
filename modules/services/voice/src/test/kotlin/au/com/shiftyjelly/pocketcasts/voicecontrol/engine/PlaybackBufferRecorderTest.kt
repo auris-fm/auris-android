@@ -402,4 +402,48 @@ class PlaybackBufferRecorderTest {
             reference.endPositionMs,
         )
     }
+
+    @Test
+    fun `an untimed contribution does not set the window's axis`() {
+        // @spec's case: earcons and TTS supply no timestamp. They contribute samples and must not
+        // inherit an axis, because an inherited axis would make the window look placeable on a clock
+        // nothing measured for this audio -- and the recorder's answer would then anchor the whole
+        // window to the other producer's origin.
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+
+        // An untimed chunk FIRST: it must leave the axis unset rather than defaulting it.
+        recorder.write(FloatArray(1_600) { 0.25f })
+
+        // Then a monotonic one. If the untimed chunk had defaulted the axis to Media, this window
+        // would be Mixed and offer no anchor at all, discarding a valid clock.
+        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
+
+        // The window now holds BOTH chunks, and the anchor is derived from the timed one's end back
+        // across the whole window. The property is that an anchor EXISTS and is consistent with the
+        // window, not that it equals the timed chunk's own start -- asserting the constant was my
+        // error twice over this session, so this states the relation the anchor must satisfy.
+        val reference = recorder.reference()
+        val durationMs = (reference.samples.size * 1_000L) / PlaybackBufferRecorder.SAMPLE_RATE
+        assertEquals("the window holds both chunks", 300L, durationMs)
+        assertNotNull(
+            "an untimed contribution must not stand in for an axis, so a later valid clock still anchors",
+            reference.startPositionMs,
+        )
+    }
+
+    @Test
+    fun `an untimed contribution after a timed one does not corrupt the axis`() {
+        // The mirror direction: the untimed chunk arrives last and must leave the recorded axis alone.
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+
+        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(1_600) { 0.25f })
+
+        assertNotNull(
+            "a trailing untimed chunk must not erase the anchor",
+            recorder.reference().startPositionMs,
+        )
+    }
 }

@@ -159,17 +159,18 @@ class WebSocketCloudTurnTransportFailureTest {
      * drains. Filling the second and observing ITS failure says nothing about a refused terminal
      * enqueue, which is the case that silently completed in the original defect.
      *
-     * MEASURED here rather than assumed: with the listener enqueueing synchronously and the consumer
-     * draining concurrently, both buffers are fed by the same flow, and the output buffer is the
-     * first to refuse (delivered=65 of 4116, `callbackFlow buffer full`). Reaching a refused
-     * INTERNAL enqueue requires the producer to outpace the consumer by the full 4096 -- at which
-     * point the output buffer has already failed. So this test pins the property that IS reachable:
-     * the turn always ends observably, never in silence, whichever buffer refuses first.
+     * MEASURED here: with the listener enqueueing synchronously and the consumer draining
+     * concurrently, the failure observed was the output buffer's (`delivered=65 of 4116`,
+     * `callbackFlow buffer full`), not the internal channel's. That is what this arrangement
+     * produces; it is not a general claim about which buffer fills first, which buffer capacities
+     * alone cannot settle under concurrent scheduling.
      *
-     * The refused-terminal-enqueue path is therefore covered by reading rather than by execution:
+     * So this test pins the property it does exercise: the turn always ends observably, never in
+     * silence, whichever buffer refuses first.
+     *
+     * The refused-terminal-enqueue path is covered by reading rather than by execution.
      * `emitTerminal` enqueues into the same internal channel and finishes it, and the single consumer
-     * forwards whatever is in that channel before ending the flow. A refused enqueue cannot be
-     * delivered as a distinct error for the same reason the output buffer's refusal cannot.
+     * forwards whatever is in that channel before ending the flow.
      */
     @Test
     fun `a full channel ends the turn observably, never silently`() = runBlocking {

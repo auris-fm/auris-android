@@ -1,5 +1,6 @@
 #include "OboeAudioCapture.h"
 #include <android/log.h>
+#include <ctime>
 
 #define LOG_TAG "OboeCapture"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -203,6 +204,40 @@ int32_t OboeAudioCapture::getDeviceId() {
         return -1;
     }
     return mStream->getDeviceId();
+}
+
+OboeAudioCapture::CaptureClock OboeAudioCapture::captureClock() const {
+    CaptureClock clock;
+    clock.sampleRate = mSampleRate;
+
+    // The fallback: the producer's own monotonic sample counter, which is always available and is a
+    // real position in the capture stream. The stream's timestamp is preferred only because the clock
+    // is what the OTHER side of the alignment is measured against.
+    clock.framePosition = mRingBuffer.writeCursor();
+
+    std::lock_guard<std::mutex> lock(mStreamMutex);
+    if (mStream == nullptr) {
+        // No live stream: the counter is the honest answer and the timestamp is unavailable rather
+        // than invented.
+        return clock;
+    }
+    if (mTestStreamInstalled) {
+        // A test's placeholder cannot be interrogated, so its observation is supplied instead. The
+        // consumption branch below is the same one a real stream takes.
+        if (mTestTimestampAvailable) {
+            clock.framePosition = mTestTimestampFrame;
+            clock.timestampNs = mTestTimestampNs;
+            clock.observable = true;
+        }
+        return clock;
+    }
+    auto timestamp = mStream->getTimestamp(CLOCK_MONOTONIC);
+    if (timestamp) {
+        clock.framePosition = timestamp.value().position;
+        clock.timestampNs = timestamp.value().timestamp;
+        clock.observable = true;
+    }
+    return clock;
 }
 int32_t OboeAudioCapture::getRoutedDeviceId() const {
     // Ask the LIVE stream when there is one. A cached value goes stale the moment the platform

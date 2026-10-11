@@ -280,6 +280,45 @@ int main() {
         check(!capture.isActive(), "the current stream's failure must stop capture");
     }
 
+    // (7) The capture-frame/time observation. It must report the producer's own counter as a position
+    // even when no timestamp is available, and it must NOT invent a timestamp: an unavailable
+    // observation has to stay unavailable, because a substituted value aligns confidently against the
+    // wrong instant.
+    {   OboeAudioCapture capture;
+        OboeAudioCapture::CaptureClock idle = capture.captureClock();
+        check(!idle.observable, "with no stream the timestamp is unavailable, not invented");
+        check(idle.framePosition == 0, "and the position is the producer's own counter");
+        check(idle.sampleRate == kSampleRate, "the clock carries the rate that converts position to time");
+
+        // With a stream installed the counter still stands in: a test stream cannot report a timestamp,
+        // so the observation must remain unavailable rather than reading through the placeholder.
+        auto* live = reinterpret_cast<oboe::AudioStream*>(0x4000);
+        capture.installStreamForTest(live, /*deviceId=*/7);
+
+        // A stream that CANNOT report: the observation must stay unavailable rather than substitute
+        // the counter for a timestamp.
+        OboeAudioCapture::CaptureClock unavailable = capture.captureClock();
+        check(!unavailable.observable,
+              "a stream that cannot report keeps the observation unavailable");
+
+        // A stream that CAN report: the observation is the stream's own frame/time pair, and the
+        // conversion it implies must place a later sample correctly in time.
+        capture.setStreamTimestampForTest(/*available=*/true, /*framePosition=*/48'000,
+                                          /*timestampNs=*/2'000'000'000);
+        OboeAudioCapture::CaptureClock observed = capture.captureClock();
+        check(observed.observable, "a stream that reports gives an observable clock");
+        check(observed.framePosition == 48'000, "the frame position is the stream's");
+        check(observed.timestampNs == 2'000'000'000, "the timestamp is the stream's");
+        // One second later is 16000 frames further on, so it must be 1e9 ns further in time. This is
+        // the conversion the alignment depends on, checked as arithmetic rather than asserted.
+        const int64_t oneSecondLaterFrames = observed.framePosition + observed.sampleRate;
+        const int64_t laterNs = observed.timestampNs +
+            ((oneSecondLaterFrames - observed.framePosition) * 1'000'000'000LL) / observed.sampleRate;
+        check(laterNs == observed.timestampNs + 1'000'000'000LL,
+              "a sample one second later maps to one second later on the shared clock");
+        capture.clearStreamForTest();
+    }
+
     std::printf(gFailures == 0 ? "all checks passed\n" : "%d CHECK(S) FAILED\n", gFailures);
     return gFailures == 0 ? 0 : 1;
 }

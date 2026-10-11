@@ -585,10 +585,16 @@ class CloudRouteSink internal constructor(
                 "seek_relative" -> {
                     // delta_seconds is nullable for a reason: null means "no amount was stated,"
                     // which is the only case that applies the sink's own interval. A stated zero
-                    // is a real delta meaning "stay put" — treated here as a no-op, matching the
-                    // local executor's `0 -> Silent`. Falling through would move a user who named
-                    // no movement by the interval, which is the defaulted-seek failure this
+                    // is a real delta meaning "stay put" — treated here as a no-op, matching
+                    // the local executor's `0 -> Silent`. Falling through would move a user who
+                    // named no movement by the interval, which is the defaulted-seek failure this
                     // dispatch exists to avoid.
+                    //
+                    // The match order matters and is load-bearing: a stated nonzero delta is
+                    // matched FIRST, so it executes by its SIGN and its direction field is not
+                    // consulted. Only a null delta consults `direction`, and only an unstated
+                    // amount with an unrecognised direction reaches `else`. A stated delta whose
+                    // direction string is unrecognised is NOT refused — it seeks by sign.
                     val delta = (params["delta_seconds"] as? Number)?.toInt()
                     val direction = params["direction"] as? String
                     when {
@@ -598,29 +604,36 @@ class CloudRouteSink internal constructor(
                             } else {
                                 playbackSink.skipBackward(-delta)
                             }
+                            true
                         }
 
-                        delta == 0 -> Unit
+                        delta == 0 -> true
 
                         // Neither amount nor direction stated: the spec explicitly permits the
                         // configured skip interval here, and the sink's own comment says null means
-                        // exactly that. Only invalid STATED values and unknown stated directions
-                        // are refused.
+                        // exactly that.
                         delta == null && direction == null -> {
                             playbackSink.skipForward(null)
+                            true
                         }
 
-                        delta == null && direction == "backward" -> playbackSink.skipBackward(null)
+                        delta == null && direction == "backward" -> {
+                            playbackSink.skipBackward(null)
+                            true
+                        }
 
-                        delta == null && direction == "forward" -> playbackSink.skipForward(null)
+                        delta == null && direction == "forward" -> {
+                            playbackSink.skipForward(null)
+                            true
+                        }
 
-                        // A stated delta with an unknown direction, or any other combination the
-                        // spec does not define, is refused rather than defaulted: an unrecognised
-                        // direction falling through to forward would move a user who asked for
-                        // nothing recognisable.
+                        // An unstated amount with a stated unrecognised direction: refused rather
+                        // than defaulted. Falling through to forward would move a user who asked
+                        // for nothing recognisable. The `when` value IS the return value — it must
+                        // not be discarded, or the sink reports the turn as delivered while
+                        // nothing moved.
                         else -> false
                     }
-                    true
                 }
 
                 // An action this build does not know: nothing happened, and the turn must not be

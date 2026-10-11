@@ -1197,6 +1197,36 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `an unstated amount with an unknown direction is refused instead of defaulted`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_relative",
+                    params = mapOf("direction" to "sideways"),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+
+        val response = deps.sink().routeToCloud("go sideways", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // The refusal must be OBSERVABLE, not merely an absence of movement: a refused action
+        // means the turn delivered nothing, so the turn must not read as delivered (Silent).
+        // Asserting only "no skip call" would pass on the buggy code too — the defect was that
+        // the `when` value was discarded, so the caller saw `true` while nothing happened.
+        assertEquals(
+            "a refused action must not count as a delivered turn",
+            VoiceResponse.Spoken("Sorry, I couldn't complete that request."),
+            response,
+        )
+        assertEquals(
+            emptyList<String>(),
+            deps.playback.calls.filter { it.startsWith("skip") },
+        )
+    }
+
+    @Test
     fun `an unstated amount applies the interval in the stated direction`() = runTest {
         val deps = TestDeps(
             events = flowOf(

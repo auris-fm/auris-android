@@ -66,13 +66,20 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
         scope.launch {
             var wasPlaying = isHostAudioActive.value
             isHostAudioActive.collect { playing ->
-                if (wasPlaying && !playing && gracePeriodSignal.isClosedByPrivacy()) {
+                if (hostStoppedWhileClosed(wasPlaying, playing)) {
                     gracePeriodSignal.noteHostPlaybackStopped()
                 }
                 wasPlaying = playing
             }
         }
     }
+
+    /**
+     * Whether a playing-to-stopped transition during a closed window counts as a playback-stop
+     * closure. Extracted so the counting rule is testable through the same decision the watcher
+     * applies, rather than through a counter a test pokes directly.
+     */
+    internal fun hostStoppedWhileClosed(wasPlaying: Boolean, isPlaying: Boolean): Boolean = wasPlaying && !isPlaying && gracePeriodSignal.isClosedByPrivacy()
 
     /**
      * True when the host app (Pocket Casts) is actively playing audio. Used by

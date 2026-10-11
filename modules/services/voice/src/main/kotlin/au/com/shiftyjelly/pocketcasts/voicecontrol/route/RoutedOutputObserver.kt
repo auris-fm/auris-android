@@ -48,15 +48,11 @@ class RoutedOutputObserver @Inject constructor() {
         return ObservedRoute(mine)
     }
 
-    /** Withdraws the claim of the stream that owns [mine] only if it is still the current one. */
+    /** Withdraws the claim only if it is still the current one and still live. */
     private fun releaseClaim(claim: ObservedRoute) {
         if (claim.token != holders.get()) return
-        // A claim releases at most once, tracked on the claim itself rather than as a history of
-        // tokens: the question is whether THIS claim is still live, which is one bit, not the set of
-        // every token ever minted. The ownership guard above proves the claim is still the current
-        // one, but not that it has not already released — a claim's token equals holders forever, so
-        // stop() followed by release() would otherwise decrement twice and drive the counter
-        // negative, while a second play() on the same player needs to find the claim live again.
+        // A release is idempotent per claimed state: the bit flips once, so stop() followed by
+        // release() cannot decrement twice, while a later session re-takes the same claim.
         if (!claim.active.compareAndSet(true, false)) return
         claimHolders.decrementAndGet()
         type = null
@@ -67,8 +63,10 @@ class RoutedOutputObserver @Inject constructor() {
         internal val token: Int get() = mine
 
         /**
-         * Whether this claim is still held. One bit per claim, so a release is idempotent without
-         * retaining a history of every token ever minted.
+         * Whether this claim is currently held. One bit per claim, which gives both properties the
+         * lifecycle needs: a release is idempotent per claimed state (not per token), and a claim is
+         * reusable across sessions — publish, clear, publish again, clear again — because clearing
+         * ends the session rather than spending the claim forever.
          */
         internal val active = java.util.concurrent.atomic.AtomicBoolean(true)
 
@@ -80,7 +78,11 @@ class RoutedOutputObserver @Inject constructor() {
          * `AudioDeviceInfo`, which cannot be constructed off a device.
          */
         internal fun publishType(routedType: Int?) {
-            if (mine != holders.get()) return
+            // Ownership AND liveness: the token stays equal to `holders` forever, so it alone cannot
+            // tell a live claim from a spent one. A cleared claim that could still write `type` would
+            // publish a route nothing can withdraw — which is the same defect as never clearing it.
+            if (!active.get()) return
+            if (token != holders.get()) return
             type = routedType
         }
 

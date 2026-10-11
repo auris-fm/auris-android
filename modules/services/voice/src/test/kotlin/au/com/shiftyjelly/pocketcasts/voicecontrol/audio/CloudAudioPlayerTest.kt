@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.audio
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -473,6 +474,37 @@ class CloudAudioPlayerTest {
         )
         wired.stop()
         assertFalse("and stop must release it again", observer.holdsAClaim())
+        wired.release()
+    }
+
+    @Test
+    fun `a second playback on the same player withdraws its route when it stops`() {
+        // The production-path probe: not just that the second playback HOLDS a claim, but that its
+        // route is WITHDRAWN when that playback ends. A claim that could only release once would leave
+        // the second route published after the stream ended -- the same defect the stop/drain fix
+        // addressed, reappearing on the second turn.
+        val observer = au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver()
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            routedOutputObserver = observer,
+        )
+        val chunk = byteArrayOf(0x00, 0x01, 0x02, 0x03)
+
+        // session 0
+        wired.submitFrame(chunk)
+        wired.play()
+        wired.stop()
+        assertNull("session 0 withdrew its route", observer.current())
+        assertFalse("session 0 released its claim", observer.holdsAClaim())
+
+        // session 1
+        wired.submitFrame(chunk)
+        wired.play()
+        assertTrue("session 1 holds a claim", observer.holdsAClaim())
+        wired.stop()
+        assertNull("session 1 must withdraw its route as well", observer.current())
+        assertFalse("session 1 released its claim", observer.holdsAClaim())
         wired.release()
     }
 

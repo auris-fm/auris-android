@@ -74,6 +74,48 @@ class RoutedOutputObserverTest {
     }
 
     @Test
+    fun `one claim is reusable across sessions and withdraws each session's route`() {
+        // A player is a singleton that serves several turns, so its claim must be reusable: publish,
+        // clear, publish again, clear again -- and the SECOND route must be withdrawn too. A claim that
+        // can only release once leaves the second route permanently published, which is the same defect
+        // as never clearing it.
+        val observer = RoutedOutputObserver()
+
+        // session 0
+        val claim0 = observer.observe()
+        claim0.publishType(2)
+        assertEquals("session 0 route is visible", 2, observer.current())
+        claim0.clear()
+        assertNull("session 0 route is withdrawn", observer.current())
+        assertFalse("session 0 released its claim", observer.holdsAClaim())
+
+        // session 1: a fresh claim on the same observer, which must be equally withdrawable.
+        val claim1 = observer.observe()
+        claim1.publishType(3)
+        assertEquals("session 1 route must be visible on a re-taken claim", 3, observer.current())
+        claim1.clear()
+        assertNull(
+            "session 1 route must be withdrawn too -- a claim that releases only once would " +
+                "leave this route published forever",
+            observer.current(),
+        )
+        assertFalse("session 1 released its claim", observer.holdsAClaim())
+    }
+
+    @Test
+    fun `a cleared claim cannot republish without being re-taken`() {
+        // The ownership token stays equal to holders forever, so it alone cannot tell a live claim from
+        // a spent one. A cleared claim that could still write `type` would publish a route nothing can
+        // withdraw.
+        val observer = RoutedOutputObserver()
+        val claim = observer.observe()
+        claim.clear()
+
+        claim.publishType(7)
+        assertNull("a cleared claim must not publish a route", observer.current())
+    }
+
+    @Test
     fun `a fresh observation after a stop then release is held by exactly one stream`() {
         // The reachable production lifecycle that underflowed the counter: a player stops, is
         // released, and the next turn claims the slot. The new stream must own the observation, and

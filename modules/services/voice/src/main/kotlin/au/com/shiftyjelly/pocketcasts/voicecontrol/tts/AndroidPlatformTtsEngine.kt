@@ -35,6 +35,9 @@ import timber.log.Timber
 class AndroidPlatformTtsEngine @Inject constructor(
     @ApplicationContext context: Context,
     private val playbackBufferRecorder: PlaybackBufferRecorder,
+    // Nullable with a default so the engine can be built without Hilt (the unit tests do), and
+    // because a nullable function type is not a binding Dagger can match: production supplies the
+    // engine through VoiceControlModule's @Provides, which passes a real factory explicitly.
     private val synthesizerFactory: ((onInitialized: (Boolean) -> Unit) -> TextToSpeech)? = null,
 ) : TtsEngine {
     private val appContext = context.applicationContext

@@ -261,7 +261,11 @@ void NativeVadProcessor::runLoop() {
 
             mActive.store(false, std::memory_order_release);
             std::lock_guard<std::mutex> lock(mEventMutex);
-            mPendingEvent = -1; // stopped: fault, not a speech end
+            // NOT the stop sentinel. `-1` means "the stream was stopped" and the consumer treats it
+            // as an ordinary end, so emitting it here made a fault indistinguishable from a normal
+            // shutdown: no error, no result, no state change, no recovery when the noise stops. A
+            // distinct value is what makes the fault visible at the boundary.
+            mPendingEvent = kFaultEvent; // fault: surfaced, not an ordinary end
             mEventReady = true;
             mEventCv.notify_one();
             break;

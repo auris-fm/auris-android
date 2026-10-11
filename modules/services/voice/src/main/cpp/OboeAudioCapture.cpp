@@ -245,7 +245,7 @@ oboe::DataCallbackResult OboeAudioCapture::onAudioReady(
 }
 
 void OboeAudioCapture::onErrorAfterClose(
-    oboe::AudioStream* /*audioStream*/,
+    oboe::AudioStream* failedStream,
     oboe::Result error)
 {
     mActive.store(false, std::memory_order_release);
@@ -255,6 +255,13 @@ void OboeAudioCapture::onErrorAfterClose(
     }
 
     std::lock_guard<std::mutex> lock(mStreamMutex);
+    // Only the CURRENT stream's failure may clear the observation. A replaced stream's delayed
+    // callback would otherwise erase the observation its successor published, reporting unknown for
+    // a stream that is capturing -- a late event acting on state that is no longer its own.
+    if (failedStream != mStream) {
+        LOGE("Ignoring error-after-close from a replaced stream: %s", oboe::convertToText(error));
+        return;
+    }
     mStream = nullptr;
     // The stream is gone, so the device it reported is no longer an observation. Leaving it set
     // would present a dead stream's routing as the live capture route -- the stale-observation

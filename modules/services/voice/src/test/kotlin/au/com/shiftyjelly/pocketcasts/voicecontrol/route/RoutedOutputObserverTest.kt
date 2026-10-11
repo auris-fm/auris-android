@@ -116,36 +116,83 @@ class RoutedOutputObserverTest {
     }
 
     @Test
-    fun `a route published from the heartbeat path cannot outlive a concurrent release`() {
-        // Publication and release both run on the player's lifecycle, and the production reachability
-        // of the interleaving is a property of the call graph rather than of this test. What the test
-        // CAN establish is the invariant: whatever the interleaving, a route is never left published
-        // by a claim that is no longer held. Publication is taken on one thread while the claim is
-        // released on another; the assertion is the invariant, so it holds for every outcome except
-        // the one where the write wins after the clear.
+    fun `publication and release are serialised, so a release cannot interleave inside one`() {
+        // A controlled interleaving rather than repeated scheduling: the assertion is that one
+        // publication call runs to completion without a release landing inside it. The observer
+        // exposes the boundary for exactly this, so the test does not depend on timing to arrange the
+        // interleaving it is about -- a stress run that found no violation would show only that the
+        // window was not hit, which is what @spec ruled out as evidence.
         val observer = RoutedOutputObserver()
-        val iterations = 3_000
-        var violations = 0
-        repeat(iterations) {
-            val claim = observer.observe()
-            val start = java.util.concurrent.CountDownLatch(1)
-            val writer = Thread {
-                start.await()
-                claim.publishType(5)
-            }
-            writer.start()
-            start.countDown()
-            claim.clear()
-            writer.join()
-            if (!observer.holdsAClaim() && observer.current() != null) {
-                violations += 1
+        val claim = observer.observe()
+        claim.publishType(5)
+        assertEquals("precondition: the claim published a route", 5, observer.current())
+
+        val interleaved = java.util.concurrent.atomic.AtomicBoolean(false)
+        observer.runSerialisedForTest {
+            // Inside the boundary, no release may make progress: start one and require it to block.
+            val done = java.util.concurrent.CountDownLatch(1)
+            Thread {
+                claim.clear()
+                done.countDown()
+            }.start()
+            // The releaser is serialised behind us, so it cannot have completed while we hold the
+            // boundary. If it did, the two operations were not serialised and a release could clear
+            // between a publication's check and its write.
+            if (done.await(150, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                interleaved.set(true)
             }
         }
-        assertEquals(
-            "no iteration may leave a route published by a released claim",
-            0,
-            violations,
+        assertFalse(
+            "a release must not complete while a publication holds the boundary",
+            interleaved.get(),
         )
+
+        // And once the boundary is free, the release does complete -- the blocking above must be
+        // serialisation, not a deadlock or a no-op clear.
+        val settled = java.util.concurrent.CountDownLatch(1)
+        Thread {
+            claim.clear()
+            settled.countDown()
+        }.start()
+        assertTrue("the release completes once the boundary is free", settled.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        assertNull("and the route is withdrawn", observer.current())
+    }
+
+    @Test
+    fun `claiming is serialised with release, so a successor cannot claim inside one`() {
+        // The same boundary as publication and release. Claiming mints a token and increments the
+        // holder count, so if it could run inside a release's check-then-clear the retiring claim and
+        // its successor would both act on a slot neither exclusively owns.
+        val observer = RoutedOutputObserver()
+        val retiring = observer.observe()
+        retiring.publishType(2)
+
+        val claimedInsideRelease = java.util.concurrent.atomic.AtomicBoolean(false)
+        observer.runSerialisedForTest {
+            val done = java.util.concurrent.CountDownLatch(1)
+            Thread {
+                observer.observe()
+                done.countDown()
+            }.start()
+            if (done.await(150, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                claimedInsideRelease.set(true)
+            }
+        }
+        assertFalse(
+            "a claim must not be minted while another operation holds the boundary",
+            claimedInsideRelease.get(),
+        )
+
+        // And once free, claiming proceeds: the blocking is serialisation, not a deadlock.
+        val successor = java.util.concurrent.atomic.AtomicReference<RoutedOutputObserver.ObservedRoute?>()
+        val claimed = java.util.concurrent.CountDownLatch(1)
+        Thread {
+            successor.set(observer.observe())
+            claimed.countDown()
+        }.start()
+        assertTrue("claiming completes once the boundary is free", claimed.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        successor.get()!!.publishType(3)
+        assertEquals("the successor owns the route", 3, observer.current())
     }
 
     @Test

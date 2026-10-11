@@ -46,15 +46,39 @@ class RoutedOutputObserver @Inject constructor() {
     internal fun holdsAClaim(): Boolean = claimHolders.get() > 0
 
     /**
+     * Runs [block] while holding the publication boundary.
+     *
+     * Lets a test arrange the interleaving it is about instead of hoping for it: a caller inside the
+     * boundary can start a concurrent publication or release and observe that it cannot complete,
+     * which is the property that stops a release landing between a publication's check and its write.
+     */
+    internal fun runSerialisedForTest(block: () -> Unit) {
+        publishLock.lock()
+        try {
+            block()
+        } finally {
+            publishLock.unlock()
+        }
+    }
+
+    /**
      * Claims the observation for a stream and returns [ObservedRoute] to publish through.
      *
      * Each claim gets its own token, so [ObservedRoute.clear] from a superseded stream is ignored rather
      * than erasing the route its replacement has since reported.
      */
     fun observe(): ObservedRoute {
-        val mine = holders.incrementAndGet()
-        claimHolders.incrementAndGet()
-        return ObservedRoute(mine)
+        // Claiming takes the same boundary as publication and release. Without it a claim can be
+        // minted between a release's ownership check and its write of null, so the successor's token
+        // and the retiring claim's token both act on a slot neither exclusively owns.
+        publishLock.lock()
+        try {
+            val mine = holders.incrementAndGet()
+            claimHolders.incrementAndGet()
+            return ObservedRoute(mine)
+        } finally {
+            publishLock.unlock()
+        }
     }
 
     /** Withdraws the claim only if it is still the current one and still live. */

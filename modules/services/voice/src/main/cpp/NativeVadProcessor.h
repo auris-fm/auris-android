@@ -84,6 +84,15 @@ private:
     // ceiling only exists to surface a detector STUCK active as an explicit fault; it must be far
     // above any plausible utterance so ordinary long speech is never affected.
     static constexpr int32_t kStuckDetectorFrameLimit = 3750;  // ~240s @ 64ms frames
+
+    /**
+     * The event value that reports a FAULT, distinct from the stop sentinel.
+     *
+     * The consumer reads -1 as an ordinary end (it is what stop() emits), so a fault reported with that
+     * value looked like a clean shutdown: the session ended with no error, no result and no recovery.
+     * A separate value lets the consumer surface it instead of completing.
+     */
+    static constexpr int32_t kFaultEvent = -2;
     static constexpr double kRmsThreshold = 200.0;
     static constexpr float kSpeechThreshold = 0.2f;
 

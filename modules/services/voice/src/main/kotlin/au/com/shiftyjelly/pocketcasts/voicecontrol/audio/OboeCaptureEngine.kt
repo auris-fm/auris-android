@@ -142,6 +142,13 @@ internal object OboeConfig {
  * it. That scoping is what makes a stale collector's `finally` unable to stop a capture opened
  * for a replacement session.
  */
+// The native capture reported a fault rather than an ordinary end.
+//
+// Distinct from a normal completion on purpose: the detector discards its frames when it faults, so a
+// turn that treats this as a clean end would drop the user's session with no error, no result and no
+// recovery once the noise stops. Thrown so the collector owns restarting.
+internal class VoiceCaptureFaultException(message: String) : Exception(message)
+
 internal class OboeCaptureEngine(
     private val hardware: CaptureHardware,
     private val assetManager: AssetManager,
@@ -208,7 +215,17 @@ internal class OboeCaptureEngine(
 
                     0 -> { /* timeout */ }
 
+                    // An ordinary end: the stream was stopped.
                     -1 -> break
+
+                    // A FAULT, reported on its own value so it cannot be mistaken for the clean end
+                    // above. The native detector emits this when it is stuck speech-classified past
+                    // its ceiling; the frames are discarded upstream, so completing the flow here
+                    // would end the session with no error, no result and no recovery. Throwing makes
+                    // it observable to the collector, which owns restarting.
+                    -2 -> throw VoiceCaptureFaultException(
+                        "Native VAD fault: detector stuck speech-classified past its ceiling",
+                    )
                 }
             }
         } finally {

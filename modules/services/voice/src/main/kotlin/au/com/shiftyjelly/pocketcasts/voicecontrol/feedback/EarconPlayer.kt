@@ -27,7 +27,6 @@ class EarconPlayer(
     private val appContext = context.applicationContext
     private val clips: Map<EarconId, EarconClip>
     private var track: AudioTrack? = null
-    private var released = false
 
     /**
      * Serialises play and release onto one thread.
@@ -73,7 +72,6 @@ class EarconPlayer(
     }
 
     private fun playOnPlayerThread(id: EarconId): Boolean {
-        if (released) return false
         val clip = clips[id] ?: return false
         if (clip.samples.isEmpty()) return false
         return try {
@@ -98,13 +96,21 @@ class EarconPlayer(
         }
     }
 
+    /**
+     * Frees this session's audio resources.
+     *
+     * Deliberately NOT a terminal state, and the distinction is a user-facing one: this player is a
+     * Hilt `@Singleton` and `VoiceControlService.stopVoiceControl()` releases it on every stop, so a
+     * one-way flag here silenced all feedback for the rest of the PROCESS -- the user stops voice
+     * control once and never hears a cue again, with nothing logged. Releasing frees the track and
+     * makes an in-flight play stop; the next play re-creates its track, which is what the singleton's
+     * lifetime requires.
+     *
+     * The executor is not shut down either: a shut-down executor rejects the next submit with
+     * `RejectedExecutionException`, and the thread is a daemon, so an idle one costs nothing.
+     */
     fun release() {
-        // The executor is NOT shut down here. `release()` must leave the player usable-as-a-no-op
-        // (the existing contract asserts a later play() does not crash), and a shut-down executor
-        // rejects the next submit with RejectedExecutionException -- turning a documented no-op into a
-        // throw. The thread is a daemon, so leaving it idle costs nothing.
         onPlayerThread {
-            released = true
             track?.runCatching {
                 stop()
                 release()

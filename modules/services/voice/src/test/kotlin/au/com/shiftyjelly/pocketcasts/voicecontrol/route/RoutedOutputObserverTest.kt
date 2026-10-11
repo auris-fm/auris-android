@@ -1,7 +1,9 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.route
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -49,6 +51,47 @@ class RoutedOutputObserverTest {
 
         second.clear()
         assertNull("and the owner can still withdraw it", observer.current())
+    }
+
+    @Test
+    fun `clearing twice from one owner does not double-count the claim`() {
+        // The stop() -> release() production order clears the same stream twice: stop() withdraws the
+        // route, then release() clears again from its own first line. If a second clear from the same
+        // owner decremented the claim counter again, claimHolders would go negative and the claim would
+        // read as unheld while a stream still holds it.
+        val observer = RoutedOutputObserver()
+        val stream = observer.observe()
+        stream.publishType(2)
+
+        stream.clear()
+        stream.clear()
+
+        assertNull("the route stays withdrawn", observer.current())
+        assertFalse(
+            "a second clear from the same owner must not un-hold the claim it already released",
+            observer.holdsAClaim(),
+        )
+    }
+
+    @Test
+    fun `a fresh observation after a stop then release is held by exactly one stream`() {
+        // The reachable production lifecycle that underflowed the counter: a player stops, is
+        // released, and the next turn claims the slot. The new stream must own the observation, and
+        // the retired one must not be able to clear it.
+        val observer = RoutedOutputObserver()
+        val first = observer.observe()
+        first.publishType(2)
+        first.clear() // stop()
+        first.clear() // release()
+
+        val second = observer.observe()
+        second.publishType(3)
+        assertTrue("the new stream holds the observation", observer.holdsAClaim())
+        assertEquals("the new stream's route is current", 3, observer.current())
+
+        first.clear()
+        assertEquals("the retired stream must not clear its successor", 3, observer.current())
+        assertTrue("and the successor still holds the claim", observer.holdsAClaim())
     }
 
     @Test

@@ -107,6 +107,37 @@ public:
      * is not routing. Matches AudioDeviceInfo.getId() on the Java side.
      */
     int32_t getRoutedDeviceId() const;
+
+    /**
+     * Installs [stream] as the live stream, with [deviceId] as the device it reports.
+     *
+     * A seam for the host test, which cannot open a real Oboe stream and cannot fabricate one either
+     * (`AudioStream` has ten pure virtuals). `onErrorAfterClose` compares its argument against the live
+     * stream and clears the device only on a match, and neither half of that could be driven while the
+     * state was unreachable. `getRoutedDeviceId` reads through a REAL stream when one is installed, so
+     * this sets the reported device directly as well.
+     */
+    void installStreamForTest(oboe::AudioStream* stream, int32_t deviceId) {
+        std::lock_guard<std::mutex> lock(mStreamMutex);
+        mStream = stream;
+        mTestReportedDeviceId = deviceId;
+        mTestStreamInstalled = true;
+        mActive.store(true, std::memory_order_release);
+    }
+
+    /**
+     * Drops the test's stream WITHOUT touching it.
+     *
+     * `close()` calls `requestStop()` and `close()` on the stream, and a test's stream is not a real
+     * one -- `requestStop` is pure virtual, so calling through it on a placeholder is undefined
+     * behaviour. The test clears the pointer here before destruction, which is the same state a real
+     * close leaves behind.
+     */
+    void clearStreamForTest() {
+        std::lock_guard<std::mutex> lock(mStreamMutex);
+        mStream = nullptr;
+        mTestStreamInstalled = false;
+    }
     // --- oboe::AudioStreamDataCallback ---
     oboe::DataCallbackResult onAudioReady(
         oboe::AudioStream* audioStream,
@@ -123,6 +154,11 @@ private:
 
     /** The device the live capture stream is routed to; kUnspecified when none is observed. */
     std::atomic<int32_t> mRoutedDeviceId{oboe::kUnspecified};
+
+    // The device the host test's installed stream reports. `getRoutedDeviceId` asks the live stream
+    // for the device, which a test cannot construct, so this stands in for that answer.
+    int32_t mTestReportedDeviceId = oboe::kUnspecified;
+    bool mTestStreamInstalled = false;
 
 
     RingBuffer mRingBuffer;

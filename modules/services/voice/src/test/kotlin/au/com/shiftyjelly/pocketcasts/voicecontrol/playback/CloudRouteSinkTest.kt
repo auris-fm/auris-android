@@ -311,7 +311,9 @@ class CloudRouteSinkTest {
         sink.routeToCloud("play quote", VoiceIntent.CloudTier.Premium, playbackContext)
 
         assertEquals(
-            listOf("pause", "seekTo:900", "resume"),
+            // 900_000 ms on the REFERENCE timeline maps to 945 s on the sink timeline: the mapping's
+            // 45 s offset is what distinguishes a reference seek from the reference ms used directly.
+            listOf("pause", "seekTo:945", "resume"),
             deps.playback.calls,
         )
     }
@@ -430,7 +432,9 @@ class CloudRouteSinkTest {
 
         sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        assertTrue(deps.playback.calls.contains("seekTo:500"))
+        // The reference target maps through the offset: 500 s on the reference timeline is 545 s on
+        // the sink's. Asserting the mapped value is what shows the mapping was applied at all.
+        assertTrue("the action was executed (calls=${deps.playback.calls})", deps.playback.calls.contains("seekTo:545"))
         assertTrue(!deps.playback.calls.contains("seekTo:50"))
     }
 
@@ -659,7 +663,10 @@ class CloudRouteSinkTest {
         val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
 
         // The executed seek is not rolled back; the partial speech is dropped.
-        assertTrue(deps.playback.calls.contains("seekTo:500"))
+        assertTrue(
+            "the executed seek is the MAPPED sink position (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:545"),
+        )
         // Deliberately changed: the client speaks its own words for the code, never the
         // server's message (which here was the same sentence by coincidence).
         assertEquals(VoiceResponse.Spoken("The assistant couldn't finish that request."), response)
@@ -1270,6 +1277,11 @@ class CloudRouteSinkTest {
         }
     }
 
+    private companion object {
+        /** The mapping's offset: reference[ms] + this = sink[ms], as ad insertion produces. */
+        const val REFERENCE_TO_SINK_OFFSET_MS = 45_000
+    }
+
     private data class CloudRouteAnalyticsCall(
         val outcome: String,
         val inputTokens: Int?,
@@ -1358,13 +1370,14 @@ class CloudRouteSinkTest {
         private val userId: String = "user_test",
         clientPositionMs: Long = 50_000L,
         // Mockito defaults Int? to 0; unmapped seeks must see null so we fall back to referenceMs.
-        // An IDENTITY mapping by default: reference seconds map to the same sink seconds. A reference
-        // seek now requires a usable mapping, so tests that are about seeking must supply one; the
-        // unmapped case is asserted separately, where the action must be refused.
+        // A NONZERO-OFFSET mapping by default: reference seconds map to sink seconds plus an offset,
+        // as dynamic ad insertion produces. An identity mapping cannot distinguish the two timelines
+        // -- a seek computed from reference ms and one computed through the mapping would agree, so a
+        // test could pass while the code used the wrong one. The offset makes the two differ.
         private val fingerprintTimingManager: FingerprintTimingManager = mock<FingerprintTimingManager>().also {
             whenever(it.playbackTimeMs(any())).thenAnswer { invocation ->
                 val seconds = invocation.getArgument<Double>(0)
-                (seconds * 1000).toInt()
+                (seconds * 1000).toInt() + REFERENCE_TO_SINK_OFFSET_MS
             }
         },
         private val cloudPlaybackContextState: CloudPlaybackContextState = CloudPlaybackContextState(),

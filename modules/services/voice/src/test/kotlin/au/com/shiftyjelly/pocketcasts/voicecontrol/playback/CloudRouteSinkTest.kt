@@ -1093,6 +1093,32 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a turn-owned pause delivered after the closure still releases its own hold`() = runTest {
+        // The caller-path outcome for the ownership fix: the turn takes its hold, backgrounding closes
+        // the window, and the sink's own pause is the stop an observer would see. Because the sink
+        // declared that stop as turn-owned, no playback-stop closure is recorded, so the completed
+        // answer releases its own hold and resumes the playback that was previously running.
+        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
+        val sink = deps.sink()
+
+        val turn = launch { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.pauseStarted.await()
+
+        // Backgrounding closes the window; the turn's own pause is what stopped playback, and it was
+        // declared turn-owned, so no playback-stop closure arises from it.
+        deps.privacyClosed = true
+        deps.playback.pauseGate?.complete(Unit)
+        turn.join()
+
+        assertEquals(
+            "a turn-owned pause must not strand the hold it was taken for",
+            listOf("pause", "resume"),
+            deps.playback.calls.filter { it == "pause" || it == "resume" },
+        )
+    }
+
+    @Test
     fun `a closure without a playback stop releases the turn hold and resumes`() = runTest {
         // The hold policy (Voice Intents 657-659): the turn releases its OWN hold when the answer
         // completes, unless playback actually stopped or a user pause superseded it. A visibility

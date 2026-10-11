@@ -93,6 +93,24 @@ class GracePeriodSignal @Inject constructor() {
     }
 
     /**
+     * The playback-command revision of the last stop this app CAUSED on a turn's behalf.
+     *
+     * Event-time ownership: a turn-owned pause is produced before the window closes but the
+     * observer may process it afterwards, so classifying by observation time would record the app's
+     * own pause as an external playback stop and strand the very hold it was taken for. The sink
+     * records it here when it issues the pause; the observer skips a stop carrying that revision.
+     */
+    @Volatile
+    private var turnOwnedStopRevision: Long? = null
+
+    fun markTurnOwnedStop(revision: Long) {
+        turnOwnedStopRevision = revision
+    }
+
+    /** Whether a stop at [revision] was caused by this app on a turn's behalf rather than externally. */
+    fun isTurnOwnedStop(revision: Long): Boolean = revision == turnOwnedStopRevision
+
+    /**
      * One escalation to the cloud service is allowed per grace window: the
      * window is the user-initiated act, and this bounds a routing failure (or a
      * deliberate `no_match`) to a single dispatch per act rather than a stream.

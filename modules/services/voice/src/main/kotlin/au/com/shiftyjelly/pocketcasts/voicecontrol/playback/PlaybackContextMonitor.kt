@@ -35,6 +35,9 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
      */
     fun playbackCommandRevision(): Long = playbackManager.playbackCommandRevision()
 
+    /** Records that the given revision's stop was caused by this app on a turn's behalf. */
+    fun markTurnOwnedStop(revision: Long) = gracePeriodSignal.markTurnOwnedStop(revision)
+
     /**
      * True when a privacy event closed the window. Read by the cloud turn so it does not restore a
      * pause over playback the user's own privacy action ended; a privacy closure does not reach the
@@ -79,7 +82,12 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
      * closure. Extracted so the counting rule is testable through the same decision the watcher
      * applies, rather than through a counter a test pokes directly.
      */
-    internal fun hostStoppedWhileClosed(wasPlaying: Boolean, isPlaying: Boolean): Boolean = wasPlaying && !isPlaying && gracePeriodSignal.isClosedByPrivacy()
+    internal fun hostStoppedWhileClosed(wasPlaying: Boolean, isPlaying: Boolean): Boolean = wasPlaying &&
+        !isPlaying &&
+        gracePeriodSignal.isClosedByPrivacy() &&
+        // Event-time ownership: a stop the app caused on a turn's behalf is not an external
+        // playback-stop obligation, whenever the observer happens to process it.
+        !gracePeriodSignal.isTurnOwnedStop(playbackManager.playbackCommandRevision())
 
     /**
      * True when the host app (Pocket Casts) is actively playing audio. Used by

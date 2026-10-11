@@ -83,81 +83,68 @@ class PlaybackContextMonitorHostStopTest {
     }
 
     @Test
-    fun `a turn-owned pause in effect is not an external stop`() = runTest {
-        // The app takes its own hold and declares it in effect; the observer must not read the stop
-        // that pause causes as an external playback-stop obligation, whenever it processes it.
+    fun `a stop caused by the voice path's own pause is not an external stop`() = runTest {
         val h = harness()
         h.awaitHostPlaying(true)
 
-        h.signal.setTurnOwnedPause(true)
+        // The voice path pauses: the command records VOICE_COMMANDS as the stop's provenance.
+        org.mockito.kotlin.whenever(h.manager.lastStopSourceView())
+            .thenReturn(au.com.shiftyjelly.pocketcasts.analytics.SourceView.VOICE_COMMANDS)
+
         h.signal.onAppBackgrounded()
         h.flow.value = paused
         h.awaitHostPlaying(false)
 
         assertEquals(
-            "the app's own hold pause is not an external stop",
+            "the voice path's own pause is not an external playback stop",
             0L,
             h.signal.playbackStopClosureCount(),
         )
     }
 
     @Test
-    fun `an external stop while no turn-owned pause is in effect is counted`() = runTest {
+    fun `an external stop DURING the hold is still counted`() = runTest {
+        // The distinguishing case: an external or user stop arrives while the turn's hold is in
+        // effect, before the delayed own-pause event. Provenance separates them; the interval during
+        // which a hold exists does not, which is why the hold's lifetime cannot be the discriminator.
         val h = harness()
         h.awaitHostPlaying(true)
 
-        // No hold in effect: whatever stopped the host is external.
+        // The turn's own pause is outstanding...
+        // ...but THIS stop carries an external source.
+        org.mockito.kotlin.whenever(h.manager.lastStopSourceView())
+            .thenReturn(au.com.shiftyjelly.pocketcasts.analytics.SourceView.UNKNOWN)
+
         h.signal.onAppBackgrounded()
         h.flow.value = paused
         h.awaitHostPlaying(false)
 
         assertEquals(
-            "a stop with no turn-owned hold in effect is an external stop",
+            "an external stop during a hold must be counted and supersede the auto-resume",
             1L,
             h.signal.playbackStopClosureCount(),
         )
     }
 
     @Test
-    fun `an external stop arriving before the hold is declared is not exempted`() = runTest {
-        // The revision key could not identify the voice pause, so an external stop sharing its number
-        // could spend the exemption on itself. The flag has no such ambiguity: a stop observed while
-        // no hold is in effect is external, and declaring the hold afterwards cannot retroactively
-        // exempt it.
+    fun `a voice-path stop delivered after the hold is released is not an external obligation`() = runTest {
+        // The own-pause event may be delivered after the turn already released its hold. Provenance is
+        // a property of the stop, not of the hold's lifetime, so the successor is not charged with an
+        // external obligation for the predecessor's own pause.
         val h = harness()
         h.awaitHostPlaying(true)
 
-        // External stop FIRST, with no hold in effect.
-        h.signal.onAppBackgrounded()
-        h.flow.value = paused
-        h.awaitHostPlaying(false)
+        org.mockito.kotlin.whenever(h.manager.lastStopSourceView())
+            .thenReturn(au.com.shiftyjelly.pocketcasts.analytics.SourceView.VOICE_COMMANDS)
 
-        // The hold is declared only afterwards.
-        h.signal.setTurnOwnedPause(true)
-
-        assertEquals(
-            "an external stop must not be exempted by a hold declared after it",
-            1L,
-            h.signal.playbackStopClosureCount(),
-        )
-    }
-
-    @Test
-    fun `a stop after the hold is released is counted`() = runTest {
-        val h = harness()
-        h.awaitHostPlaying(true)
-
-        h.signal.setTurnOwnedPause(true)
-        // The turn releases its hold.
-        h.signal.setTurnOwnedPause(false)
-
+        // No hold is declared in effect at all here -- provenance alone must decide.
         h.signal.onAppBackgrounded()
         h.flow.value = paused
         h.awaitHostPlaying(false)
 
         assertEquals(
-            "once the hold is released a stop is external again",
-            1L,
+            "the predecessor's own pause is not an external obligation for the successor",
+            0L,
             h.signal.playbackStopClosureCount(),
         )
     }

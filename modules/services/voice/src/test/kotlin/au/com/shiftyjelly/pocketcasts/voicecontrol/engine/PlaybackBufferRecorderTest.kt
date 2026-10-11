@@ -169,4 +169,67 @@ class PlaybackBufferRecorderTest {
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
         assertEquals(null, recorder.lastRecordedPositionMs())
     }
+
+    /**
+     * `retire()` must be atomic against a concurrent writer.
+     *
+     * The recorder's contract says every source feeds the same single writer, but they do not share a
+     * thread: the tap collector runs on Main, CloudAudioPlayer.drainFrames writes from the sink's IO
+     * coroutine, and snapshot() is read from the ASR coroutine. write() is monotonic per field, while
+     * retire() is a multi-field transition (buffer.fill + copyInto + writePos + filled) -- so a writer
+     * interleaving it can observe `filled` from before the fill with `writePos` from after.
+     *
+     * The observable symptom is a reference that reports MORE samples than the buffer can hold, which
+     * is impossible for any consistent state: `snapshot()` sizes by `if (filled) buffer.size else
+     * writePos`, so the two fields must agree.
+     */
+    @Test
+    fun `retire is atomic against a concurrent writer`() {
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val capacity = PlaybackBufferRecorder.SAMPLE_RATE * PlaybackBufferRecorder.BUFFER_DURATION_SECONDS
+        val chunk = FloatArray(4_000) { 0.25f }
+        val stop = java.util.concurrent.atomic.AtomicBoolean(false)
+        val violations = java.util.concurrent.atomic.AtomicInteger(0)
+
+        val writer = Thread {
+            while (!stop.get()) {
+                recorder.write(chunk)
+            }
+        }
+        val reader = Thread {
+            while (!stop.get()) {
+                // The strongest observable invariant: retire() promises the surviving content is the
+                // DELAY TAIL. A snapshot taken while the fill/copy transition is mid-flight sees a
+                // buffer sized from one field and populated from another, so the samples include
+                // zeros the fill wrote but the copy has not yet overwritten.
+                val samples = recorder.snapshot()
+                if (samples.size > capacity) violations.incrementAndGet()
+                // retire() only ever leaves DELAY_TAIL_SAMPLES or fewer; a larger all-zero prefix is
+                // impossible outside the torn window, because every writer writes 0.25f.
+                if (samples.size < capacity && samples.size > PlaybackBufferRecorder.DELAY_TAIL_SAMPLES) {
+                    val zeroRun = samples.takeWhile { it == 0f }.size
+                    if (zeroRun > PlaybackBufferRecorder.DELAY_TAIL_SAMPLES) violations.incrementAndGet()
+                }
+            }
+        }
+        val retirer = Thread {
+            while (!stop.get()) {
+                recorder.retire()
+            }
+        }
+        listOf(writer, reader, retirer).forEach {
+            it.isDaemon = true
+            it.start()
+        }
+        Thread.sleep(400)
+        stop.set(true)
+        listOf(writer, reader, retirer).forEach { it.join(2_000) }
+
+        assertEquals(
+            "a reference larger than the ring means retire() and write() interleaved: " +
+                "violations=${violations.get()}",
+            0,
+            violations.get(),
+        )
+    }
 }

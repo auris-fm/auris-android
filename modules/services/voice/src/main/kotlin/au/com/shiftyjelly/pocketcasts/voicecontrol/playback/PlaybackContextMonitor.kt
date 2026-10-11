@@ -87,7 +87,7 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
         gracePeriodSignal.isClosedByPrivacy() &&
         // Event-time ownership: a stop the app caused on a turn's behalf is not an external
         // playback-stop obligation, whenever the observer happens to process it.
-        !gracePeriodSignal.isTurnOwnedStop(playbackManager.playbackCommandRevision())
+        !gracePeriodSignal.consumeTurnOwnedStop(playbackManager.playbackCommandRevision())
 
     /**
      * True when the host app (Pocket Casts) is actively playing audio. Used by

@@ -107,8 +107,20 @@ class GracePeriodSignal @Inject constructor() {
         turnOwnedStopRevision = revision
     }
 
-    /** Whether a stop at [revision] was caused by this app on a turn's behalf rather than externally. */
-    fun isTurnOwnedStop(revision: Long): Boolean = revision == turnOwnedStopRevision
+    /**
+     * Whether a stop at [revision] was caused by this app on a turn's behalf rather than externally,
+     * consuming the mark when it answers yes.
+     *
+     * One stop was caused, so at most one stop is exempt. A mark that stayed set would turn a
+     * one-shot exception into a permanent exemption for a revision the app does not own: the sink's
+     * own pause goes through a source that does not advance the revision, so a later stop can carry
+     * the same number.
+     */
+    fun consumeTurnOwnedStop(revision: Long): Boolean {
+        if (revision != turnOwnedStopRevision) return false
+        turnOwnedStopRevision = null
+        return true
+    }
 
     /**
      * One escalation to the cloud service is allowed per grace window: the

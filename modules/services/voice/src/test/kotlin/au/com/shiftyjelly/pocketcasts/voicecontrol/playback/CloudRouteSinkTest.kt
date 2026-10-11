@@ -1074,6 +1074,25 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a turn that inherits a paused host does not resume it after privacy closed mid-turn`() = runTest {
+        // The inherited-pause gap (#4236499389): the obligation latch is sampled only when the turn
+        // takes its own pause, so a turn arriving to an ALREADY-paused host records nothing and its
+        // privacy guard reads `atPause == null` -- always false. The user then presses play during
+        // the answer, privacy closes mid-turn, and the turn's restore path must still not resume:
+        // the user's play command plus a privacy closure both stand regardless of who paused first.
+        val deps = TestDeps(hostPlaying = false, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        deps.privacyClosed = true
+
+        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(
+            "a privacy closure during an inherited-pause turn must not end in playback",
+            emptyList<String>(),
+            deps.playback.calls,
+        )
+    }
+
+    @Test
     fun `a turn while the host is playing pauses and restores it`() = runTest {
         val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
 

@@ -2061,10 +2061,15 @@ class CloudRouteSinkTest {
 
     @Test
     fun `a user pause is handled the same with and without the confirmation`() = runTest {
-        // @reviewer measured `unconfirmed = [pause]`, `confirmed = [pause, resume]` and attributed the
-        // difference to the confirmation. This drives both variants through the SAME arrangement so the
-        // confirmation is the only variable, and reports both sequences so a divergence is visible
-        // rather than asserted from a reading.
+        // The pair is asserted because the confirmation has NO observable consequence, here measured
+        // across every ordering and both terminal paths. It is NOT asserted against a divergence: an
+        // earlier probe of @reviewer's reported `confirmed = [pause, resume]` vs `unconfirmed =
+        // [pause]`, and they traced it to a deadlock in the probe that reproduced identically on
+        // re-run -- a deadlock is perfectly stable, which is why three identical runs looked like a
+        // measurement. The attribution to the confirmation was wrong and is not cited here.
+        //
+        // What the pair does: it pins the behaviour that HOLDS, so it fails the day a confirmation
+        // starts changing the outcome, whether or not that is provable today.
         val confirmed = runUserPauseDuringHold(this, withConfirmation = true, fails = true)
         val unconfirmed = runUserPauseDuringHold(this, withConfirmation = false, fails = true)
         val confirmedOk = runUserPauseDuringHold(this, withConfirmation = true, fails = false)

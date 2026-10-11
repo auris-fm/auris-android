@@ -35,7 +35,7 @@ class PlaybackBufferRecorder @Inject constructor(
     private var filled = false
 
     /**
-     * Guards [buffer], [writePos] and [filled].
+     * Guards [buffer], [writePos], [filled] and [lastPositionMs].
      *
      * The class doc's "single writer" is true of the SUBMISSION ORDER, not of the thread: the tap
      * collector runs on Main, [CloudAudioPlayer] writes from the sink's IO coroutine, the route
@@ -137,27 +137,35 @@ class PlaybackBufferRecorder @Inject constructor(
      * timestamped source has contributed.
      */
     fun reference(): PlaybackReference {
-        val samples = snapshot()
-        val end = lastPositionMs
-        val start = end?.let { it - (samples.size * 1_000L) / SAMPLE_RATE }
-        return PlaybackReference(samples, SAMPLE_RATE, start)
+        // One acquisition, not two. `snapshot()` and the position are the two halves of ONE answer --
+        // the samples and the timeline position they occupy -- so reading them under separate locks
+        // can pair `start` derived from a newer position with samples from an older state, giving a
+        // span that never existed. `write()` updates both, and `retire()` changes the sample count
+        // without touching the position.
+        synchronized(lock) {
+            val samples = snapshotLocked()
+            val end = lastPositionMs
+            val start = end?.let { it - (samples.size * 1_000L) / SAMPLE_RATE }
+            return PlaybackReference(samples, SAMPLE_RATE, start)
+        }
     }
 
-    fun snapshot(): FloatArray {
-        synchronized(lock) {
-            if (!filled && writePos == 0) return FloatArray(0)
-            val size = if (filled) buffer.size else writePos
-            val result = FloatArray(size)
-            if (filled) {
-                // Wrap: copy from writePos to end, then start to writePos
-                val tail = buffer.size - writePos
-                buffer.copyInto(result, 0, writePos, buffer.size)
-                buffer.copyInto(result, tail, 0, writePos)
-            } else {
-                buffer.copyInto(result, 0, 0, writePos)
-            }
-            return result
+    fun snapshot(): FloatArray = synchronized(lock) { snapshotLocked() }
+
+    /** The window's samples. Callers must hold [lock] so the read is one coherent step. */
+    private fun snapshotLocked(): FloatArray {
+        if (!filled && writePos == 0) return FloatArray(0)
+        val size = if (filled) buffer.size else writePos
+        val result = FloatArray(size)
+        if (filled) {
+            // Wrap: copy from writePos to end, then start to writePos
+            val tail = buffer.size - writePos
+            buffer.copyInto(result, 0, writePos, buffer.size)
+            buffer.copyInto(result, tail, 0, writePos)
+        } else {
+            buffer.copyInto(result, 0, 0, writePos)
         }
+        return result
     }
 
     companion object {

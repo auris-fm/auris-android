@@ -9,6 +9,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -108,6 +109,42 @@ class WebSocketCloudTurnTransportFailureTest {
         assertTrue(
             "the failure must surface as a terminal Error event, not silence: $events",
             events.any { it is CloudRouteEvent.Error },
+        )
+    }
+
+    /**
+     * A terminal event must not OVERTAKE frames that were already emitted before it.
+     *
+     * The failure event bypasses the channel while audio and action frames go through it, so a
+     * terminal emitted directly can be delivered while earlier frames are still buffered -- the
+     * sink would then see an error before the audio it already received, and the turn's own
+     * ordering guarantee ("everything the server sends back, in order") is broken.
+     */
+    @Test
+    fun `a terminal event does not overtake frames emitted before it`() = runBlocking {
+        val client = CapturingOkHttpClient()
+        val transport = WebSocketCloudTurnTransport("https://example.invalid", client)
+
+        val events = CopyOnWriteArrayList<CloudRouteEvent>()
+        val job = launch { transport.exchange(frame()).collect { events.add(it) } }
+
+        withTimeout(5_000) { while (client.listener == null) delay(10) }
+        val l = client.listener!!
+        val s = client.socket!!
+
+        // An audio frame first, then an undecodable text frame that emits a terminal error.
+        l.onMessage(s, ByteString.of(1, 2, 3))
+        l.onMessage(s, "not-json")
+        delay(300)
+        job.cancel()
+
+        val audioIndex = events.indexOfFirst { it is CloudRouteEvent.AudioFrame }
+        val errorIndex = events.indexOfFirst { it is CloudRouteEvent.Error }
+        assertTrue("the audio frame must be delivered: $events", audioIndex >= 0)
+        assertTrue("the terminal error must be delivered: $events", errorIndex >= 0)
+        assertTrue(
+            "the error must not overtake the audio frame emitted before it: $events",
+            audioIndex < errorIndex,
         )
     }
 }

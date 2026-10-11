@@ -189,10 +189,23 @@ class PlaybackBufferRecorder @Inject constructor(
             // an instant on the other, producing a plausible delay that is really the distance between
             // two unrelated origins. Absent is the honest answer, and the correlator already falls
             // back to offset matching when a position is absent.
-            val start = if (positionAxis == PositionAxis.Mixed) {
-                null
-            } else {
+            // A position is offered ONLY when the window's samples carry a monotonically-clocked
+            // mapping, because that is the only axis the microphone instant can be compared against.
+            // Two exclusions, and the second is the one a mixed-axis guard alone misses:
+            //
+            //   Mixed     the window spans two origins, so subtraction crosses them
+            //   Media     a SINGLE-domain window on the wrong domain -- a media position is seconds
+            //             into an episode and a microphone instant is a monotonic time, so pairing
+            //             them reports the distance between two unrelated origins as a delay
+            //
+            // Both report no position. Absent is the honest answer and the correlator falls back to
+            // offset matching, whereas a media position would align confidently against a moment that
+            // has nothing to do with when the audio was captured.
+            val anchored = positionAxis == PositionAxis.Monotonic
+            val start = if (anchored) {
                 end?.let { it - (samples.size * 1_000L) / SAMPLE_RATE }
+            } else {
+                null
             }
             return PlaybackReference(samples, SAMPLE_RATE, start)
         }

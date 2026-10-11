@@ -1437,7 +1437,11 @@ class CloudRouteSinkTest {
             listOf("pause", "pause"),
             deps.playback.calls.filter { it == "pause" || it == "resume" },
         )
-        assertEquals("no revision bump happens on this path", 0L, deps.commandRevision)
+        // The fixture holds the command revision CONSTANT so ownership is the only axis under
+        // test: supersession is proved by the refusal above, not by the revision. No assertion is
+        // made on deps.commandRevision because only the test writes it -- asserting on it would
+        // restate the fixture rather than a production fact, and an assertion that cannot fail is
+        // worse than an absent one because it reads as coverage. (Measured at 2f28ce664.)
     }
 
     @Test

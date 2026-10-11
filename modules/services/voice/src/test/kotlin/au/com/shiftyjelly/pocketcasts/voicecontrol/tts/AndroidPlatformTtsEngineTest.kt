@@ -4,9 +4,14 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -46,5 +51,139 @@ class AndroidPlatformTtsEngineTest {
     fun `release is idempotent`() {
         engine.release()
         engine.release()
+    }
+
+    @Test
+    fun `cancelling while synthesis is suspended stops the engine`() = runTest {
+        // The synthesis never completes, so the coroutine is cancelled exactly while suspended inside
+        // the call -- the case the !isActive check after the call cannot reach, because that check
+        // runs only once the call has already returned.
+        val (wired, fake) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+
+        // Real dispatchers, not runTest's: speak() uses withContext(Dispatchers.Main) to touch the
+        // platform engine, and runTest's virtual scheduler never runs Main, so the test would block
+        // on work that cannot progress. A real scope on the default dispatcher lets the call reach
+        // its suspension, which is the state this test is about.
+        val scope = CoroutineScope(Dispatchers.Default)
+        val job = scope.launch { wired.speak("hello", "en") }
+        // speak() touches the platform engine through withContext(Dispatchers.Main), which posts to
+        // Robolectric's main looper; those runnables must be idled or the call never advances to its
+        // synthesis suspension and the test waits on work that is sitting in the queue.
+        val queued = (0 until 50).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            fake.synthesizeQueued
+        }
+        assertTrue(
+            "precondition: the synthesis must actually be queued and left suspended",
+            queued,
+        )
+        job.cancelAndJoin()
+        scope.cancel()
+
+        assertTrue(
+            "cancelling while suspended must stop the queued synthesis (stopCalls=${fake.stopCalls})",
+            fake.stopCalls > 0,
+        )
+    }
+
+    @Test
+    fun `a completed synthesis is not disturbed, and a later utterance still runs`() {
+        // The other half of the cancellation contract: adding invokeOnCancellation must not break
+        // the normal path. The first utterance completes through the platform's own onDone callback,
+        // and a second utterance on the same engine must still synthesize -- a cancellation handler
+        // that fired on success, or that left the engine stopped, would show up here.
+        val (wired, fake) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        repeat(2) { attempt ->
+            val job = scope.launch { wired.speak("hello", "en") }
+            val queued = (0 until 50).any {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(20)
+                fake.synthesizeCount > attempt
+            }
+            assertTrue("utterance ${attempt + 1} must reach synthesis", queued)
+            // Complete it the way the platform does, so the call resumes normally.
+            fake.listener?.onDone(fake.lastUtteranceId)
+            runBlocking { job.join() }
+        }
+        assertEquals(
+            "both utterances must have reached synthesis without a cancellation",
+            2,
+            fake.synthesizeCount,
+        )
+        assertEquals("a completed synthesis must not stop the engine", 0, fake.stopCalls)
+        scope.cancel()
+    }
+
+    /**
+     * Builds an engine whose synthesizer is controlled by the test, and fires the platform's OWN
+     * initialization callback with SUCCESS so `speak` reaches the synthesis suspension. The callback
+     * driven here is the production one -- the same lambda the real TextToSpeech invokes -- rather
+     * than a test-only "initialized" flag.
+     */
+    private fun engineWithFakeSynthesizer(
+        onSynthesize: (utteranceId: String) -> Unit = {},
+    ): Pair<AndroidPlatformTtsEngine, FakeSynthesizer> {
+        val fake = FakeSynthesizer(onSynthesize)
+        lateinit var engineRef: AndroidPlatformTtsEngine
+        engineRef = AndroidPlatformTtsEngine(
+            context,
+            PlaybackBufferRecorder(FingerprintPcmTap()),
+        ) { onInitialized ->
+            fake.onInitialized = onInitialized
+            fake
+        }
+        return engineRef to fake
+    }
+
+    private class FakeSynthesizer(
+        private val onSynthesize: (String) -> Unit,
+    ) : android.speech.tts.TextToSpeech(
+        androidx.test.core.app.ApplicationProvider.getApplicationContext(),
+        null,
+    ) {
+        var onInitialized: ((Boolean) -> Unit)? = null
+        var stopCalls = 0
+            private set
+
+        @Volatile
+        var synthesizeQueued = false
+            private set
+        var synthesizeCount = 0
+            private set
+        var lastUtteranceId: String = ""
+            private set
+        var listener: android.speech.tts.UtteranceProgressListener? = null
+
+        override fun setOnUtteranceProgressListener(
+            l: android.speech.tts.UtteranceProgressListener?,
+        ): Int {
+            listener = l
+            return android.speech.tts.TextToSpeech.SUCCESS
+        }
+
+        override fun setLanguage(locale: java.util.Locale): Int = android.speech.tts.TextToSpeech.LANG_AVAILABLE
+
+        override fun synthesizeToFile(
+            text: CharSequence?,
+            params: android.os.Bundle?,
+            file: java.io.File?,
+            utteranceId: String?,
+        ): Int {
+            lastUtteranceId = utteranceId ?: ""
+            synthesizeCount += 1
+            onSynthesize(utteranceId ?: "")
+            synthesizeQueued = true
+            return android.speech.tts.TextToSpeech.SUCCESS
+        }
+
+        override fun stop(): Int {
+            stopCalls += 1
+            return android.speech.tts.TextToSpeech.SUCCESS
+        }
     }
 }

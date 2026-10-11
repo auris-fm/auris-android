@@ -34,6 +34,7 @@ import timber.log.Timber
 class AndroidPlatformTtsEngine @Inject constructor(
     @ApplicationContext context: Context,
     private val playbackBufferRecorder: PlaybackBufferRecorder,
+    private val synthesizerFactory: ((onInitialized: (Boolean) -> Unit) -> TextToSpeech)? = null,
 ) : TtsEngine {
     private val appContext = context.applicationContext
     private var tts: TextToSpeech? = null
@@ -53,13 +54,6 @@ class AndroidPlatformTtsEngine @Inject constructor(
      */
     var synthesizeToFile: ((engine: TextToSpeech, text: String, file: java.io.File, utteranceId: String) -> Int)? =
         null
-
-    /**
-     * Stops the engine, so a test can observe that cancellation reached it. Defaults to the real
-     * `TextToSpeech.stop`; the substitution exists because the platform engine is unreachable in a
-     * unit test and "cancellation stops synthesis" is otherwise a claim nobody has run.
-     */
-    var stopInvokerForTest: (() -> Unit)? = null
 
     /** Set while a synthesized file is being played, so cancellation can stop it. */
     @Volatile
@@ -85,10 +79,18 @@ class AndroidPlatformTtsEngine @Inject constructor(
     private var speakCount = 0
 
     init {
-        tts = TextToSpeech(appContext) { status ->
-            initialized = (status == TextToSpeech.SUCCESS)
-            if (!initialized) {
-                Timber.w("TTS engine initialization failed with status $status")
+        val factory = synthesizerFactory
+        tts = if (factory != null) {
+            factory { ok ->
+                initialized = ok
+                if (!ok) Timber.w("TTS engine initialization failed")
+            }
+        } else {
+            TextToSpeech(appContext) { status ->
+                initialized = (status == TextToSpeech.SUCCESS)
+                if (!initialized) {
+                    Timber.w("TTS engine initialization failed with status $status")
+                }
             }
         }
     }
@@ -144,7 +146,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
                 // catches a cancellation that lands BEFORE this line, not one that arrives while
                 // suspended or after the call returns.
                 continuation.invokeOnCancellation {
-                    stopInvokerForTest?.invoke() ?: engine.stop()
+                    engine.stop()
                 }
                 // QUEUE_FLUSH preserves the previous single-utterance behaviour: a superseded reply
                 // must not keep talking.
@@ -157,7 +159,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
                 if (!continuation.isActive) {
                     // A cancellation landed between registering the listener and the call, so stop
                     // the queued synthesis rather than leaving it orphaned.
-                    stopInvokerForTest?.invoke() ?: engine.stop()
+                    engine.stop()
                 }
             }
             if (!synthesized) return

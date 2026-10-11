@@ -28,6 +28,10 @@ internal object CloudRouteEvents {
                             tool = map["tool"] as? String ?: "",
                             action = map["action"] as? String ?: "",
                             params = (map["params"] as? Map<String, Any?>).orEmpty(),
+                            // Read from the frame, and absent on user actions -- the distinction the
+                            // contract turns on. Not defaulted to a sentinel: an unprefixed absence is
+                            // what makes "not a user action" different from "this turn's hold".
+                            turnId = map["turn_id"] as? String,
                         )
                     }
 

@@ -160,6 +160,28 @@ class AudioFeedbackRenderer(
         earconPlayer.release()
     }
 
+    /**
+     * What an owner's lifecycle event should do to this renderer.
+     *
+     * Named rather than left to two call sites, because the CHOICE is the defect this exists to
+     * prevent: `stopVoiceControl` runs on EVERY stop while this type is a `@Singleton`, so releasing
+     * there silenced all feedback for the process. A caller selects a constant, and the service's two
+     * call sites are pinned by a test without standing the Service up.
+     */
+    enum class Lifecycle {
+        /** The owning session ended; the renderer stays usable for the next one. */
+        SessionEnded,
+
+        /** The owner is gone for good; a later emit is refused. */
+        Disposed,
+    }
+
+    /** Applies [event], so the choice between ending and disposing has one home. */
+    fun applyLifecycle(event: Lifecycle) = when (event) {
+        Lifecycle.SessionEnded -> endSession()
+        Lifecycle.Disposed -> release()
+    }
+
     /** Disposes the renderer for good. A later [render] or [playEarcon] is refused. */
     fun release() {
         disposed = true

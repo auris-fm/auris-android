@@ -782,8 +782,9 @@ class VoiceControlService : Service() {
         voiceRecognizer.release()
         // END THE SESSION, do not dispose. This runs on every stop, and the renderer is a Hilt
         // @Singleton: disposing here meant the next start had no feedback at all, silently. Disposal
-        // is onDestroy's job, below.
-        audioFeedbackRenderer.endSession()
+        // is onDestroy's job, below. The choice is named so it is checkable without driving the
+        // Service -- swapping these two constants is the mistake the naming prevents.
+        audioFeedbackRenderer.applyLifecycle(AudioFeedbackRenderer.Lifecycle.SessionEnded)
         notificationManager.cancelNotification()
         stopForeground(STOP_FOREGROUND_REMOVE)
         serviceScope.cancel()
@@ -802,7 +803,7 @@ class VoiceControlService : Service() {
         stopVoiceControl()
         // The service itself is gone, so the singleton renderer can be disposed for good. Permanent
         // release belongs here, where the object will not be handed back to a new session.
-        audioFeedbackRenderer.release()
+        audioFeedbackRenderer.applyLifecycle(AudioFeedbackRenderer.Lifecycle.Disposed)
         // The controller keeps its own record of whether this service is running; without this it
         // would believe a service that the system killed is still alive and never start it again.
         voiceControlServiceController.onServiceStopped()

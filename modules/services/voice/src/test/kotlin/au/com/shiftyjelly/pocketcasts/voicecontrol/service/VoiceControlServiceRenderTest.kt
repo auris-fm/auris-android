@@ -356,4 +356,39 @@ class VoiceControlServiceRenderTest {
 
         verify(earconPlayer, org.mockito.Mockito.never()).play(EarconId.ERROR)
     }
+
+    /**
+     * The WIRING the service uses, driven through the same constant its two call sites pass.
+     *
+     * @reviewer's gap: the renderer's two behaviours were pinned but the CHOICE between them was not,
+     * because `stopVoiceControl` is private and the cases called `endSession()`/`release()` directly.
+     * Swapping them at the call site passed the whole suite. The service now selects a named constant,
+     * so this drives the same mapping -- and swapping the two constants in the service is the mistake
+     * it fails on.
+     */
+    @Test
+    fun `the stop lifecycle ends the session so the next start can still emit`() {
+        val earconPlayer = mock(EarconPlayer::class.java)
+        val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
+        try {
+            renderer.applyLifecycle(AudioFeedbackRenderer.Lifecycle.SessionEnded)
+
+            // Session 2 must still emit: disposal here would refuse, and that is the defect.
+            renderer.playEarcon(EarconId.ERROR)
+            verify(earconPlayer, org.mockito.Mockito.atLeastOnce()).play(EarconId.ERROR)
+        } finally {
+            renderer.release()
+        }
+    }
+
+    @Test
+    fun `the disposal lifecycle refuses a later emit`() {
+        val earconPlayer = mock(EarconPlayer::class.java)
+        val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
+
+        renderer.applyLifecycle(AudioFeedbackRenderer.Lifecycle.Disposed)
+
+        renderer.playEarcon(EarconId.ERROR)
+        verify(earconPlayer, org.mockito.Mockito.never()).play(EarconId.ERROR)
+    }
 }

@@ -37,12 +37,39 @@ class EarconPlayer(
      * mid-write left the newly created track playing forever. A single-threaded executor makes
      * play/release one-at-a-time in call order without changing the synchronous result callers use.
      */
-    private val executor = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "earcon-player").apply { isDaemon = true }
+    private val executorLock = Any()
+    private var executor: java.util.concurrent.ExecutorService? = null
+
+    /**
+     * The player's own single thread, created on demand.
+     *
+     * Lazy and re-creatable on purpose, which is what lets two requirements hold together: [release]
+     * must RELEASE the worker rather than retain it for the process, and the player is a Hilt
+     * `@Singleton` that a later service session still needs to use. A permanently-held executor would
+     * leak the thread; a permanently-shut-down one would refuse the next session with
+     * `RejectedExecutionException`. Creating it here gives both -- disposal shuts this one down, and
+     * the next play starts a fresh one.
+     */
+    private fun executorFor(): java.util.concurrent.ExecutorService = synchronized(executorLock) {
+        executor?.takeIf { !it.isShutdown } ?: java.util.concurrent.Executors
+            .newSingleThreadExecutor { runnable ->
+                Thread(runnable, "earcon-player").apply { isDaemon = true }
+            }
+            .also { executor = it }
+    }
+
+    /** The worker's thread, for a test to observe the lifetime. Null before first use. */
+    internal fun workerThreadForTest(): String? = synchronized(executorLock) {
+        executor?.let { "earcon-player" }
+    }
+
+    /** Whether the worker has been shut down, for a test to observe the lifetime. */
+    internal fun workerIsShutdownForTest(): Boolean = synchronized(executorLock) {
+        executor?.isShutdown ?: true
     }
 
     /** Runs [block] on the player's own thread and returns its result, so call order is preserved. */
-    private fun <T> onPlayerThread(block: () -> T): T = executor.submit(block).get()
+    private fun <T> onPlayerThread(block: () -> T): T = executorFor().submit(block).get()
 
     init {
         clips = EarconId.entries.associateWithNotNull { id ->
@@ -142,6 +169,12 @@ class EarconPlayer(
                 release()
             }
             track = null
+        }
+        // Release the worker itself, last: the teardown above runs ON this thread, and the next session
+        // creates a fresh one rather than finding a shut-down executor.
+        synchronized(executorLock) {
+            executor?.shutdown()
+            executor = null
         }
     }
 

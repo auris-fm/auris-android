@@ -78,7 +78,7 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
             playbackManager.playbackStateFlow.collect { state ->
                 // The cause is read from THIS emission, so a newer command replacing a shared
                 // "last command" field cannot re-attribute a stop the observer processes late.
-                if (hostStoppedWhileClosed(wasPlaying, state.isPlaying, state.changedBySource)) {
+                if (hostStoppedWhileClosed(wasPlaying, state.isPlaying, state.changedByVoiceHold)) {
                     gracePeriodSignal.noteHostPlaybackStopped()
                 }
                 wasPlaying = state.isPlaying
@@ -96,14 +96,14 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
     internal fun hostStoppedWhileClosed(
         wasPlaying: Boolean,
         isPlaying: Boolean,
-        cause: String? = null,
+        causedByVoiceHold: Boolean = false,
     ): Boolean = wasPlaying &&
         !isPlaying &&
         gracePeriodSignal.isClosedByPrivacy() &&
-        // Event provenance, from the stop's own emission: a stop caused by the voice path's hold
-        // pause is not an external obligation. A spoken user pause also carries VOICE_COMMANDS, so
-        // the executor marks that one as a user command and it supersedes the hold like any other.
-        !(cause == SourceView.VOICE_COMMANDS.key && !isSpokenUserPause)
+        // Ownership, not interface: only a stop the turn caused while HOLDING is exempt. The user's
+        // own pause reaches the player through the same VOICE_COMMANDS tag, and a voice-path skip or
+        // next-episode carries it too, so the tag says nothing about whose stop this was.
+        !causedByVoiceHold
 
     /**
      * True when the host app (Pocket Casts) is actively playing audio. Used by

@@ -274,24 +274,31 @@ open class PlaybackManager @Inject constructor(
     }
 
     /**
-     * The source of the command currently being applied, so the state it produces can carry its own
-     * cause. Transient and consumed when the state is emitted; an observer reads the cause from the
-     * emission it is processing rather than from a shared "last command" field it may outlive.
+     * Whether the pause currently being applied is the voice turn's own HOLD.
+     *
+     * `SourceView.VOICE_COMMANDS` records the INTERFACE a command arrived through, and both the
+     * turn's hold pause and the user's own spoken or in-app pause reach the player that way. Interface
+     * and ownership are different facts, so the turn marks its hold explicitly and an observer
+     * distinguishes the two by this, never by the tag.
      */
     @Volatile
-    private var commandSourceInFlight: SourceView? = null
+    private var voiceHoldPauseInFlight = false
 
-    private fun notePlaybackCommand(sourceView: SourceView) {
-        commandSourceInFlight = sourceView
-        if (sourceView == SourceView.VOICE_COMMANDS) return
-        playbackCommandCount.incrementAndGet()
+    /** Marks the next voice-path pause as the turn's own hold rather than a user's pause. */
+    fun markNextVoicePauseAsHold() {
+        voiceHoldPauseInFlight = true
     }
 
-    /** The source of the command that produced the state being emitted, or null when none is in flight. */
-    fun consumeCommandSource(): String? {
-        val source = commandSourceInFlight
-        commandSourceInFlight = null
-        return source?.key
+    /** The ownership of the pause being applied, for the state it produces to carry. */
+    private fun consumeHoldOwnership(): Boolean {
+        val held = voiceHoldPauseInFlight
+        voiceHoldPauseInFlight = false
+        return held
+    }
+
+    private fun notePlaybackCommand(sourceView: SourceView) {
+        if (sourceView == SourceView.VOICE_COMMANDS) return
+        playbackCommandCount.incrementAndGet()
     }
 
     private var updateCount = 0
@@ -1080,6 +1087,7 @@ open class PlaybackManager @Inject constructor(
                     playbackState.copy(
                         transientLoss = false,
                         changedBySource = sourceView.key,
+                        changedByVoiceHold = consumeHoldOwnership(),
                     ),
                 )
             }

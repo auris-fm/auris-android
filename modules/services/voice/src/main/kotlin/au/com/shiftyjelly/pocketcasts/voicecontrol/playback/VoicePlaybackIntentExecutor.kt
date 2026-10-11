@@ -203,6 +203,15 @@ interface VoicePlaybackSink {
     suspend fun restore(): VoiceResponse
 
     suspend fun pause(): VoiceResponse
+
+    /**
+     * Pause on the turn's own behalf, taking a HOLD the turn will release.
+     *
+     * Deliberately distinct from [pause]: both reach the player through `VOICE_COMMANDS`, so a
+     * listener cannot tell them apart by interface. The user's own pause must supersede the answer
+     * hold, and the turn's hold must not be exempted from that rule merely because it shares the tag.
+     */
+    suspend fun pauseAsHold(): VoiceResponse
     suspend fun resume(): VoiceResponse
     suspend fun skipForward(seconds: Int?): VoiceResponse
     suspend fun skipBackward(seconds: Int?): VoiceResponse

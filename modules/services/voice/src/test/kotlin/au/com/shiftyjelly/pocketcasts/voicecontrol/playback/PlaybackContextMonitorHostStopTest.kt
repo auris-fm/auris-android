@@ -27,9 +27,10 @@ class PlaybackContextMonitorHostStopTest {
         episodeUuid = "ep",
     )
 
-    private fun pausedBy(source: SourceView) = playing.copy(
+    private fun pausedBy(source: SourceView, hold: Boolean = false) = playing.copy(
         state = PlaybackState.State.PAUSED,
         changedBySource = source.key,
+        changedByVoiceHold = hold,
     )
 
     private class Harness(
@@ -46,7 +47,7 @@ class PlaybackContextMonitorHostStopTest {
         }
     }
 
-    private fun harness(spokenUserPause: Boolean = false): Harness {
+    private fun harness(): Harness {
         val flow = MutableStateFlow(playing)
         val manager = mock<PlaybackManager>()
         whenever(manager.playbackStateFlow).thenReturn(flow)
@@ -56,7 +57,6 @@ class PlaybackContextMonitorHostStopTest {
             playbackManager = manager,
             gracePeriodSignal = signal,
             scope = CoroutineScope(driver),
-            isSpokenUserPause = spokenUserPause,
         )
         return Harness(flow, signal, monitor, driver)
     }
@@ -84,7 +84,7 @@ class PlaybackContextMonitorHostStopTest {
         h.awaitHostPlaying(true)
 
         h.signal.onAppBackgrounded()
-        h.flow.value = pausedBy(SourceView.VOICE_COMMANDS)
+        h.flow.value = pausedBy(SourceView.VOICE_COMMANDS, hold = true)
         h.awaitHostPlaying(false)
 
         assertEquals(
@@ -119,7 +119,7 @@ class PlaybackContextMonitorHostStopTest {
         h.awaitHostPlaying(true)
         h.signal.onAppBackgrounded()
 
-        h.flow.value = pausedBy(SourceView.VOICE_COMMANDS)
+        h.flow.value = pausedBy(SourceView.VOICE_COMMANDS, hold = true)
         h.flow.value = playing
         h.flow.value = pausedBy(SourceView.UNKNOWN)
         h.driver.drain()
@@ -132,15 +132,16 @@ class PlaybackContextMonitorHostStopTest {
     }
 
     @Test
-    fun `a spoken user pause is not exempted by its interface`() = runTest {
+    fun `a user pause sharing the voice interface tag is not exempted`() = runTest {
         // VOICE_COMMANDS is the interface the command arrived through, not who asked for it. A user's
         // spoken pause reaches the player through that same tag, and must supersede the answer hold
         // like any other user pause rather than being exempted as the turn's own pause.
-        val h = harness(spokenUserPause = true)
+        val h = harness()
         h.awaitHostPlaying(true)
 
         h.signal.onAppBackgrounded()
-        h.flow.value = pausedBy(SourceView.VOICE_COMMANDS)
+        // The user's pause arrives through the SAME interface tag, but is not the turn's hold.
+        h.flow.value = pausedBy(SourceView.VOICE_COMMANDS, hold = false)
         h.awaitHostPlaying(false)
 
         assertEquals(

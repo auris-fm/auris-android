@@ -465,6 +465,8 @@ class VoicePlaybackIntentExecutorTest {
             onCall?.invoke("restore")
             return VoiceResponse.Silent
         }
+
+        override suspend fun pauseAsHold(): VoiceResponse = pause()
         override suspend fun pause(): VoiceResponse {
             calls += "pause"
             onCall?.invoke("pause")

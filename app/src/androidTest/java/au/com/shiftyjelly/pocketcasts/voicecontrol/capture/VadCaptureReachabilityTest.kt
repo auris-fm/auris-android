@@ -90,5 +90,13 @@ class VadCaptureReachabilityTest {
             scope.cancel()
         }
         assertTrue("capture stopped cleanly", !capture.isRecording)
+        // `isRecording` reads the wrapper's `disposed` flag first, so it reports false the moment
+        // stopCapture() is called whether or not the native stream was actually released. Assert the
+        // native stream itself: the release must not depend on the collector happening to notice the
+        // flag before it stops running.
+        assertTrue(
+            "the NATIVE capture stream must be released, not just the wrapper's flag",
+            !MicrophoneCapture.isNativeCapturing(),
+        )
     }
 }

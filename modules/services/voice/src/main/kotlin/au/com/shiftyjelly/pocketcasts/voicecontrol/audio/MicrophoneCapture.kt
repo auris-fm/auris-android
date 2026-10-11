@@ -46,6 +46,15 @@ class MicrophoneCapture @Inject constructor(
         fun framesConsumed(): Long = OboeNative.nativeGetFramesConsumed()
 
         /**
+         * Whether the native capture stream itself is still running.
+         *
+         * Distinct from [MicrophoneCapture.isRecording], which reads `disposed` first and so reports
+         * "not recording" as soon as the wrapper is told to stop, whether or not the native stream was
+         * actually released. A test that asserts only `isRecording` cannot tell those apart; this can.
+         */
+        fun isNativeCapturing(): Boolean = OboeNative.nativeIsCapturing()
+
+        /**
          * Detector aggregates for capture diagnosis, or null when unavailable.
          *
          * Returns null in a release build, so the diagnostic cannot be reached from a shipped app: the

@@ -212,6 +212,14 @@ internal class OboeCaptureEngine(
      */
     fun dispose() {
         disposed = true
+        // Stop the native stream directly rather than only signalling the collector to stop. The
+        // collector sets this flag and then only notices on its next poll (up to the event timeout),
+        // and if nobody is collecting -- cancelled, already ended, or never started -- the flow's
+        // `finally` never runs and the capture stream and its VAD thread are never released. The
+        // native call is idempotent (it deletes behind a mutex and nulls the pointers), so calling it
+        // here and again in the `finally` is safe, and it is the only path that releases the stream
+        // when the collector is not there to do it.
+        OboeNative.nativeStopCaptureAndVad()
         onFinished(this)
     }
 

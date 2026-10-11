@@ -116,6 +116,39 @@ class RoutedOutputObserverTest {
     }
 
     @Test
+    fun `a route published from the heartbeat path cannot outlive a concurrent release`() {
+        // Publication and release both run on the player's lifecycle, and the production reachability
+        // of the interleaving is a property of the call graph rather than of this test. What the test
+        // CAN establish is the invariant: whatever the interleaving, a route is never left published
+        // by a claim that is no longer held. Publication is taken on one thread while the claim is
+        // released on another; the assertion is the invariant, so it holds for every outcome except
+        // the one where the write wins after the clear.
+        val observer = RoutedOutputObserver()
+        val iterations = 3_000
+        var violations = 0
+        repeat(iterations) {
+            val claim = observer.observe()
+            val start = java.util.concurrent.CountDownLatch(1)
+            val writer = Thread {
+                start.await()
+                claim.publishType(5)
+            }
+            writer.start()
+            start.countDown()
+            claim.clear()
+            writer.join()
+            if (!observer.holdsAClaim() && observer.current() != null) {
+                violations += 1
+            }
+        }
+        assertEquals(
+            "no iteration may leave a route published by a released claim",
+            0,
+            violations,
+        )
+    }
+
+    @Test
     fun `a fresh observation after a stop then release is held by exactly one stream`() {
         // The reachable production lifecycle that underflowed the counter: a player stops, is
         // released, and the next turn claims the slot. The new stream must own the observation, and

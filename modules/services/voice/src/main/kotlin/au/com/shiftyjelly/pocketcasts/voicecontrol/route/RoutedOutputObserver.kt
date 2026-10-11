@@ -23,6 +23,15 @@ class RoutedOutputObserver @Inject constructor() {
     private val holders = AtomicInteger(0)
     private val claimHolders = AtomicInteger(0)
 
+    /**
+     * Serialises publication against release.
+     *
+     * Publication is a check-then-write and release is a check-then-clear, so without a shared lock a
+     * release can land between publication's two steps: it clears the route, and the write then
+     * reinstates it, leaving a route published by a claim that is no longer held.
+     */
+    private val publishLock = java.util.concurrent.locks.ReentrantLock()
+
     @Volatile
     private var type: Int? = null
 
@@ -50,12 +59,17 @@ class RoutedOutputObserver @Inject constructor() {
 
     /** Withdraws the claim only if it is still the current one and still live. */
     private fun releaseClaim(claim: ObservedRoute) {
-        if (claim.token != holders.get()) return
-        // A release is idempotent per claimed state: the bit flips once, so stop() followed by
-        // release() cannot decrement twice, while a later session re-takes the same claim.
-        if (!claim.active.compareAndSet(true, false)) return
-        claimHolders.decrementAndGet()
-        type = null
+        publishLock.lock()
+        try {
+            if (claim.token != holders.get()) return
+            // A release is idempotent per claimed state: the bit flips once, so stop() followed by
+            // release() cannot decrement twice, while a later session re-takes the same claim.
+            if (!claim.active.compareAndSet(true, false)) return
+            claimHolders.decrementAndGet()
+            type = null
+        } finally {
+            publishLock.unlock()
+        }
     }
 
     inner class ObservedRoute internal constructor(private val mine: Int) {
@@ -78,12 +92,18 @@ class RoutedOutputObserver @Inject constructor() {
          * `AudioDeviceInfo`, which cannot be constructed off a device.
          */
         internal fun publishType(routedType: Int?) {
-            // Ownership AND liveness: the token stays equal to `holders` forever, so it alone cannot
-            // tell a live claim from a spent one. A cleared claim that could still write `type` would
-            // publish a route nothing can withdraw — which is the same defect as never clearing it.
-            if (!active.get()) return
-            if (token != holders.get()) return
-            type = routedType
+            // Ownership, liveness and the write are one step under the observer's lock, so a release
+            // cannot land between the check and the write. Checking then writing separately leaves a
+            // window in which a release clears `type` and the write then resurrects it -- a route
+            // outliving its claim, reached by a race rather than by a missing call.
+            publishLock.lock()
+            try {
+                if (!active.get()) return
+                if (token != holders.get()) return
+                type = routedType
+            } finally {
+                publishLock.unlock()
+            }
         }
 
         /** Stops publishing. Only effective while this stream is still the current one. */

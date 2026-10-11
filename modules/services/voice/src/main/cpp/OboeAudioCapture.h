@@ -123,6 +123,8 @@ private:
 
     /** The device the live capture stream is routed to; kUnspecified when none is observed. */
     std::atomic<int32_t> mRoutedDeviceId{oboe::kUnspecified};
+
+
     RingBuffer mRingBuffer;
     int32_t mSampleRate = kSampleRate;
     int32_t mChannelCount = kChannelCount;

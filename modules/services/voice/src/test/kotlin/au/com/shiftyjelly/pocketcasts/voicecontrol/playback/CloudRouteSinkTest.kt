@@ -264,6 +264,62 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `an ordinary position_seconds seek uses sink time directly, with no mapping`() = runTest {
+        // voice-intents: "Ordinary seek_to.position_seconds already uses sink seconds." It must reach
+        // the sink as produced: no fingerprint lookup, no unit conversion, and the value equals the
+        // request -- which is what distinguishes this form from the reference form.
+        // The mapping returns a DIFFERENT value from the input, so a consulting implementation
+        // cannot coincidentally agree. A mapping that returned the same number, or null (whose
+        // fallback is the input), would let the two behaviours pass the same assertion.
+        val fingerprint = mock<FingerprintTimingManager>()
+        whenever(fingerprint.playbackTimeMs(any())).thenReturn(-1)
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("position_seconds" to 300),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("jump to five minutes", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertTrue(
+            "an ordinary sink-time seek must reach the sink unchanged, without a mapping " +
+                "(calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:300"),
+        )
+    }
+
+    @Test
+    fun `a negative position_seconds is resolved the way the local executor resolves it`() = runTest {
+        // The mapper does not coerce the sign, so the sink must resolve it the same way the local
+        // path does (`positionSeconds.coerceAtLeast(0)`) rather than diverging on one input.
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("position_seconds" to -10),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("go back", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertTrue(
+            "a negative position resolves as the local executor resolves it (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:0"),
+        )
+    }
+
+    @Test
     fun `a reference seek with no usable mapping is refused, not approximated`() = runTest {
         // `timeline-alignment`: reference_position_ms is null when alignment is unavailable and the
         // SERVER falls back to client_position_ms. Treating the reference milliseconds as sink time

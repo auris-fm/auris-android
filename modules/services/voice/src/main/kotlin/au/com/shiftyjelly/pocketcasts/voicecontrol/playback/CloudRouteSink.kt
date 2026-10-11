@@ -547,6 +547,22 @@ class CloudRouteSink internal constructor(
             if (activeTurnId != myId) return@withLock false
             when (action) {
                 "seek_to" -> {
+                    // Two forms, and they are different units rather than alternatives to try:
+                    // `position_seconds` is already SINK time (voice-intents: "Ordinary
+                    // seek_to.position_seconds already uses sink seconds"), while
+                    // `reference_position_ms` is REFERENCE time and needs the fingerprint mapping.
+                    // Treating one as the other is the substitution the alignment rules forbid.
+                    val positionSeconds = params.positionSeconds()
+                    if (positionSeconds != null) {
+                        // Sink seconds, used exactly as produced: no mapping, no unit conversion.
+                        // The clamp matches the local executor's own rule for this intent
+                        // (`positionSeconds.coerceAtLeast(0)`), so the cloud path and the local path
+                        // resolve the same value the same way rather than diverging on one input.
+                        val target = positionSeconds.coerceAtLeast(0)
+                        capturePreActionPosition(target * 1000L, turnState)
+                        playbackSink.seekTo(target)
+                        return@withLock true
+                    }
                     val referenceMs = params.referencePositionMs() ?: return@withLock false
                     capturePreActionPosition(referenceMs, turnState)
                     // A reference target with no usable mapping is refused, not approximated.
@@ -685,6 +701,14 @@ class CloudRouteSink internal constructor(
         val playbackMs = fingerprintTimingManager.playbackTimeMs(referenceSeconds) ?: return false
         playbackSink.seekTo((playbackMs / 1000).coerceAtLeast(0))
         return true
+    }
+
+    private fun Map<String, Any?>.positionSeconds(): Int? {
+        val value = this["position_seconds"] ?: return null
+        return when (value) {
+            is Number -> value.toInt()
+            else -> null
+        }
     }
 
     private fun Map<String, Any?>.referencePositionMs(): Long? {

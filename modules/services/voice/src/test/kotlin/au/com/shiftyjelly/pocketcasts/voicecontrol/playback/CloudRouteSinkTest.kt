@@ -1864,20 +1864,13 @@ class CloudRouteSinkTest {
         )
     }
 
-    @Test
-    fun `the guard does not block capture when no turn paused anything`() = runTest(UnconfinedTestDispatcher()) {
-        // A privacy closure must not be a blanket ban on ordinary playback: with no turn-owned pause
-        // there is nothing to restore, so nothing may be resumed or suppressed either.
-        val deps = TestDeps(hostPlaying = false, events = flowOf(CloudRouteEvent.Done(1, 0)))
-        deps.privacyClosed = true
-
-        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
-
-        assertTrue(
-            "no turn-owned pause means no resume attempt (calls=${deps.playback.calls})",
-            deps.playback.calls.none { it == "resume" },
-        )
-    }
+    // (Removed) `the guard does not block capture when no turn paused anything`. The case could not
+    // fail: `hostPlaying = false` means the turn never takes its pause, so `playerAutoPaused` stays false
+    // and `restoreTransientAudioState` returns at its first line -- before the guard is consulted at all.
+    // It therefore held with the guard, without it, and even if the guard aborted the turn. The
+    // direction it claimed (a privacy closure is not a blanket ban) is observable only where a
+    // turn-owned pause actually exists, which `a turn does not override a user pause that changed
+    // nothing` covers.
 
     @Test
     fun `a privacy closure invalidates the turn before any successor registers`() = runTest(UnconfinedTestDispatcher()) {

@@ -30,6 +30,15 @@ data class PlaybackState(
      * wrong cause to this stop. Each emission states its own cause.
      */
     val changedBySource: String? = null,
+
+    /**
+     * Whether the play/pause/stop command that produced this state was the voice turn's own HOLD.
+     *
+     * Distinct from [changedBySource]: `VOICE_COMMANDS` records the interface a command arrived
+     * through, and a user's own pause reaches the player the same way. Ownership travels with the
+     * emission, so an observer classifies the stop rather than the interface.
+     */
+    val changedByVoiceHold: Boolean = false,
     val playbackIssue: PlaybackIssue? = null,
     val lastErrorMessage: String? = null,
     val playbackSpeed: Double = 1.0,

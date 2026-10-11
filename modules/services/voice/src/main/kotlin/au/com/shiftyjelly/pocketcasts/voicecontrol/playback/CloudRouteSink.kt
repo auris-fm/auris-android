@@ -257,10 +257,10 @@ class CloudRouteSink internal constructor(
                     privacyClosuresAtPause = privacyClosureCount()
                     pauseCommandRevision = playbackCommandRevision()
                     playerAutoPaused = true
-                    // The pause carries VOICE_COMMANDS as its source, which is the provenance an
-                    // observer reads to tell this stop from an external one. Nothing to declare here:
-                    // the command records its own cause.
-                    playbackSink.pause()
+                    // Take the hold explicitly. The user's own pause reaches the player through the
+                    // same VOICE_COMMANDS interface, so the source alone cannot say whose pause this
+                    // stop was; the hold is declared as an ownership fact, not inferred from the tag.
+                    playbackSink.pauseAsHold()
                 }
             }
 

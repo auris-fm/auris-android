@@ -72,6 +72,16 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
+    /**
+     * The turn's own hold pause. Identical to [pause] through the playback interface, so it declares
+     * its ownership before the call: `VOICE_COMMANDS` is the interface, not the owner, and the user's
+     * own pause arrives through the same one.
+     */
+    override suspend fun pauseAsHold(): VoiceResponse {
+        playbackManager.markNextVoicePauseAsHold()
+        return pause()
+    }
+
     override suspend fun resume(): VoiceResponse {
         playbackManager.playQueueSuspend(sourceView = SourceView.VOICE_COMMANDS)
         return VoiceResponse.Silent

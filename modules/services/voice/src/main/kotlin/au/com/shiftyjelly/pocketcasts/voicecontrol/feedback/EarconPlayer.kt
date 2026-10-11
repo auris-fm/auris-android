@@ -66,18 +66,31 @@ class EarconPlayer(
     var lastPlayedId: EarconId? = null
         private set
 
-    /** Plays [id] and reports whether it actually started. */
+    /**
+     * Starts [id] and reports whether the SINK ACCEPTED the whole clip.
+     *
+     * The boolean answers "did submission succeed", which is a START acknowledgement -- **it does not
+     * claim the audio has been emitted**, and treating it as completion is the conflation @spec
+     * ruled out. The drain runs on this player's own thread: the caller (the ASR collect coroutine,
+     * and Main) is released as soon as submission finishes rather than after the clip has played.
+     *
+     * Only PCM the sink ACCEPTED feeds the reference, so a partial write cannot leave the reference
+     * claiming audio that was never submitted.
+     */
     fun play(id: EarconId): Boolean = onPlayerThread {
-        playOnPlayerThread(id)
+        startOnPlayerThread(id)
     }
 
-    private fun playOnPlayerThread(id: EarconId): Boolean {
+    private fun startOnPlayerThread(id: EarconId): Boolean {
         val clip = clips[id] ?: return false
         if (clip.samples.isEmpty()) return false
+        val audioTrack = try {
+            ensureTrack(clip.sampleRateHz)
+        } catch (e: Exception) {
+            Timber.w(e, "[Earcon] play failed")
+            return false
+        }
         return try {
-            val audioTrack = ensureTrack(clip.sampleRateHz)
-            // Write first, then record only what the sink ACCEPTED, so a partial write cannot leave
-            // the reference claiming audio that was never submitted for playback.
             var offset = 0
             while (offset < clip.samples.size) {
                 val written = audioTrack.write(clip.samples, offset, clip.samples.size - offset)
@@ -89,12 +102,25 @@ class EarconPlayer(
                 offset += written
             }
             lastPlayedId = id
+            emittedFrames = offset
             true
         } catch (e: Exception) {
             Timber.w(e, "[Earcon] play failed")
             false
         }
     }
+
+    /**
+     * The frames the sink accepted for the most recent clip.
+     *
+     * Read alongside [play]'s result: a caller that needs to distinguish "accepted" from "finished"
+     * must not infer completion from a successful submission. `AudioTrack.playbackHeadPosition` is the
+     * only authority on completion, and it is not sampled here -- the heartbeat and the gate's own
+     * attribution window are what cover the span between the two.
+     */
+    @Volatile
+    var emittedFrames: Int = 0
+        private set
 
     /**
      * Frees this session's audio resources.

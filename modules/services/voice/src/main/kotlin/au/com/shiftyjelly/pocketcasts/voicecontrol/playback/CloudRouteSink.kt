@@ -65,8 +65,8 @@ class CloudRouteSink internal constructor(
      * restore over them.
      */
     private val playbackCommandRevision: () -> Long = { 0L },
-    /** Records a stop this sink caused on a turn's behalf, so the observer skips it. */
-    private val markTurnOwnedStop: (Long) -> Unit = {},
+    /** Declares a turn-owned hold pause in effect, so the observer skips the stop it causes. */
+    private val setTurnOwnedPause: (Boolean) -> Unit = {},
     /**
      * Whether a privacy event has closed the window, so restoring the turn's pause would resume
      * playback the user's own privacy action ended. A privacy closure does not go through the
@@ -107,7 +107,7 @@ class CloudRouteSink internal constructor(
         currentLocale = currentLocale,
         isHostPlaying = { playbackContextMonitor.isHostAudioActive.value },
         playbackCommandRevision = playbackContextMonitor::playbackCommandRevision,
-        markTurnOwnedStop = playbackContextMonitor::markTurnOwnedStop,
+        setTurnOwnedPause = playbackContextMonitor::setTurnOwnedPause,
         isPrivacyClosed = playbackContextMonitor::isPrivacyClosed,
         // Only closures that coincided with the host's audio stopping carry a playback fact. A
         // visibility-only closure must not strand a turn-owned pause: the hold policy releases a
@@ -261,10 +261,11 @@ class CloudRouteSink internal constructor(
                     pauseCommandRevision = playbackCommandRevision()
                     playerAutoPaused = true
                     playbackSink.pause()
-                    // Declare the stop this pause causes as turn-owned, so an observer that processes
-                    // the host-audio transition AFTER a later privacy closure does not read the app's
-                    // own pause as an external playback-stop obligation.
-                    markTurnOwnedStop(playbackCommandRevision())
+                    // Declare the hold pause in effect, so an observer that processes the host-audio
+                    // transition after a later privacy closure does not read the app's OWN pause as an
+                    // external playback-stop obligation. The lifetime belongs to this turn: it is
+                    // cleared when the turn releases the hold, not by an observer event.
+                    setTurnOwnedPause(true)
                 }
             }
 
@@ -511,6 +512,8 @@ class CloudRouteSink internal constructor(
     private suspend fun restoreTransientAudioState(privacyInvalidated: Boolean) {
         if (!playerAutoPaused) return
         playerAutoPaused = false
+        // The hold is being released, so a stop observed from here on is not this turn's pause.
+        setTurnOwnedPause(false)
         // The turn is a long suspension, and playback can move underneath it.
         // Ownership is a question about commands, not state: a user who pressed
         // pause leaves the player in the same state the turn left it, so only a

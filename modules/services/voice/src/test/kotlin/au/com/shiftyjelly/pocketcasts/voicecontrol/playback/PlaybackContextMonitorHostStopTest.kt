@@ -83,76 +83,80 @@ class PlaybackContextMonitorHostStopTest {
     }
 
     @Test
-    fun `a turn-owned pause processed after the closure is not an external stop`() = runTest {
-        // Event-time ownership. The turn takes its own hold while the window is open; the observer
-        // processes that transition only after backgrounding closed the window. Classifying by
-        // observation time would record the app's OWN pause as an external playback-stop obligation
-        // and strand the hold it was taken for. The sink marks the stop it caused, so the observer
-        // skips it.
+    fun `a turn-owned pause in effect is not an external stop`() = runTest {
+        // The app takes its own hold and declares it in effect; the observer must not read the stop
+        // that pause causes as an external playback-stop obligation, whenever it processes it.
         val h = harness()
         h.awaitHostPlaying(true)
 
-        // The sink takes its hold and declares the revision of the stop it causes.
-        val revision = h.manager.playbackCommandRevision()
-        h.signal.markTurnOwnedStop(revision)
-
+        h.signal.setTurnOwnedPause(true)
         h.signal.onAppBackgrounded()
         h.flow.value = paused
         h.awaitHostPlaying(false)
 
         assertEquals(
-            "the app's own pause must not become an external playback-stop obligation",
+            "the app's own hold pause is not an external stop",
             0L,
             h.signal.playbackStopClosureCount(),
         )
     }
 
     @Test
-    fun `an external stop processed after the closure still counts`() = runTest {
-        // The complement: a stop the app did NOT cause, processed after the closure, is a real
-        // external playback stop and must count.
+    fun `an external stop while no turn-owned pause is in effect is counted`() = runTest {
         val h = harness()
         h.awaitHostPlaying(true)
 
+        // No hold in effect: whatever stopped the host is external.
         h.signal.onAppBackgrounded()
         h.flow.value = paused
         h.awaitHostPlaying(false)
 
         assertEquals(
-            "a stop the app did not cause is an external playback-stop obligation",
+            "a stop with no turn-owned hold in effect is an external stop",
             1L,
             h.signal.playbackStopClosureCount(),
         )
     }
 
     @Test
-    fun `an external stop that follows a turn-owned pause at the same revision is still counted`() = runTest {
-        // Revision lifetime. The sink's own pause goes through VOICE_COMMANDS, which does NOT advance
-        // the revision, so the mark records the pre-pause revision. A later stop observed at that SAME
-        // revision would be skipped by a mark that is never consumed -- turning a one-shot exception
-        // into a permanent exemption for a revision the app does not own.
+    fun `an external stop arriving before the hold is declared is not exempted`() = runTest {
+        // The revision key could not identify the voice pause, so an external stop sharing its number
+        // could spend the exemption on itself. The flag has no such ambiguity: a stop observed while
+        // no hold is in effect is external, and declaring the hold afterwards cannot retroactively
+        // exempt it.
         val h = harness()
         h.awaitHostPlaying(true)
 
-        val revision = h.manager.playbackCommandRevision()
-        h.signal.markTurnOwnedStop(revision)
-
-        // First stop at that revision: the app's own pause. Skipped.
+        // External stop FIRST, with no hold in effect.
         h.signal.onAppBackgrounded()
         h.flow.value = paused
         h.awaitHostPlaying(false)
-        assertEquals("the app's own stop is not counted", 0L, h.signal.playbackStopClosureCount())
 
-        // A later stop arriving at the SAME revision is not the app's own pause and must count: the
-        // mark applies to the stop it was made for, not to every stop sharing its revision.
-        h.flow.value = playing
+        // The hold is declared only afterwards.
+        h.signal.setTurnOwnedPause(true)
+
+        assertEquals(
+            "an external stop must not be exempted by a hold declared after it",
+            1L,
+            h.signal.playbackStopClosureCount(),
+        )
+    }
+
+    @Test
+    fun `a stop after the hold is released is counted`() = runTest {
+        val h = harness()
         h.awaitHostPlaying(true)
+
+        h.signal.setTurnOwnedPause(true)
+        // The turn releases its hold.
+        h.signal.setTurnOwnedPause(false)
+
         h.signal.onAppBackgrounded()
         h.flow.value = paused
         h.awaitHostPlaying(false)
 
         assertEquals(
-            "a later stop at the same revision must not inherit the turn's exemption",
+            "once the hold is released a stop is external again",
             1L,
             h.signal.playbackStopClosureCount(),
         )

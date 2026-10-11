@@ -88,38 +88,28 @@ class GracePeriodSignal @Inject constructor() {
      * separated at the event boundary rather than inferred from a count that increments on
      * visibility changes alone.
      */
+    // Whether a turn-owned hold pause is currently in effect. Ownership is attached to the EVENT,
+    // not to a revision: the voice pause goes through a source that does not advance the revision,
+    // so a revision cannot identify it, and keying an exemption on one would suppress an unrelated
+    // external stop that happens to share the number. The sink owns this flag's lifetime -- set when
+    // it takes the hold, cleared when the turn releases it -- so no observer event can spend it on
+    // the wrong stop.
+    @Volatile
+    private var turnOwnedPauseInEffect = false
+
+    fun setTurnOwnedPause(inEffect: Boolean) {
+        turnOwnedPauseInEffect = inEffect
+    }
+
+    /** Whether a stop observed now belongs to a turn-owned hold pause rather than an external one. */
+    fun isTurnOwnedPause(): Boolean = turnOwnedPauseInEffect
+
+    // Records that the host's playback stopped while the window was closed by a privacy event.
+    // Called by the playback-context layer when it observes the stop, so the closure kinds are
+    // separated at the event boundary rather than inferred from a count that increments on
+    // visibility changes alone.
     fun noteHostPlaybackStopped() {
         playbackStopClosures.incrementAndGet()
-    }
-
-    /**
-     * The playback-command revision of the last stop this app CAUSED on a turn's behalf.
-     *
-     * Event-time ownership: a turn-owned pause is produced before the window closes but the
-     * observer may process it afterwards, so classifying by observation time would record the app's
-     * own pause as an external playback stop and strand the very hold it was taken for. The sink
-     * records it here when it issues the pause; the observer skips a stop carrying that revision.
-     */
-    @Volatile
-    private var turnOwnedStopRevision: Long? = null
-
-    fun markTurnOwnedStop(revision: Long) {
-        turnOwnedStopRevision = revision
-    }
-
-    /**
-     * Whether a stop at [revision] was caused by this app on a turn's behalf rather than externally,
-     * consuming the mark when it answers yes.
-     *
-     * One stop was caused, so at most one stop is exempt. A mark that stayed set would turn a
-     * one-shot exception into a permanent exemption for a revision the app does not own: the sink's
-     * own pause goes through a source that does not advance the revision, so a later stop can carry
-     * the same number.
-     */
-    fun consumeTurnOwnedStop(revision: Long): Boolean {
-        if (revision != turnOwnedStopRevision) return false
-        turnOwnedStopRevision = null
-        return true
     }
 
     /**

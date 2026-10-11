@@ -94,10 +94,16 @@ class VoicePlaybackIntentExecutor @Inject constructor(
             }
         }
 
-        is VoiceIntent.Playback.SeekAbsolute -> playbackSink.seekTo(intent.positionSeconds.coerceAtLeast(0))
+        is VoiceIntent.Playback.SeekAbsolute -> playbackSink.seekTo(
+            intent.positionSeconds,
+            episodeDurationSeconds = currentEpisodeDurationSeconds(),
+        )
 
         VoiceIntent.Playback.NextEpisode -> playbackSink.nextEpisode()
     }
+
+    /** The current episode's duration in seconds, for resolving a negative absolute position. */
+    private fun currentEpisodeDurationSeconds(): Int = playbackManager.getCurrentEpisode()?.duration?.toInt() ?: 0
 
     private fun executeEffects(intent: VoiceIntent.Effects): VoiceResponse = when (intent) {
         is VoiceIntent.Effects.SetSpeed -> effectsSink.setSpeed(intent.speed)
@@ -215,7 +221,16 @@ interface VoicePlaybackSink {
     suspend fun resume(): VoiceResponse
     suspend fun skipForward(seconds: Int?): VoiceResponse
     suspend fun skipBackward(seconds: Int?): VoiceResponse
-    suspend fun seekTo(positionSeconds: Int): VoiceResponse
+
+    /**
+     * Seek to a signed absolute episode position.
+     *
+     * The schema's semantics belong to this call rather than to its callers: non-negative values are
+     * offsets from the beginning, 0 is the beginning, and a NEGATIVE value is an offset back from the
+     * episode end. [episodeDurationSeconds] is what makes the negative case resolvable -- clamping it
+     * to zero would turn "seek back 30 s from the end" into "seek to the beginning".
+     */
+    suspend fun seekTo(positionSeconds: Int, episodeDurationSeconds: Int): VoiceResponse
     fun nextEpisode(): VoiceResponse
 }
 

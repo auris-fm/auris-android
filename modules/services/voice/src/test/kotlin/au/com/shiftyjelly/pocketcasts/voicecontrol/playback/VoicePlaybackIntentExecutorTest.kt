@@ -91,14 +91,25 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
-    fun `negative absolute seek clamps to zero`() = runTest {
+    fun `negative absolute seek resolves as an offset back from the episode end`() = runTest {
+        // voice-intents: "non-negative values are offsets from the beginning, 0 means beginning, and
+        // negative values are offsets back from the episode end." Clamping to zero is a different
+        // instruction: "5 s before the end" is not "the beginning". The duration is what makes the
+        // offset resolvable, so it is supplied and must be used.
         val sinks = FakeSinks()
-        val executor = sinks.executor()
+        org.mockito.kotlin.whenever(sinks.playbackManager.getCurrentEpisode()).thenReturn(
+            au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+                uuid = "episode-id",
+                publishedDate = java.util.Date(),
+                podcastUuid = "podcast-id",
+                duration = 1800.0,
+            ),
+        )
 
-        val response = executor.execute(VoiceIntent.Playback.SeekAbsolute(-1))
+        val response = sinks.executor().execute(VoiceIntent.Playback.SeekAbsolute(-5))
 
         assertEquals(VoiceResponse.Silent, response)
-        assertEquals(listOf("seekTo:0"), sinks.playback.calls)
+        assertEquals(listOf("seekTo:1795"), sinks.playback.calls)
     }
 
     @Test
@@ -484,8 +495,15 @@ class VoicePlaybackIntentExecutorTest {
             calls += "skipBackward:$seconds"
             return VoiceResponse.Silent
         }
-        override suspend fun seekTo(positionSeconds: Int): VoiceResponse {
-            calls += "seekTo:$positionSeconds"
+        override suspend fun seekTo(positionSeconds: Int, episodeDurationSeconds: Int): VoiceResponse {
+            // Resolve the schema's signed semantics the same way production does, so a fake cannot
+            // make a negative position pass by clamping it where the real sink resolves an offset.
+            val resolved = if (positionSeconds < 0) {
+                (episodeDurationSeconds + positionSeconds).coerceIn(0, episodeDurationSeconds)
+            } else {
+                positionSeconds
+            }
+            calls += "seekTo:$resolved"
             return VoiceResponse.Silent
         }
         override fun nextEpisode(): VoiceResponse {

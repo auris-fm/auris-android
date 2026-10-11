@@ -85,17 +85,19 @@ class VoiceControlServiceRenderTest {
                 whenever(executor.execute(org.mockito.kotlin.any())).thenReturn(VoiceResponse.Spoken("a reply"))
             }
         }
-        var cleanupRan = false
         try {
             service.renderWithFailureHandling(noopIntent())
-            // Reaching here is the property: the failure was handled inside the render, so the
-            // service's post-render cleanup still runs for a command the user did give.
-            cleanupRan = true
+            // No local flag is asserted here: `cleanupRan = true` before the assertion would pass
+            // whenever the call returns, and the call THROWS if the failure escapes -- so a flag
+            // re-tests the return, not any cleanup. The property this case can establish is that a
+            // delivery failure is handled inside the render, leaving the method to return normally.
+            // The grace cleanup is measured through the production launch path in
+            // `an ordinary failure keeps feedback and grace cleanup, and the next command is handled`,
+            // which is where that cleanup actually lives (handleIntent's launch block, not here).
             assertNotNull("the renderer's failure handling must be installed", renderer.onPlaybackFailure)
         } finally {
             renderer.release()
         }
-        assertTrue("cleanup must not be skipped by a delivery failure", cleanupRan)
     }
 
     /**

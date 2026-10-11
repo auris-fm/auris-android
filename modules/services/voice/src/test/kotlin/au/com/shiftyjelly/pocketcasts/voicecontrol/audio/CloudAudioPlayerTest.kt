@@ -645,9 +645,10 @@ class CloudAudioPlayerTest {
         )
         var reported = -1L
         player.onWriteFailure = { frames -> reported = frames }
-        // The callback is invoked from the write loop; assert it is wired rather than invoking the
-        // private path, which requires a failing AudioTrack (not reachable under Robolectric).
-        assertTrue("the failure callback must be installed", player.onWriteFailure != null)
+        // No assertion that the callback is "installed": assigning it three lines above guarantees
+        // non-null, so such a check passes whatever the player does. This case asserts only the
+        // observable fact it can establish -- nothing is reported before a write is attempted -- and
+        // the wiring itself is covered by the end-to-end case below, which drives a real refusal.
         assertEquals("no failure reported before any write", -1L, reported)
         player.release()
     }

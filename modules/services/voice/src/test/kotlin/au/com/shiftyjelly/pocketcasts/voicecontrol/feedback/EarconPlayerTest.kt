@@ -128,4 +128,48 @@ class EarconPlayerTest {
         out.put(pcm)
         return out.array()
     }
+
+    @Test
+    fun `concurrent play and release never leave an orphaned track or throw`() {
+        // `track` is shared mutable state that was written from Main (the listening cue) and IO (the
+        // ASR collect coroutine) with no synchronization: two overlapping cues could each build a
+        // track and orphan the first -- still playing, never released -- and a release() landing
+        // mid-write could leave the newly created track playing forever. Serialising play/release on
+        // the player's own thread is what makes them one-at-a-time in call order.
+        //
+        // This is a STRESS CHECK, not a reproduced race: a plain thread test cannot control the
+        // interleaving, so a pass is a guard rather than proof. What it does pin is the contract the
+        // serialization must not break -- no throw and no crash under contention -- plus that the
+        // player stays usable as a no-op afterwards.
+        val player = EarconPlayer(org.robolectric.RuntimeEnvironment.getApplication())
+        val failures = java.util.concurrent.CopyOnWriteArrayList<Throwable>()
+        val start = java.util.concurrent.CountDownLatch(1)
+        val threads = (0 until 4).map { i ->
+            Thread {
+                start.await()
+                try {
+                    if (i % 2 == 0) player.play(EarconId.SUCCESS) else player.release()
+                } catch (t: Throwable) {
+                    failures.add(t)
+                }
+            }.apply {
+                isDaemon = true
+                start()
+            }
+        }
+        start.countDown()
+        threads.forEach { it.join(5_000) }
+
+        assertTrue(
+            "concurrent play/release must not throw: ${failures.map { it::class.simpleName }}",
+            failures.isEmpty(),
+        )
+        // And the player is still usable as the documented no-op.
+        try {
+            player.play(EarconId.SUCCESS)
+        } catch (t: Throwable) {
+            fail("a play after release must be a no-op, not a throw: $t")
+        }
+        player.release()
+    }
 }

@@ -78,6 +78,14 @@ class AndroidPlatformTtsEngine @Inject constructor(
     @Volatile
     private var speakCount = 0
 
+    /**
+     * Identifies the current synthesis, so a cancellation handler can tell whether a successor has
+     * since started on the shared engine. Incremented before each synthesis call; read from the
+     * handler, which may run after the next utterance has begun.
+     */
+    @Volatile
+    private var synthesisGeneration = 0
+
     init {
         val factory = synthesizerFactory
         tts = if (factory != null) {
@@ -141,12 +149,15 @@ class AndroidPlatformTtsEngine @Inject constructor(
                 })
 
                 val utteranceId = System.currentTimeMillis().toString()
-                // Cancellation must stop the queued synthesis. Without this, a cancelled reply leaves
-                // the engine synthesizing an utterance nobody plays -- and the check below only
-                // catches a cancellation that lands BEFORE this line, not one that arrives while
-                // suspended or after the call returns.
+                // Cancellation must stop the queued synthesis, but only while this synthesis is
+                // still the current one. This handler is registered before the call and runs
+                // asynchronously, so it can execute after a successor has already started on the
+                // shared engine -- stopping then silences the successor rather than this utterance.
+                val mine = ++synthesisGeneration
                 continuation.invokeOnCancellation {
-                    engine.stop()
+                    if (synthesisGeneration == mine) {
+                        engine.stop()
+                    }
                 }
                 // QUEUE_FLUSH preserves the previous single-utterance behaviour: a superseded reply
                 // must not keep talking.

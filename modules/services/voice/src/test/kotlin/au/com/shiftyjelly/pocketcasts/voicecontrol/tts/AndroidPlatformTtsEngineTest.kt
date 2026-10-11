@@ -119,6 +119,50 @@ class AndroidPlatformTtsEngineTest {
         scope.cancel()
     }
 
+    @Test
+    fun `a cancellation whose cleanup runs after a successor starts does not stop the successor`() {
+        // The distinguishing case two completed utterances cannot reach. The cancellation handlers
+        // stop the SHARED engine, and they run asynchronously: if the first utterance's handler runs
+        // after the second has already begun synthesizing, the successor is silenced by a
+        // cancellation that belonged to a turn already over.
+        //
+        // The ordering is made EXPLICIT rather than hoped for: the successor's synthesis is confirmed
+        // queued BEFORE the cancelled utterance is allowed to finish cancelling.
+        val (wired, fake) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        val scope = CoroutineScope(Dispatchers.Default)
+
+        // Utterance 1 reaches its synthesis suspension.
+        val first = scope.launch { wired.speak("first", "en") }
+        assertTrue("precondition: utterance 1 reached synthesis", awaitSynthesize(fake, 1))
+
+        // The successor claims the engine and is confirmed synthesizing while utterance 1 is still
+        // cancelling. Only then is the cancellation allowed to complete its cleanup.
+        val second = scope.launch { wired.speak("second", "en") }
+        assertTrue(
+            "precondition: the successor reached synthesis before utterance 1 finished cancelling",
+            awaitSynthesize(fake, 2),
+        )
+        runBlocking { first.cancelAndJoin() }
+
+        assertEquals(
+            "the successor's synthesis must survive a cancellation that belonged to utterance 1 " +
+                "(stopCalls=${fake.stopCalls})",
+            0,
+            fake.stopCalls,
+        )
+        scope.cancel()
+    }
+
+    /**
+     * Idles the main looper until the fake has queued at least [count] syntheses.
+     */
+    private fun awaitSynthesize(fake: FakeSynthesizer, count: Int): Boolean = (0 until 100).any {
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        Thread.sleep(20)
+        fake.synthesizeCount >= count
+    }
+
     /**
      * Builds an engine whose synthesizer is controlled by the test, and fires the platform's OWN
      * initialization callback with SUCCESS so `speak` reaches the synthesis suspension. The callback

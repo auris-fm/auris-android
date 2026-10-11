@@ -54,6 +54,7 @@ class PlaybackContextMonitorHostStopTest {
         val signal: GracePeriodSignal,
         val monitor: PlaybackContextMonitor,
         val driver: QueuedDispatcher,
+        val manager: PlaybackManager,
     ) {
         // Waits for the collector to observe `expected` as the host's audio state.
         fun awaitHostPlaying(expected: Boolean) {
@@ -78,23 +79,47 @@ class PlaybackContextMonitorHostStopTest {
             gracePeriodSignal = signal,
             scope = CoroutineScope(driver),
         )
-        return Harness(flow, signal, monitor, driver)
+        return Harness(flow, signal, monitor, driver, manager)
     }
 
     @Test
-    fun `a stop processed after the closure counts, even though the pause preceded it`() = runTest {
+    fun `a turn-owned pause processed after the closure is not an external stop`() = runTest {
+        // Event-time ownership. The turn takes its own hold while the window is open; the observer
+        // processes that transition only after backgrounding closed the window. Classifying by
+        // observation time would record the app's OWN pause as an external playback-stop obligation
+        // and strand the hold it was taken for. The sink marks the stop it caused, so the observer
+        // skips it.
         val h = harness()
         h.awaitHostPlaying(true)
 
-        // The window closes BEFORE the stop is reported to the collector: the pause is produced
-        // first, but the collector only sees it after the closure.
+        // The sink takes its hold and declares the revision of the stop it causes.
+        val revision = h.manager.playbackCommandRevision()
+        h.signal.markTurnOwnedStop(revision)
+
         h.signal.onAppBackgrounded()
-        assertTrue("precondition: the window must be closed", h.signal.isClosedByPrivacy())
         h.flow.value = paused
         h.awaitHostPlaying(false)
 
         assertEquals(
-            "a stop observed after the closure counts even when the pause preceded it",
+            "the app's own pause must not become an external playback-stop obligation",
+            0L,
+            h.signal.playbackStopClosureCount(),
+        )
+    }
+
+    @Test
+    fun `an external stop processed after the closure still counts`() = runTest {
+        // The complement: a stop the app did NOT cause, processed after the closure, is a real
+        // external playback stop and must count.
+        val h = harness()
+        h.awaitHostPlaying(true)
+
+        h.signal.onAppBackgrounded()
+        h.flow.value = paused
+        h.awaitHostPlaying(false)
+
+        assertEquals(
+            "a stop the app did not cause is an external playback-stop obligation",
             1L,
             h.signal.playbackStopClosureCount(),
         )

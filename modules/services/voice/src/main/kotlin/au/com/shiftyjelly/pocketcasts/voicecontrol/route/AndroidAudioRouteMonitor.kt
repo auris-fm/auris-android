@@ -212,22 +212,12 @@ class AndroidAudioRouteMonitor @Inject constructor(
                 inputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
 
             return when {
-                // A wired input is auto-selected by the platform.
-                hasWiredInput -> AudioRoute.Headset(hasMicrophone = true)
-
-                // For BLE only getCommunicationDevice() proves selection; an enumerated input
-                // is not a selected one.
-                hasBleDevice && bleCommunicationDeviceSelected ->
-                    AudioRoute.Headset(hasMicrophone = true)
-
-                // A wired output with no wired microphone (headphones) exposes no mic and
-                // cannot be acquired; it stays NoMic.
-                hasWiredOutput -> AudioRoute.Headset(hasMicrophone = false)
-
-                // A BLE device whose microphone the session has not selected yet is an
-                // acquirable candidate: LE Audio selection (setCommunicationDevice) turns
-                // it into an Isolated headset. It must not collapse to NoMic.
-                hasBleDevice -> AudioRoute.BluetoothA2dpOnly
+                // The OUTPUT names the route. An enumerated headset INPUT beside a speaker output is
+                // availability, not the route: arch/android.md gives `hasMicrophone` as "a headset
+                // OUTPUT with a matching input device", so a route with no headset output is not a
+                // headset route however many headset inputs the system offers.
+                hasWiredOrBleOutput ->
+                    AudioRoute.Headset(hasMicrophone = hasWiredOrBleInput)
 
                 // Classic BT with a live SCO link — mic is on the headset.
                 (hasScoDevices || hasA2dp) && bluetoothScoActive ->

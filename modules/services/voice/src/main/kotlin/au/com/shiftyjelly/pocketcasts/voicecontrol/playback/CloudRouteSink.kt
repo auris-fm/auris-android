@@ -229,13 +229,17 @@ class CloudRouteSink internal constructor(
             if (previous != null && previous !== myJob) previous.cancel()
 
             val routeContext = buildRouteContext(context)
+            // The turn's WIRE identity: the frame's `turn_id` is this value, and a deterministic hold
+            // must be attributed against it. It is a different identity from the local `myId` counter,
+            // and it is read straight off the turn that was built so the two cannot drift.
+            var myRequestId: String? = null
             val turn = CloudRouteTurn(
                 request = request,
                 context = routeContext,
                 // Stable per logical turn; a transport retry reuses it, and the
                 // server rejects a repeat rather than re-executing (no auto-retry
                 // is attempted by this client).
-                requestId = UUID.randomUUID().toString(),
+                requestId = UUID.randomUUID().toString().also { myRequestId = it },
                 capabilities = advertisedCapabilities(),
                 routeHint = hint,
             )
@@ -283,6 +287,19 @@ class CloudRouteSink internal constructor(
                     }
 
                     is CloudRouteEvent.Action -> {
+                        // A deterministic HOLD carries `turn_id` and is the turn's own: the engine
+                        // sends it at its delivery commitment, meaning "this turn is about to speak".
+                        // It is attributed by that identity rather than by arrival order, because the
+                        // terminal rule is "release nothing unless THIS turn took the hold, and never
+                        // release a successor's" -- which arrival order cannot answer once two turns
+                        // overlap. A hold for another turn is ignored outright: it belongs to a turn
+                        // that is not this one, so acting on it would take or drop a hold we do not own.
+                        //
+                        // A frame WITHOUT `turn_id` is an app operation, answered with a typed result,
+                        // and it keeps the existing path unchanged.
+                        if (event.turnId != null && event.turnId != myRequestId) {
+                            return@collect
+                        }
                         // Only a *performed* action counts: executeAction ignores an unknown tool,
                         // an unknown action, missing parameters and superseded turns, and an ignored
                         // action followed by a blank Done must not pass for a turn that delivered

@@ -5,6 +5,19 @@ sealed class CloudRouteEvent {
         val tool: String,
         val action: String,
         val params: Map<String, Any?>,
+        /**
+         * The turn a deterministic HOLD belongs to, or null for a user action.
+         *
+         * A hold is identified by carrying this INSTEAD of an operation id: the absence of an
+         * operation id says only "not a user action", which is not enough to answer the rule the
+         * contract requires at terminal time -- release nothing unless THIS turn took the hold, and
+         * never release a successor's. Without the identity that rule can only be inferred from
+         * arrival order, which breaks the moment two turns overlap.
+         *
+         * The server omits it on user actions, so null means "this is an app operation, answer it
+         * with a typed result"; non-null means "this is the turn's own hold, and it takes no result".
+         */
+        val turnId: String? = null,
     ) : CloudRouteEvent()
 
     data class Token(val text: String) : CloudRouteEvent()

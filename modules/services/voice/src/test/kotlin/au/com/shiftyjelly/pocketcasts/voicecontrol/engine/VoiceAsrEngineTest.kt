@@ -322,9 +322,15 @@ class VoiceAsrEngineTest {
         verify(voiceAudioProcessor, never()).startProcessing()
         engine.stop()
 
-        // A second attempt on a route that does not need SCO must capture, which it cannot if the failed
-        // setup left the SCO flag set.
-        startEngine(AudioRoute.Speaker)
+        // A second attempt must capture, and it must be on an SCO ROUTE. A retry on `Speaker` would
+        // pass whatever the flag did, because `Speaker` never consults it -- `awaitBluetoothSco()` is
+        // reached only for `BluetoothA2dpOnly` -- so the case would read as coverage of the stale flag
+        // while being blind to it. On `BluetoothA2dpOnly` a leaked flag short-circuits the setup, so
+        // no second `startBluetoothSco()` is issued and nothing captures.
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+        verify(audioManager, times(2)).startBluetoothSco()
+        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
         advanceUntilIdle()
         verify(voiceAudioProcessor).startProcessing()
         engine.stop()

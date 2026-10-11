@@ -157,6 +157,18 @@ class CloudRouteSink internal constructor(
      */
     private var playerAutoPaused = false
 
+    /**
+     * This turn reserved the pause at turn start but the server has not confirmed it.
+     *
+     * Under the hold contract the turn-start block RESERVES the hold -- the auto-resume decision needs
+     * "was it playing before the stream", and that information exists only at turn start -- and the
+     * server's deterministic hold frame CONFIRMS it. A reservation that is never confirmed (a short
+     * answer that never commits to audible output) must be released without a pause ever having been
+     * activated, which requires these two facts to be distinct: [playerAutoPaused] records an ACTUAL
+     * hold, this records a claim on one.
+     */
+    private var pauseReserved = false
+
     /** The command revision in force when this turn chain took the pause. */
     private var pauseCommandRevision: Long = 0L
     private val turnCounter = AtomicLong(0)
@@ -264,9 +276,13 @@ class CloudRouteSink internal constructor(
                 // suspended is invisible to a live flag once a wake clears it, but stays visible as a
                 // count difference. A turn that starts after a closure samples the new count, so the
                 // closure neither blocks it nor excuses a resume it did not take.
-                if (activeTurnId == myId && !playerAutoPaused && isHostPlaying() && !isPrivacyClosed()) {
+                if (activeTurnId == myId && !playerAutoPaused && !pauseReserved && isHostPlaying() && !isPrivacyClosed()) {
                     privacyClosuresAtPause = privacyClosureCount()
                     pauseCommandRevision = playbackCommandRevision()
+                    // RESERVE, and take the pause: the resume decision needs what playback was doing
+                    // BEFORE the stream, which is only knowable here. The frame confirms the
+                    // reservation; a reservation the server never confirms is released unsent.
+                    pauseReserved = true
                     playerAutoPaused = true
                     // Take the hold explicitly. The user's own pause reaches the player through the
                     // same VOICE_COMMANDS interface, so the source alone cannot say whose pause this
@@ -298,6 +314,16 @@ class CloudRouteSink internal constructor(
                         // A frame WITHOUT `turn_id` is an app operation, answered with a typed result,
                         // and it keeps the existing path unchanged.
                         if (event.turnId != null && event.turnId != myRequestId) {
+                            return@collect
+                        }
+                        // The delivery commitment CONFIRMS this turn's reservation: it is the moment
+                        // the server commits to audible output, so "this turn is about to speak" is
+                        // now true. Confirmation is the reservation being SPENT, which is what makes
+                        // an unconfirmed one distinguishable from a held one -- the two must not
+                        // collapse into a single fact, or a turn that never commits is
+                        // indistinguishable from one that has already held the user's place.
+                        if (event.turnId != null && event.action == "pause") {
+                            pauseReserved = false
                             return@collect
                         }
                         // Only a *performed* action counts: executeAction ignores an unknown tool,
@@ -476,6 +502,11 @@ class CloudRouteSink internal constructor(
                             ducked = false
                         }
                         restoreTransientAudioState(privacyInvalidatedSince(privacyClosuresAtPause))
+                        // The reservation is per turn-CHAIN, like the pause it claims: a turn that
+                        // never received the server's confirmation leaves it set, and clearing it only
+                        // when THIS turn still owns the audio state keeps a successor's reservation
+                        // intact -- the successor inherits the paused player, so it inherits the claim.
+                        pauseReserved = false
                         activeTurnId = 0
                         activeTurn = null
                     }
@@ -531,6 +562,11 @@ class CloudRouteSink internal constructor(
     private suspend fun restoreTransientAudioState(privacyInvalidated: Boolean) {
         if (!playerAutoPaused) return
         playerAutoPaused = false
+        // The reservation goes with the pause it claims: releasing the hold ends the claim on it, so a
+        // later turn can reserve again. Both are the same obligation seen from two sides -- one says a
+        // pause HAPPENED, the other that this chain CLAIMS it -- and clearing only the first would
+        // leave every later turn unable to reserve.
+        pauseReserved = false
         // The turn is a long suspension, and playback can move underneath it.
         // Ownership is a question about commands, not state: a user who pressed
         // pause leaves the player in the same state the turn left it, so only a
@@ -610,6 +646,7 @@ class CloudRouteSink internal constructor(
                     // would make the finally resume, which is what this action
                     // wanted anyway — the reorder is for uniformity, not safety.)
                     playerAutoPaused = false
+                    pauseReserved = false
                     playbackSink.resume()
                     true
                 }
@@ -625,6 +662,7 @@ class CloudRouteSink internal constructor(
                     // obligation before the suspending call so a throw cannot
                     // leave us thinking we still own a pause the user asked for.
                     playerAutoPaused = false
+                    pauseReserved = false
                     playbackSink.pause()
                     true
                 }
@@ -633,6 +671,7 @@ class CloudRouteSink internal constructor(
                     // As at play_quote: cleared first for uniformity, so a throw
                     // cannot leave the flag describing a state we failed to reach.
                     playerAutoPaused = false
+                    pauseReserved = false
                     playbackSink.resume()
                     true
                 }

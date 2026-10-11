@@ -11,6 +11,11 @@ find_package(Threads REQUIRED)
 add_executable(vad_segment_test
     VadSegmentAccountingTest.cpp
     ${CPP_DIR}/NativeVadProcessor.cpp
+    # Compiled so its real callbacks are the ones under test, rather than an empty stub in the test
+    # file: `onErrorAfterClose` carries a late-callback guard and a device clear, and with the stub it
+    # was covered by nothing that executes.
+    ${CPP_DIR}/OboeAudioCapture.cpp
+    OboeLibraryStubs.cpp
 )
 
 target_include_directories(vad_segment_test PRIVATE

@@ -40,17 +40,10 @@ float sileroVadPredict(const int16_t* samples, int32_t count) {
 
 void sileroVadResetState() {}
 
-// OboeAudioCapture holds a RingBuffer member, so constructing the stub above runs its constructor.
-// The host test never touches it — the VAD loop reads through readRingBuffer, which the fake
-// overrides — so trivial definitions are all that is needed.
-RingBuffer::RingBuffer() {}
-RingBuffer::~RingBuffer() {}
-
-// The vtable references the base implementation even though the fake overrides it; never called.
-int32_t OboeAudioCapture::readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs) {
-    (void)outData; (void)maxSamples; (void)timeoutMs;
-    return 0;
-}
+// None of these are defined here any more: RingBuffer's members, OboeAudioCapture's members and the
+// base `readRingBuffer` all come from the real OboeAudioCapture.cpp compiled into this target. The
+// fake below overrides `readRingBuffer` through the vtable, which is why the base still has to exist
+// -- and it does, from the real translation unit.
 
 // --- A capture that serves a scripted sequence of VAD frames -----------------
 
@@ -143,21 +136,11 @@ std::deque<bool> frames(int count, bool loud) {
 }  // namespace
 
 // Defined at file scope: a member definition must sit in a namespace that encloses the class, and
-// the class is in the global namespace. The real ones live in OboeAudioCapture.cpp, which calls the
-// Oboe API — the host test never links that, so it supplies its own.
-OboeAudioCapture::OboeAudioCapture() {}
-OboeAudioCapture::~OboeAudioCapture() {}
-
-// The vtable needs every virtual, including the Oboe callbacks this class overrides. They are
-// never invoked here — the VAD loop only calls readRingBuffer — so they are no-ops.
-oboe::DataCallbackResult OboeAudioCapture::onAudioReady(oboe::AudioStream* stream, void* audioData,
-                                                       int32_t numFrames) {
-    (void)stream; (void)audioData; (void)numFrames;
-    return oboe::DataCallbackResult::Continue;
-}
-void OboeAudioCapture::onErrorAfterClose(oboe::AudioStream* stream, oboe::Result error) {
-    (void)stream; (void)error;
-}
+// OboeAudioCapture.cpp is COMPILED into this target (see CMakeLists), so its constructor,
+// destructor and callbacks -- including the late-callback guard and the device clear in
+// `onErrorAfterClose` -- are the code under test rather than stubs supplied here. Only
+// `readRingBuffer` is overridden below, because it is virtual and the cases script its frames; and
+// the Oboe LIBRARY entry points are stubbed in OboeLibraryStubs.cpp, since the host links no Oboe.
 
 int main() {
     std::printf("native VAD segment accounting\n");
@@ -264,6 +247,37 @@ int main() {
             check(s.end >= s.onset + 5 * kFrame,
                   "end sample advances past the first speech run into the resumed one");
         }
+    }
+
+    // (6) `onErrorAfterClose` is the REAL compiled callback, not a stub: its late-callback guard and
+    // its device clear were covered by nothing that executes, because the host target did not compile
+    // OboeAudioCapture.cpp at all.
+    //
+    // 6a -- a REPLACED stream's late callback must not act on state that is no longer its own.
+    {   OboeAudioCapture capture;
+        auto* live = reinterpret_cast<oboe::AudioStream*>(0x1000);
+        auto* replaced = reinterpret_cast<oboe::AudioStream*>(0x2000);
+        capture.installStreamForTest(live, /*deviceId=*/42);
+        check(capture.getRoutedDeviceId() == 42, "the live stream's device is observable");
+
+        // The delayed callback from a stream that was already replaced.
+        capture.onErrorAfterClose(replaced, oboe::Result::ErrorDisconnected);
+        check(capture.getRoutedDeviceId() == 42,
+              "a replaced stream's late callback must not clear the live observation");
+        check(capture.isActive(), "a replaced stream's late callback must not stop the live capture");
+    }
+
+    // 6b -- the CURRENT stream's failure DOES clear it: the observation must not outlive its stream,
+    // or a dead stream's routing reads as the live capture route.
+    {   OboeAudioCapture capture;
+        auto* live = reinterpret_cast<oboe::AudioStream*>(0x3000);
+        capture.installStreamForTest(live, /*deviceId=*/43);
+        check(capture.getRoutedDeviceId() == 43, "the live stream's device is observable");
+
+        capture.onErrorAfterClose(live, oboe::Result::ErrorDisconnected);
+        check(capture.getRoutedDeviceId() == oboe::kUnspecified,
+              "the current stream's failure must clear the device observation");
+        check(!capture.isActive(), "the current stream's failure must stop capture");
     }
 
     std::printf(gFailures == 0 ? "all checks passed\n" : "%d CHECK(S) FAILED\n", gFailures);

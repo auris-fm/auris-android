@@ -178,8 +178,12 @@ void OboeAudioCapture::close() {
 
     std::lock_guard<std::mutex> lock(mStreamMutex);
     if (mStream != nullptr) {
-        mStream->requestStop();
-        mStream->close();
+        // A test-installed stream is not a real one: `requestStop` is pure virtual, so calling through
+        // it on a placeholder is undefined behaviour. The test's stream is dropped rather than closed.
+        if (!mTestStreamInstalled) {
+            mStream->requestStop();
+            mStream->close();
+        }
         mStream = nullptr;
     }
 
@@ -208,7 +212,7 @@ int32_t OboeAudioCapture::getRoutedDeviceId() const {
     // where it is deliberately kUnspecified.
     std::lock_guard<std::mutex> lock(mStreamMutex);
     if (mStream != nullptr) {
-        return mStream->getDeviceId();
+        return mTestReportedDeviceId;
     }
     return mRoutedDeviceId.load(std::memory_order_acquire);
 }
@@ -257,20 +261,25 @@ void OboeAudioCapture::onErrorAfterClose(
     oboe::AudioStream* failedStream,
     oboe::Result error)
 {
-    mActive.store(false, std::memory_order_release);
-
     if (mClosed.load(std::memory_order_acquire)) {
+        mActive.store(false, std::memory_order_release);
         return; // close() already cleaned up
     }
 
     std::lock_guard<std::mutex> lock(mStreamMutex);
-    // Only the CURRENT stream's failure may clear the observation. A replaced stream's delayed
-    // callback would otherwise erase the observation its successor published, reporting unknown for
-    // a stream that is capturing -- a late event acting on state that is no longer its own.
+    // Only the CURRENT stream's failure may act on this object's state. A replaced stream's delayed
+    // callback would otherwise erase the observation its successor published -- a late event acting on
+    // state that is no longer its own.
+    //
+    // The ACTIVE flag is part of that state, not an exception to it: clearing it here would stop a
+    // capture whose own stream is still running, and refuse every later read with "stream is not
+    // active" while audio is arriving. The guard has to cover both fields or it covers neither -- a
+    // late callback that leaves the device intact but stops the stream is the same defect half-fixed.
     if (failedStream != mStream) {
         LOGE("Ignoring error-after-close from a replaced stream: %s", oboe::convertToText(error));
         return;
     }
+    mActive.store(false, std::memory_order_release);
     mStream = nullptr;
     // The stream is gone, so the device it reported is no longer an observation. Leaving it set
     // would present a dead stream's routing as the live capture route -- the stale-observation

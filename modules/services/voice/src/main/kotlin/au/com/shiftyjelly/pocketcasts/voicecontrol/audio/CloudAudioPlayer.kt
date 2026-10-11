@@ -46,8 +46,15 @@ class CloudAudioPlayer(
     // actually goes rather than what is merely available. Null in contexts with no route consumer.
     private val routedOutputObserver: au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver? = null,
 ) {
-    /** This stream's claim on the routed observation; cleared when the player retires. */
-    private val observedRoute = routedOutputObserver?.observe()
+    /**
+     * This stream's claim on the routed observation, taken when playback starts.
+     *
+     * Not taken in the constructor: the claim is released when playback stops, and one player serves
+     * several turns, so a claim taken once at construction would be spent after the first stop and the
+     * second playback would publish into a claim the observer no longer counts — the route would be
+     * observably absent while audio was sounding.
+     */
+    private var observedRoute: au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver.ObservedRoute? = null
 
     /**
      * Converts decoded PCM to the recorder's timeline, holding phase across chunks.
@@ -281,10 +288,11 @@ class CloudAudioPlayer(
         playbackBufferRecorder?.retire()
         // And withdraw the routed observation. The contract is that the published route describes a
         // live reporting stream: this stream has stopped, so leaving the route published would keep
-        // answering for a stream that is gone. Safe to call alongside release()'s own clear: the
-        // observer releases a claim at most once per stream, so the second clear withdraws nothing
-        // and the claim accounting stays correct.
+        // answering for a stream that is gone. Nulling it as well lets a later playback on this same
+        // player take a fresh claim; clear() itself is idempotent per claim, so a following release()
+        // withdrawing an already-cleared claim is a no-op.
         observedRoute?.clear()
+        observedRoute = null
     }
 
     /**
@@ -308,6 +316,11 @@ class CloudAudioPlayer(
     private fun startAudibleHeartbeat() {
         // Sample the routed output alongside the audible stamp: the heartbeat already runs while this
         // player is producing sound, which is exactly when its routing is the answer for route decisions.
+        // Claim the observation for this playback run if it is not already held, so a reused player
+        // reports a live route on every turn rather than only the first.
+        if (observedRoute == null) {
+            observedRoute = routedOutputObserver?.observe()
+        }
         observedRoute?.publish(audioTrack?.routedDevice)
         audibleHeartbeat?.cancel()
         onPlaybackAudibleChanged?.invoke(true)
@@ -330,9 +343,10 @@ class CloudAudioPlayer(
 
     /** Release all resources. Must be called before the player is discarded. */
     fun release() {
-        observedRoute?.clear()
         if (released) return
         released = true
+        // stop() withdraws the claim when one is held and clears the reference, so a released player
+        // cannot be re-used to take another. Nothing else to clear here.
         stop()
         decodeCodec?.stop()
         decodeCodec?.release()

@@ -171,7 +171,13 @@ class CloudAudioPlayer(
     /** True when at least one frame was successfully written to the AudioTrack. */
     var audioWritten = false
 
-    /** Set when the sink refuses audio mid-answer, so the turn is stopped rather than silently gapped. */
+    /**
+     * Set when the sink refuses audio mid-answer, so the turn is stopped rather than silently gapped.
+     *
+     * Reset at the start of every playback run, not only at construction: one player serves several
+     * turns, and a flag that survives the answer it stopped ends the NEXT answer after its first
+     * frame -- attributing one turn's failure to a turn that never failed.
+     */
     @Volatile
     private var audioWriteFailed = false
         private set
@@ -222,6 +228,10 @@ class CloudAudioPlayer(
     fun play() {
         if (released) return
         ensureAudioTrack()
+        // Reset the failure flag for this run. The drain loop reads it at the end of every frame, so
+        // leaving it set after the answer it stopped would end the next answer after its first frame
+        // and report nothing -- a turn that played almost none of its audio, recorded as delivered.
+        audioWriteFailed = false
         synchronized(frameBuffer) {
             if (paused) {
                 audioTrack?.play()

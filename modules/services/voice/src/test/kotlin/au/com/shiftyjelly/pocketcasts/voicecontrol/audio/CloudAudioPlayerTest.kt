@@ -509,6 +509,49 @@ class CloudAudioPlayerTest {
     }
 
     @Test
+    fun `a sink write failure stops one answer without poisoning the next`() {
+        // One player serves several turns, so a write failure on one answer must not decide the next.
+        // The flag that stops the failing answer is also read at the top of every frame loop, so if it
+        // survives the turn it ends, the NEXT answer breaks out before playing anything -- the failure
+        // is attributed to a turn that never failed.
+        val failures = java.util.concurrent.atomic.AtomicInteger(0)
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+        )
+        wired.onWriteFailure = { failures.incrementAndGet() }
+        val frame = byteArrayOf(0x00, 0x01, 0x02, 0x03)
+
+        // Turn 1: the sink refuses.
+        wired.writeToSink = { _, _, _, _ -> 0 }
+        wired.submitFrame(frame)
+        wired.play()
+        assertEquals("turn 1 reported its failure", 1, failures.get())
+        wired.stop()
+
+        // Turn 2: the sink accepts. TWO frames, because the flag is read at the END of the per-frame
+        // loop: a one-frame turn writes that frame and then reaches the check, so a single frame IS
+        // the whole answer and cannot show the early stop. Two frames is the fewest that can.
+        var acceptedBytes = 0
+        wired.writeToSink = { _, bytes, _, count ->
+            acceptedBytes += count
+            count
+        }
+        wired.submitFrame(frame)
+        wired.submitFrame(frame)
+        wired.play()
+
+        assertEquals(
+            "a recovered sink must receive the whole next answer, not stop after its first frame " +
+                "because the previous answer's failure flag survived",
+            2 * frame.size,
+            acceptedBytes,
+        )
+        assertEquals("and turn 2 must not report a failure of its own", 1, failures.get())
+        wired.release()
+    }
+
+    @Test
     fun `a partial sink write records only the accepted prefix`() {
         // The cloud answer must record accepted samples, not the whole submitted frame: a reference
         // holding audio the sink rejected would correlate against audio that never played.

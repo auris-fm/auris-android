@@ -23,6 +23,15 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
     private val gracePeriodSignal: au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal,
     @ApplicationScope
     private val scope: CoroutineScope,
+    /**
+     * Whether the stop being classified was a user's SPOKEN pause.
+     *
+     * `VOICE_COMMANDS` is the interface the command arrived through, not who asked for it: the voice
+     * path's hold pause and a user's spoken pause carry the same tag. The executor records the
+     * spoken one through [PlaybackManager.noteUserPlaybackCommand], and this reports whether that
+     * happened for the current stop, so a user pause is never exempted by its interface.
+     */
+    private val isSpokenUserPause: Boolean = false,
 ) {
     val context: StateFlow<PlaybackContext> = playbackManager.playbackStateFlow
         .map(::toPlaybackContext)
@@ -66,11 +75,13 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
         // playback stop does not strand a turn-owned pause.
         scope.launch {
             var wasPlaying = isHostAudioActive.value
-            isHostAudioActive.collect { playing ->
-                if (hostStoppedWhileClosed(wasPlaying, playing)) {
+            playbackManager.playbackStateFlow.collect { state ->
+                // The cause is read from THIS emission, so a newer command replacing a shared
+                // "last command" field cannot re-attribute a stop the observer processes late.
+                if (hostStoppedWhileClosed(wasPlaying, state.isPlaying, state.changedBySource)) {
                     gracePeriodSignal.noteHostPlaybackStopped()
                 }
-                wasPlaying = playing
+                wasPlaying = state.isPlaying
             }
         }
     }
@@ -79,15 +90,20 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
      * Whether a playing-to-stopped transition during a closed window counts as a playback-stop
      * closure. Extracted so the counting rule is testable through the same decision the watcher
      * applies, rather than through a counter a test pokes directly.
+     *
+     * [cause] is the source of the command that produced this state, carried on the emission itself.
      */
-    internal fun hostStoppedWhileClosed(wasPlaying: Boolean, isPlaying: Boolean): Boolean = wasPlaying &&
+    internal fun hostStoppedWhileClosed(
+        wasPlaying: Boolean,
+        isPlaying: Boolean,
+        cause: String? = null,
+    ): Boolean = wasPlaying &&
         !isPlaying &&
         gracePeriodSignal.isClosedByPrivacy() &&
-        // Event provenance, not the interval a hold happens to be in effect: a stop caused by our own
-        // hold pause is not an external obligation, however long the hold lasts and whenever the
-        // observer processes the transition. An external or user stop during that hold carries a
-        // different source and is counted.
-        playbackManager.lastStopSourceView() != SourceView.VOICE_COMMANDS
+        // Event provenance, from the stop's own emission: a stop caused by the voice path's hold
+        // pause is not an external obligation. A spoken user pause also carries VOICE_COMMANDS, so
+        // the executor marks that one as a user command and it supersedes the hold like any other.
+        !(cause == SourceView.VOICE_COMMANDS.key && !isSpokenUserPause)
 
     /**
      * True when the host app (Pocket Casts) is actively playing audio. Used by

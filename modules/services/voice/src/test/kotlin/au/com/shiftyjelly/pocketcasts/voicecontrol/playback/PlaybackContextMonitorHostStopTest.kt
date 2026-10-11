@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
+import au.com.shiftyjelly.pocketcasts.analytics.SourceView
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
@@ -8,7 +9,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
@@ -16,10 +16,9 @@ import org.mockito.kotlin.whenever
 /**
  * Event provenance for the playback-stop closure count, driven through the REAL collector.
  *
- * Calling the collector's decision directly verifies the decision, not the ordering: a pause that
- * occurs before the window closes does not guarantee its observer callback runs before the close.
- * These checks therefore feed the monitor's own flow and control WHEN the emission is processed
- * relative to the closure.
+ * The cause must ride ON each emission, not be read from shared "last command" state when the
+ * collector eventually runs: a newer command can replace that field before a queued stop is
+ * processed, and the stop would be charged with a cause that is not its own.
  */
 class PlaybackContextMonitorHostStopTest {
 
@@ -28,12 +27,42 @@ class PlaybackContextMonitorHostStopTest {
         episodeUuid = "ep",
     )
 
-    private val paused = playing.copy(state = PlaybackState.State.PAUSED)
+    private fun pausedBy(source: SourceView) = playing.copy(
+        state = PlaybackState.State.PAUSED,
+        changedBySource = source.key,
+    )
 
-    /** A monitor whose host-audio flow the test drives, with a real grace signal. */
+    private class Harness(
+        val flow: MutableStateFlow<PlaybackState>,
+        val signal: GracePeriodSignal,
+        val monitor: PlaybackContextMonitor,
+        val driver: QueuedDispatcher,
+    ) {
+        fun awaitHostPlaying(expected: Boolean) {
+            driver.drain()
+            check(monitor.isHostAudioActive.value == expected) {
+                "the collector must have settled on hostPlaying=$expected"
+            }
+        }
+    }
+
+    private fun harness(spokenUserPause: Boolean = false): Harness {
+        val flow = MutableStateFlow(playing)
+        val manager = mock<PlaybackManager>()
+        whenever(manager.playbackStateFlow).thenReturn(flow)
+        val signal = GracePeriodSignal()
+        val driver = QueuedDispatcher()
+        val monitor = PlaybackContextMonitor(
+            playbackManager = manager,
+            gracePeriodSignal = signal,
+            scope = CoroutineScope(driver),
+            isSpokenUserPause = spokenUserPause,
+        )
+        return Harness(flow, signal, monitor, driver)
+    }
+
     // Runs submitted coroutines only when the test asks, so the collector cannot process an emission
-    // at a moment the test did not choose. This is what makes the ordering explicit: the emission
-    // produced before the closure is only PROCESSED when drain() is called, after it.
+    // at a moment the test did not choose.
     private class QueuedDispatcher : kotlinx.coroutines.CoroutineDispatcher() {
         private val queue = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
 
@@ -49,50 +78,13 @@ class PlaybackContextMonitorHostStopTest {
         }
     }
 
-    private class Harness(
-        val flow: MutableStateFlow<PlaybackState>,
-        val signal: GracePeriodSignal,
-        val monitor: PlaybackContextMonitor,
-        val driver: QueuedDispatcher,
-        val manager: PlaybackManager,
-    ) {
-        // Waits for the collector to observe `expected` as the host's audio state.
-        fun awaitHostPlaying(expected: Boolean) {
-            driver.drain()
-            check(monitor.isHostAudioActive.value == expected) {
-                "the collector must have settled on hostPlaying=$expected"
-            }
-        }
-
-        // Drains queued collector work, so the watcher processes what it has seen on the test's turn.
-        fun drainCollector() = driver.drain()
-    }
-
-    private fun harness(): Harness {
-        val flow = MutableStateFlow(playing)
-        val manager = mock<PlaybackManager>()
-        whenever(manager.playbackStateFlow).thenReturn(flow)
-        val signal = GracePeriodSignal()
-        val driver = QueuedDispatcher()
-        val monitor = PlaybackContextMonitor(
-            playbackManager = manager,
-            gracePeriodSignal = signal,
-            scope = CoroutineScope(driver),
-        )
-        return Harness(flow, signal, monitor, driver, manager)
-    }
-
     @Test
     fun `a stop caused by the voice path's own pause is not an external stop`() = runTest {
         val h = harness()
         h.awaitHostPlaying(true)
 
-        // The voice path pauses: the command records VOICE_COMMANDS as the stop's provenance.
-        org.mockito.kotlin.whenever(h.manager.lastStopSourceView())
-            .thenReturn(au.com.shiftyjelly.pocketcasts.analytics.SourceView.VOICE_COMMANDS)
-
         h.signal.onAppBackgrounded()
-        h.flow.value = paused
+        h.flow.value = pausedBy(SourceView.VOICE_COMMANDS)
         h.awaitHostPlaying(false)
 
         assertEquals(
@@ -103,48 +95,57 @@ class PlaybackContextMonitorHostStopTest {
     }
 
     @Test
-    fun `an external stop DURING the hold is still counted`() = runTest {
-        // The distinguishing case: an external or user stop arrives while the turn's hold is in
-        // effect, before the delayed own-pause event. Provenance separates them; the interval during
-        // which a hold exists does not, which is why the hold's lifetime cannot be the discriminator.
+    fun `an external stop during the hold is counted`() = runTest {
         val h = harness()
         h.awaitHostPlaying(true)
 
-        // The turn's own pause is outstanding...
-        // ...but THIS stop carries an external source.
-        org.mockito.kotlin.whenever(h.manager.lastStopSourceView())
-            .thenReturn(au.com.shiftyjelly.pocketcasts.analytics.SourceView.UNKNOWN)
-
         h.signal.onAppBackgrounded()
-        h.flow.value = paused
+        h.flow.value = pausedBy(SourceView.UNKNOWN)
         h.awaitHostPlaying(false)
 
         assertEquals(
-            "an external stop during a hold must be counted and supersede the auto-resume",
+            "an external stop must be counted and supersede the auto-resume",
             1L,
             h.signal.playbackStopClosureCount(),
         )
     }
 
     @Test
-    fun `a voice-path stop delivered after the hold is released is not an external obligation`() = runTest {
-        // The own-pause event may be delivered after the turn already released its hold. Provenance is
-        // a property of the stop, not of the hold's lifetime, so the successor is not charged with an
-        // external obligation for the predecessor's own pause.
+    fun `two queued stops from different sources each keep their own cause`() = runTest {
+        // The reason the cause must ride the emission: with a shared "last command" field, processing
+        // both stops after the fact would attribute BOTH to whichever source was recorded last. Here
+        // the voice-path stop is queued first and an external stop second, both before delivery.
         val h = harness()
         h.awaitHostPlaying(true)
-
-        org.mockito.kotlin.whenever(h.manager.lastStopSourceView())
-            .thenReturn(au.com.shiftyjelly.pocketcasts.analytics.SourceView.VOICE_COMMANDS)
-
-        // No hold is declared in effect at all here -- provenance alone must decide.
         h.signal.onAppBackgrounded()
-        h.flow.value = paused
+
+        h.flow.value = pausedBy(SourceView.VOICE_COMMANDS)
+        h.flow.value = playing
+        h.flow.value = pausedBy(SourceView.UNKNOWN)
+        h.driver.drain()
+
+        assertEquals(
+            "only the stop that was NOT the voice path's own is an external obligation",
+            1L,
+            h.signal.playbackStopClosureCount(),
+        )
+    }
+
+    @Test
+    fun `a spoken user pause is not exempted by its interface`() = runTest {
+        // VOICE_COMMANDS is the interface the command arrived through, not who asked for it. A user's
+        // spoken pause reaches the player through that same tag, and must supersede the answer hold
+        // like any other user pause rather than being exempted as the turn's own pause.
+        val h = harness(spokenUserPause = true)
+        h.awaitHostPlaying(true)
+
+        h.signal.onAppBackgrounded()
+        h.flow.value = pausedBy(SourceView.VOICE_COMMANDS)
         h.awaitHostPlaying(false)
 
         assertEquals(
-            "the predecessor's own pause is not an external obligation for the successor",
-            0L,
+            "a user's spoken pause must count despite sharing the voice interface's tag",
+            1L,
             h.signal.playbackStopClosureCount(),
         )
     }
@@ -154,7 +155,7 @@ class PlaybackContextMonitorHostStopTest {
         val h = harness()
         h.awaitHostPlaying(true)
 
-        h.flow.value = paused
+        h.flow.value = pausedBy(SourceView.UNKNOWN)
         h.awaitHostPlaying(false)
         h.signal.onAppBackgrounded()
 

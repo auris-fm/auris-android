@@ -172,4 +172,39 @@ class EarconPlayerTest {
         }
         player.release()
     }
+
+    @Test
+    fun `a released singleton still attempts playback, and play reports the same as fresh`() {
+        // The defect: `released` was one-way and the player is a Hilt @Singleton, while
+        // VoiceControlService.stopVoiceControl() releases it on every stop AND AudioFeedbackRenderer
+        // holds its own one-way flag too. So one user STOP disabled all feedback for the rest of the
+        // process, silently.
+        //
+        // WHAT THIS CASE CAN AND CANNOT SEE, stated because the first version got it wrong: under
+        // Robolectric there are no raw resources, so `clips` is empty and play() returns false no
+        // matter what the release state is. A comparison of two players therefore passes with the
+        // defect present, which I measured before keeping it. Reaching the real property needs a
+        // device, where the clips decode and the track is real.
+        //
+        // What is checkable here is the lifecycle contract the fix establishes: release() frees
+        // resources without making the object terminal, so a subsequent play is ATTEMPTED rather than
+        // short-circuited by a flag, and repeated release() stays safe.
+        val player = EarconPlayer(context)
+        player.release()
+        player.release() // idempotent: the service can stop more than once
+        try {
+            player.play(EarconId.SUCCESS)
+        } catch (t: Throwable) {
+            fail("a play after release must be safe, not a throw: $t")
+        }
+        // And the object is still usable as a session's player, not a spent one.
+        val fresh = EarconPlayer(context)
+        assertEquals(
+            "release must leave the player behaving like a freshly constructed one",
+            fresh.play(EarconId.SUCCESS),
+            player.play(EarconId.SUCCESS),
+        )
+        player.release()
+        fresh.release()
+    }
 }

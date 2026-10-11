@@ -722,20 +722,18 @@ class VoiceControlService : Service() {
         lastCommandTime = now
 
         serviceScope.launch(Dispatchers.IO) {
+            // ONE failure boundary, and it lives in renderWithFailureHandling: that call converts an
+            // ordinary failure into feedback and returns normally, so the cleanup below runs for a
+            // command the user did give. A catch here would be dead code for that case and would put
+            // the same decision in two places.
+            //
+            // Cancellation is the one thing the helper rethrows, and it must NOT reach the cleanup:
+            // advancing or reopening a window for a cancelled turn would claim the user gave a command
+            // that is no longer being handled, and structured concurrency still has to unwind.
             try {
                 renderWithFailureHandling(intent)
             } catch (cancellation: kotlinx.coroutines.CancellationException) {
-                // The scope is being torn down: rethrow WITHOUT touching the grace window. Reopening
-                // or advancing a window for a cancelled turn would claim the user gave a command that
-                // is no longer being handled, and structured concurrency still has to unwind.
                 throw cancellation
-            } catch (failure: Exception) {
-                // An ordinary failure must not cost this command its cleanup. The user did give the
-                // command, so the window advances as it would on success -- otherwise the window stays
-                // open for a command already abandoned, and the next utterance is judged against a
-                // turn that ended. Feedback for the failure is rendered inside
-                // renderWithFailureHandling, so nothing is swallowed here.
-                Timber.w(failure, "[VoicePipeline] command failed before cleanup")
             }
             gracePeriodSignal.onCommandRecognized(
                 fromGeneration = intent.windowGenerationOf(),

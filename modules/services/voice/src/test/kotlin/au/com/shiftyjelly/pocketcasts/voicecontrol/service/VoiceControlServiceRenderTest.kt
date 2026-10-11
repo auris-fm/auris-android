@@ -254,4 +254,56 @@ class VoiceControlServiceRenderTest {
             Thread.sleep(20)
         }
     }
+
+    /**
+     * @spec's launch-path cancellation check: a cancelled command produces NO feedback and does NOT
+     * renew the grace allowance.
+     *
+     * Driven through `handleIntent`, so both halves are observed at the launch site rather than at the
+     * helper: the helper rethrows cancellation, the launch rethrows it again before the cleanup, and
+     * nothing may reach `onCommandRecognized`.
+     *
+     * The allowance probe is the same one the ordinary-failure case uses, and it is why this is a
+     * check rather than a state read: the wake's escalation is spent first, so a renewed window would
+     * ACCEPT a further escalation while a window left untouched keeps refusing one.
+     */
+    @Test
+    fun `a cancelled command gives no feedback and does not renew grace`() = runTest {
+        val earconPlayer = mock(EarconPlayer::class.java)
+        val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
+        val executor = mock(VoicePlaybackIntentExecutor::class.java)
+        whenever(executor.execute(org.mockito.kotlin.any()))
+            .thenThrow(kotlinx.coroutines.CancellationException("caller withdrew"))
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
+        val service = VoiceControlService().apply {
+            audioFeedbackRenderer = renderer
+            voicePlaybackIntentExecutor = executor
+            gracePeriodSignal = signal
+            voiceControlServiceController = mock(au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlServiceController::class.java)
+        }
+        signal.onWakeWordDetected()
+        // Spend this window's single escalation so a renewal would be visible as "available".
+        signal.issueEscalation()
+        assertEquals(
+            "the probe needs a spent escalation",
+            "allowance spent in this window",
+            signal.escalationRefusal(),
+        )
+        try {
+            service.handleIntentForTest(VoiceIntent.Playback.Pause)
+            awaitRealTime { org.mockito.Mockito.mockingDetails(executor).invocations.size >= 1 }
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+
+            // No feedback: cancellation is the caller withdrawing, not a failure to report.
+            verify(earconPlayer, org.mockito.Mockito.never()).play(EarconId.ERROR)
+            // And the window was not renewed, so the spent allowance stays spent.
+            assertEquals(
+                "cancellation must not reopen or advance the window: refusal=${signal.escalationRefusal()}",
+                "allowance spent in this window",
+                signal.escalationRefusal(),
+            )
+        } finally {
+            renderer.release()
+        }
+    }
 }

@@ -12,6 +12,26 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 
 /**
+ * THE POSITION EACH SOURCE SUPPLIES, because they are not all the same quantity and the difference
+ * decides whether two of them can be compared:
+ *
+ * ```
+ * episode        PcmChunk.positionSec          MEDIA position
+ * cloud answer   submittedSamples * 1000 / rate  a SUBMISSION COUNT, restarting at 0 per answer
+ * earcon         none                           no position at all
+ * TTS            none                           no position at all
+ * capture (mic)  getTimestamp(CLOCK_MONOTONIC)   a TIME (see OboeAudioCapture.captureClock)
+ * ```
+ *
+ * Two consequences a reader should not have to rediscover:
+ *  - SUBMISSION ORDER SUFFICES FOR WHAT THIS CLASS CONTAINS. Its contract is "the PCM the client
+ *    actually submitted for playback", and the filter's first question is what the reference holds,
+ *    which submission order answers exactly. A wrong submission order corrupts WHAT is held.
+ *  - IT DOES NOT PLACE ANYTHING IN TIME. Placing the reference against a microphone segment needs a
+ *    render-side clock, which no source here supplies; the capture side has one and the render side
+ *    does not. A missing render clock corrupts WHEN it was held -- and the gap is the player's buffer
+ *    latency, which for an echo-bleed filter is the quantity being decided.
+ *
  * Rolling buffer of recently-played audio for cross-correlation.
  *
  * It holds the PCm the client actually submitted for playback, so the signal filter can reject

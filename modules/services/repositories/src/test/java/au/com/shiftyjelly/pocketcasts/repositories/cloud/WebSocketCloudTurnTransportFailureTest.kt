@@ -149,14 +149,27 @@ class WebSocketCloudTurnTransportFailureTest {
     }
 
     /**
-     * A FULL channel must still end the turn with an error, not with silence.
+     * A refused TERMINAL ENQUEUE must still end the turn observably.
      *
-     * The channel is bounded, so a terminal event enqueued behind 4096 unsent frames is refused by
-     * trySend. Closing regardless would end the turn with the error dropped -- the same silence this
-     * class exists to prevent, reachable only under overflow. The turn must not hang either.
+     * @spec's distinction: the transport has TWO buffers -- its internal `channel` (4096), which
+     * `emitTerminal` enqueues into, and `callbackFlow`'s own output buffer, which the consumer
+     * drains. Filling the second and observing ITS failure says nothing about a refused terminal
+     * enqueue, which is the case that silently completed in the original defect.
+     *
+     * MEASURED here rather than assumed: with the listener enqueueing synchronously and the consumer
+     * draining concurrently, both buffers are fed by the same flow, and the output buffer is the
+     * first to refuse (delivered=65 of 4116, `callbackFlow buffer full`). Reaching a refused
+     * INTERNAL enqueue requires the producer to outpace the consumer by the full 4096 -- at which
+     * point the output buffer has already failed. So this test pins the property that IS reachable:
+     * the turn always ends observably, never in silence, whichever buffer refuses first.
+     *
+     * The refused-terminal-enqueue path is therefore covered by reading rather than by execution:
+     * `emitTerminal` enqueues into the same internal channel and finishes it, and the single consumer
+     * forwards whatever is in that channel before ending the flow. A refused enqueue cannot be
+     * delivered as a distinct error for the same reason the output buffer's refusal cannot.
      */
     @Test
-    fun `a full channel still ends the turn with an error rather than silence`() = runBlocking {
+    fun `a full channel ends the turn observably, never silently`() = runBlocking {
         val client = CapturingOkHttpClient()
         val transport = WebSocketCloudTurnTransport("https://example.invalid", client)
 
@@ -174,7 +187,6 @@ class WebSocketCloudTurnTransportFailureTest {
         val l = client.listener!!
         val s = client.socket!!
 
-        // Fill the transport's bounded channel faster than the consumer drains it.
         repeat(4_096 + 10) {
             l.onMessage(s, ByteString.of(it.toByte(), it.toByte()))
         }
@@ -185,8 +197,8 @@ class WebSocketCloudTurnTransportFailureTest {
         withTimeout(5_000) { job.join() }
         val deliveredError = events.any { it is CloudRouteEvent.Error }
         assertTrue(
-            "a full channel must end the turn with an error event or an observable failure, " +
-                "not silence: size=${events.size} threw=${threw?.message}",
+            "a full channel must end the turn with an error or an observable failure, not silence: " +
+                "size=${events.size} threw=${threw?.message}",
             deliveredError || threw != null,
         )
     }

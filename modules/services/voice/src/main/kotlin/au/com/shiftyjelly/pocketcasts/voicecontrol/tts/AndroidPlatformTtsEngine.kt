@@ -46,6 +46,21 @@ class AndroidPlatformTtsEngine @Inject constructor(
      */
     var drainWaitMs: Long = MAX_DRAIN_WAIT_MS
 
+    /**
+     * Queues [text] for synthesis to [file], returning the platform's status code. Defaults to the
+     * real engine; a test can substitute one that never completes so the cancellation path is
+     * exercised deterministically rather than inferred from a code reading.
+     */
+    var synthesizeToFile: ((engine: TextToSpeech, text: String, file: java.io.File, utteranceId: String) -> Int)? =
+        null
+
+    /**
+     * Stops the engine, so a test can observe that cancellation reached it. Defaults to the real
+     * `TextToSpeech.stop`; the substitution exists because the platform engine is unreachable in a
+     * unit test and "cancellation stops synthesis" is otherwise a claim nobody has run.
+     */
+    var stopInvokerForTest: (() -> Unit)? = null
+
     /** Set while a synthesized file is being played, so cancellation can stop it. */
     @Volatile
     private var activeTrack: AudioTrack? = null
@@ -124,9 +139,17 @@ class AndroidPlatformTtsEngine @Inject constructor(
                 })
 
                 val utteranceId = System.currentTimeMillis().toString()
+                // Cancellation must stop the queued synthesis. Without this, a cancelled reply leaves
+                // the engine synthesizing an utterance nobody plays -- and the check below only
+                // catches a cancellation that lands BEFORE this line, not one that arrives while
+                // suspended or after the call returns.
+                continuation.invokeOnCancellation {
+                    stopInvokerForTest?.invoke() ?: engine.stop()
+                }
                 // QUEUE_FLUSH preserves the previous single-utterance behaviour: a superseded reply
                 // must not keep talking.
-                val queued = engine.synthesizeToFile(text, null, wav, utteranceId)
+                val queued = synthesizeToFile?.invoke(engine, text, wav, utteranceId)
+                    ?: engine.synthesizeToFile(text, null, wav, utteranceId)
                 if (queued != TextToSpeech.SUCCESS) {
                     Timber.w("TTS synthesizeToFile failed with $queued")
                     continuation.resume(false)
@@ -134,7 +157,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
                 if (!continuation.isActive) {
                     // A cancellation landed between registering the listener and the call, so stop
                     // the queued synthesis rather than leaving it orphaned.
-                    engine.stop()
+                    stopInvokerForTest?.invoke() ?: engine.stop()
                 }
             }
             if (!synthesized) return

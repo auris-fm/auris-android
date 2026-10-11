@@ -41,6 +41,39 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeRoutedCa
     return gCapture != nullptr ? gCapture->getRoutedDeviceId() : oboe::kUnspecified;
 }
 
+// The live stream's frame/time observation, as [framePosition, timestampNs, sampleRate, observable].
+// Read on the polling thread rather than the audio callback: the platform documents that calling the
+// timestamp API from a data callback is unreliable before Android R, and this value must describe the
+// stream's actual progress rather than the last frame the callback happened to hand over.
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeCaptureClock(
+    JNIEnv* env,
+    jclass /*clazz*/)
+{
+    OboeAudioCapture::CaptureClock clock;
+    {
+        std::lock_guard<std::mutex> lock(gCaptureMutex);
+        if (gCapture != nullptr) {
+            clock = gCapture->captureClock();
+        }
+    }
+
+    jlongArray result = env->NewLongArray(4);
+    if (result == nullptr) {
+        return nullptr;
+    }
+    // The frames and the sample rate are reported even when no timestamp is observable, so a caller
+    // can tell "no time known" from "no capture at all"; the observable flag carries that distinction.
+    const jlong values[4] = {
+        static_cast<jlong>(clock.framePosition),
+        static_cast<jlong>(clock.timestampNs),
+        static_cast<jlong>(clock.sampleRate),
+        clock.observable ? 1 : 0,
+    };
+    env->SetLongArrayRegion(result, 0, 4, values);
+    return result;
+}
+
 // Whether libonnxruntime.so is already loaded in this process. Uses the same RTLD_NOLOAD idiom the
 // capture path uses, so a test can assert the ordering property directly: capture must succeed even
 // when this returns false (i.e. when wake/embedding/transcriber setup has not run first).

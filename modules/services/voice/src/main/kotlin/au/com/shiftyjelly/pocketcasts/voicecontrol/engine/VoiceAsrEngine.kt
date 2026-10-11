@@ -9,6 +9,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.captureTimeOfSpeechOnsetMs
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
@@ -294,10 +295,18 @@ class VoiceAsrEngine @Inject constructor(
         val sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000
         val floatSamples = request.samples
 
-        // Filter out playback bleed before transcribing
+        // Filter out playback bleed before transcribing. The player's reference window carries its
+        // own timeline position, and the segment carries the capture clock, so the correlator can
+        // compare the two at a SHARED instant instead of at raw buffer offsets. When the stream
+        // reports no timestamp, the capture time stays unknown and the correlator falls back to
+        // offset matching, which is the behaviour from before a clock existed.
         val playbackReference = playbackBufferProvider?.invoke()
             ?: PlaybackReference(FloatArray(0), sampleRateHz, startPositionMs = null)
-        if (!utteranceFilter.shouldProcessReference(floatSamples, false, 0, playbackReference)) {
+        // Named `Ms` because the correlator's clock is in milliseconds: the capture observation is
+        // nanoseconds and the conversion happens here, so a reader cannot pair the two domains by
+        // accident. The comment on the helper says the same thing at the point of the division.
+        val micPositionMs = segment.captureTimeOfSpeechOnsetMs()
+        if (!utteranceFilter.shouldProcessReference(floatSamples, false, 0, playbackReference, micPositionMs)) {
             Timber.i("[VoicePipeline] → drop (bleed filter)")
             return
         }

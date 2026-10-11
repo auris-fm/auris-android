@@ -303,6 +303,57 @@ class CloudAudioPlayerTest {
     }
 
     @Test
+    fun `a 48 kHz answer is recorded at its own duration, not replayed at 16 kHz`() {
+        // The recorder's timeline is 16 kHz: it converts sample counts to milliseconds with
+        // SAMPLE_RATE. PCM decoded from a 48 kHz codec is 48 kHz PCM, so recording it unchanged
+        // stores three times as many samples as 16 kHz would for the same span of audio -- the
+        // reference then claims an audio duration three times the real one, and correlation against
+        // it can never align.
+        val recorder = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder(
+            au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap(),
+        )
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            playbackBufferRecorder = recorder,
+        )
+        wired.setCodec("pcm@48k")
+
+        // Exactly 100 ms of 48 kHz PCM: 4800 frames of s16le = 9600 bytes.
+        val hundredMsAt48k = ByteArray(9600)
+        for (i in 0 until 4800) {
+            val v = 8000
+            hundredMsAt48k[i * 2] = (v and 0xFF).toByte()
+            hundredMsAt48k[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+        }
+        // TWO frames, not one. The position of the first chunk is `(0 samples submitted) / rate`,
+        // which is 0 at every rate -- a single-frame arrangement cannot distinguish a position
+        // computed at the playback rate from one computed at the recorder's. The second frame puts a
+        // nonzero submitted-sample count into that division, which is where the two rates differ.
+        wired.submitFrame(hundredMsAt48k)
+        wired.submitFrame(hundredMsAt48k)
+        wired.play()
+
+        assertEquals(
+            "200 ms of 48 kHz audio must be recorded as 200 ms at the recorder's 16 kHz, " +
+                "not as 600 ms of mis-typed samples",
+            au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.SAMPLE_RATE / 5,
+            recorder.snapshot().size,
+        )
+        // The producer-clock position must still be the wall-clock end of the audio that was
+        // SUBMITTED. Resampling changes the sample count, so deriving the position from the resampled
+        // length would put the reference 3x too far along at 48 kHz. The second frame's submitted
+        // count is 4800, so the position is 4800/48000 = 100 ms before the second chunk's own 100 ms.
+        assertEquals(
+            "the newest reference sample sits at the end of the submitted audio, on the " +
+                "producer's clock rather than the recorder's sample count",
+            200L,
+            recorder.lastRecordedPositionMs(),
+        )
+        wired.release()
+    }
+
+    @Test
     fun `a partial sink write records only the accepted prefix`() {
         // The cloud answer must record accepted samples, not the whole submitted frame: a reference
         // holding audio the sink rejected would correlate against audio that never played.

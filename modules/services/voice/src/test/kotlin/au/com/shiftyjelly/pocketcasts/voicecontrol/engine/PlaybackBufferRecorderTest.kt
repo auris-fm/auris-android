@@ -419,30 +419,77 @@ class PlaybackBufferRecorderTest {
         // would be Mixed and offer no anchor at all, discarding a valid clock.
         recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
 
-        // The window now holds BOTH chunks, and the anchor is derived from the timed one's end back
-        // across the whole window. The property is that an anchor EXISTS and is consistent with the
-        // window, not that it equals the timed chunk's own start -- asserting the constant was my
-        // error twice over this session, so this states the relation the anchor must satisfy.
+        // REVERSED, and the reversal is the point: this case originally asserted that the window
+        // STILL anchors, which encoded the behaviour @spec corrected. An untimed contribution is not
+        // merely neutral -- it invalidates any anchor, because the untimed samples are now part of the
+        // span whose start would be reported. An untimed chunk still must not SET an axis (it is not a
+        // media position), but the consequence of its presence is no anchor at all, not a retained one.
         val reference = recorder.reference()
         val durationMs = (reference.samples.size * 1_000L) / PlaybackBufferRecorder.SAMPLE_RATE
         assertEquals("the window holds both chunks", 300L, durationMs)
-        assertNotNull(
-            "an untimed contribution must not stand in for an axis, so a later valid clock still anchors",
+        assertNull(
+            "an untimed contribution joins the retained window, so the window has no start it can place",
             reference.startPositionMs,
         )
     }
 
     @Test
-    fun `an untimed contribution after a timed one does not corrupt the axis`() {
-        // The mirror direction: the untimed chunk arrives last and must leave the recorded axis alone.
+    fun `an untimed contribution after a timed one removes the anchor`() {
+        // REVERSED like the case above, and for the same reason: the earlier version asserted the
+        // anchor survived, which is the reading @spec corrected. The samples are still retained -- the
+        // reference must remain complete for WHAT it holds -- but the window can no longer be placed.
         val tap = FingerprintPcmTap()
         val recorder = PlaybackBufferRecorder(tap)
 
         recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
         recorder.write(FloatArray(1_600) { 0.25f })
 
-        assertNotNull(
-            "a trailing untimed chunk must not erase the anchor",
+        assertEquals(
+            "the samples are still retained: an absent position changes WHEN, never WHAT",
+            4_800,
+            recorder.reference().samples.size,
+        )
+        assertNull(
+            "a trailing untimed chunk removes the anchor",
+            recorder.reference().startPositionMs,
+        )
+    }
+
+    @Test
+    fun `an unanchored contribution invalidates an anchor the window already had`() {
+        // @spec's requirement: an untimed contribution must not simply be ignored once an anchor
+        // exists. The anchor describes the START of the retained window, and untimed audio joining
+        // that window moves the start to a sample whose sounding time nothing measured -- so keeping
+        // the old anchor would place those samples at a moment derived from another producer's clock.
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+
+        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
+        assertNotNull("the timed window anchors first", recorder.reference().startPositionMs)
+
+        // TTS or an earcon lands with no timestamp.
+        recorder.write(FloatArray(1_600) { 0.25f })
+
+        assertNull(
+            "untimed audio joining an anchored window must invalidate the anchor " +
+                "(start=${recorder.reference().startPositionMs})",
+            recorder.reference().startPositionMs,
+        )
+    }
+
+    @Test
+    fun `a later timed contribution does not restore an anchor the window lost`() {
+        // The window cannot become anchored again once untimed audio is retained in it: the samples
+        // that have no known time are still part of the span whose start would be reported.
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+
+        recorder.write(FloatArray(1_600) { 0.25f })
+        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
+
+        assertNull(
+            "a window containing untimed samples has no trustworthy start " +
+                "(start=${recorder.reference().startPositionMs})",
             recorder.reference().startPositionMs,
         )
     }

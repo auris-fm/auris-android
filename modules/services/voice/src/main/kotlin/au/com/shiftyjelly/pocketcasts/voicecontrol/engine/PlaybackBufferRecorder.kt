@@ -144,7 +144,8 @@ class PlaybackBufferRecorder @Inject constructor(
      * window look like it has a valid mapping to a clock nothing measured for this audio.
      * @param axis which clock [positionMs] is on. Ignored when [positionMs] is null.
      */
-    fun write(pcm: FloatArray, positionMs: Long? = null, axis: PositionAxis = PositionAxis.Media) {
+    fun write(pcm: FloatArray, positionMs: Long? = null, axis: PositionAxis? = null) {
+        val axisClaimed = axis != null
         synchronized(lock) {
             for (sample in pcm) {
                 buffer[writePos] = sample
@@ -158,11 +159,26 @@ class PlaybackBufferRecorder @Inject constructor(
                 // different axes has no single position, and subtracting across them yields a
                 // number that is neither a media position nor a time -- the difference between two
                 // unrelated origins, reported as a delay.
-                if (positionAxis == null) {
-                    positionAxis = axis
+                if (positionAxis == PositionAxis.Unanchored) {
+                    // A window cannot come back to being anchored once an untimed contribution has
+                    // joined it. The retained samples now include audio whose sounding time nothing
+                    // measured, so the span's start no longer describes when the window began.
+                    positionAxis = PositionAxis.Mixed
+                } else if (positionAxis == null) {
+                    // An unlabelled position is producer placement, not a render observation, so it
+                    // leaves the window unanchored rather than claiming the Monotonic default.
+                    positionAxis = if (axisClaimed) axis else PositionAxis.Unanchored
                 } else if (positionAxis != axis) {
                     positionAxis = PositionAxis.Mixed
                 }
+            } else {
+                // An UNTIMED contribution contributes samples and NO position. It does not inherit
+                // the axis of whatever came before, and -- the part that is easy to miss -- it
+                // INVALIDATES any anchor already established: the anchor describes the start of the
+                // retained window, and this audio has just joined that window with no known time.
+                // Keeping the old anchor would place untimed samples at a moment derived from
+                // another producer's clock.
+                positionAxis = PositionAxis.Unanchored
             }
         }
     }
@@ -280,4 +296,11 @@ enum class PositionAxis {
 
     /** Both have contributed: the window has no single position. */
     Mixed,
+
+    /**
+     * An untimed contribution has joined the window, so the span's start is no longer known even if
+     * every timed contribution agreed. Distinguishing this from [Mixed] keeps the reason accurate:
+     * one is two clocks disagreeing, the other is audio whose time nothing measured.
+     */
+    Unanchored,
 }

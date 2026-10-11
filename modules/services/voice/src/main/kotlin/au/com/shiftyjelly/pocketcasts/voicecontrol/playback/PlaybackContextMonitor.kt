@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
 sealed interface PlaybackContext {
     data class Active(val currentEpisodeUuid: String, val isPlaying: Boolean) : PlaybackContext
@@ -20,7 +21,7 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
     private val playbackManager: PlaybackManager,
     private val gracePeriodSignal: au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal,
     @ApplicationScope
-    scope: CoroutineScope,
+    private val scope: CoroutineScope,
 ) {
     val context: StateFlow<PlaybackContext> = playbackManager.playbackStateFlow
         .map(::toPlaybackContext)
@@ -47,6 +48,31 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
      * cannot show once a later wake has cleared it.
      */
     fun privacyClosureCount(): Long = gracePeriodSignal.privacyClosureCount()
+
+    /**
+     * Monotonic count of closures that coincided with the host's audio actually stopping.
+     *
+     * The playback-restoration guard reads this rather than [privacyClosureCount]: a visibility
+     * change closes the window without touching playback, so counting it here would let a turn-owned
+     * pause be stranded by an event that was never a fact about playback.
+     */
+    fun playbackStopClosureCount(): Long = gracePeriodSignal.playbackStopClosureCount()
+
+    init {
+        // Separate the closure kinds at the owning event boundary. A closure that coincides with the
+        // host's audio actually stopping is a fact about playback; a visibility change alone is not.
+        // The sink's restoration guard reads the playback-stop count, so backgrounding without a
+        // playback stop does not strand a turn-owned pause.
+        scope.launch {
+            var wasPlaying = isHostAudioActive.value
+            isHostAudioActive.collect { playing ->
+                if (wasPlaying && !playing && gracePeriodSignal.isClosedByPrivacy()) {
+                    gracePeriodSignal.noteHostPlaybackStopped()
+                }
+                wasPlaying = playing
+            }
+        }
+    }
 
     /**
      * True when the host app (Pocket Casts) is actively playing audio. Used by

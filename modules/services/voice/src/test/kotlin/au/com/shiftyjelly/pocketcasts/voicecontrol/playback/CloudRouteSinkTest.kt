@@ -1093,6 +1093,58 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a closure without a playback stop releases the turn hold and resumes`() = runTest {
+        // The hold policy (Voice Intents 657-659): the turn releases its OWN hold when the answer
+        // completes, unless playback actually stopped or a user pause superseded it. A visibility
+        // closure -- backgrounding -- ends grace without touching playback, so it must not strand
+        // the pause: the answer finished, the hold is the turn's, and playback was running before.
+        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
+        val sink = deps.sink()
+
+        val turn = launch { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.pauseStarted.await()
+
+        // Backgrounding alone: the closure count rises, but the host's audio never stopped, so no
+        // playback-stop closure is recorded. The completion must then release the hold.
+        deps.privacyClosed = true
+        deps.privacyClosures += 1
+        deps.playback.pauseGate?.complete(Unit)
+        turn.join()
+
+        assertEquals(
+            "a visibility closure without a playback stop must not strand the turn's pause",
+            listOf("pause", "resume"),
+            deps.playback.calls.filter { it == "pause" || it == "resume" },
+        )
+    }
+
+    @Test
+    fun `a closure WITH an observed playback stop still withholds the resume`() = runTest {
+        // The other half: when the host's audio genuinely stopped during the closure, the hold is
+        // not released -- resuming would start audio the user's environment ended.
+        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
+        val sink = deps.sink()
+
+        val turn = launch { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        deps.playback.pauseStarted.await()
+
+        // The closure coincides with a playback stop: the observed-stop count rises too.
+        deps.privacyClosed = true
+        deps.privacyClosures += 1
+        deps.playbackStopClosures += 1
+        deps.playback.pauseGate?.complete(Unit)
+        turn.join()
+
+        assertEquals(
+            "a closure with an observed playback stop must withhold the resume",
+            listOf("pause"),
+            deps.playback.calls.filter { it == "pause" || it == "resume" },
+        )
+    }
+
+    @Test
     fun `a turn while the host is playing pauses and restores it`() = runTest {
         val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
 
@@ -1291,6 +1343,7 @@ class CloudRouteSinkTest {
 
         /** Monotonic, so a closure during a turn is visible after a wake clears [privacyClosed]. */
         var privacyClosures: Long = 0,
+        var playbackStopClosures: Long = 0,
         // Keys built from the same constant the sink uses, so renaming the
         // wire code breaks these tests rather than silently detaching the
         // template from it.
@@ -1352,7 +1405,7 @@ class CloudRouteSinkTest {
             isHostPlaying = { host.playing },
             playbackCommandRevision = { commandRevision },
             isPrivacyClosed = { privacyClosed },
-            privacyClosureCount = { privacyClosures },
+            privacyClosureCount = { playbackStopClosures },
             audioPlayer = audioPlayer,
         )
     }
@@ -1486,8 +1539,10 @@ class CloudRouteSinkTest {
         val route = launch { deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
         deps.playback.pauseStarted.await()
 
-        // Privacy closes while the turn's own pause is in flight; the revision is untouched.
+        // Privacy closes WITH an observed playback stop while the turn's own pause is in flight; the
+        // revision is untouched. A closure with a playback-stop fact is what blocks the restore.
         deps.privacyClosed = true
+        deps.playbackStopClosures += 1
         deps.playback.pauseGate?.complete(Unit)
         route.join()
 
@@ -1536,7 +1591,8 @@ class CloudRouteSinkTest {
         // The interval @spec named: A owns the turn and has paused the host; privacy closes A; a new
         // wake clears the closure flag; A's delayed cleanup then lands BEFORE any successor cloud turn
         // registers. `activeTurnId` is still A's, so ownership alone would let A through, and the live
-        // flag has been cleared. Only a latch on A itself can hold.
+        // flag has been cleared. Only a latch on A itself can hold. The closure carried an observed
+        // playback stop, which is the fact that survives the wake.
         val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
         deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
         val sink = deps.sink()
@@ -1548,6 +1604,7 @@ class CloudRouteSinkTest {
         // registers in between — this is the gap the newer-cloud-turn test cannot see.
         deps.privacyClosed = true
         deps.privacyClosures += 1
+        deps.playbackStopClosures += 1
         deps.privacyClosed = false
 
         deps.playback.pauseGate?.complete(Unit)

@@ -106,7 +106,11 @@ class CloudRouteSink internal constructor(
         isHostPlaying = { playbackContextMonitor.isHostAudioActive.value },
         playbackCommandRevision = playbackContextMonitor::playbackCommandRevision,
         isPrivacyClosed = playbackContextMonitor::isPrivacyClosed,
-        privacyClosureCount = playbackContextMonitor::privacyClosureCount,
+        // Only closures that coincided with the host's audio stopping carry a playback fact. A
+        // visibility-only closure must not strand a turn-owned pause: the hold policy releases a
+        // turn's own pause when the answer completes, unless playback actually stopped or a user
+        // command superseded it.
+        privacyClosureCount = playbackContextMonitor::playbackStopClosureCount,
     )
 
     /**
@@ -494,7 +498,7 @@ class CloudRouteSink internal constructor(
      * Whether a privacy closure happened after the turn took its pause obligation. A live flag cannot
      * answer this: a later wake clears it while this turn is still suspended.
      */
-    private fun privacyInvalidatedSince(atPause: Long?): Boolean = atPause != null && (isPrivacyClosed() || privacyClosureCount() != atPause)
+    private fun privacyInvalidatedSince(atPause: Long?): Boolean = atPause != null && privacyClosureCount() != atPause
 
     /** Owner-only: resume the player if this turn chain auto-paused it. */
     private suspend fun restoreTransientAudioState(privacyInvalidated: Boolean) {

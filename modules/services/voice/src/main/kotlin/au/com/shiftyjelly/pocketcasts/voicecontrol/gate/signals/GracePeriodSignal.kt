@@ -70,6 +70,29 @@ class GracePeriodSignal @Inject constructor() {
     private val privacyClosures = java.util.concurrent.atomic.AtomicLong(0)
 
     /**
+     * How many closures coincided with the host's audio actually stopping.
+     *
+     * Distinct from [privacyClosureCount]: backgrounding and route changes close the window without
+     * touching playback, so a caller that holds a playback obligation must not treat those as a
+     * fact about playback. Incremented by [noteHostPlaybackStopped], called from where the host's
+     * own state is observable, at the boundary that owns the distinction.
+     */
+    private val playbackStopClosures = java.util.concurrent.atomic.AtomicLong(0)
+
+    fun playbackStopClosureCount(): Long = playbackStopClosures.get()
+
+    /**
+     * Records that the host's playback stopped while the window was closed by a privacy event.
+     *
+     * Called by the playback-context layer when it observes the stop, so the closure kinds are
+     * separated at the event boundary rather than inferred from a count that increments on
+     * visibility changes alone.
+     */
+    fun noteHostPlaybackStopped() {
+        playbackStopClosures.incrementAndGet()
+    }
+
+    /**
      * One escalation to the cloud service is allowed per grace window: the
      * window is the user-initiated act, and this bounds a routing failure (or a
      * deliberate `no_match`) to a single dispatch per act rather than a stream.

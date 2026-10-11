@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
+import au.com.shiftyjelly.pocketcasts.analytics.SourceView
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
@@ -34,9 +35,6 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
      * lag the command it is meant to describe.
      */
     fun playbackCommandRevision(): Long = playbackManager.playbackCommandRevision()
-
-    /** Declares whether a turn-owned hold pause is in effect, with the sink owning the lifetime. */
-    fun setTurnOwnedPause(inEffect: Boolean) = gracePeriodSignal.setTurnOwnedPause(inEffect)
 
     /**
      * True when a privacy event closed the window. Read by the cloud turn so it does not restore a
@@ -85,9 +83,11 @@ class PlaybackContextMonitor @javax.inject.Inject constructor(
     internal fun hostStoppedWhileClosed(wasPlaying: Boolean, isPlaying: Boolean): Boolean = wasPlaying &&
         !isPlaying &&
         gracePeriodSignal.isClosedByPrivacy() &&
-        // Event-time ownership: a stop the app caused on a turn's behalf is not an external
-        // playback-stop obligation, whenever the observer happens to process it.
-        !gracePeriodSignal.isTurnOwnedPause()
+        // Event provenance, not the interval a hold happens to be in effect: a stop caused by our own
+        // hold pause is not an external obligation, however long the hold lasts and whenever the
+        // observer processes the transition. An external or user stop during that hold carries a
+        // different source and is counted.
+        playbackManager.lastStopSourceView() != SourceView.VOICE_COMMANDS
 
     /**
      * True when the host app (Pocket Casts) is actively playing audio. Used by

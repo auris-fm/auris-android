@@ -273,8 +273,29 @@ open class PlaybackManager @Inject constructor(
         playbackCommandCount.incrementAndGet()
     }
 
+    /**
+     * The source of the last command that STOPPED playback, or null when none has.
+     *
+     * Event provenance, not state: the voice path's own hold pause and an external stop produce the
+     * same playing-to-stopped transition, so a caller that must tell them apart cannot ask how the
+     * player looks now, nor which revision it is on -- the voice pause is deliberately excluded from
+     * the revision, so it shares a revision with stops it did not cause. What separates them is the
+     * command that caused the stop, recorded here at the moment it is issued.
+     */
+    @Volatile
+    private var lastStopSource: SourceView? = null
+
+    /** The source of the last command that stopped playback, or null when none has. */
+    fun lastStopSourceView(): SourceView? = lastStopSource
+
     private fun notePlaybackCommand(sourceView: SourceView) {
-        if (sourceView == SourceView.VOICE_COMMANDS) return
+        if (sourceView == SourceView.VOICE_COMMANDS) {
+            // The voice path's own hold pause: recorded as the stop's provenance but excluded from
+            // the revision, exactly as before.
+            lastStopSource = sourceView
+            return
+        }
+        lastStopSource = sourceView
         playbackCommandCount.incrementAndGet()
     }
 

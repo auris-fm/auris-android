@@ -88,21 +88,6 @@ class GracePeriodSignal @Inject constructor() {
      * separated at the event boundary rather than inferred from a count that increments on
      * visibility changes alone.
      */
-    // Whether a turn-owned hold pause is currently in effect. Ownership is attached to the EVENT,
-    // not to a revision: the voice pause goes through a source that does not advance the revision,
-    // so a revision cannot identify it, and keying an exemption on one would suppress an unrelated
-    // external stop that happens to share the number. The sink owns this flag's lifetime -- set when
-    // it takes the hold, cleared when the turn releases it -- so no observer event can spend it on
-    // the wrong stop.
-    @Volatile
-    private var turnOwnedPauseInEffect = false
-
-    fun setTurnOwnedPause(inEffect: Boolean) {
-        turnOwnedPauseInEffect = inEffect
-    }
-
-    /** Whether a stop observed now belongs to a turn-owned hold pause rather than an external one. */
-    fun isTurnOwnedPause(): Boolean = turnOwnedPauseInEffect
 
     // Records that the host's playback stopped while the window was closed by a privacy event.
     // Called by the playback-context layer when it observes the stop, so the closure kinds are

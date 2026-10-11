@@ -404,6 +404,42 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
+    @Test
+    fun `a successful second SCO attempt re-runs setup, proving the stale flag was cleared`() = runTest {
+        // The distinguishing case for the stale-flag defect: a second attempt on the SPEAKER route
+        // never consults scoStarted (only BluetoothA2dpOnly gates on it), so a test whose second
+        // attempt uses Speaker passes whether or not the failed setup left the flag set. A second
+        // attempt on the SCO route READS the flag -- `awaitBluetoothSco` returns early on it -- so if
+        // the flag survived, the second attempt skips setup entirely and captures on an unconfirmed
+        // input while behaving as if the route were established.
+        createEngine()
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+        advanceTimeBy(3_001)
+        advanceUntilIdle()
+        verify(voiceAudioProcessor, never()).startProcessing()
+
+        // Second attempt on the SAME route, WITHOUT stopping in between: engine.stop() clears the
+        // flag through closeBluetoothSco, which would mask a rollback that failed to clear it. The
+        // stale-flag failure mode is that the second attempt's awaitBluetoothSco returns early on the
+        // surviving flag, skipping startBluetoothSco entirely and capturing on an input that was
+        // never confirmed -- so the discriminator is the request being made AGAIN.
+        startEngine(AudioRoute.BluetoothA2dpOnly)
+        runCurrent()
+        // Advance ONLY far enough to reach the SCO request: advanceUntilIdle would run the whole
+        // 3 s connect timeout before the broadcast is delivered, and the second attempt would fail
+        // the way the first did rather than being confirmed.
+        advanceTimeBy(100)
+        verify(audioManager, times(2)).startBluetoothSco()
+
+        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
+        advanceUntilIdle()
+        // The first attempt never reaches capture (it fails in SCO setup before the try block), so
+        // startProcessing is called once in total -- by this second attempt, on a CONFIRMED input.
+        verify(voiceAudioProcessor, times(1)).startProcessing()
+        engine.stop()
+    }
+
     // ── Cancellation / Stop ────────────────────────────────────────────
 
     @Test

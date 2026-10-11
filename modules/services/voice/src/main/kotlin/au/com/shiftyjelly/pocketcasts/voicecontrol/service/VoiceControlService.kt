@@ -23,6 +23,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningModePolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.shouldPlayListeningStartCue
@@ -150,7 +151,21 @@ class VoiceControlService : Service() {
         intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
     ) {
         VoiceControlServiceWiring.attachPlaybackFailureHandling(audioFeedbackRenderer)
-        val response = voicePlaybackIntentExecutor.execute(intent)
+        // The transport can throw: its channel closes with a cause when a terminal event is refused,
+        // and `execute` has no try/catch. Left uncaught the throw escapes this method, so the user
+        // hears nothing for a command they did give -- and at the call site it also skips the
+        // turn's grace cleanup, which runs after this returns. Feedback is the user-facing contract,
+        // so the failure is turned into one here rather than propagated.
+        val response = try {
+            voicePlaybackIntentExecutor.execute(intent)
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            // Cancellation is the caller withdrawing, not a failure to report: rethrow so structured
+            // concurrency still unwinds instead of being swallowed into an earcon.
+            throw cancellation
+        } catch (failure: Exception) {
+            Timber.w(failure, "[VoicePipeline] command failed")
+            VoiceResponse.Earcon(EarconId.ERROR)
+        }
         audioFeedbackRenderer.render(response)
     }
 

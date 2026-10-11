@@ -201,6 +201,15 @@ int32_t OboeAudioCapture::getDeviceId() {
     return mStream->getDeviceId();
 }
 int32_t OboeAudioCapture::getRoutedDeviceId() const {
+    // Ask the LIVE stream when there is one. A cached value goes stale the moment the platform
+    // reroutes an open stream -- a scenario distinct from a disconnect, where the stream stays open
+    // and its routed device changes -- and a stale device is worse than a missing one because it
+    // reads as a confirmed observation. The cache is only the fallback for the stop/close window,
+    // where it is deliberately kUnspecified.
+    std::lock_guard<std::mutex> lock(mStreamMutex);
+    if (mStream != nullptr) {
+        return mStream->getDeviceId();
+    }
     return mRoutedDeviceId.load(std::memory_order_acquire);
 }
 bool OboeAudioCapture::isActive() const {

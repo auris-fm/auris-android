@@ -20,6 +20,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
@@ -49,10 +50,12 @@ class CloudRouteSinkTest {
     @Test
     fun `upstream throw during collect still restores auto pause`() = runTest {
         val deps = TestDeps(
-            events = flow {
-                emit(CloudRouteEvent.Token("partial "))
-                throw IllegalStateException("upstream blew up")
-            },
+            routeInvoker = withHold(
+                flow {
+                    emit(CloudRouteEvent.Token("partial "))
+                    throw IllegalStateException("upstream blew up")
+                },
+            ),
         )
         val sink = deps.sink()
 
@@ -66,10 +69,12 @@ class CloudRouteSinkTest {
     @Test
     fun `cancellation during collect still restores auto pause`() = runTest {
         val deps = TestDeps(
-            events = flow {
-                emit(CloudRouteEvent.Token("partial "))
-                awaitCancellation()
-            },
+            routeInvoker = withHold(
+                flow {
+                    emit(CloudRouteEvent.Token("partial "))
+                    awaitCancellation()
+                },
+            ),
         )
         val sink = deps.sink()
 
@@ -98,10 +103,12 @@ class CloudRouteSinkTest {
     @Test
     fun `buffers token texts and speaks once on done`() = runTest {
         val deps = TestDeps(
-            events = flowOf(
-                CloudRouteEvent.Token("She "),
-                CloudRouteEvent.Token("is arguing."),
-                CloudRouteEvent.Done(inputTokens = 10, outputTokens = 5),
+            routeInvoker = withHold(
+                flowOf(
+                    CloudRouteEvent.Token("She "),
+                    CloudRouteEvent.Token("is arguing."),
+                    CloudRouteEvent.Done(inputTokens = 10, outputTokens = 5),
+                ),
             ),
         )
         val sink = deps.sink()
@@ -451,13 +458,15 @@ class CloudRouteSinkTest {
     fun `play_quote captures position seeks and resumes`() = runTest {
         val deps = TestDeps(
             clientPositionMs = 60_000L,
-            events = flowOf(
-                CloudRouteEvent.Action(
-                    tool = "playback",
-                    action = "play_quote",
-                    params = mapOf("reference_position_ms" to 900_000L),
+            routeInvoker = withHold(
+                flowOf(
+                    CloudRouteEvent.Action(
+                        tool = "playback",
+                        action = "play_quote",
+                        params = mapOf("reference_position_ms" to 900_000L),
+                    ),
+                    CloudRouteEvent.Done(1, 0),
                 ),
-                CloudRouteEvent.Done(1, 0),
             ),
         )
         val sink = deps.sink()
@@ -496,10 +505,12 @@ class CloudRouteSinkTest {
     @Test
     fun `unknown tool and action are ignored, so a blank done still reports the turn`() = runTest {
         val deps = TestDeps(
-            events = flowOf(
-                CloudRouteEvent.Action("effects", "set_speed", mapOf("speed" to 2.0)),
-                CloudRouteEvent.Action("playback", "next_episode", emptyMap()),
-                CloudRouteEvent.Done(1, 0),
+            routeInvoker = withHold(
+                flowOf(
+                    CloudRouteEvent.Action("effects", "set_speed", mapOf("speed" to 2.0)),
+                    CloudRouteEvent.Action("playback", "next_episode", emptyMap()),
+                    CloudRouteEvent.Done(1, 0),
+                ),
             ),
         )
         val sink = deps.sink()
@@ -538,9 +549,11 @@ class CloudRouteSinkTest {
     @Test
     fun `error clears token buffer restores auto pause and speaks message`() = runTest {
         val deps = TestDeps(
-            events = flowOf(
-                CloudRouteEvent.Token("partial"),
-                CloudRouteEvent.Error(code = "connection_lost", message = "Connection lost"),
+            routeInvoker = withHold(
+                flowOf(
+                    CloudRouteEvent.Token("partial"),
+                    CloudRouteEvent.Error(code = "connection_lost", message = "Connection lost"),
+                ),
             ),
         )
         val sink = deps.sink()
@@ -803,14 +816,16 @@ class CloudRouteSinkTest {
     @Test
     fun `interrupted mixed stream keeps executed actions and clears buffered text`() = runTest {
         val deps = TestDeps(
-            events = flowOf(
-                CloudRouteEvent.Action(
-                    tool = "playback",
-                    action = "seek_to",
-                    params = mapOf("reference_position_ms" to 500_000L),
+            routeInvoker = withHold(
+                flowOf(
+                    CloudRouteEvent.Action(
+                        tool = "playback",
+                        action = "seek_to",
+                        params = mapOf("reference_position_ms" to 500_000L),
+                    ),
+                    CloudRouteEvent.Token("She was about to"),
+                    CloudRouteEvent.Error(code = "provider_error", message = "The assistant hit an error."),
                 ),
-                CloudRouteEvent.Token("She was about to"),
-                CloudRouteEvent.Error(code = "provider_error", message = "The assistant hit an error."),
             ),
         )
 
@@ -927,7 +942,7 @@ class CloudRouteSinkTest {
     @Test
     fun `cancellation during the initial pause still restores audio`() = runTest(UnconfinedTestDispatcher()) {
         val gate = CompletableDeferred<Unit>()
-        val deps = TestDeps(events = flowOf(CloudRouteEvent.Done(1, 1)))
+        val deps = TestDeps(routeInvoker = withHold(flowOf(CloudRouteEvent.Done(1, 1))))
         deps.playback.pauseGate = gate
         val sink = deps.sink()
 
@@ -946,13 +961,15 @@ class CloudRouteSinkTest {
     fun `a superseded turn's action cannot resume the player under the new turn`() = runTest(UnconfinedTestDispatcher()) {
         val gate = CompletableDeferred<Unit>()
         val deps = TestDeps(
-            events = flowOf(
-                CloudRouteEvent.Action(
-                    tool = "playback",
-                    action = "play_quote",
-                    params = mapOf("reference_position_ms" to 45_000_000L),
+            routeInvoker = withHold(
+                flowOf(
+                    CloudRouteEvent.Action(
+                        tool = "playback",
+                        action = "play_quote",
+                        params = mapOf("reference_position_ms" to 45_000_000L),
+                    ),
+                    CloudRouteEvent.Done(1, 0),
                 ),
-                CloudRouteEvent.Done(1, 0),
             ),
         )
         deps.playback.resumeGate = gate
@@ -980,8 +997,19 @@ class CloudRouteSinkTest {
         val deps = TestDeps(
             routeInvoker = { turn ->
                 when (turn.request) {
-                    // Predecessor: pauses, then stays in flight until superseded.
-                    "first" -> flow { awaitCancellation() }
+                    // Predecessor: takes the hold via its delivery commitment, then stays in flight
+                    // until superseded.
+                    "first" -> flow {
+                        emit(
+                            CloudRouteEvent.Action(
+                                tool = "playback",
+                                action = "pause",
+                                params = emptyMap(),
+                                turnId = turn.requestId,
+                            ),
+                        )
+                        awaitCancellation()
+                    }
 
                     else -> error("successor failed during setup")
                 }
@@ -1005,9 +1033,18 @@ class CloudRouteSinkTest {
     fun `a setup failure with no predecessor leaves no stale ownership`() = runTest(UnconfinedTestDispatcher()) {
         var fail = true
         val deps = TestDeps(
-            routeInvoker = { _ ->
+            routeInvoker = { turn ->
                 if (fail) error("route invoker failed during setup")
-                flowOf(CloudRouteEvent.Token("answer"), CloudRouteEvent.Done(1, 1))
+                flowOf(
+                    CloudRouteEvent.Action(
+                        tool = "playback",
+                        action = "pause",
+                        params = emptyMap(),
+                        turnId = turn.requestId,
+                    ),
+                    CloudRouteEvent.Token("answer"),
+                    CloudRouteEvent.Done(1, 1),
+                )
             },
         )
         val sink = deps.sink()
@@ -1026,7 +1063,7 @@ class CloudRouteSinkTest {
 
     @Test
     fun `a newer turn cannot pause while an older turn's restore is suspended`() = runTest(UnconfinedTestDispatcher()) {
-        val deps = TestDeps(events = flowOf(CloudRouteEvent.Token("a"), CloudRouteEvent.Done(1, 1)))
+        val deps = TestDeps(routeInvoker = withHold(flowOf(CloudRouteEvent.Token("a"), CloudRouteEvent.Done(1, 1))))
         val gate = CompletableDeferred<Unit>()
         deps.playback.resumeGate = gate
         val sink = deps.sink()
@@ -1057,6 +1094,14 @@ class CloudRouteSinkTest {
             routeInvoker = { turn ->
                 if (turn.request == "first") {
                     flow {
+                        emit(
+                            CloudRouteEvent.Action(
+                                tool = "playback",
+                                action = "pause",
+                                params = emptyMap(),
+                                turnId = turn.requestId,
+                            ),
+                        )
                         firstStarted.complete(Unit)
                         try {
                             awaitCancellation()
@@ -1206,9 +1251,11 @@ class CloudRouteSinkTest {
     @Test
     fun `a throwing pause does not leave a stale obligation to resume`() = runTest {
         val deps = TestDeps(
-            events = flowOf(
-                CloudRouteEvent.Action(tool = "playback", action = "pause", params = emptyMap()),
-                CloudRouteEvent.Done(1, 0),
+            routeInvoker = withHold(
+                flowOf(
+                    CloudRouteEvent.Action(tool = "playback", action = "pause", params = emptyMap()),
+                    CloudRouteEvent.Done(1, 0),
+                ),
             ),
         )
         // Call 1 is the turn's own auto-pause; call 2 is the explicit action.
@@ -1267,7 +1314,7 @@ class CloudRouteSinkTest {
         // the window, and the sink's own pause is the stop an observer would see. Because the sink
         // declared that stop as turn-owned, no playback-stop closure is recorded, so the completed
         // answer releases its own hold and resumes the playback that was previously running.
-        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        val deps = TestDeps(hostPlaying = true, routeInvoker = withHold(flowOf(CloudRouteEvent.Done(1, 0))))
         deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
         val sink = deps.sink()
 
@@ -1293,7 +1340,7 @@ class CloudRouteSinkTest {
         // completes, unless playback actually stopped or a user pause superseded it. A visibility
         // closure -- backgrounding -- ends grace without touching playback, so it must not strand
         // the pause: the answer finished, the hold is the turn's, and playback was running before.
-        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        val deps = TestDeps(hostPlaying = true, routeInvoker = withHold(flowOf(CloudRouteEvent.Done(1, 0))))
         deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
         val sink = deps.sink()
 
@@ -1318,7 +1365,7 @@ class CloudRouteSinkTest {
     fun `a closure WITH an observed playback stop still withholds the resume`() = runTest {
         // The other half: when the host's audio genuinely stopped during the closure, the hold is
         // not released -- resuming would start audio the user's environment ended.
-        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        val deps = TestDeps(hostPlaying = true, routeInvoker = withHold(flowOf(CloudRouteEvent.Done(1, 0))))
         deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
         val sink = deps.sink()
 
@@ -1341,7 +1388,9 @@ class CloudRouteSinkTest {
 
     @Test
     fun `a turn while the host is playing pauses and restores it`() = runTest {
-        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        // The server sends its delivery commitment for a long answer; that frame is what takes the
+        // user's place, so the pause does not happen without it.
+        val deps = TestDeps(hostPlaying = true, routeInvoker = withHold(flowOf(CloudRouteEvent.Done(1, 0))))
 
         deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
 
@@ -1354,7 +1403,7 @@ class CloudRouteSinkTest {
         // The interleaving a post-pause sample would swallow: the user acts while
         // the turn's own pause is still in flight, so the sample taken afterwards
         // would already include their command and the restore would pass.
-        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        val deps = TestDeps(hostPlaying = true, routeInvoker = withHold(flowOf(CloudRouteEvent.Done(1, 0))))
         deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
 
         val route = launch { deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
@@ -1377,8 +1426,17 @@ class CloudRouteSinkTest {
         lateinit var deps: TestDeps
         deps = TestDeps(
             hostPlaying = true,
-            routeInvoker = {
+            routeInvoker = { turn ->
                 kotlinx.coroutines.flow.flow {
+                    // The delivery commitment takes the user's place first.
+                    emit(
+                        CloudRouteEvent.Action(
+                            tool = "playback",
+                            action = "pause",
+                            params = emptyMap(),
+                            turnId = turn.requestId,
+                        ),
+                    )
                     // The user presses pause while the answer is in flight, then the turn FAILS
                     // instead of completing. Both terminations share the restore path.
                     deps.commandRevision += 1
@@ -1414,9 +1472,18 @@ class CloudRouteSinkTest {
         lateinit var deps: TestDeps
         deps = TestDeps(
             hostPlaying = true,
-            routeInvoker = {
+            routeInvoker = { turn ->
                 kotlinx.coroutines.flow.flow {
-                    // The answer's own hold has been taken; the cloud then requests a pause.
+                    // The delivery commitment takes the answer's hold...
+                    emit(
+                        CloudRouteEvent.Action(
+                            tool = "playback",
+                            action = "pause",
+                            params = emptyMap(),
+                            turnId = turn.requestId,
+                        ),
+                    )
+                    // ...and the cloud then requests a pause as an APP OPERATION (no turn id).
                     emit(
                         CloudRouteEvent.Action(
                             tool = "playback",
@@ -1452,8 +1519,17 @@ class CloudRouteSinkTest {
         lateinit var deps: TestDeps
         deps = TestDeps(
             hostPlaying = true,
-            routeInvoker = {
+            routeInvoker = { turn ->
                 kotlinx.coroutines.flow.flow {
+                    // The delivery commitment takes the user's place; the user's pause then supersedes it.
+                    emit(
+                        CloudRouteEvent.Action(
+                            tool = "playback",
+                            action = "pause",
+                            params = emptyMap(),
+                            turnId = turn.requestId,
+                        ),
+                    )
                     deps.commandRevision += 1
                     emit(CloudRouteEvent.Done(1, 0))
                 }
@@ -1470,8 +1546,16 @@ class CloudRouteSinkTest {
         lateinit var deps: TestDeps
         deps = TestDeps(
             hostPlaying = true,
-            routeInvoker = {
+            routeInvoker = { turn ->
                 kotlinx.coroutines.flow.flow {
+                    emit(
+                        CloudRouteEvent.Action(
+                            tool = "playback",
+                            action = "pause",
+                            params = emptyMap(),
+                            turnId = turn.requestId,
+                        ),
+                    )
                     // The user presses play while the cloud turn is in flight:
                     // a command, and a state change.
                     deps.commandRevision += 1
@@ -1593,6 +1677,33 @@ class CloudRouteSinkTest {
             listOf("skipBackward:null"),
             deps.playback.calls.filter { it.startsWith("skip") },
         )
+    }
+
+    /**
+     * `events` with a hold frame addressed to THIS turn prepended.
+     *
+     * The owning policy pauses ONLY when the server sends its delivery commitment for a long answer, so
+     * the turn-start block records metadata and does not touch playback. A test that expects the user's
+     * place to be taken must therefore deliver this frame: without it the turn correctly pauses nothing,
+     * which is what a short answer is entitled to.
+     *
+     * The id comes from the turn the sink BUILT (`routeInvoker` receives it) rather than being written
+     * literally, so a case cannot pass by addressing an id the sink never issued.
+     */
+    private fun withHold(
+        events: kotlinx.coroutines.flow.Flow<CloudRouteEvent>,
+    ): (CloudRouteTurn) -> kotlinx.coroutines.flow.Flow<CloudRouteEvent> = { turn ->
+        kotlinx.coroutines.flow.flow {
+            emit(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "pause",
+                    params = emptyMap(),
+                    turnId = turn.requestId,
+                ),
+            )
+            emitAll(events)
+        }
     }
 
     private class TestDeps(
@@ -1787,12 +1898,14 @@ class CloudRouteSinkTest {
             writeToSink = { _, _, _, count -> if (accepted++ < 1) count else -1 }
         }
         val deps = TestDeps(
-            events = flow {
-                emit(CloudRouteEvent.Connected("pcm_s16le"))
-                emit(CloudRouteEvent.AudioFrame("pcm_s16le", ByteArray(4096) { 1 }))
-                emit(CloudRouteEvent.AudioFrame("pcm_s16le", ByteArray(4096) { 1 }))
-                emit(CloudRouteEvent.Done(0, 0))
-            },
+            routeInvoker = withHold(
+                flow {
+                    emit(CloudRouteEvent.Connected("pcm_s16le"))
+                    emit(CloudRouteEvent.AudioFrame("pcm_s16le", ByteArray(4096) { 1 }))
+                    emit(CloudRouteEvent.AudioFrame("pcm_s16le", ByteArray(4096) { 1 }))
+                    emit(CloudRouteEvent.Done(0, 0))
+                },
+            ),
             audioPlayer = player,
         )
         try {
@@ -1826,7 +1939,7 @@ class CloudRouteSinkTest {
         // A privacy event (route loss, backgrounding) closes the voice window and does NOT pass
         // through the playback layer, so it cannot advance the command revision. The turn must still
         // decline to resume: restoring would restart playback the user's privacy action ended.
-        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        val deps = TestDeps(hostPlaying = true, routeInvoker = withHold(flowOf(CloudRouteEvent.Done(1, 0))))
         deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
 
         val route = launch { deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
@@ -1850,7 +1963,7 @@ class CloudRouteSinkTest {
     fun `a later turn is not blocked by an old closure flag once privacy reopens`() = runTest(UnconfinedTestDispatcher()) {
         // The guard is scoped to whether the window is closed NOW, not to whether it ever was: a
         // stale flag must not become a blanket ban on an unrelated later turn's cleanup.
-        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        val deps = TestDeps(hostPlaying = true, routeInvoker = withHold(flowOf(CloudRouteEvent.Done(1, 0))))
         // The closure was earlier and privacy has since reopened (a wake clears it).
         deps.privacyClosed = false
 
@@ -1879,7 +1992,7 @@ class CloudRouteSinkTest {
         // registers. `activeTurnId` is still A's, so ownership alone would let A through, and the live
         // flag has been cleared. Only a latch on A itself can hold. The closure carried an observed
         // playback stop, which is the fact that survives the wake.
-        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        val deps = TestDeps(hostPlaying = true, routeInvoker = withHold(flowOf(CloudRouteEvent.Done(1, 0))))
         deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
         val sink = deps.sink()
 
@@ -1958,7 +2071,7 @@ class CloudRouteSinkTest {
      */
     @Test
     fun `without the frame the reservation is released unsent`() = runTest(UnconfinedTestDispatcher()) {
-        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        val deps = TestDeps(hostPlaying = true, routeInvoker = withHold(flowOf(CloudRouteEvent.Done(1, 0))))
         val sink = deps.sink()
 
         sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
@@ -1999,9 +2112,12 @@ class CloudRouteSinkTest {
 
         // A foreign frame neither takes a hold nor confirms one; the turn's own reservation is still
         // released by the end of the turn.
+        // A foreign frame takes no hold AND the turn takes none of its own (it received no frame
+        // addressed to it), so playback is untouched -- the host is never paused and never resumed.
+        // The earlier expectation was two calls because the turn paused unconditionally at start.
         assertEquals(
-            "a foreign frame must not act on this turn",
-            listOf("pause", "resume"),
+            "a foreign frame must not act on this turn, and an unconfirmed turn must not pause",
+            emptyList<String>(),
             deps.playback.calls.filter { it == "pause" || it == "resume" },
         )
         assertTrue("the host is left as it was found", deps.host.playing)
@@ -2024,11 +2140,9 @@ class CloudRouteSinkTest {
             hostPlaying = true,
             routeInvoker = { turn ->
                 kotlinx.coroutines.flow.flow {
-                    // @reviewer's ordering B: the USER pause arrives BETWEEN the reservation and the
-                    // frame, so the user acts on a hold that has been reserved but not yet confirmed.
-                    // This ordering is the one they identified as separating the two states -- my
-                    // earlier variants all put the user action after the frame and converged.
-                    deps.commandRevision += 1
+                    // The user's action and the server's frame, in the order this variant means. Both
+                    // orders are meaningful: the frame first ACTIVATES the hold and the user then
+                    // supersedes it, or the user acts on a reservation the frame never activates.
                     if (withConfirmation) {
                         emit(
                             CloudRouteEvent.Action(
@@ -2039,6 +2153,10 @@ class CloudRouteSinkTest {
                             ),
                         )
                     }
+                    // The user's pause, recorded as the command it is. It is recorded as a revision
+                    // bump rather than delivered as an action so the case isolates whether a user
+                    // action SUPERSEDED the hold from whether one EXECUTED.
+                    deps.commandRevision += 1
                     // The spec asks for BOTH terminal paths, so both are driven here.
                     if (fails) {
                         throw RuntimeException("provider error")
@@ -2053,7 +2171,12 @@ class CloudRouteSinkTest {
         val turn = scope.launch {
             runCatching { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
         }
-        deps.playback.pauseStarted.await()
+        // The pause only happens when the frame activates the hold, so the UNCONFIRMED variant never
+        // reaches it. Waiting unconditionally would hang rather than report that -- which is exactly
+        // how this case failed once the pause moved off turn start.
+        if (withConfirmation) {
+            deps.playback.pauseStarted.await()
+        }
         deps.playback.pauseGate?.complete(Unit)
         turn.join()
         return deps.playback.calls.filter { it == "pause" || it == "resume" }
@@ -2075,26 +2198,33 @@ class CloudRouteSinkTest {
         val confirmedOk = runUserPauseDuringHold(this, withConfirmation = true, fails = false)
         val unconfirmedOk = runUserPauseDuringHold(this, withConfirmation = false, fails = false)
 
-        // BOTH variants decline the resume, so the user's pause stands either way -- and the pair is
-        // the assertion: a difference between them would fail here.
+        // The pair now SEPARATES, and the difference is the policy: only the frame activates the
+        // hold, so the confirmed turn takes the user's place and the unconfirmed one never touches
+        // playback. An earlier version of this case asserted they were identical, which was true while
+        // the pause happened unconditionally at turn start -- the behaviour the owning policy forbids.
         assertEquals(
-            "a user pause must not be resumed over, with or without the confirmation " +
-                "(confirmed=$confirmed unconfirmed=$unconfirmed)",
+            "the confirmed hold is taken and then superseded, and never resumed over " +
+                "(confirmed=$confirmed)",
             listOf("pause"),
             confirmed,
         )
         assertEquals(
-            "and the unconfirmed reservation behaves the same way (unconfirmed=$unconfirmed)",
-            confirmed,
+            "the unconfirmed reservation never pauses -- a short answer keeps its ducking " +
+                "(unconfirmed=$unconfirmed)",
+            emptyList<String>(),
             unconfirmed,
         )
-        // The spec's OTHER terminal path. Reported alongside so a divergence between the paths -- or
-        // between the variants on this path -- is visible rather than assumed.
+        // The spec's OTHER terminal path, and the same policy applies: the frame is what activates the
+        // hold, so the confirmed turn takes the user's place and the unconfirmed one does not.
         assertEquals(
-            "the same must hold on a SUCCESSFUL termination, where the turn reaches its own terminal " +
-                "point rather than being thrown out of its pause " +
-                "(confirmed=$confirmedOk unconfirmed=$unconfirmedOk)",
+            "on a SUCCESSFUL termination the confirmed hold is likewise taken and superseded " +
+                "(confirmed=$confirmedOk)",
+            listOf("pause"),
             confirmedOk,
+        )
+        assertEquals(
+            "and the unconfirmed reservation again leaves playback untouched (unconfirmed=$unconfirmedOk)",
+            emptyList<String>(),
             unconfirmedOk,
         )
     }

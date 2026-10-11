@@ -456,14 +456,44 @@ class CloudAudioPlayer(
                     // the end here would count the chunk twice; and deriving it per chunk would floor
                     // away each chunk's sub-millisecond remainder, so the clock falls behind over a
                     // long answer.
-                    val chunkStartMs = (submittedSamples * 1_000L) / currentSampleRate
-                    playbackBufferRecorder?.write(referenceFloats, chunkStartMs)
+                    // The chunk's position on the RENDER clock when the platform can report one, which
+                    // is a time on the same monotonic axis the capture side uses. The submitted count
+                    // is the fallback and is a different quantity: it says what was SENT, not when it
+                    // SOUNDED, and the two differ by the player's buffer latency.
+                    val renderMs = renderClockMs(currentSampleRate) ?: (submittedSamples * 1_000L) / currentSampleRate
+                    playbackBufferRecorder?.write(referenceFloats, renderMs)
                     submittedSamples += floats.size
                     offset += written
                 }
                 if (audioWriteFailed) break
             }
         }
+    }
+
+    /**
+     * The position of the audio now reaching the output, in milliseconds on `CLOCK_MONOTONIC`, or null
+     * when the platform cannot report one.
+     *
+     * `AudioTrack.getTimestamp` reports the frame position and the time that frame was rendered, on
+     * `TIMEBASE_MONOTONIC` -- the same clock domain as the capture observation. That is what makes the
+     * two sides comparable at all: the submitted count is a total of what was SENT and cannot be placed
+     * on a clock.
+     *
+     * A platform that cannot report one stays unknown: returning the submitted count here would be a
+     * value this side never measured, presented as a rendered position -- the substitution the whole
+     * alignment exists to avoid, and worse than an absent value because it aligns confidently against
+     * the wrong instant.
+     */
+    private fun renderClockMs(sampleRateHz: Int): Long? {
+        val track = audioTrack ?: return null
+        if (sampleRateHz <= 0) return null
+        val timestamp = android.media.AudioTimestamp()
+        if (!track.getTimestamp(timestamp)) return null
+        // The timestamp is the instant the frame at `framePosition` was rendered, so it IS this chunk's
+        // position: the caller asks at the point of submission, and the answer describes output that is
+        // already sounding. A zero frame position means the track has not rendered anything yet.
+        if (timestamp.framePosition <= 0) return null
+        return timestamp.nanoTime / 1_000_000L
     }
 
     private fun decodeOpus(input: ByteArray): ByteArray {

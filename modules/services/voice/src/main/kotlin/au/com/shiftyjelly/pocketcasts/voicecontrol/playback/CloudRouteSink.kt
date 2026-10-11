@@ -271,23 +271,27 @@ class CloudRouteSink internal constructor(
             // the revision is sampled before it so a command that arrives during the suspension
             // is not swallowed into the value expected at restore.
             turnMutex.withLock {
-                // Sample the monotonic closure count as the obligation is taken, under the same mutex
-                // that serializes registration and cleanup: a closure that lands while this turn is
-                // suspended is invisible to a live flag once a wake clears it, but stays visible as a
-                // count difference. A turn that starts after a closure samples the new count, so the
-                // closure neither blocks it nor excuses a resume it did not take.
+                // RECORD the pre-stream state, and DO NOT PAUSE.
+                //
+                // The resume decision needs what playback was doing BEFORE the stream, which is only
+                // knowable here -- so the metadata is captured at turn start. The PAUSE does not belong
+                // here: the owning policy distinguishes short-answer ducking from
+                // server-selected long-answer holding, and pausing unconditionally at turn start
+                // prevents the ducking a short answer is entitled to. No pause happens until the
+                // matching hold frame arrives, and a reservation the server never activates is not
+                // auto-resumed.
+                //
+                // The closure count is sampled under the same mutex that serializes registration and
+                // cleanup: a closure that lands while this turn is suspended is invisible to a live
+                // flag once a wake clears it, but stays visible as a count difference. A turn that
+                // starts after a closure samples the new count, so the closure neither blocks it nor
+                // excuses a resume it did not take.
                 if (activeTurnId == myId && !playerAutoPaused && !pauseReserved && isHostPlaying() && !isPrivacyClosed()) {
                     privacyClosuresAtPause = privacyClosureCount()
                     pauseCommandRevision = playbackCommandRevision()
-                    // RESERVE, and take the pause: the resume decision needs what playback was doing
-                    // BEFORE the stream, which is only knowable here. The frame confirms the
-                    // reservation; a reservation the server never confirms is released unsent.
+                    // Reserved, NOT activated: `playerAutoPaused` stays false so nothing restores a
+                    // pause that never happened, and the frame is what turns this into a real hold.
                     pauseReserved = true
-                    playerAutoPaused = true
-                    // Take the hold explicitly. The user's own pause reaches the player through the
-                    // same VOICE_COMMANDS interface, so the source alone cannot say whose pause this
-                    // stop was; the hold is declared as an ownership fact, not inferred from the tag.
-                    playbackSink.pauseAsHold()
                 }
             }
 
@@ -316,14 +320,26 @@ class CloudRouteSink internal constructor(
                         if (event.turnId != null && event.turnId != myRequestId) {
                             return@collect
                         }
-                        // The delivery commitment CONFIRMS this turn's reservation: it is the moment
-                        // the server commits to audible output, so "this turn is about to speak" is
-                        // now true. Confirmation is the reservation being SPENT, which is what makes
-                        // an unconfirmed one distinguishable from a held one -- the two must not
-                        // collapse into a single fact, or a turn that never commits is
-                        // indistinguishable from one that has already held the user's place.
+                        // The delivery commitment ACTIVATES this turn's hold: it is the moment the
+                        // server commits to a long answer, so the user's place is now taken. This is
+                        // the ONLY place the turn pauses -- turn start records the metadata and does
+                        // not touch playback, so a short answer keeps the ducking it is entitled to.
+                        //
+                        // The reservation is spent here, which is what keeps an unactivated one
+                        // distinguishable from a taken hold: an unactivated reservation is dropped at
+                        // the turn's end without a pause ever having happened, and nothing auto-resumes
+                        // it.
                         if (event.turnId != null && event.action == "pause") {
-                            pauseReserved = false
+                            turnMutex.withLock {
+                                if (activeTurnId == myId && pauseReserved && !playerAutoPaused && isHostPlaying() && !isPrivacyClosed()) {
+                                    pauseReserved = false
+                                    playerAutoPaused = true
+                                    // Declared as an ownership fact, not inferred from the tag: the
+                                    // user's own pause reaches the player through the same
+                                    // VOICE_COMMANDS interface.
+                                    playbackSink.pauseAsHold()
+                                }
+                            }
                             return@collect
                         }
                         // Only a *performed* action counts: executeAction ignores an unknown tool,

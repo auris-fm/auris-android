@@ -656,6 +656,16 @@ class VoiceAsrEngine @Inject constructor(
             } catch (_: Exception) {
             }
         }
+        // Withdraw the SCO request, but ONLY if this rollback is undoing a request that was actually
+        // issued. This runs when a setup that already called startBluetoothSco() fails -- including
+        // the case where it succeeded and the connect never arrived. Clearing the flag alone would
+        // disarm closeBluetoothSco()'s early return, so stop() could never close it and the request
+        // would stay outstanding for the process, holding the headset. When the request was never
+        // issued, scoStarted is already false and this is a no-op.
+        closeBluetoothSco()
+        // Restore the audio mode this rollback captured. Kept separate from closeBluetoothSco(): that
+        // one restores the mode it saved only when it had a request to undo, so a failure BEFORE the
+        // request went out still has to put the mode back itself.
         if (modeCaptured) {
             try {
                 savedAudioMode?.let { audioManager.mode = it }
@@ -663,7 +673,6 @@ class VoiceAsrEngine @Inject constructor(
             }
             savedAudioMode = null
         }
-        scoStarted = false
     }
 
     @Suppress("DEPRECATION") // stopBluetoothSco deprecated in API 33; no replacement

@@ -37,6 +37,17 @@ public:
     // Returns number of samples available to read.
     int32_t available() const;
 
+    /**
+     * The producer's monotonic sample counter: the total samples written since construction.
+     *
+     * Never wraps (only the buffer INDEX is `cursor % capacity`), so this is a position in the capture
+     * stream rather than an index into the buffer. That is what lets a sample position be related to a
+     * stream timestamp: the two are the same quantity in different units.
+     */
+    int64_t writeCursor() const {
+        return mWriteCursor.load(std::memory_order_acquire);
+    }
+
     void reset();
 
 private:
@@ -109,6 +120,41 @@ public:
     int32_t getRoutedDeviceId() const;
 
     /**
+     * A capture-frame position on the shared monotonic clock: where a sample sits in time.
+     *
+     * `framePosition` is a position in the CAPTURE STREAM (the producer's monotonic sample counter, or
+     * a stream frame position), `timestampNs` is `CLOCK_MONOTONIC`, and `sampleRate` converts between
+     * them. Any sample at stream position `p` is then at
+     * `timestampNs + (p - framePosition) * 1e9 / sampleRate`.
+     *
+     * `observable` is false when the platform reports no timestamp -- `getTimestamp` fails on some
+     * backends, and OpenSL ES in particular. An unavailable observation must stay unavailable: a
+     * substituted value would be a position the platform never reported, which is worse than none
+     * because it aligns confidently against the wrong instant.
+     */
+    struct CaptureClock {
+        int64_t framePosition = 0;
+        int64_t timestampNs = 0;
+        int32_t sampleRate = kSampleRate;
+        bool observable = false;
+    };
+
+    /**
+     * Samples the stream's own frame/time observation.
+     *
+     * MUST be called from the DRAIN thread, never from `onAudioReady`: the Oboe header says
+     * *"due to issues in Android before R, we recommend NOT calling this method from a data
+     * callback"*, and calling it there would also make the observation describe the callback's instant
+     * rather than the consumer's.
+     *
+     * The frame position and the ring's write cursor are read TOGETHER, in one call, so the pair
+     * describes ONE instant. Reading them separately gives two instants -- the same "two timelines
+     * paired as one" failure the alignment exists to avoid, reached by sequencing instead of by a
+     * missing value.
+     */
+    CaptureClock captureClock() const;
+
+    /**
      * Installs [stream] as the live stream, with [deviceId] as the device it reports.
      *
      * A seam for the host test, which cannot open a real Oboe stream and cannot fabricate one either
@@ -123,6 +169,21 @@ public:
         mTestReportedDeviceId = deviceId;
         mTestStreamInstalled = true;
         mActive.store(true, std::memory_order_release);
+    }
+
+    /**
+     * Supplies the stream's frame/time observation, so the branch that USES it is reachable.
+     *
+     * A test cannot call `getTimestamp` -- it needs a real Oboe stream -- so without this the only
+     * reachable path through `captureClock` is the early return, and the code that consumes a
+     * timestamp would be covered by nothing. Setting it to "unavailable" is how the
+     * unavailable-stays-unavailable property is exercised rather than assumed.
+     */
+    void setStreamTimestampForTest(bool available, int64_t framePosition, int64_t timestampNs) {
+        std::lock_guard<std::mutex> lock(mStreamMutex);
+        mTestTimestampAvailable = available;
+        mTestTimestampFrame = framePosition;
+        mTestTimestampNs = timestampNs;
     }
 
     /**
@@ -159,6 +220,9 @@ private:
     // for the device, which a test cannot construct, so this stands in for that answer.
     int32_t mTestReportedDeviceId = oboe::kUnspecified;
     bool mTestStreamInstalled = false;
+    bool mTestTimestampAvailable = false;
+    int64_t mTestTimestampFrame = 0;
+    int64_t mTestTimestampNs = 0;
 
 
     RingBuffer mRingBuffer;

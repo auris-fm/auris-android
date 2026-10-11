@@ -2023,6 +2023,11 @@ class CloudRouteSinkTest {
             hostPlaying = true,
             routeInvoker = { turn ->
                 kotlinx.coroutines.flow.flow {
+                    // @reviewer's ordering B: the USER pause arrives BETWEEN the reservation and the
+                    // frame, so the user acts on a hold that has been reserved but not yet confirmed.
+                    // This ordering is the one they identified as separating the two states -- my
+                    // earlier variants all put the user action after the frame and converged.
+                    deps.commandRevision += 1
                     if (withConfirmation) {
                         emit(
                             CloudRouteEvent.Action(
@@ -2033,16 +2038,6 @@ class CloudRouteSinkTest {
                             ),
                         )
                     }
-                    // The user pauses while the answer is in flight, then the turn FAILS. The
-                    // revision is not advanced: the pause goes through the app-operation path, whose
-                    // command carries the voice source, so a revision comparison cannot see it.
-                    emit(
-                        CloudRouteEvent.Action(
-                            tool = "playback",
-                            action = "pause",
-                            params = emptyMap(),
-                        ),
-                    )
                     throw RuntimeException("provider error")
                 }
             },
@@ -2067,14 +2062,17 @@ class CloudRouteSinkTest {
         val confirmed = runUserPauseDuringHold(this, withConfirmation = true)
         val unconfirmed = runUserPauseDuringHold(this, withConfirmation = false)
 
+        // BOTH variants decline the resume, so the user's pause stands either way -- and the pair is
+        // the assertion: a difference between them would fail here.
         assertEquals(
-            "a user pause during a held turn must not be resumed over (calls=$confirmed)",
-            listOf("pause", "pause"),
+            "a user pause must not be resumed over, with or without the confirmation " +
+                "(confirmed=$confirmed unconfirmed=$unconfirmed)",
+            listOf("pause"),
             confirmed,
         )
         assertEquals(
-            "a user pause during an unconfirmed reservation (calls=$unconfirmed)",
-            listOf("pause", "pause"),
+            "and the unconfirmed reservation behaves the same way (unconfirmed=$unconfirmed)",
+            confirmed,
             unconfirmed,
         )
     }

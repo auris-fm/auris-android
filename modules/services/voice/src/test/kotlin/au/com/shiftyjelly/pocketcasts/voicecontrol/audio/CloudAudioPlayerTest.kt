@@ -354,6 +354,46 @@ class CloudAudioPlayerTest {
     }
 
     @Test
+    fun `a 24 kHz answer records the exact resampled frame count`() {
+        // 24k is the other negotiated rate the parser recognises, and it is a 1.5x factor rather than
+        // 3x: the output length is 2400 * 16000 / 24000, which must come out exactly 1600. A test at
+        // 48 kHz alone cannot show this, because that ratio divides evenly and would hide a formula
+        // that truncates where the ratio is fractional.
+        val recorder = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder(
+            au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap(),
+        )
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            playbackBufferRecorder = recorder,
+        )
+        wired.setCodec("pcm@24k")
+
+        // 100 ms of 24 kHz PCM: 2400 frames of s16le = 4800 bytes.
+        val hundredMsAt24k = ByteArray(4800)
+        for (i in 0 until 2400) {
+            val v = 8000
+            hundredMsAt24k[i * 2] = (v and 0xFF).toByte()
+            hundredMsAt24k[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+        }
+        wired.submitFrame(hundredMsAt24k)
+        wired.submitFrame(hundredMsAt24k)
+        wired.play()
+
+        assertEquals(
+            "200 ms of 24 kHz audio is 3200 samples at the recorder's 16 kHz",
+            au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.SAMPLE_RATE / 5,
+            recorder.snapshot().size,
+        )
+        assertEquals(
+            "the producer-clock position is 200 ms regardless of the source rate",
+            200L,
+            recorder.lastRecordedPositionMs(),
+        )
+        wired.release()
+    }
+
+    @Test
     fun `a partial sink write records only the accepted prefix`() {
         // The cloud answer must record accepted samples, not the whole submitted frame: a reference
         // holding audio the sink rejected would correlate against audio that never played.

@@ -2008,88 +2008,74 @@ class CloudRouteSinkTest {
     }
 
     /**
-     * A user pause during a CONFIRMED hold is not resumed over, and the UNCONFIRMED case below it
-     * behaves IDENTICALLY -- which is the invariant, not a coincidence.
+     * The CONFIRMED half, built so the ONLY difference from the unconfirmed half is the confirmation.
      *
-     * The property asserted here is @cloud's reframe: a confirmed hold and an unconfirmed reservation
-     * both clean up the same way when a user pause intervenes, so the user's pause always stands.
-     *
-     * WHAT IS NOT ASSERTED, and I measured it rather than assuming: the confirmation itself has NO
-     * observable consequence. Three arrangements fail to separate confirmed from unconfirmed --
-     * the playback calls, a two-turn chain (a successor inherits the paused player, so one hold), and
-     * this user-pause pair. Removing the confirmation leaves every case green. So the confirmation is
-     * CORRECT BY READING, and the difference it makes lives only in private state.
+     * Both variants deliver the SAME user pause; `withConfirmation` decides whether the server's
+     * delivery-commitment frame arrives first. Anything else that differed would be the asserted
+     * property's confound rather than its cause.
      */
-    @Test
-    fun `a user pause during a CONFIRMED hold is not resumed over`() = runTest {
-        val deps = TestDeps(
+    private suspend fun runUserPauseDuringHold(
+        scope: kotlinx.coroutines.CoroutineScope,
+        withConfirmation: Boolean,
+    ): List<String> {
+        lateinit var deps: TestDeps
+        deps = TestDeps(
             hostPlaying = true,
             routeInvoker = { turn ->
                 kotlinx.coroutines.flow.flow {
-                    // The delivery commitment confirms this turn's reservation.
+                    if (withConfirmation) {
+                        emit(
+                            CloudRouteEvent.Action(
+                                tool = "playback",
+                                action = "pause",
+                                params = emptyMap(),
+                                turnId = turn.requestId,
+                            ),
+                        )
+                    }
+                    // The user pauses while the answer is in flight, then the turn FAILS. The
+                    // revision is not advanced: the pause goes through the app-operation path, whose
+                    // command carries the voice source, so a revision comparison cannot see it.
                     emit(
                         CloudRouteEvent.Action(
                             tool = "playback",
                             action = "pause",
                             params = emptyMap(),
-                            turnId = turn.requestId,
                         ),
                     )
-                    // Then the user pauses, through the app-operation path (no turn_id).
-                    emit(
-                        CloudRouteEvent.Action(
-                            tool = "playback",
-                            action = "pause",
-                            params = emptyMap(),
-                        ),
-                    )
-                    emit(CloudRouteEvent.Done(1, 0))
+                    throw RuntimeException("provider error")
                 }
             },
         )
-
-        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext)
-
-        assertEquals(
-            "a confirmed hold followed by a user pause must not be resumed over " +
-                "(calls=${deps.playback.calls})",
-            listOf("pause", "pause"),
-            deps.playback.calls.filter { it == "pause" || it == "resume" },
-        )
+        deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
+        val sink = deps.sink()
+        val turn = scope.launch {
+            runCatching { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        }
+        deps.playback.pauseStarted.await()
+        deps.playback.pauseGate?.complete(Unit)
+        turn.join()
+        return deps.playback.calls.filter { it == "pause" || it == "resume" }
     }
 
-    /**
-     * The other half of the pair: the SAME stream without the confirmation frame.
-     *
-     * It expects the same `[pause, pause]`, so the pair reads as one claim -- a user pause during a
-     * held turn is never resumed over, whether or not the server confirmed the hold. If the
-     * confirmation ever acquires an observable consequence, this is the case that will separate.
-     */
     @Test
-    fun `a user pause during an UNCONFIRMED reservation is handled the same way`() = runTest {
-        val deps = TestDeps(
-            hostPlaying = true,
-            routeInvoker = {
-                kotlinx.coroutines.flow.flow {
-                    // No confirmation frame: the reservation stands unspent.
-                    emit(
-                        CloudRouteEvent.Action(
-                            tool = "playback",
-                            action = "pause",
-                            params = emptyMap(),
-                        ),
-                    )
-                    emit(CloudRouteEvent.Done(1, 0))
-                }
-            },
-        )
-
-        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext)
+    fun `a user pause is handled the same with and without the confirmation`() = runTest {
+        // @reviewer measured `unconfirmed = [pause]`, `confirmed = [pause, resume]` and attributed the
+        // difference to the confirmation. This drives both variants through the SAME arrangement so the
+        // confirmation is the only variable, and reports both sequences so a divergence is visible
+        // rather than asserted from a reading.
+        val confirmed = runUserPauseDuringHold(this, withConfirmation = true)
+        val unconfirmed = runUserPauseDuringHold(this, withConfirmation = false)
 
         assertEquals(
-            "an unconfirmed reservation followed by a user pause (calls=${deps.playback.calls})",
+            "a user pause during a held turn must not be resumed over (calls=$confirmed)",
             listOf("pause", "pause"),
-            deps.playback.calls.filter { it == "pause" || it == "resume" },
+            confirmed,
+        )
+        assertEquals(
+            "a user pause during an unconfirmed reservation (calls=$unconfirmed)",
+            listOf("pause", "pause"),
+            unconfirmed,
         )
     }
 }

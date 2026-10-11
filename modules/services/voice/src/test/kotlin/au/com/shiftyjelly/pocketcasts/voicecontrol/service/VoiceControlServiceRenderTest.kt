@@ -309,4 +309,51 @@ class VoiceControlServiceRenderTest {
             renderer.release()
         }
     }
+
+    /**
+     * A normal service stop must not permanently disable feedback on the next start.
+     *
+     * @spec's requirement, and it is user-facing: `VoiceControlService` releases the renderer on every
+     * stop while the renderer is a Hilt `@Singleton`, so a single one-way flag meant the SECOND session
+     * had no feedback at all -- silently. Disposal is `onDestroy`'s job; a stop ends the session.
+     */
+    @Test
+    fun `a stop ends the session without disabling the next start`() = runTest {
+        val earconPlayer = mock(EarconPlayer::class.java)
+        val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
+        try {
+            // Session 1 ends the way stopVoiceControl() does.
+            renderer.endSession()
+
+            // Session 2 must still be able to emit: this is the property a one-way flag broke.
+            var failure: Throwable? = null
+            try {
+                renderer.playEarcon(EarconId.ERROR)
+            } catch (t: Throwable) {
+                failure = t
+            }
+            assertEquals("a stop must leave the renderer usable, not disposed", null, failure)
+            // and it must actually reach the player rather than being refused by terminal state.
+            verify(earconPlayer, org.mockito.Mockito.atLeastOnce()).play(EarconId.ERROR)
+        } finally {
+            renderer.release()
+        }
+    }
+
+    /**
+     * A disposed renderer IS refused, so the fix is a split rather than a removal.
+     *
+     * Without this the previous case would pass if the flag were simply deleted, and "endSession does
+     * not disable" would be indistinguishable from "nothing ever disables".
+     */
+    @Test
+    fun `a disposed renderer refuses to emit`() = runTest {
+        val earconPlayer = mock(EarconPlayer::class.java)
+        val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
+        renderer.release()
+
+        renderer.playEarcon(EarconId.ERROR)
+
+        verify(earconPlayer, org.mockito.Mockito.never()).play(EarconId.ERROR)
+    }
 }

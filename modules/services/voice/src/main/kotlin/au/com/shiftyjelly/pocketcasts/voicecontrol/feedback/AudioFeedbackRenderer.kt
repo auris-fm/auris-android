@@ -58,7 +58,15 @@ class AudioFeedbackRenderer(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var currentJob: Job? = null
-    private var released = false
+
+    /**
+     * Whether this renderer is DISPOSED for good, as opposed to between service sessions.
+     *
+     * The two are different and the distinction is user-facing: `VoiceControlService` is released on
+     * every stop and this type is a `@Singleton`, so a single flag made one stop disable all feedback
+     * for the rest of the process. [endSession] handles the stop; this handles disposal.
+     */
+    private var disposed = false
 
     /**
      * Called when a spoken reply did not finish playing. Defaulted to the structured log so an
@@ -69,7 +77,7 @@ class AudioFeedbackRenderer(
     }
 
     fun render(response: VoiceResponse, language: String = "en") {
-        if (released) return
+        if (disposed) return
         // Debug-only diagnostic: what the app is about to say, before TTS. This is the one
         // place every spoken response passes through, so it is where a response that is
         // identical regardless of the prompt can be told from one that differs. Debug-gated
@@ -116,7 +124,7 @@ class AudioFeedbackRenderer(
      * while the microphone is open — so this is where the gate has to know the sound is ours.
      */
     fun playEarcon(id: EarconId): Boolean {
-        if (released) return false
+        if (disposed) return false
         val played = earconPlayer.play(id)
         if (played) noteEmitted()
         return played
@@ -141,8 +149,20 @@ class AudioFeedbackRenderer(
         utterance.join()
     }
 
+    /**
+     * Ends a service session: frees audio resources but leaves the renderer usable.
+     *
+     * Called from `stopVoiceControl()`, which runs on EVERY stop. Because this type is a `@Singleton`,
+     * treating that as disposal meant the next start had no feedback at all -- silently.
+     */
+    fun endSession() {
+        currentJob?.cancel()
+        earconPlayer.release()
+    }
+
+    /** Disposes the renderer for good. A later [render] or [playEarcon] is refused. */
     fun release() {
-        released = true
+        disposed = true
         scope.cancel()
         earconPlayer.release()
         ttsEngine.release()

@@ -1406,6 +1406,41 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a cloud-requested pause during an answer hold supersedes it without a revision bump`() = runTest {
+        // The assigned case: the pause is an APP OPERATION the cloud asked for during an answer hold,
+        // not a manual playback command. It goes through the sink's own pause, which carries the voice
+        // source and therefore does NOT advance the playback command revision -- so a restore that
+        // only compares revisions would resume over the user's pause and undo it.
+        lateinit var deps: TestDeps
+        deps = TestDeps(
+            hostPlaying = true,
+            routeInvoker = {
+                kotlinx.coroutines.flow.flow {
+                    // The answer's own hold has been taken; the cloud then requests a pause.
+                    emit(
+                        CloudRouteEvent.Action(
+                            tool = "playback",
+                            action = "pause",
+                            params = emptyMap(),
+                        ),
+                    )
+                    emit(CloudRouteEvent.Done(1, 0))
+                }
+            },
+        )
+
+        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(
+            "the app-operation pause must supersede the hold, not be resumed over " +
+                "(calls=${deps.playback.calls})",
+            listOf("pause", "pause"),
+            deps.playback.calls.filter { it == "pause" || it == "resume" },
+        )
+        assertEquals("no revision bump happens on this path", 0L, deps.commandRevision)
+    }
+
+    @Test
     fun `a turn does not override a user pause that changed nothing`() = runTest {
         // The case a state sample cannot see: the player is already paused (by
         // the turn), the user presses pause, and nothing about the state

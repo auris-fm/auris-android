@@ -137,6 +137,13 @@ class PlaybackBufferRecorder @Inject constructor(
     /** No axis recorded yet, or no timestamped contribution has arrived. */
     private var positionAxis: PositionAxis? = null
 
+    /**
+     * @param positionMs the position of the chunk's FIRST sample, or null when the contributing
+     * renderer supplies no timestamp (earcons and TTS do not). An untimed chunk contributes SAMPLES
+     * and NOT a position: it must not inherit another producer's axis, because doing so would make a
+     * window look like it has a valid mapping to a clock nothing measured for this audio.
+     * @param axis which clock [positionMs] is on. Ignored when [positionMs] is null.
+     */
     fun write(pcm: FloatArray, positionMs: Long? = null, axis: PositionAxis = PositionAxis.Media) {
         synchronized(lock) {
             for (sample in pcm) {

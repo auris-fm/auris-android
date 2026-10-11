@@ -602,9 +602,23 @@ class CloudRouteSink internal constructor(
 
                         delta == 0 -> Unit
 
-                        direction == "backward" -> playbackSink.skipBackward(null)
+                        // Neither amount nor direction stated: the spec explicitly permits the
+                        // configured skip interval here, and the sink's own comment says null means
+                        // exactly that. Only invalid STATED values and unknown stated directions
+                        // are refused.
+                        delta == null && direction == null -> {
+                            playbackSink.skipForward(null)
+                        }
 
-                        else -> playbackSink.skipForward(null)
+                        delta == null && direction == "backward" -> playbackSink.skipBackward(null)
+
+                        delta == null && direction == "forward" -> playbackSink.skipForward(null)
+
+                        // A stated delta with an unknown direction, or any other combination the
+                        // spec does not define, is refused rather than defaulted: an unrecognised
+                        // direction falling through to forward would move a user who asked for
+                        // nothing recognisable.
+                        else -> false
                     }
                     true
                 }

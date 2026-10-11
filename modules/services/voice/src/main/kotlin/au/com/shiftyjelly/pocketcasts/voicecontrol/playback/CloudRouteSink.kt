@@ -549,14 +549,14 @@ class CloudRouteSink internal constructor(
                 "seek_to" -> {
                     val referenceMs = params.referencePositionMs() ?: return@withLock false
                     capturePreActionPosition(referenceMs, turnState)
+                    // A reference target with no usable mapping is refused, not approximated.
                     seekToReference(referenceMs)
-                    true
                 }
 
                 "play_quote" -> {
                     val referenceMs = params.referencePositionMs() ?: return@withLock false
                     capturePreActionPosition(referenceMs, turnState)
-                    seekToReference(referenceMs)
+                    if (!seekToReference(referenceMs)) return@withLock false
                     // Cleared before the suspending call so the flag never
                     // outlives the player state it refers to. (Here a throw
                     // would make the finally resume, which is what this action
@@ -668,11 +668,23 @@ class CloudRouteSink internal constructor(
         )
     }
 
-    private suspend fun seekToReference(referenceMs: Long) {
+    /**
+     * Seeks to a position expressed on the REFERENCE (ad-free) timeline.
+     *
+     * Requires a valid mapping; there is no fallback. Treating the reference milliseconds as sink
+     * time assumes the two timelines coincide, which is exactly what dynamic ad insertion breaks --
+     * the seek would land on the wrong audio while reporting success. `timeline-alignment` states the
+     * fallback explicitly: `reference_position_ms` is null when alignment is unavailable, and the
+     * server falls back to `client_position_ms` for transcript lookup. Nothing authorizes substituting
+     * one timeline for the other, so an unavailable mapping refuses the action.
+     *
+     * @return true when the seek was performed, false when the mapping is unavailable.
+     */
+    private suspend fun seekToReference(referenceMs: Long): Boolean {
         val referenceSeconds = referenceMs / 1000.0
-        val playbackMs = fingerprintTimingManager.playbackTimeMs(referenceSeconds)
-            ?: referenceMs.toInt()
+        val playbackMs = fingerprintTimingManager.playbackTimeMs(referenceSeconds) ?: return false
         playbackSink.seekTo((playbackMs / 1000).coerceAtLeast(0))
+        return true
     }
 
     private fun Map<String, Any?>.referencePositionMs(): Long? {

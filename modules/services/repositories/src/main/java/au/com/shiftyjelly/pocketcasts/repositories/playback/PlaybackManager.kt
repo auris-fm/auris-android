@@ -273,29 +273,6 @@ open class PlaybackManager @Inject constructor(
         playbackCommandCount.incrementAndGet()
     }
 
-    /**
-     * Whether the pause currently being applied is the voice turn's own HOLD.
-     *
-     * `SourceView.VOICE_COMMANDS` records the INTERFACE a command arrived through, and both the
-     * turn's hold pause and the user's own spoken or in-app pause reach the player that way. Interface
-     * and ownership are different facts, so the turn marks its hold explicitly and an observer
-     * distinguishes the two by this, never by the tag.
-     */
-    @Volatile
-    private var voiceHoldPauseInFlight = false
-
-    /** Marks the next voice-path pause as the turn's own hold rather than a user's pause. */
-    fun markNextVoicePauseAsHold() {
-        voiceHoldPauseInFlight = true
-    }
-
-    /** The ownership of the pause being applied, for the state it produces to carry. */
-    private fun consumeHoldOwnership(): Boolean {
-        val held = voiceHoldPauseInFlight
-        voiceHoldPauseInFlight = false
-        return held
-    }
-
     private fun notePlaybackCommand(sourceView: SourceView) {
         if (sourceView == SourceView.VOICE_COMMANDS) return
         playbackCommandCount.incrementAndGet()
@@ -1069,13 +1046,29 @@ open class PlaybackManager @Inject constructor(
         }
     }
 
-    fun pause(transientLoss: Boolean = false, sourceView: SourceView = SourceView.UNKNOWN) {
+    fun pause(
+        transientLoss: Boolean = false,
+        sourceView: SourceView = SourceView.UNKNOWN,
+        asVoiceHold: Boolean = false,
+    ) {
         launch {
-            pauseSuspend(transientLoss, sourceView)
+            pauseSuspend(transientLoss, sourceView, asVoiceHold)
         }
     }
 
-    suspend fun pauseSuspend(transientLoss: Boolean = false, sourceView: SourceView = SourceView.UNKNOWN) {
+    /**
+     * @param asVoiceHold whether this pause is the voice turn's own HOLD.
+     *
+     * `SourceView.VOICE_COMMANDS` records the INTERFACE a command arrived through, and both the
+     * turn's hold pause and the user's own pause reach the player that way, so interface and ownership
+     * are different facts. Ownership is an ARGUMENT of this call rather than a mark set beforehand: a
+     * separate mark would be consumed by whichever pause ran first, not by the one it was meant for.
+     */
+    suspend fun pauseSuspend(
+        transientLoss: Boolean = false,
+        sourceView: SourceView = SourceView.UNKNOWN,
+        asVoiceHold: Boolean = false,
+    ) {
         notePlaybackCommand(sourceView)
         if (!transientLoss) {
             focusManager.giveUpAudioFocus()
@@ -1087,7 +1080,7 @@ open class PlaybackManager @Inject constructor(
                     playbackState.copy(
                         transientLoss = false,
                         changedBySource = sourceView.key,
-                        changedByVoiceHold = consumeHoldOwnership(),
+                        changedByVoiceHold = asVoiceHold,
                     ),
                 )
             }

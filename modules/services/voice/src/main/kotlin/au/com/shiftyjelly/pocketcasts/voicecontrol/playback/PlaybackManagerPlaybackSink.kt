@@ -78,8 +78,8 @@ class PlaybackManagerPlaybackSink @Inject constructor(
      * own pause arrives through the same one.
      */
     override suspend fun pauseAsHold(): VoiceResponse {
-        playbackManager.markNextVoicePauseAsHold()
-        return pause()
+        playbackManager.pauseSuspend(sourceView = SourceView.VOICE_COMMANDS, asVoiceHold = true)
+        return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
     override suspend fun resume(): VoiceResponse {

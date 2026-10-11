@@ -11,6 +11,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -251,16 +252,22 @@ class PlaybackBufferRecorderTest {
         val half = PlaybackBufferRecorder.SAMPLE_RATE / 2
         // One chunk of 8000 samples at 16 kHz = 500 ms, recorded as starting at 1000 ms, so the
         // newest sample sits at 1500 ms.
-        recorder.write(FloatArray(half) { 0.5f }, positionMs = 1_000)
+        // Declared Media explicitly: this case is about the end-position relation, which holds on
+        // either axis, and Media is the axis an episode tap supplies. It used the default before the
+        // axis existed, and the default is the only reason it was passing.
+        recorder.write(FloatArray(half) { 0.5f }, positionMs = 1_000, axis = PositionAxis.Media)
         val recordedEnd = recorder.lastRecordedPositionMs()
         assertEquals("the recorded end position is the chunk start plus its duration", 1_500L, recordedEnd)
 
-        val ref = recorder.reference()
-        val durationMs = (ref.samples.size * 1_000L) / PlaybackBufferRecorder.SAMPLE_RATE
+        // The END position is recorded regardless of axis -- it is what the newest contribution
+        // reported, and the axis is what decides whether the START may be offered as an anchor. So
+        // this asserts the end relation through the recorder's own accessor, and asserts separately
+        // that a media window offers no anchor.
+        assertEquals("the recorded end position is the chunk start plus its duration", 1_500L, recordedEnd)
         assertEquals(
-            "the window must end on the recorded position: start + duration == recorded end",
-            recordedEnd,
-            (ref.startPositionMs ?: -1L) + durationMs,
+            "a media-positioned window offers no anchor to the microphone's clock",
+            null,
+            recorder.reference().startPositionMs,
         )
     }
 
@@ -350,6 +357,49 @@ class PlaybackBufferRecorderTest {
                 "not one derived by subtracting across them (start=${reference.startPositionMs})",
             null,
             reference.startPositionMs,
+        )
+    }
+
+    @Test
+    fun `an episode-only window offers no anchor because its axis is not the microphone's`() {
+        // @spec's single-axis case, and the one a mixed-axis guard alone does not cover. This window
+        // is internally CONSISTENT -- every contribution is a media position -- but the microphone
+        // instant is a monotonic time, so offering this start would pair seconds-into-an-episode with
+        // a wall-clock instant and report the gap between two unrelated origins as an echo delay.
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+
+        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 12_000L, axis = PositionAxis.Media)
+
+        assertNull(
+            "a media-positioned window must not offer an anchor to a monotonic microphone instant " +
+                "(start=${recorder.reference().startPositionMs})",
+            recorder.reference().startPositionMs,
+        )
+    }
+
+    @Test
+    fun `a monotonic window does offer an anchor`() {
+        // The control for the case above: without this, the exclusion could be passing because the
+        // recorder never reports a position at all rather than because the axis was wrong.
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+
+        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
+
+        val reference = recorder.reference()
+        // The write anchors the chunk's START at 9_000_000 and records the END as start + duration,
+        // so the window's start comes back as the input: end (9_000_200) minus the window (200 ms).
+        // Stated as the relation rather than as a constant, because the constant is what I got wrong
+        // first -- I expected 8_999_800 by subtracting the duration from the INPUT and had to read
+        // the reported values to see the off-by-a-duration error was mine, not the code's.
+        val durationMs = (reference.samples.size * 1_000L) / PlaybackBufferRecorder.SAMPLE_RATE
+        assertEquals("3200 samples at 16 kHz is 200 ms", 200L, durationMs)
+        assertEquals("the chunk's own start is where it was anchored", 9_000_000L, reference.startPositionMs)
+        assertEquals(
+            "and the window ends a duration later, which is the relation the anchor must satisfy",
+            9_000_000L + durationMs,
+            reference.endPositionMs,
         )
     }
 }

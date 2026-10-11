@@ -235,6 +235,7 @@ class AndroidPlatformTtsEngineTest {
         @Volatile
         var synthesizeQueued = false
             private set
+        var emitRealWav = false
         var synthesizeCount = 0
             private set
         var lastUtteranceId: String = ""
@@ -258,6 +259,11 @@ class AndroidPlatformTtsEngineTest {
         ): Int {
             lastUtteranceId = utteranceId ?: ""
             synthesizeCount += 1
+            // Write a real WAV only when a test asks for the write path to be reached: an empty file
+            // makes speak() return before the write loop, so without this the truncation case would
+            // exercise nothing. Off by default, because a decodable clip also engages the drain wait,
+            // which the synthesis-oriented cases do not need.
+            if (emitRealWav) file?.also { writeMinimalWav(it, samples = 512, sampleRateHz = 22050) }
             onSynthesize(utteranceId ?: "")
             synthesizeQueued = true
             return android.speech.tts.TextToSpeech.SUCCESS
@@ -267,5 +273,82 @@ class AndroidPlatformTtsEngineTest {
             stopCalls += 1
             return android.speech.tts.TextToSpeech.SUCCESS
         }
+    }
+
+    @Test
+    fun `a refused sink write surfaces as an incomplete playback rather than a silent end`() {
+        // A refused AudioTrack.write means the reply was TRUNCATED, not finished. The old code broke
+        // out of the loop, leaving offset at the accepted count -- so the drain loop waited only for
+        // frames that had already played, speak() returned normally, and nothing reached
+        // onPlaybackFailure. The user heard a cut-off reply and saw no error: the same "silent end"
+        // shape this round fixed on the cloud path.
+        //
+        // The refusal needs a failing AudioTrack, which a unit test cannot construct, so the write is
+        // injected -- the seam CloudAudioPlayer already exposes for its own path.
+        val (wired, fake) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        fake.emitRealWav = true
+        // No drain wait: the write is refused, so there is nothing to drain and waiting would only
+        // exercise Robolectric's playback clock.
+        wired.drainWaitMs = 0
+        // Refuse after accepting nothing, which is the ERROR_DEAD_OBJECT shape.
+        wired.writeToSink = { _, _, _, _ -> -1 }
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        var failure: Throwable? = null
+        val job = scope.launch {
+            try {
+                wired.speak("hello", "en")
+            } catch (t: Throwable) {
+                failure = t
+            }
+        }
+        val queued = (0 until 50).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            fake.synthesizeCount > 0
+        }
+        assertTrue("the utterance must reach synthesis", queued)
+        fake.listener?.onDone(fake.lastUtteranceId)
+        runBlocking { job.join() }
+        scope.cancel()
+
+        assertTrue(
+            "a refused write must surface as an incomplete playback, not a silent end: " +
+                "failure=${failure?.let { it::class.simpleName }}",
+            failure is TtsPlaybackIncompleteException,
+        )
+    }
+}
+
+private fun java.io.DataOutputStream.writeIntLE(value: Int) {
+    writeByte(value and 0xFF)
+    writeByte((value shr 8) and 0xFF)
+    writeByte((value shr 16) and 0xFF)
+    writeByte((value shr 24) and 0xFF)
+}
+
+private fun java.io.DataOutputStream.writeShortLE(value: Int) {
+    writeByte(value and 0xFF)
+    writeByte((value shr 8) and 0xFF)
+}
+
+private fun writeMinimalWav(file: java.io.File, samples: Int, sampleRateHz: Int) {
+    val dataBytes = samples * 2
+    java.io.DataOutputStream(java.io.BufferedOutputStream(file.outputStream())).use { out ->
+        out.writeBytes("RIFF")
+        out.writeIntLE(36 + dataBytes)
+        out.writeBytes("WAVE")
+        out.writeBytes("fmt ")
+        out.writeIntLE(16)
+        out.writeShortLE(1) // PCM
+        out.writeShortLE(1) // mono
+        out.writeIntLE(sampleRateHz)
+        out.writeIntLE(sampleRateHz * 2) // byte rate
+        out.writeShortLE(2) // block align
+        out.writeShortLE(16) // bits per sample
+        out.writeBytes("data")
+        out.writeIntLE(dataBytes)
+        repeat(samples) { out.writeShortLE(1_000) }
     }
 }

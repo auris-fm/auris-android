@@ -186,6 +186,9 @@ void OboeAudioCapture::close() {
     mRingBuffer.reset();
     mSampleRate = kSampleRate;
     mChannelCount = kChannelCount;
+    // No stream, no observed capture device. Clearing here covers the explicit close path the same
+    // way stop() and the error path do, so every way a stream ends leaves no observation behind.
+    mRoutedDeviceId.store(oboe::kUnspecified, std::memory_order_release);
 
     LOGI("Capture closed");
 }
@@ -253,5 +256,9 @@ void OboeAudioCapture::onErrorAfterClose(
 
     std::lock_guard<std::mutex> lock(mStreamMutex);
     mStream = nullptr;
+    // The stream is gone, so the device it reported is no longer an observation. Leaving it set
+    // would present a dead stream's routing as the live capture route -- the stale-observation
+    // failure, on a disconnect or a route change that closed the stream.
+    mRoutedDeviceId.store(oboe::kUnspecified, std::memory_order_release);
     LOGE("Stream error after close: %s", oboe::convertToText(error));
 }

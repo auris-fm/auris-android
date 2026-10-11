@@ -147,4 +147,47 @@ class WebSocketCloudTurnTransportFailureTest {
             audioIndex < errorIndex,
         )
     }
+
+    /**
+     * A FULL channel must still end the turn with an error, not with silence.
+     *
+     * The channel is bounded, so a terminal event enqueued behind 4096 unsent frames is refused by
+     * trySend. Closing regardless would end the turn with the error dropped -- the same silence this
+     * class exists to prevent, reachable only under overflow. The turn must not hang either.
+     */
+    @Test
+    fun `a full channel still ends the turn with an error rather than silence`() = runBlocking {
+        val client = CapturingOkHttpClient()
+        val transport = WebSocketCloudTurnTransport("https://example.invalid", client)
+
+        val events = CopyOnWriteArrayList<CloudRouteEvent>()
+        var threw: Throwable? = null
+        val job = launch {
+            try {
+                transport.exchange(frame()).collect { events.add(it) }
+            } catch (t: Throwable) {
+                threw = t
+            }
+        }
+
+        withTimeout(5_000) { while (client.listener == null) delay(10) }
+        val l = client.listener!!
+        val s = client.socket!!
+
+        // Fill the transport's bounded channel faster than the consumer drains it.
+        repeat(4_096 + 10) {
+            l.onMessage(s, ByteString.of(it.toByte(), it.toByte()))
+        }
+        l.onFailure(s, RuntimeException("boom"), null)
+
+        // The turn must END rather than hang, and it must NOT complete silently: either a terminal
+        // Error event is delivered, or the flow fails observably. Silence is the defect.
+        withTimeout(5_000) { job.join() }
+        val deliveredError = events.any { it is CloudRouteEvent.Error }
+        assertTrue(
+            "a full channel must end the turn with an error event or an observable failure, " +
+                "not silence: size=${events.size} threw=${threw?.message}",
+            deliveredError || threw != null,
+        )
+    }
 }

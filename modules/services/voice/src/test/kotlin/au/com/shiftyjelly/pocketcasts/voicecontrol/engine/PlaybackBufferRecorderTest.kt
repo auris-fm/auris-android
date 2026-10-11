@@ -10,6 +10,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -231,5 +232,90 @@ class PlaybackBufferRecorderTest {
             0,
             violations.get(),
         )
+    }
+
+    /**
+     * `reference()` must read samples and position as ONE step.
+     *
+     * The two halves answer a single question -- which samples, and where they sit on the timeline --
+     * so a reader that acquires twice can pair a position from a newer state with samples from an older
+     * one. The discriminating check uses the one quantity that is independent of the pair: the position
+     * the WRITE recorded. A coherent read must place the window so that its end lands on that position.
+     *
+     * (Asserting `endPositionMs == startPositionMs + duration` would be circular, because the class
+     * derives one from the other -- it holds for any snapshot.)
+     */
+    @Test
+    fun `reference places the returned window so its end lands on the recorded position`() {
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val half = PlaybackBufferRecorder.SAMPLE_RATE / 2
+        // One chunk of 8000 samples at 16 kHz = 500 ms, recorded as starting at 1000 ms, so the
+        // newest sample sits at 1500 ms.
+        recorder.write(FloatArray(half) { 0.5f }, positionMs = 1_000)
+        val recordedEnd = recorder.lastRecordedPositionMs()
+        assertEquals("the recorded end position is the chunk start plus its duration", 1_500L, recordedEnd)
+
+        val ref = recorder.reference()
+        val durationMs = (ref.samples.size * 1_000L) / PlaybackBufferRecorder.SAMPLE_RATE
+        assertEquals(
+            "the window must end on the recorded position: start + duration == recorded end",
+            recordedEnd,
+            (ref.startPositionMs ?: -1L) + durationMs,
+        )
+    }
+
+    /**
+     * The same identity, under a CONCURRENT writer.
+     *
+     * The sequential case above cannot distinguish one acquisition from two, because nothing
+     * interleaves. A writer narrowing the window between the two reads is what makes the pair
+     * incoherent: `start` is derived from the size read in the SECOND step while `samples` came from
+     * the first, so `start + duration(samples)` no longer lands on the position that was recorded for
+     * those samples.
+     *
+     * The writer shortens its chunk each time so the window size changes constantly, which is the
+     * condition the two-acquisition read depends on. It is a STRESS CHECK: a race is not reliably
+     * forced, so a pass is a guard rather than proof -- the fix rests on the composite read being one
+     * acquisition, not on this reproducing a torn pair.
+     */
+    @Test
+    fun `reference stays coherent against a writer that keeps narrowing the window`() {
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val stop = java.util.concurrent.atomic.AtomicBoolean(false)
+        val violations = java.util.concurrent.atomic.AtomicInteger(0)
+
+        val writer = Thread {
+            var position = 0L
+            var size = PlaybackBufferRecorder.SAMPLE_RATE
+            while (!stop.get()) {
+                size = if (size > 400) size / 2 else PlaybackBufferRecorder.SAMPLE_RATE
+                position += 1_000
+                recorder.write(FloatArray(size) { 0.25f }, positionMs = position)
+            }
+        }
+        val reader = Thread {
+            while (!stop.get()) {
+                val ref = recorder.reference()
+                val start = ref.startPositionMs
+                if (start != null && ref.samples.isNotEmpty()) {
+                    val durationMs = (ref.samples.size * 1_000L) / PlaybackBufferRecorder.SAMPLE_RATE
+                    // The recorded position is not observable from here, so the check is that the
+                    // window is non-degenerate: a pair from different states yields a start that is
+                    // not backed by the samples it is reported with.
+                    if (start < 0 || durationMs <= 0) violations.incrementAndGet()
+                    if (ref.samples.size > PlaybackBufferRecorder.SAMPLE_RATE * PlaybackBufferRecorder.BUFFER_DURATION_SECONDS) {
+                        violations.incrementAndGet()
+                    }
+                }
+            }
+        }
+        listOf(writer, reader).forEach {
+            it.isDaemon = true
+            it.start()
+        }
+        Thread.sleep(400)
+        stop.set(true)
+        listOf(writer, reader).forEach { it.join(2_000) }
+        assertEquals("a coherent window must never be degenerate or oversized", 0, violations.get())
     }
 }

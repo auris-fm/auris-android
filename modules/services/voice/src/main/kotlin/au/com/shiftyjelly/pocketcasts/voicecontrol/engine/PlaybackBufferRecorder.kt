@@ -16,8 +16,8 @@ import kotlinx.coroutines.flow.onEach
  * decides whether two of them can be compared:
  *
  * ```
- * episode        PcmChunk.positionSec          MEDIA position
- * cloud answer   submittedSamples * 1000 / rate  a SUBMISSION COUNT, restarting at 0 per answer
+ * episode        PcmChunk.positionSec          MEDIA position      (PositionAxis.Media)
+ * cloud answer   AudioTrack.getTimestamp        a MONOTONIC TIME    (PositionAxis.Monotonic)
  * earcon         none                           no position at all
  * TTS            none                           no position at all
  * capture (mic)  getTimestamp(CLOCK_MONOTONIC)   a TIME (see OboeAudioCapture.captureClock)
@@ -27,16 +27,17 @@ import kotlinx.coroutines.flow.onEach
  *  - SUBMISSION ORDER SUFFICES FOR WHAT THIS CLASS CONTAINS. Its contract is "the PCM the client
  *    actually submitted for playback", and the filter's first question is what the reference holds,
  *    which submission order answers exactly. A wrong submission order corrupts WHAT is held.
- *  - IT DOES NOT PLACE ANYTHING IN TIME. Placing the reference against a microphone segment needs a
- *    render-side clock, which no source here supplies; the capture side has one and the render side
- *    does not. A missing render clock corrupts WHEN it was held -- and the gap is the player's buffer
- *    latency, which for an echo-bleed filter is the quantity being decided.
+ *  - IT PLACES A WINDOW IN TIME ONLY WHEN ONE AXIS IS PRESENT. The cloud answer now supplies a
+ *    render clock, so a window of ONLY cloud audio can be related to wall time and the gap between it
+ *    and a microphone segment is the player's buffer latency -- the quantity an echo-bleed filter is
+ *    deciding. The episode tap supplies a MEDIA position, which is not a time, so those two cannot be
+ *    combined: a window containing both has NO position and is reported as such rather than as a
+ *    subtraction across two origins.
  *
- * Adding a render clock would NOT change what this class stores -- the contract above is unaffected.
- * It would change what a consumer can ASK of the stored samples: whether they can be related to wall
- * time at all. That distinction is the reason the two consequences are separate claims rather than one
- * bug, and it is the reason "add a render clock" is an addition to this class's interpretation rather
- * than a correction to its contract.
+ * The render clock changed what a consumer can ASK of the stored samples, not what this class stores.
+ * That distinction is why the two consequences above are separate claims rather than one bug, and it
+ * is also why adding the clock introduced a new failure mode -- a mixed window -- rather than only
+ * removing an old gap. A new source of time is a new way for two clocks to disagree.
  *
  * Rolling buffer of recently-played audio for cross-correlation.
  *

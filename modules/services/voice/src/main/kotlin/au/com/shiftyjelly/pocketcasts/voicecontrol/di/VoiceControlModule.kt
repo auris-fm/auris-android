@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.di
 import android.content.Context
 import android.media.AudioManager
 import android.os.PowerManager
+import android.speech.tts.TextToSpeech
 import android.telephony.TelephonyManager
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
@@ -125,8 +126,6 @@ abstract class VoiceControlModule {
     @Binds abstract fun bindEntityExtractor(impl: GrammarEntityExtractor): EntityExtractor
 
     @Binds abstract fun bindWakeWordDetector(impl: OpenWakeWordDetector): WakeWordDetector
-
-    @Binds abstract fun bindTtsEngine(impl: AndroidPlatformTtsEngine): TtsEngine
 
     @Binds abstract fun bindTranslationStage(impl: GoogleMlKitTranslator): TranslationStage
 
@@ -269,6 +268,47 @@ abstract class VoiceControlModule {
             earconPlayer: EarconPlayer,
             ttsEngine: TtsEngine,
         ): AudioFeedbackRenderer = AudioFeedbackRenderer(earconPlayer, ttsEngine)
+
+        /**
+         * Supplies the monitor's spoken-pause seam to Dagger.
+         *
+         * Same reason as the seams below: a default value on an `@Inject` constructor parameter
+         * does NOT satisfy Dagger, so without this binding the graph fails to build
+         * (`[Dagger/MissingBinding]` for `java.lang.Boolean`, injected at `PlaybackContextMonitor`).
+         *
+         * It is `false`, the monitor's own default: the injected predicate is how production reports
+         * that a stop was a user's spoken pause, and the default keeps that report absent rather than
+         * invented. The seam stays on the constructor so a test can present one directly.
+         */
+        @Provides
+        fun provideIsSpokenUserPause(): Boolean = false
+
+        /**
+         * Supplies the TTS engine.
+         *
+         * Provided rather than `@Binds`-bound to an `@Inject` constructor: that constructor takes a
+         * synthesizer seam whose type is a nullable function, and a nullable function type is not a
+         * binding Dagger can match -- the graph asks for a non-null `Function1<Function1<Boolean,
+         * Unit>, TextToSpeech>` and the whole build fails with `[Dagger/MissingBinding]`. Passing the
+         * factory here keeps the seam on the constructor (so a test can present its own) without
+         * asking Dagger to resolve it.
+         *
+         * The factory body is what the engine did when the seam was absent: construct a real
+         * `TextToSpeech` and report whether initialisation succeeded.
+         */
+        @Provides
+        @Singleton
+        fun provideTtsEngine(
+            @ApplicationContext context: Context,
+            playbackBufferRecorder: PlaybackBufferRecorder,
+        ): TtsEngine = AndroidPlatformTtsEngine(
+            context,
+            playbackBufferRecorder,
+        ) { onInitialized ->
+            TextToSpeech(context.applicationContext) { status ->
+                onInitialized(status == TextToSpeech.SUCCESS)
+            }
+        }
 
         /**
          * Supplies the monitor's optional enumeration seam to Dagger.

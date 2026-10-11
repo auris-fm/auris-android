@@ -130,7 +130,9 @@ private:
     int32_t mChannelCount = kChannelCount;
     std::atomic<bool> mActive{false};
     std::atomic<bool> mClosed{false};
-    std::mutex mStreamMutex;
+    // Mutable so the const accessor can read the live stream's device under the same lock that
+    // guards its assignment: the answer belongs to whichever stream is current.
+    mutable std::mutex mStreamMutex;
     std::mutex mWaitMutex;
     std::condition_variable mDataCv;
 

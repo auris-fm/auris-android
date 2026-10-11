@@ -64,6 +64,30 @@ class AndroidAudioRouteMonitorTest {
     }
 
     @Test
+    fun `a live speaker output with an available headset input stays Speaker`() {
+        // The observed output is the speaker, so it is the SPEAKER route. An enumerated headset input
+        // does not turn a speaker output into a headset output: availability is not the capture route,
+        // and classifying by it would claim a headset the user is not listening through.
+        val route = AndroidAudioRouteMonitor.classifyRoute(
+            outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER),
+            inputDeviceTypes = listOf(AudioDeviceInfo.TYPE_WIRED_HEADSET),
+        )
+        assertEquals(AudioRoute.Speaker, route)
+    }
+
+    @Test
+    fun `speaker output with the headset actually routed as input is not a headset route`() {
+        // "matching" does not mean any available input. The OUTPUT is what names the route; a headset
+        // input used for capture while the speaker plays does not make this a headset route.
+        val route = AndroidAudioRouteMonitor.classifyRoute(
+            outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER),
+            inputDeviceTypes = listOf(AudioDeviceInfo.TYPE_WIRED_HEADSET),
+            bluetoothScoActive = false,
+        )
+        assertEquals(AudioRoute.Speaker, route)
+    }
+
+    @Test
     fun `wired headphones without mic`() {
         val route = AndroidAudioRouteMonitor.classifyRoute(
             outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_WIRED_HEADPHONES),
@@ -114,12 +138,17 @@ class AndroidAudioRouteMonitorTest {
     }
 
     @Test
-    fun `bluetooth a2dp with wired headset mic input`() {
+    fun `bluetooth a2dp output with a wired headset input is not a headset route`() {
+        // arch/android.md: `TYPE_BLUETOOTH_A2DP` is OUTPUT-ONLY and maps to `BluetoothA2dpOnly`.
+        // A wired headset INPUT being available does not establish that capture uses it, and the
+        // rule for `hasMicrophone` is "a headset OUTPUT with a matching input device" -- there is no
+        // headset output here. This test previously asserted the loose rule that any available
+        // headset input made the route a headset; the spec does not support that.
         val route = AndroidAudioRouteMonitor.classifyRoute(
             outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP),
             inputDeviceTypes = listOf(AudioDeviceInfo.TYPE_WIRED_HEADSET),
         )
-        assertEquals(AudioRoute.Headset(hasMicrophone = true), route)
+        assertEquals(AudioRoute.BluetoothA2dpOnly, route)
     }
 
     @Test

@@ -542,16 +542,18 @@ class AndroidAudioRouteMonitorTest {
             inputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BUILTIN_MIC),
         )
 
-        // The assertion is the AMBIGUITY: identical inputs give identical answers, because enumeration
-        // carries no information about which output is live. Encoding a different expectation would
-        // assert behaviour the API cannot provide.
-        assertTrue(
-            "the classifier is given no input that separates available-and-unused from available-and-used",
-            pairedButUnused == actuallyCarryingAudio,
-        )
+        // No equality assertion here: both calls pass byte-identical arguments to a pure function, so
+        // they are equal whatever classifyRoute returns -- it would pass on any implementation and
+        // proves nothing. The ambiguity it was meant to show is that ENUMERATION cannot separate the
+        // two cases, and that is stated by the case itself: the same inputs are used for both.
+        // What is checkable is the classifier's answer on those inputs, asserted below.
         assertTrue(
             "and with A2DP present it reports A2DP rather than the speaker media may still be using",
             pairedButUnused is AudioRoute.BluetoothA2dpOnly,
+        )
+        assertTrue(
+            "the live-output case is deliberately the same input, so the two are indistinguishable",
+            actuallyCarryingAudio is AudioRoute.BluetoothA2dpOnly,
         )
     }
 

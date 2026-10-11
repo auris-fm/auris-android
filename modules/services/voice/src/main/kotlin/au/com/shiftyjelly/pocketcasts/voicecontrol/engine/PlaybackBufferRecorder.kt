@@ -133,7 +133,10 @@ class PlaybackBufferRecorder @Inject constructor(
         }
     }
 
-    fun write(pcm: FloatArray, positionMs: Long? = null) {
+    /** No axis recorded yet, or no timestamped contribution has arrived. */
+    private var positionAxis: PositionAxis? = null
+
+    fun write(pcm: FloatArray, positionMs: Long? = null, axis: PositionAxis = PositionAxis.Media) {
         synchronized(lock) {
             for (sample in pcm) {
                 buffer[writePos] = sample
@@ -143,6 +146,15 @@ class PlaybackBufferRecorder @Inject constructor(
             if (positionMs != null) {
                 // The position of the newest sample: the chunk's start plus its duration at 16 kHz.
                 lastPositionMs = positionMs + (pcm.size * 1_000L) / SAMPLE_RATE
+                // WHICH CLOCK that number belongs to. A window holding two contributions from
+                // different axes has no single position, and subtracting across them yields a
+                // number that is neither a media position nor a time -- the difference between two
+                // unrelated origins, reported as a delay.
+                if (positionAxis == null) {
+                    positionAxis = axis
+                } else if (positionAxis != axis) {
+                    positionAxis = PositionAxis.Mixed
+                }
             }
         }
     }
@@ -171,7 +183,16 @@ class PlaybackBufferRecorder @Inject constructor(
         synchronized(lock) {
             val samples = snapshotLocked()
             val end = lastPositionMs
-            val start = end?.let { it - (samples.size * 1_000L) / SAMPLE_RATE }
+            // A window spanning two clocks reports NO position. The start would otherwise be computed
+            // by subtracting the window's duration from a value on one axis and then compared against
+            // an instant on the other, producing a plausible delay that is really the distance between
+            // two unrelated origins. Absent is the honest answer, and the correlator already falls
+            // back to offset matching when a position is absent.
+            val start = if (positionAxis == PositionAxis.Mixed) {
+                null
+            } else {
+                end?.let { it - (samples.size * 1_000L) / SAMPLE_RATE }
+            }
             return PlaybackReference(samples, SAMPLE_RATE, start)
         }
     }
@@ -223,4 +244,19 @@ class PlaybackBufferRecorder @Inject constructor(
             }
         }
     }
+}
+
+/**
+ * Which clock a contribution's position is measured on. Two sources in different domains cannot be
+ * paired, so the recorder records which one it is holding rather than assuming they agree.
+ */
+enum class PositionAxis {
+    /** Seconds into the media being played (the episode renderer's tap). */
+    Media,
+
+    /** A monotonic time on `CLOCK_MONOTONIC` (the cloud answer's render clock). */
+    Monotonic,
+
+    /** Both have contributed: the window has no single position. */
+    Mixed,
 }

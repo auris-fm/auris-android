@@ -10,6 +10,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
+import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PositionAxis
 import java.nio.ByteBuffer
 import kotlin.math.max
 import kotlinx.coroutines.CoroutineScope
@@ -461,7 +462,14 @@ class CloudAudioPlayer(
                     // is the fallback and is a different quantity: it says what was SENT, not when it
                     // SOUNDED, and the two differ by the player's buffer latency.
                     val renderMs = renderClockMs(currentSampleRate) ?: (submittedSamples * 1_000L) / currentSampleRate
-                    playbackBufferRecorder?.write(referenceFloats, renderMs)
+                    playbackBufferRecorder?.write(
+                        pcm = referenceFloats,
+                        positionMs = renderMs,
+                        // The render clock is a TIME on CLOCK_MONOTONIC, not a media position. Naming
+                        // it lets the recorder refuse to pair this window against a media-positioned
+                        // one, which would otherwise subtract across two unrelated origins.
+                        axis = PositionAxis.Monotonic,
+                    )
                     submittedSamples += floats.size
                     offset += written
                 }

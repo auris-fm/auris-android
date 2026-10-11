@@ -410,8 +410,16 @@ class CloudAudioPlayer(
                     // Record only what the sink accepted, so the reference never holds audio the
                     // output rejected, and position it on the submitted-sample timeline.
                     val floats = s16leBytesToFloats(pcmBytes, written, offset)
-                    val positionMs = (submittedSamples * 1_000L) / sampleRateHz
-                    playbackBufferRecorder?.write(floats, positionMs)
+                    // The decoded PCM is at the codec's rate; the recorder's timeline is 16 kHz.
+                    // Recording it unchanged would store rate/16000 times too many samples for the
+                    // span of audio they represent, so the reference would claim a duration that
+                    // never played and correlation could never align against it. Resample to the
+                    // recorder's rate, keeping the producer-clock position computed from the
+                    // samples actually submitted (not the resampled count, which is a different
+                    // number at any other rate).
+                    val referenceFloats = resampleToRecorderRate(floats, currentSampleRate)
+                    val positionMs = (submittedSamples * 1_000L) / currentSampleRate
+                    playbackBufferRecorder?.write(referenceFloats, positionMs)
                     submittedSamples += floats.size
                     offset += written
                 }
@@ -491,6 +499,37 @@ class CloudAudioPlayer(
 
     companion object {
         private const val TAG = "CloudAudio"
+
+        /**
+         * Resamples [samples] from [sourceRateHz] to the recorder's 16 kHz timeline.
+         *
+         * Linear interpolation over the source samples: the reference is used for correlation, so a
+         * faithful time axis matters more than audio quality. At the recorder's own rate the input is
+         * returned unchanged, which is the common case and avoids touching the samples at all.
+         *
+         * The output length is derived from the input's DURATION, `size * recorderRate / sourceRate`,
+         * so a 48 kHz frame of N samples becomes N/3 samples -- the same span of time, not a
+         * re-interpretation of the same count at a different rate.
+         */
+        internal fun resampleToRecorderRate(
+            samples: FloatArray,
+            sourceRateHz: Int,
+            targetRateHz: Int = PlaybackBufferRecorder.SAMPLE_RATE,
+        ): FloatArray {
+            if (sourceRateHz == targetRateHz || samples.isEmpty()) return samples
+            val outLength = (samples.size.toLong() * targetRateHz / sourceRateHz).toInt()
+            if (outLength <= 0) return FloatArray(0)
+            val out = FloatArray(outLength)
+            val step = sourceRateHz.toDouble() / targetRateHz
+            for (i in 0 until outLength) {
+                val src = i * step
+                val lo = src.toInt()
+                val hi = if (lo + 1 < samples.size) lo + 1 else lo
+                val frac = (src - lo).toFloat()
+                out[i] = samples[lo] + (samples[hi] - samples[lo]) * frac
+            }
+            return out
+        }
 
         /**
          * Converts 16-bit little-endian PCM bytes to the float samples the echo reference stores.

@@ -34,6 +34,18 @@ class PlaybackBufferRecorder @Inject constructor(
     private var writePos = 0
     private var filled = false
 
+    /**
+     * Guards [buffer], [writePos] and [filled].
+     *
+     * The class doc's "single writer" is true of the SUBMISSION ORDER, not of the thread: the tap
+     * collector runs on Main, [CloudAudioPlayer] writes from the sink's IO coroutine, the route
+     * observer retires on Main, and [snapshot] is read from the ASR coroutine. [write] advances one
+     * field at a time, so a reader sees a consistent cursor; [retire] is a MULTI-FIELD transition
+     * (fill + copy + writePos + filled), so a reader interleaving it can size the window from one
+     * field and populate it from another.
+     */
+    private val lock = Any()
+
     private var tapJob: Job? = null
 
     /** Player-timeline position (ms) of the newest timestamped sample; null until one is written. */
@@ -77,31 +89,35 @@ class PlaybackBufferRecorder @Inject constructor(
      * the tail is the part that could still be heard at the microphone.
      */
     fun retire() {
-        // Nothing was ever submitted: there is no tail to keep and no stale audio to retire.
-        if (!filled && writePos == 0) return
-        val keep = minOf(DELAY_TAIL_SAMPLES, buffer.size, if (filled) buffer.size else writePos)
-        val tail = FloatArray(keep)
-        // Copy the newest `keep` samples in order, wrapping as needed, then write them back so the
-        // buffer contains only the still-plausible tail and the write cursor sits after it.
-        for (i in 0 until keep) {
-            val from = ((writePos - keep + i) % buffer.size + buffer.size) % buffer.size
-            tail[i] = buffer[from]
+        synchronized(lock) {
+            // Nothing was ever submitted: there is no tail to keep and no stale audio to retire.
+            if (!filled && writePos == 0) return
+            val keep = minOf(DELAY_TAIL_SAMPLES, buffer.size, if (filled) buffer.size else writePos)
+            val tail = FloatArray(keep)
+            // Copy the newest `keep` samples in order, wrapping as needed, then write them back so the
+            // buffer contains only the still-plausible tail and the write cursor sits after it.
+            for (i in 0 until keep) {
+                val from = ((writePos - keep + i) % buffer.size + buffer.size) % buffer.size
+                tail[i] = buffer[from]
+            }
+            buffer.fill(0f)
+            tail.copyInto(buffer, 0)
+            writePos = if (keep == buffer.size) 0 else keep
+            filled = false
         }
-        buffer.fill(0f)
-        tail.copyInto(buffer, 0)
-        writePos = if (keep == buffer.size) 0 else keep
-        filled = false
     }
 
     fun write(pcm: FloatArray, positionMs: Long? = null) {
-        for (sample in pcm) {
-            buffer[writePos] = sample
-            writePos = (writePos + 1) % buffer.size
-            if (writePos == 0) filled = true
-        }
-        if (positionMs != null) {
-            // The position of the newest sample: the chunk's start plus its duration at 16 kHz.
-            lastPositionMs = positionMs + (pcm.size * 1_000L) / SAMPLE_RATE
+        synchronized(lock) {
+            for (sample in pcm) {
+                buffer[writePos] = sample
+                writePos = (writePos + 1) % buffer.size
+                if (writePos == 0) filled = true
+            }
+            if (positionMs != null) {
+                // The position of the newest sample: the chunk's start plus its duration at 16 kHz.
+                lastPositionMs = positionMs + (pcm.size * 1_000L) / SAMPLE_RATE
+            }
         }
     }
 
@@ -110,7 +126,7 @@ class PlaybackBufferRecorder @Inject constructor(
      * written with a timestamp. Lets the correlation align a mic segment to a position rather than
      * to buffer offset, which is what holds when sources share the buffer.
      */
-    fun lastRecordedPositionMs(): Long? = lastPositionMs
+    fun lastRecordedPositionMs(): Long? = synchronized(lock) { lastPositionMs }
 
     /**
      * The reference window with the player position of its oldest retained sample.
@@ -128,18 +144,20 @@ class PlaybackBufferRecorder @Inject constructor(
     }
 
     fun snapshot(): FloatArray {
-        if (!filled && writePos == 0) return FloatArray(0)
-        val size = if (filled) buffer.size else writePos
-        val result = FloatArray(size)
-        if (filled) {
-            // Wrap: copy from writePos to end, then start to writePos
-            val tail = buffer.size - writePos
-            buffer.copyInto(result, 0, writePos, buffer.size)
-            buffer.copyInto(result, tail, 0, writePos)
-        } else {
-            buffer.copyInto(result, 0, 0, writePos)
+        synchronized(lock) {
+            if (!filled && writePos == 0) return FloatArray(0)
+            val size = if (filled) buffer.size else writePos
+            val result = FloatArray(size)
+            if (filled) {
+                // Wrap: copy from writePos to end, then start to writePos
+                val tail = buffer.size - writePos
+                buffer.copyInto(result, 0, writePos, buffer.size)
+                buffer.copyInto(result, tail, 0, writePos)
+            } else {
+                buffer.copyInto(result, 0, 0, writePos)
+            }
+            return result
         }
-        return result
     }
 
     companion object {

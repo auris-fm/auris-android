@@ -552,6 +552,66 @@ class CloudAudioPlayerTest {
     }
 
     @Test
+    fun `chunked resampling produces the same samples as resampling the whole stream`() {
+        // Counting samples proves no audio is LOST; it does not prove the samples are the RIGHT ones.
+        // A chunked conversion that carried the count but dropped the interpolation state would keep
+        // the total and put the wrong values in it -- the right number of samples of the wrong audio,
+        // which correlates as badly as missing audio does. So compare the VALUES against resampling
+        // the concatenation in one call, which is the definition the chunked path must reproduce.
+        // 24 kHz, not 48: step is sourceRate/targetRate, and 48000/16000 is exactly 3, so `frac` is
+        // always 0 and interpolated output equals nearest-sample output. At 24000/16000 = 1.5 the
+        // weights alternate 0.0 and 0.5, which is the only fixture that can tell an interpolating
+        // resampler from one that drops the fractional weight.
+        val rate = 24_000
+        val perChunk = 1000
+        val chunks = 8
+        val source = FloatArray(perChunk * chunks) { i -> kotlin.math.sin(i * 0.05).toFloat() }
+
+        // The chunked path: the production seam.
+        val chunked = ArrayList<Float>()
+        val resampler =
+            CloudAudioPlayer.Companion.ChunkResampler()
+        resampler.beginChunk(rate)
+        for (c in 0 until chunks) {
+            val slice = source.copyOfRange(c * perChunk, (c + 1) * perChunk)
+            resampler.resample(slice).forEach { chunked.add(it) }
+        }
+
+        // The definition, computed INDEPENDENTLY rather than by calling the production method again.
+        // A comparison of chunked-against-contiguous where both sides run the same method cannot
+        // detect a defect in that method: a mutation changes both sides identically and they still
+        // agree. Verified -- dropping the interpolation weight entirely left such a comparison green.
+        // This is linear interpolation of the concatenation at the same fractional positions, written
+        // out here so the production path is compared against the definition and not against itself.
+        val step = rate.toDouble() / au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.SAMPLE_RATE
+        val expectedValues = ArrayList<Float>()
+        var pos = 0.0
+        while (true) {
+            val lo = pos.toInt()
+            if (lo + 1 >= source.size) break
+            val frac = (pos - lo).toFloat()
+            expectedValues.add(source[lo] + (source[lo + 1] - source[lo]) * frac)
+            pos += step
+        }
+        val contiguous = FloatArray(expectedValues.size)
+        for (i in expectedValues.indices) contiguous[i] = expectedValues[i]
+
+        assertEquals(
+            "the chunked path must emit the same number of samples as the contiguous one",
+            contiguous.size,
+            chunked.size,
+        )
+        for (i in contiguous.indices) {
+            assertEquals(
+                "sample $i differs between chunked and contiguous resampling",
+                contiguous[i],
+                chunked[i],
+                1e-6f,
+            )
+        }
+    }
+
+    @Test
     fun `a partial sink write records only the accepted prefix`() {
         // The cloud answer must record accepted samples, not the whole submitted frame: a reference
         // holding audio the sink rejected would correlate against audio that never played.

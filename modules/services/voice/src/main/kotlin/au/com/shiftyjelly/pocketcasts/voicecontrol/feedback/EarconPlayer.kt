@@ -53,7 +53,7 @@ class EarconPlayer(
     private fun executorFor(): java.util.concurrent.ExecutorService = synchronized(executorLock) {
         executor?.takeIf { !it.isShutdown } ?: java.util.concurrent.Executors
             .newSingleThreadExecutor { runnable ->
-                Thread(runnable, "earcon-player").apply { isDaemon = true }
+                Thread(runnable, WORKER_THREAD_NAME).apply { isDaemon = true }
             }
             .also { executor = it }
     }
@@ -63,9 +63,23 @@ class EarconPlayer(
         executor?.let { "earcon-player" }
     }
 
-    /** Whether the worker has been shut down, for a test to observe the lifetime. */
+    /**
+     * Whether the worker has been RELEASED, for a test to observe the lifetime.
+     *
+     * Null alone does not mean shut down: dropping the reference while the thread is alive is precisely
+     * the leak the case exists to catch, and `executor?.isShutdown ?: true` reported that as shut down.
+     * The worker is released only when the reference is gone AND no `earcon-player` thread is still
+     * alive, so both are checked.
+     */
     internal fun workerIsShutdownForTest(): Boolean = synchronized(executorLock) {
-        executor?.isShutdown ?: true
+        val service = executor
+        val shutDown = service?.isShutdown ?: true
+        shutDown && !anyWorkerThreadAlive()
+    }
+
+    /** Whether any worker thread is still running, so a released-but-live worker is not read as gone. */
+    private fun anyWorkerThreadAlive(): Boolean = Thread.getAllStackTraces().keys.any {
+        it.name == WORKER_THREAD_NAME && it.isAlive
     }
 
     /** Runs [block] on the player's own thread and returns its result, so call order is preserved. */
@@ -261,6 +275,9 @@ class EarconPlayer(
     }
 
     internal companion object {
+        /** The name the worker thread carries, so the test observer can find it by name. */
+        const val WORKER_THREAD_NAME = "earcon-player"
+
         /** The rate the shared echo reference and the correlator work at. */
         const val REFERENCE_RATE_HZ = 16_000
 

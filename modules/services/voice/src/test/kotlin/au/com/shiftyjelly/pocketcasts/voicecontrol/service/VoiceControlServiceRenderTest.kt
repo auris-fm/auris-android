@@ -62,10 +62,14 @@ class VoiceControlServiceRenderTest {
     private fun noopIntent(): VoiceIntent = VoiceIntent.Playback.Pause
 
     @Test
-    fun `a delivery failure does not skip the turn's grace cleanup`() = runTest {
-        // Cleanup runs after the render, so a render failure that escaped would skip it — leaving the
-        // window un-advanced for a command the user did give. The failure is reported from inside the
-        // render job, so the call still completes.
+    fun `a delivery failure is handled inside the render rather than escaping it`() = runTest {
+        // The property this case CAN establish: a render failure is reported from inside the render
+        // job, so it never escapes the call. It does NOT measure grace cleanup -- that belongs to the
+        // caller (`gracePeriodSignal.onCommandRecognized` after this returns), and this case would pass
+        // with that call deleted. The name says so now; the cleanup is measured through the production
+        // launch path in `an ordinary failure keeps feedback and grace cleanup, and the next command is
+        // handled`, and the run's own render path is covered by `the service arms its failure handling
+        // before rendering`.
         val recorder = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder(
             au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap(),
         )
@@ -89,12 +93,11 @@ class VoiceControlServiceRenderTest {
             service.renderWithFailureHandling(noopIntent())
             // No local flag is asserted here: `cleanupRan = true` before the assertion would pass
             // whenever the call returns, and the call THROWS if the failure escapes -- so a flag
-            // re-tests the return, not any cleanup. The property this case can establish is that a
-            // delivery failure is handled inside the render, leaving the method to return normally.
-            // The grace cleanup is measured through the production launch path in
-            // `an ordinary failure keeps feedback and grace cleanup, and the next command is handled`,
-            // which is where that cleanup actually lives (handleIntent's launch block, not here).
-            assertNotNull("the renderer's failure handling must be installed", renderer.onPlaybackFailure)
+            // re-tests the return, not any cleanup.
+            // No assertion on `renderer.onPlaybackFailure` being non-null: it is initialised to a
+            // non-null default at construction, so that check cannot fail however the service behaves.
+            // The service's arming is covered by `the service arms its failure handling before
+            // rendering`, which reads the handler the service installed.
         } finally {
             renderer.release()
         }

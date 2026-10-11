@@ -445,6 +445,38 @@ class CloudAudioPlayerTest {
     }
 
     @Test
+    fun `a reused player publishes a live route on its second playback`() {
+        // The claim is made in the constructor, so the observer slot is held for the player's whole
+        // life, and one player serves several turns. If stop() permanently marked that claim
+        // released, the SECOND playback would publish into a slot the observer no longer counts as
+        // held -- the route would be observable only through a claim that is already spent.
+        val observer = au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver()
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            routedOutputObserver = observer,
+        )
+        val chunk = byteArrayOf(0x00, 0x01, 0x02, 0x03)
+
+        wired.submitFrame(chunk)
+        wired.play()
+        assertTrue("first playback holds the claim", observer.holdsAClaim())
+        wired.stop()
+        assertFalse("stop releases the claim", observer.holdsAClaim())
+
+        // The same player, a second turn.
+        wired.submitFrame(chunk)
+        wired.play()
+        assertTrue(
+            "the second playback must hold a live claim again, not publish into a spent one",
+            observer.holdsAClaim(),
+        )
+        wired.stop()
+        assertFalse("and stop must release it again", observer.holdsAClaim())
+        wired.release()
+    }
+
+    @Test
     fun `a partial sink write records only the accepted prefix`() {
         // The cloud answer must record accepted samples, not the whole submitted frame: a reference
         // holding audio the sink rejected would correlate against audio that never played.
@@ -588,9 +620,15 @@ class CloudAudioPlayerTest {
             sampleRateHz = 16000,
             routedOutputObserver = observer,
         )
+        // Claimed when the stream actually begins sounding, not when the object is built: the claim
+        // belongs to a playback run, and a player that has never played is not producing a route for
+        // anything to read.
+        assertFalse("a player that has not sounded holds no observation", observer.holdsAClaim())
+        player.submitFrame(byteArrayOf(0x00, 0x01, 0x02, 0x03))
+        player.play()
+        assertTrue("a sounding player holds the observation", observer.holdsAClaim())
         try {
-            // Claimed at construction, so the observation belongs to this stream even before it sounds.
-            assertTrue("the player must hold an observation", observer.holdsAClaim())
+            player.stop()
         } finally {
             player.release()
         }
@@ -615,7 +653,12 @@ class CloudAudioPlayerTest {
             routedOutputObserver = observer,
         )
         try {
-            // The first retires after the second has claimed: the successor keeps the observation.
+            // Both are playing, so both hold claims; the first then retires. The successor keeps the
+            // observation -- the ownership token is what separates their claims.
+            first.submitFrame(byteArrayOf(0x00, 0x01, 0x02, 0x03))
+            first.play()
+            second.submitFrame(byteArrayOf(0x00, 0x01, 0x02, 0x03))
+            second.play()
             first.release()
             assertTrue(
                 "a superseded player must not withdraw its successor's observation",

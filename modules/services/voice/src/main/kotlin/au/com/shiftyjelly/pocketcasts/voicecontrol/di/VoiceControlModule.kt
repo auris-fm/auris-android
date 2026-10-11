@@ -286,6 +286,15 @@ abstract class VoiceControlModule {
         @Provides
         fun provideEnumeratedDeviceTypes(): (() -> AndroidAudioRouteMonitor.EnumeratedDevices)? = null
 
+        /**
+         * The live capture route, read from the capture stream's own device id. Provided rather than
+         * defaulted because this is the observation PR124 requires: without it the monitor can only
+         * see device availability, which is not the routing. Null while no capture stream is live,
+         * which the monitor reads as "unknown" rather than as "no microphone".
+         */
+        @Provides
+        fun provideCaptureRoutedDeviceId(): (() -> Int?)? = { au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture.routedCaptureDeviceId() }
+
         @Provides
         @Singleton
         fun provideCloudAudioPlayer(

@@ -55,6 +55,13 @@ class MicrophoneCapture @Inject constructor(
         fun isNativeCapturing(): Boolean = OboeNative.nativeIsCapturing()
 
         /**
+         * The device id the live capture stream is routed to, or null when no capture route is
+         * observed. Null is "unknown", not "no microphone": the platform reports no device for the
+         * live stream, and substituting an enumerated one would present availability as routing.
+         */
+        fun routedCaptureDeviceId(): Int? = OboeNative.nativeRoutedCaptureDeviceId().takeIf { it != OboeNative.NO_ROUTED_DEVICE }
+
+        /**
          * Detector aggregates for capture diagnosis, or null when unavailable.
          *
          * Returns null in a release build, so the diagnostic cannot be reached from a shipped app: the

@@ -39,10 +39,30 @@ class AndroidAudioRouteMonitor @Inject constructor(
      * no stream is routed to — the case that distinguishes the two surfaces.
      */
     private val enumeratedDeviceTypes: (() -> EnumeratedDevices)? = null,
+    /**
+     * The device id the live capture stream is routed to, or null when no capture route is observed.
+     * A provider, because the answer belongs to whichever stream is live.
+     */
+    private val captureRoutedDeviceId: (() -> Int?)? = null,
 ) : AudioRouteMonitor {
 
-    /** Output and input types the platform enumerates, as one value so they cannot be read apart. */
-    data class EnumeratedDevices(val outputs: List<Int>, val inputs: List<Int>)
+    /**
+     * Output and input types the platform enumerates, as one value so they cannot be read apart,
+     * plus the input devices' IDs so a device observed on the live capture stream can be resolved to
+     * its type. The pair is needed because the capture observation is an ID while routing wants a
+     * type; keeping them together is what lets the observation be used without a second enumeration.
+     */
+    data class EnumeratedDevices(
+        val outputs: List<Int>,
+        val inputs: List<Int>,
+        val inputIds: List<Int> = emptyList(),
+    ) {
+        /** The type of the observed capture device, or null when it is not among the enumerated ones. */
+        fun typeOfInput(deviceId: Int): Int? {
+            val index = inputIds.indexOf(deviceId)
+            return if (index >= 0 && index < inputs.size) inputs[index] else null
+        }
+    }
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val mutableRoute = MutableStateFlow(readRoute())
     private val mutableAvailability = MutableStateFlow(readAvailability())
@@ -165,18 +185,27 @@ class AndroidAudioRouteMonitor @Inject constructor(
         // Unknown is the honest one: falling back to enumeration here would substitute availability for
         // the observation and impose headset setup on a session that may use the speaker.
         val routed = routedOutputObserver?.current() ?: return AudioRoute.Unknown
+        // The observed CAPTURE input, resolved to its type. Null when no capture route is observed,
+        // which is "unknown" rather than "no microphone".
+        val captureType = captureRoutedDeviceId?.invoke()
+            ?.let { devices.typeOfInput(it) }
         return classifyRoute(
             outputDeviceTypes = listOf(routed),
             inputDeviceTypes = inputDevices,
             bluetoothScoActive = audioManager.isBluetoothScoOn,
+            captureInputType = captureType,
         )
     }
 
     /** The injected enumeration when present, otherwise the platform's. */
-    private fun enumerated(): EnumeratedDevices = enumeratedDeviceTypes?.invoke() ?: EnumeratedDevices(
-        outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.type },
-        inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).map { it.type },
-    )
+    private fun enumerated(): EnumeratedDevices = enumeratedDeviceTypes?.invoke() ?: run {
+        val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+        EnumeratedDevices(
+            outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.type },
+            inputs = inputs.map { it.type },
+            inputIds = inputs.map { it.id },
+        )
+    }
 
     /** What the system offers, for setup and discovery. Never used to derive [route]. */
     @Suppress("DEPRECATION") // isBluetoothScoOn deprecated in API 34; used to distinguish enumerated-but-inactive SCO
@@ -196,11 +225,21 @@ class AndroidAudioRouteMonitor @Inject constructor(
     }
 
     internal companion object {
+        /**
+         * @param captureInputType the TYPE of the device the live capture stream is observed on, or
+         * null when no capture route is observed. PR124: a headset output reports a usable microphone
+         * only when a routed capture input is observed; an available but unrouted input does not.
+         */
         fun classifyRoute(
             outputDeviceTypes: List<Int>,
             inputDeviceTypes: List<Int>,
             bluetoothScoActive: Boolean = false,
+<<<<<<< HEAD
             bleCommunicationDeviceSelected: Boolean = false,
+||||||| parent of 9e454f5 (feat(voice): observe the routed capture device and classify by the observed pair)
+=======
+            captureInputType: Int? = null,
+>>>>>>> 9e454f5 (feat(voice): observe the routed capture device and classify by the observed pair)
         ): AudioRoute {
             val hasWiredInput = inputDeviceTypes.any { it.isAutoSelectedExternalMicrophone() }
             val hasBleInput = inputDeviceTypes.any { it.isBleHeadset() }
@@ -208,7 +247,10 @@ class AndroidAudioRouteMonitor @Inject constructor(
             val hasBleOutput = outputDeviceTypes.any { it.isBleHeadset() }
             val hasBleDevice = hasBleInput || hasBleOutput
             val hasA2dp = outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
-            val hasScoDevices = outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO } ||
+            // SCO as an OUTPUT, not as an available input: an input must not change the output
+            // classification. PR124: "an input cannot change the output classification".
+            val hasScoOutput = outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+            val hasScoDevices = hasScoOutput ||
                 inputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
 
             return when {
@@ -217,11 +259,18 @@ class AndroidAudioRouteMonitor @Inject constructor(
                 // OUTPUT with a matching input device", so a route with no headset output is not a
                 // headset route however many headset inputs the system offers.
                 hasWiredOrBleOutput ->
-                    AudioRoute.Headset(hasMicrophone = hasWiredOrBleInput)
+                    AudioRoute.Headset(
+                        hasMicrophone = captureInputType?.isWiredOrBleHeadsetInput() == true,
+                    )
 
-                // Classic BT with a live SCO link — mic is on the headset.
-                (hasScoDevices || hasA2dp) && bluetoothScoActive ->
-                    AudioRoute.Headset(hasMicrophone = true)
+                // Classic BT with an observed SCO CAPTURE input: the output remains what it is (A2DP
+                // or SCO), and the usable capture input is recorded from the observation rather than
+                // inferred from the link state. A requested/profile-active SCO link is not itself
+                // proof of the live input, so the output is not relabelled a Headset on SCO alone.
+                hasScoOutput && bluetoothScoActive ->
+                    AudioRoute.Headset(
+                        hasMicrophone = captureInputType?.isScoOrHeadsetInput() == true,
+                    )
 
                 // A2DP (and/or enumerated-but-inactive SCO) — acquisition must open SCO
                 // before capture, otherwise Oboe binds the phone bottom mic.
@@ -236,6 +285,10 @@ class AndroidAudioRouteMonitor @Inject constructor(
         private fun Int.isWiredHeadsetOutput(): Boolean {
             return this == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
                 this == AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+        }
+
+        private fun Int.isScoOrHeadsetInput(): Boolean {
+            return this == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || isWiredOrBleHeadsetInput()
         }
 
         private fun Int.isBleHeadset(): Boolean {

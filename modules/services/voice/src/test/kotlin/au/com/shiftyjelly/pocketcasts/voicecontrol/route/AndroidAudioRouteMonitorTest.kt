@@ -56,9 +56,12 @@ class AndroidAudioRouteMonitorTest {
 
     @Test
     fun `wired headset with mic`() {
+        // The mic is usable because the CAPTURE input is OBSERVED, not because an input is enumerated:
+        // PR124 requires the routed capture observation, and availability alone does not establish it.
         val route = AndroidAudioRouteMonitor.classifyRoute(
             outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_WIRED_HEADSET),
             inputDeviceTypes = listOf(AudioDeviceInfo.TYPE_WIRED_HEADSET),
+            captureInputType = AudioDeviceInfo.TYPE_WIRED_HEADSET,
         )
         assertEquals(AudioRoute.Headset(hasMicrophone = true), route)
     }
@@ -102,6 +105,7 @@ class AndroidAudioRouteMonitorTest {
             outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_SCO),
             inputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_SCO),
             bluetoothScoActive = true,
+            captureInputType = AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
         )
         assertEquals(AudioRoute.Headset(hasMicrophone = true), route)
     }
@@ -133,6 +137,7 @@ class AndroidAudioRouteMonitorTest {
             ),
             inputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_SCO),
             bluetoothScoActive = true,
+            captureInputType = AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
         )
         assertEquals(AudioRoute.Headset(hasMicrophone = true), route)
     }
@@ -189,8 +194,49 @@ class AndroidAudioRouteMonitorTest {
                 AudioDeviceInfo.TYPE_WIRED_HEADSET,
             ),
             inputDeviceTypes = listOf(AudioDeviceInfo.TYPE_WIRED_HEADSET),
+            captureInputType = AudioDeviceInfo.TYPE_WIRED_HEADSET,
         )
         assertEquals(AudioRoute.Headset(hasMicrophone = true), route)
+    }
+
+    @Test
+    fun `a headset output with no observed capture input reports no usable microphone`() {
+        // PR124: `hasMicrophone = true` requires an OBSERVED routed capture input. Enumerated and
+        // available is not observed, and reporting a mic the routing does not show would make
+        // MicExposure.Isolated a claim about a pair nobody saw.
+        val route = AndroidAudioRouteMonitor.classifyRoute(
+            outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_WIRED_HEADSET),
+            inputDeviceTypes = listOf(AudioDeviceInfo.TYPE_WIRED_HEADSET),
+            captureInputType = null,
+        )
+        assertEquals(AudioRoute.Headset(hasMicrophone = false), route)
+    }
+
+    @Test
+    fun `an active SCO link without an observed capture input is not proof of a headset microphone`() {
+        // A requested or profile-active SCO link is not itself proof of the live capture/output pair.
+        // The output stays what it is and the mic is reported only from the observation.
+        val route = AndroidAudioRouteMonitor.classifyRoute(
+            outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_SCO),
+            inputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_SCO),
+            bluetoothScoActive = true,
+            captureInputType = null,
+        )
+        assertEquals(AudioRoute.Headset(hasMicrophone = false), route)
+    }
+
+    @Test
+    fun `a2dp output with an observed SCO capture input keeps its own output`() {
+        // The mixed case: the OUTPUT is A2DP and stays A2DP; the usable capture input is recorded
+        // from the observation. Labelling the output Headset because the input is SCO would lose the
+        // output route the user is actually listening through.
+        val route = AndroidAudioRouteMonitor.classifyRoute(
+            outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP),
+            inputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_SCO),
+            bluetoothScoActive = true,
+            captureInputType = AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+        )
+        assertEquals(AudioRoute.BluetoothA2dpOnly, route)
     }
 
     @Test

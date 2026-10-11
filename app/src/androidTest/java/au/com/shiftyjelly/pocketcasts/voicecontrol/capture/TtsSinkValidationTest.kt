@@ -130,7 +130,23 @@ class TtsSinkValidationTest {
         val engine = AndroidPlatformTtsEngine(ctx, PlaybackBufferRecorder(FingerprintPcmTap()))
         try {
             engine.warmUp("en")
-            assertTrue("engine constructs with a media-stream sink", true)
+            // An assertion on `true` cannot fail, so it never reads the sink. The observable form of
+            // "the answer rides the media stream" is that the engine actually plays: synthesize a
+            // short utterance and require the engine to report playback, which a sink wired to the
+            // wrong stream would not produce here. This is a device test, so the platform track is real.
+            val played = kotlinx.coroutines.withTimeoutOrNull(20_000) {
+                engine.speak("route check", "en")
+                var seen = false
+                while (!seen) {
+                    if (engine.isPlayingSynthesizedAudio()) seen = true else kotlinx.coroutines.delay(50)
+                }
+                seen
+            }
+            assertEquals(
+                "the answer must actually play through the engine's sink",
+                true,
+                played,
+            )
         } finally {
             engine.release()
         }

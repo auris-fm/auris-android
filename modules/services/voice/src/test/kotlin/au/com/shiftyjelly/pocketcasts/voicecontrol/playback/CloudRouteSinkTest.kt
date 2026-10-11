@@ -296,15 +296,16 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `a negative position_seconds is resolved the way the local executor resolves it`() = runTest {
-        // The mapper does not coerce the sign, so the sink must resolve it the same way the local
-        // path does (`positionSeconds.coerceAtLeast(0)`) rather than diverging on one input.
+    fun `a negative position_seconds resolves as an offset back from the episode end`() = runTest {
+        // voice-intents: "negative values are offsets back from the episode end." Clamping to zero
+        // would turn "30 s from the end" into "the beginning" -- a different instruction.
         val deps = TestDeps(
+            episodeDurationSeconds = 1800,
             events = flowOf(
                 CloudRouteEvent.Action(
                     tool = "playback",
                     action = "seek_to",
-                    params = mapOf("position_seconds" to -10),
+                    params = mapOf("position_seconds" to -30),
                 ),
                 CloudRouteEvent.Done(1, 0),
             ),
@@ -314,8 +315,56 @@ class CloudRouteSinkTest {
         sink.routeToCloud("go back", VoiceIntent.CloudTier.Premium, playbackContext)
 
         assertTrue(
-            "a negative position resolves as the local executor resolves it (calls=${deps.playback.calls})",
-            deps.playback.calls.contains("seekTo:0"),
+            "a negative position resolves against the episode end (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("seekTo:1770"),
+        )
+    }
+
+    @Test
+    fun `both reference and ordinary targets refuse rather than preferring one`() = runTest {
+        // The two forms are mutually exclusive. Testing them in sequence would express precedence
+        // where the contract requires exactly one, so a call carrying both would execute instead of
+        // being refused -- and it would execute against whichever this code happened to try first.
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf(
+                        "position_seconds" to 999,
+                        "reference_position_ms" to 1_000L,
+                    ),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+
+        deps.sink().routeToCloud("seek", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertTrue(
+            "a call carrying both forms must be refused (calls=${deps.playback.calls})",
+            deps.playback.calls.none { it.startsWith("seekTo") },
+        )
+    }
+
+    @Test
+    fun `neither target refuses`() = runTest {
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = emptyMap(),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+
+        deps.sink().routeToCloud("seek nowhere", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertTrue(
+            "a seek with no target must be refused (calls=${deps.playback.calls})",
+            deps.playback.calls.none { it.startsWith("seekTo") },
         )
     }
 
@@ -1453,6 +1502,7 @@ class CloudRouteSinkTest {
         /** Monotonic, so a closure during a turn is visible after a wake clears [privacyClosed]. */
         var privacyClosures: Long = 0,
         var playbackStopClosures: Long = 0,
+        private val episodeDurationSeconds: Int = 0,
         // Keys built from the same constant the sink uses, so renaming the
         // wire code breaks these tests rather than silently detaching the
         // template from it.
@@ -1515,6 +1565,7 @@ class CloudRouteSinkTest {
             playbackCommandRevision = { commandRevision },
             isPrivacyClosed = { privacyClosed },
             privacyClosureCount = { playbackStopClosures },
+            episodeDurationSeconds = { episodeDurationSeconds },
             audioPlayer = audioPlayer,
         )
     }
@@ -1575,8 +1626,15 @@ class CloudRouteSinkTest {
             return VoiceResponse.Silent
         }
 
-        override suspend fun seekTo(positionSeconds: Int): VoiceResponse {
-            calls += "seekTo:$positionSeconds"
+        override suspend fun seekTo(positionSeconds: Int, episodeDurationSeconds: Int): VoiceResponse {
+            // Resolve the schema's signed semantics the same way production does, so a fake cannot
+            // make a negative position pass by clamping it where the real sink resolves an offset.
+            val resolved = if (positionSeconds < 0) {
+                (episodeDurationSeconds + positionSeconds).coerceIn(0, episodeDurationSeconds)
+            } else {
+                positionSeconds
+            }
+            calls += "seekTo:$resolved"
             return VoiceResponse.Silent
         }
 

@@ -66,6 +66,12 @@ class CloudRouteSink internal constructor(
      */
     private val playbackCommandRevision: () -> Long = { 0L },
     /**
+     * The current episode's duration in seconds, for resolving a NEGATIVE absolute position as an
+     * offset back from the episode end. Zero when no episode is loaded, which makes such a seek
+     * resolve to the beginning rather than to a position the episode does not have.
+     */
+    private val episodeDurationSeconds: () -> Int = { 0 },
+    /**
      * Whether a privacy event has closed the window, so restoring the turn's pause would resume
      * playback the user's own privacy action ended. A privacy closure does not go through the
      * playback layer, so it does not advance the command revision and must be consulted separately.
@@ -105,6 +111,7 @@ class CloudRouteSink internal constructor(
         currentLocale = currentLocale,
         isHostPlaying = { playbackContextMonitor.isHostAudioActive.value },
         playbackCommandRevision = playbackContextMonitor::playbackCommandRevision,
+        episodeDurationSeconds = playbackContextMonitor::episodeDurationSeconds,
         isPrivacyClosed = playbackContextMonitor::isPrivacyClosed,
         // Only closures that coincided with the host's audio stopping carry a playback fact. A
         // visibility-only closure must not strand a turn-owned pause: the hold policy releases a
@@ -547,24 +554,23 @@ class CloudRouteSink internal constructor(
             if (activeTurnId != myId) return@withLock false
             when (action) {
                 "seek_to" -> {
-                    // Two forms, and they are different units rather than alternatives to try:
-                    // `position_seconds` is already SINK time (voice-intents: "Ordinary
-                    // seek_to.position_seconds already uses sink seconds"), while
-                    // `reference_position_ms` is REFERENCE time and needs the fingerprint mapping.
-                    // Treating one as the other is the substitution the alignment rules forbid.
+                    // The two forms are MUTUALLY EXCLUSIVE, not ordered: `position_seconds` is sink
+                    // time ("Ordinary seek_to.position_seconds already uses sink seconds") while
+                    // `reference_position_ms` is reference time needing the fingerprint mapping.
+                    // Trying one and then the other expresses precedence where the contract requires
+                    // exactly one, so a call carrying both would execute instead of being refused.
                     val positionSeconds = params.positionSeconds()
+                    val referenceMs = params.referencePositionMs()
+                    if ((positionSeconds == null) == (referenceMs == null)) return@withLock false
                     if (positionSeconds != null) {
-                        // Sink seconds, used exactly as produced: no mapping, no unit conversion.
-                        // The clamp matches the local executor's own rule for this intent
-                        // (`positionSeconds.coerceAtLeast(0)`), so the cloud path and the local path
-                        // resolve the same value the same way rather than diverging on one input.
-                        val target = positionSeconds.coerceAtLeast(0)
-                        capturePreActionPosition(target * 1000L, turnState)
-                        playbackSink.seekTo(target)
+                        // The signed semantics belong to the sink: a negative is an offset back from
+                        // the episode end. Clamping it here would turn "seek back 30 s from the end"
+                        // into "seek to the beginning", a different instruction.
+                        capturePreActionPosition(positionSeconds * 1000L, turnState)
+                        playbackSink.seekTo(positionSeconds, episodeDurationSeconds())
                         return@withLock true
                     }
-                    val referenceMs = params.referencePositionMs() ?: return@withLock false
-                    capturePreActionPosition(referenceMs, turnState)
+                    capturePreActionPosition(referenceMs!!, turnState)
                     // A reference target with no usable mapping is refused, not approximated.
                     seekToReference(referenceMs)
                 }
@@ -584,7 +590,7 @@ class CloudRouteSink internal constructor(
 
                 "stop_quote" -> {
                     val restoreMs = turnState.preQuotePositionMs ?: return@withLock false
-                    playbackSink.seekTo(restoreMs.toInt() / 1000)
+                    playbackSink.seekTo(restoreMs.toInt() / 1000, episodeDurationSeconds())
                     true
                 }
 
@@ -699,7 +705,9 @@ class CloudRouteSink internal constructor(
     private suspend fun seekToReference(referenceMs: Long): Boolean {
         val referenceSeconds = referenceMs / 1000.0
         val playbackMs = fingerprintTimingManager.playbackTimeMs(referenceSeconds) ?: return false
-        playbackSink.seekTo((playbackMs / 1000).coerceAtLeast(0))
+        // The mapped result is sink time and non-negative by construction, so the signed-offset rule
+        // does not apply; duration is passed for the call's own contract rather than used here.
+        playbackSink.seekTo((playbackMs / 1000).coerceAtLeast(0), episodeDurationSeconds())
         return true
     }
 

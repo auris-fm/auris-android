@@ -97,8 +97,16 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         return VoiceResponse.Silent
     }
 
-    override suspend fun seekTo(positionSeconds: Int): VoiceResponse {
-        playbackManager.seekToTimeMsSuspend(positionSeconds * 1000)
+    override suspend fun seekTo(positionSeconds: Int, episodeDurationSeconds: Int): VoiceResponse {
+        // The schema's signed semantics, resolved here rather than by each caller: a negative value is
+        // an offset back from the episode end. Clamping it would silently convert "seek back 30 s
+        // from the end" into "seek to the beginning", which is a different instruction.
+        val resolvedSeconds = if (positionSeconds < 0) {
+            (episodeDurationSeconds + positionSeconds).coerceIn(0, episodeDurationSeconds)
+        } else {
+            positionSeconds
+        }
+        playbackManager.seekToTimeMsSuspend(resolvedSeconds * 1000)
         return VoiceResponse.Silent
     }
 

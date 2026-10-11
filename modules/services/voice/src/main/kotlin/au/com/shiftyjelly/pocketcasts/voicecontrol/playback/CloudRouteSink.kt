@@ -559,10 +559,16 @@ class CloudRouteSink internal constructor(
                     // `reference_position_ms` is reference time needing the fingerprint mapping.
                     // Trying one and then the other expresses precedence where the contract requires
                     // exactly one, so a call carrying both would execute instead of being refused.
+                    // Presence, not parseability: a field that is present but not a number still
+                    // CLAIMS the form, so a call carrying it plus a valid other form supplies two
+                    // forms and must be refused. Testing the parsed values instead would read an
+                    // unparseable field as absent and execute the other one.
+                    val hasPositionField = params.containsKey("position_seconds")
+                    val hasReferenceField = params.containsKey("reference_position_ms")
+                    if (hasPositionField == hasReferenceField) return@withLock false
                     val positionSeconds = params.positionSeconds()
                     val referenceMs = params.referencePositionMs()
-                    if ((positionSeconds == null) == (referenceMs == null)) return@withLock false
-                    if (positionSeconds != null) {
+                    if (hasPositionField && positionSeconds != null) {
                         // The signed semantics belong to the sink: a negative is an offset back from
                         // the episode end. Clamping it here would turn "seek back 30 s from the end"
                         // into "seek to the beginning", a different instruction.
@@ -570,7 +576,10 @@ class CloudRouteSink internal constructor(
                         playbackSink.seekTo(positionSeconds, episodeDurationSeconds())
                         return@withLock true
                     }
-                    capturePreActionPosition(referenceMs!!, turnState)
+                    // The reference branch is reached only when that form was supplied, so a null
+                    // here means the value did not parse and the call is refused.
+                    if (referenceMs == null) return@withLock false
+                    capturePreActionPosition(referenceMs, turnState)
                     // A reference target with no usable mapping is refused, not approximated.
                     seekToReference(referenceMs)
                 }

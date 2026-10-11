@@ -348,6 +348,55 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `both forms present refuses even when only one value parses`() = runTest {
+        // Presence is what claims a form, not parseability. Here `position_seconds` is present but
+        // not a number, so a check on the PARSED values would read it as absent and execute the valid
+        // reference form -- supplying two forms and executing one.
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf(
+                        "position_seconds" to "not-a-number",
+                        "reference_position_ms" to 1_000L,
+                    ),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+
+        deps.sink().routeToCloud("seek", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertTrue(
+            "two present forms must refuse even when one does not parse (calls=${deps.playback.calls})",
+            deps.playback.calls.none { it.startsWith("seekTo") },
+        )
+    }
+
+    @Test
+    fun `a single present form that does not parse refuses without mutating`() = runTest {
+        // One form, unparseable: nothing to execute, and nothing may be tried in its place.
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("position_seconds" to "not-a-number"),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+
+        deps.sink().routeToCloud("seek", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertTrue(
+            "an unparseable single form must refuse (calls=${deps.playback.calls})",
+            deps.playback.calls.none { it.startsWith("seekTo") },
+        )
+    }
+
+    @Test
     fun `neither target refuses`() = runTest {
         val deps = TestDeps(
             events = flowOf(

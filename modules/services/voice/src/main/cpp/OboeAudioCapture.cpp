@@ -118,6 +118,10 @@ bool OboeAudioCapture::open() {
     // Record actual parameters (may differ from requested)
     mSampleRate = mStream->getSampleRate();
     mChannelCount = mStream->getChannelCount();
+    // The ACTUAL routed device, read only after open. It can differ from a requested device, and the
+    // OpenSL ES backend reports kUnspecified, so callers must treat kUnspecified as unknown rather
+    // than substituting an enumerated one.
+    mRoutedDeviceId.store(mStream->getDeviceId(), std::memory_order_release);
 
     LOGI("Opened input stream: %d Hz, %d channels",
          mSampleRate, mChannelCount);
@@ -150,6 +154,9 @@ int32_t OboeAudioCapture::readData(int16_t* outBuffer, int32_t maxFrames) {
 void OboeAudioCapture::stop() {
     mActive.store(false, std::memory_order_release);
     mDataCv.notify_all();
+    // The routed device is a fact about a live stream: once capture stops there is no observed
+    // capture route, and reporting the last one would be a stale observation.
+    mRoutedDeviceId.store(oboe::kUnspecified, std::memory_order_release);
 
     std::lock_guard<std::mutex> lock(mStreamMutex);
     if (mStream != nullptr) {
@@ -190,7 +197,9 @@ int32_t OboeAudioCapture::getDeviceId() {
     }
     return mStream->getDeviceId();
 }
-
+int32_t OboeAudioCapture::getRoutedDeviceId() const {
+    return mRoutedDeviceId.load(std::memory_order_acquire);
+}
 bool OboeAudioCapture::isActive() const {
     return mActive.load(std::memory_order_acquire)
         && !mClosed.load(std::memory_order_acquire);

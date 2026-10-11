@@ -97,6 +97,16 @@ public:
     // -1 when no stream is open.
     int32_t getDeviceId();
 
+    /**
+     * The device the opened capture stream is actually routed to, or kUnspecified when the platform
+     * does not report one.
+     *
+     * Read from the stream itself after open, which is the only way to know the ACTUAL device: it can
+     * differ from what was requested, and OpenSL ES backends always report kUnspecified. A caller
+     * must treat kUnspecified as unknown rather than substituting an enumerated device -- availability
+     * is not routing. Matches AudioDeviceInfo.getId() on the Java side.
+     */
+    int32_t getRoutedDeviceId() const;
     // --- oboe::AudioStreamDataCallback ---
     oboe::DataCallbackResult onAudioReady(
         oboe::AudioStream* audioStream,
@@ -110,6 +120,9 @@ public:
 
 private:
     oboe::AudioStream* mStream = nullptr;
+
+    /** The device the live capture stream is routed to; kUnspecified when none is observed. */
+    std::atomic<int32_t> mRoutedDeviceId{oboe::kUnspecified};
     RingBuffer mRingBuffer;
     int32_t mSampleRate = kSampleRate;
     int32_t mChannelCount = kChannelCount;

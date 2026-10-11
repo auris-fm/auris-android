@@ -41,6 +41,18 @@ internal object OboeNative {
     external fun nativeIsCapturing(): Boolean
 
     /**
+     * The device the live capture stream is routed to, or [NO_ROUTED_DEVICE] when none is observed.
+     *
+     * Read from the opened stream, which is the only source of the ACTUAL capture device. Enumeration
+     * reports what is available, not what capture uses, so an enumerated device must never stand in
+     * for this value when it is unknown.
+     */
+    external fun nativeRoutedCaptureDeviceId(): Int
+
+    /** No capture device is observed: the platform does not report one for the live stream. */
+    const val NO_ROUTED_DEVICE = 0
+
+    /**
      * Whether libonnxruntime.so is already loaded in this process. Lets a test assert that capture
      * succeeds without wake/embedding/transcriber setup having run first.
      */

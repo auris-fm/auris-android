@@ -29,6 +29,18 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeIsCaptur
     return (gCapture != nullptr && gCapture->isActive()) ? JNI_TRUE : JNI_FALSE;
 }
 
+// The device the live capture stream is routed to, or kUnspecified when no stream observes one.
+// Read from the opened stream rather than from device enumeration: availability is not routing, and
+// an enumerated device cannot stand in for the one capture actually uses.
+extern "C" JNIEXPORT jint JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeRoutedCaptureDeviceId(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/)
+{
+    std::lock_guard<std::mutex> lock(gCaptureMutex);
+    return gCapture != nullptr ? gCapture->getRoutedDeviceId() : oboe::kUnspecified;
+}
+
 // Whether libonnxruntime.so is already loaded in this process. Uses the same RTLD_NOLOAD idiom the
 // capture path uses, so a test can assert the ordering property directly: capture must succeed even
 // when this returns false (i.e. when wake/embedding/transcriber setup has not run first).

@@ -2017,6 +2017,7 @@ class CloudRouteSinkTest {
     private suspend fun runUserPauseDuringHold(
         scope: kotlinx.coroutines.CoroutineScope,
         withConfirmation: Boolean,
+        fails: Boolean,
     ): List<String> {
         lateinit var deps: TestDeps
         deps = TestDeps(
@@ -2038,7 +2039,12 @@ class CloudRouteSinkTest {
                             ),
                         )
                     }
-                    throw RuntimeException("provider error")
+                    // The spec asks for BOTH terminal paths, so both are driven here.
+                    if (fails) {
+                        throw RuntimeException("provider error")
+                    } else {
+                        emit(CloudRouteEvent.Done(1, 0))
+                    }
                 }
             },
         )
@@ -2059,8 +2065,10 @@ class CloudRouteSinkTest {
         // difference to the confirmation. This drives both variants through the SAME arrangement so the
         // confirmation is the only variable, and reports both sequences so a divergence is visible
         // rather than asserted from a reading.
-        val confirmed = runUserPauseDuringHold(this, withConfirmation = true)
-        val unconfirmed = runUserPauseDuringHold(this, withConfirmation = false)
+        val confirmed = runUserPauseDuringHold(this, withConfirmation = true, fails = true)
+        val unconfirmed = runUserPauseDuringHold(this, withConfirmation = false, fails = true)
+        val confirmedOk = runUserPauseDuringHold(this, withConfirmation = true, fails = false)
+        val unconfirmedOk = runUserPauseDuringHold(this, withConfirmation = false, fails = false)
 
         // BOTH variants decline the resume, so the user's pause stands either way -- and the pair is
         // the assertion: a difference between them would fail here.
@@ -2074,6 +2082,15 @@ class CloudRouteSinkTest {
             "and the unconfirmed reservation behaves the same way (unconfirmed=$unconfirmed)",
             confirmed,
             unconfirmed,
+        )
+        // The spec's OTHER terminal path. Reported alongside so a divergence between the paths -- or
+        // between the variants on this path -- is visible rather than assumed.
+        assertEquals(
+            "the same must hold on a SUCCESSFUL termination, where the turn reaches its own terminal " +
+                "point rather than being thrown out of its pause " +
+                "(confirmed=$confirmedOk unconfirmed=$unconfirmedOk)",
+            confirmedOk,
+            unconfirmedOk,
         )
     }
 }

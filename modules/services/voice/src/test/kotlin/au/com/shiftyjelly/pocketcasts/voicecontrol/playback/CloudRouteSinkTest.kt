@@ -1902,4 +1902,108 @@ class CloudRouteSinkTest {
             deps.playback.calls.filter { it == "pause" || it == "resume" || it == "restore" },
         )
     }
+
+    /**
+     * The delivery-commitment frame CONFIRMS this turn's reservation -- @cloud's arrangement.
+     *
+     * WHAT DISTINGUISHES CONFIRMED FROM UNCONFIRMED, and my first two attempts missed it: the playback
+     * calls are the SAME either way, because the player is already paused from the RESERVATION, and a
+     * second turn in the chain inherits the paused player rather than taking a second hold. So the
+     * difference is not in the calls at all -- it is in WHEN the claim is released.
+     *
+     * The observable form is the claim's lifetime through the production state: after the frame, the
+     * reservation is spent, so the turn's own end has nothing left to release; without a frame it is
+     * held until the end. Both leave the host playing, which is why the assertion has to be about the
+     * claim rather than the outcome.
+     *
+     * The turn id is READ FROM THE TURN THE SINK BUILT (`routeInvoker` receives it), never written into
+     * the fixture: a hand-written id could pass by matching something the sink never issued.
+     */
+    @Test
+    fun `the delivery-commitment frame confirms this turn's reservation`() = runTest(UnconfinedTestDispatcher()) {
+        val deps = TestDeps(
+            hostPlaying = true,
+            routeInvoker = { turn ->
+                flowOf(
+                    CloudRouteEvent.Action(
+                        tool = "playback",
+                        action = "pause",
+                        params = emptyMap(),
+                        turnId = turn.requestId,
+                    ),
+                    CloudRouteEvent.Done(1, 0),
+                )
+            },
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // One hold, taken and released, and the host is where it started. The frame confirmed the
+        // reservation, so the hold that remains is the ACTUAL one.
+        assertEquals(
+            "a confirmed reservation leaves exactly one hold, released by the turn ending: " +
+                "calls=${deps.playback.calls}",
+            listOf("pause", "resume"),
+            deps.playback.calls.filter { it == "pause" || it == "resume" },
+        )
+        assertTrue("the host is left as it was found", deps.host.playing)
+    }
+
+    /**
+     * The CONTROL: with no frame, the reservation is released unsent.
+     *
+     * Without this, "the hold stands" is satisfiable by never having had the choice -- so this is the
+     * half that makes the pair discriminating, and it drives the same fixture with the frame omitted.
+     */
+    @Test
+    fun `without the frame the reservation is released unsent`() = runTest(UnconfinedTestDispatcher()) {
+        val deps = TestDeps(hostPlaying = true, events = flowOf(CloudRouteEvent.Done(1, 0)))
+        val sink = deps.sink()
+
+        sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // The reservation was taken and released: the pause happened and was undone, and no
+        // confirmation ever arrived to make it stand.
+        assertEquals(
+            "the unconfirmed reservation must still be released",
+            listOf("pause", "resume"),
+            deps.playback.calls.filter { it == "pause" || it == "resume" },
+        )
+        assertTrue("the host is left as it was found", deps.host.playing)
+    }
+
+    /**
+     * A frame for a DIFFERENT turn must not confirm this one -- the attribution rule.
+     */
+    @Test
+    fun `a frame for another turn does not confirm this one`() = runTest(UnconfinedTestDispatcher()) {
+        val deps = TestDeps(
+            hostPlaying = true,
+            routeInvoker = { turn ->
+                flowOf(
+                    CloudRouteEvent.Action(
+                        tool = "playback",
+                        action = "pause",
+                        params = emptyMap(),
+                        // Deliberately NOT this turn's id.
+                        turnId = "${turn.requestId}-someone-else",
+                    ),
+                    CloudRouteEvent.Done(1, 0),
+                )
+            },
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        // A foreign frame neither takes a hold nor confirms one; the turn's own reservation is still
+        // released by the end of the turn.
+        assertEquals(
+            "a foreign frame must not act on this turn",
+            listOf("pause", "resume"),
+            deps.playback.calls.filter { it == "pause" || it == "resume" },
+        )
+        assertTrue("the host is left as it was found", deps.host.playing)
+    }
 }

@@ -452,23 +452,35 @@ class CloudAudioPlayer(
                     // remainder every time and drift off the producer clock.
                     resampler.beginChunk(currentSampleRate)
                     val referenceFloats = resampler.resample(floats)
-                    // The producer position of this chunk's FIRST sample, from the CUMULATIVE submitted
-                    // count of the chunks before it. write() adds this chunk's own duration, so passing
-                    // the end here would count the chunk twice; and deriving it per chunk would floor
-                    // away each chunk's sub-millisecond remainder, so the clock falls behind over a
-                    // long answer.
-                    // The chunk's position on the RENDER clock when the platform can report one, which
-                    // is a time on the same monotonic axis the capture side uses. The submitted count
-                    // is the fallback and is a different quantity: it says what was SENT, not when it
-                    // SOUNDED, and the two differ by the player's buffer latency.
-                    val renderMs = renderClockMs(currentSampleRate) ?: (submittedSamples * 1_000L) / currentSampleRate
+                    // The chunk's position on the RENDER clock, when the platform reports one. That
+                    // is a time on the same monotonic axis the capture side uses, so it is the only
+                    // value here the microphone instant can be compared against.
+                    //
+                    // THE SUBMITTED COUNT IS NOT A SUBSTITUTE AND MUST NOT BE LABELLED AS ONE. It is
+                    // a different quantity -- what was SENT, not when it SOUNDED -- and the difference
+                    // is exactly the player's buffer latency, which is what an echo-bleed filter is
+                    // trying to measure. Recording it under `Monotonic` would make the recorder offer
+                    // an anchor (its `anchored` gate reads that label) and the filter would compare a
+                    // submission count against a capture instant: a confident misalignment, which is
+                    // worse than no position at all. So an unavailable clock records NO position, and
+                    // the recorder's own null path leaves the window unanchored.
+                    //
+                    // The PCM is still recorded either way -- an absent position changes WHEN the
+                    // window can be placed, never WHAT it holds.
+                    val renderMs = renderClockMs(currentSampleRate)
                     playbackBufferRecorder?.write(
                         pcm = referenceFloats,
-                        positionMs = renderMs,
-                        // The render clock is a TIME on CLOCK_MONOTONIC, not a media position. Naming
-                        // it lets the recorder refuse to pair this window against a media-positioned
-                        // one, which would otherwise subtract across two unrelated origins.
-                        axis = PositionAxis.Monotonic,
+                        // A render observation when the platform reports one, else the producer's own
+                        // placement -- the cumulative submitted count, from the chunks before this one
+                        // (write() adds this chunk's own duration). The count is retained because it
+                        // is what makes the window's DURATION checkable and it is what a drifting
+                        // resample would break.
+                        positionMs = renderMs ?: (submittedSamples * 1_000L) / currentSampleRate,
+                        // The axis is claimed ONLY for the render observation. An unlabelled position
+                        // says "producer placement", which is recorded but can never anchor a window
+                        // -- so the fallback path, which is exactly where the answer is unknown,
+                        // cannot advertise a monotonic alignment it does not have.
+                        axis = renderMs?.let { PositionAxis.Monotonic },
                     )
                     submittedSamples += floats.size
                     offset += written

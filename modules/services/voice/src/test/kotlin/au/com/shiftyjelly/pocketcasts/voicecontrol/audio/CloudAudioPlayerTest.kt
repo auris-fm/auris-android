@@ -804,4 +804,58 @@ class CloudAudioPlayerTest {
             second.release()
         }
     }
+
+    @Test
+    fun `a player whose stream cannot report a clock never advertises a monotonic anchor`() {
+        // @spec's requested caller-path case, at the production call site rather than the recorder.
+        // Robolectric's AudioTrack cannot report a timestamp, so `renderClockMs` returns null and this
+        // exercises exactly the platform condition the `observable` flag exists for.
+        //
+        // The defect this pins: the call site used to substitute the submitted-sample COUNT and still
+        // label it `Monotonic`, which is the label the recorder's `anchored` gate reads -- so the one
+        // path where the answer is genuinely unknown was the one path that advertised it as known, and
+        // the filter would compare a submission count against a capture instant.
+        val recorder = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder(
+            au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap(),
+        )
+        val playerWithRecorder = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16_000,
+            playbackBufferRecorder = recorder,
+        )
+
+        try {
+            // Submit real PCM so the recorder is genuinely written to. The assertion is about the
+            // POSITION, so the audio must actually flow -- otherwise an empty reference would pass
+            // this for the wrong reason. Raw 16-bit little-endian frames, then start playback so the
+            // drain loop runs the recorder write.
+            val samples = ShortArray(16_000) { (kotlin.math.sin(it / 8.0) * 8_000).toInt().toShort() }
+            val bytes = java.nio.ByteBuffer.allocate(samples.size * 2)
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                .apply { samples.forEach { putShort(it) } }
+                .array()
+            playerWithRecorder.submitFrame(bytes)
+            playerWithRecorder.play()
+            // The drain runs on the player's own coroutine; give it a bounded window to reach the
+            // recorder rather than assuming it already has.
+            val deadline = System.currentTimeMillis() + 5_000
+            while (recorder.reference().samples.isEmpty() && System.currentTimeMillis() < deadline) {
+                Thread.sleep(20)
+            }
+
+            val reference = recorder.reference()
+            assertEquals(
+                "the PCM must still be recorded: an unknown clock changes WHEN, never WHAT",
+                16_000,
+                reference.samples.size,
+            )
+            assertNull(
+                "a player that cannot report a render clock must offer NO position, rather than a " +
+                    "submission count labelled as a monotonic time (start=${reference.startPositionMs})",
+                reference.startPositionMs,
+            )
+        } finally {
+            playerWithRecorder.release()
+        }
+    }
 }

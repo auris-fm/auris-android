@@ -273,8 +273,9 @@ class CloudAudioPlayer(
         playbackBufferRecorder?.retire()
         // And withdraw the routed observation. The contract is that the published route describes a
         // live reporting stream: this stream has stopped, so leaving the route published would keep
-        // answering for a stream that is gone. Idempotent -- clear() releases only while this stream
-        // still owns the slot.
+        // answering for a stream that is gone. Safe to call alongside release()'s own clear: the
+        // observer releases a claim at most once per stream, so the second clear withdraws nothing
+        // and the claim accounting stays correct.
         observedRoute?.clear()
     }
 

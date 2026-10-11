@@ -23,6 +23,16 @@ class RoutedOutputObserver @Inject constructor() {
     private val holders = AtomicInteger(0)
     private val claimHolders = AtomicInteger(0)
 
+    /**
+     * Tokens of streams that have already released their claim.
+     *
+     * [holders] is only ever incremented — a stream's token stays equal to it after that stream
+     * retires, so the guard `mine != holders.get()` alone cannot tell a second clear by the same
+     * owner from the first. Without this, clearing twice (stop() then release() on the production
+     * lifecycle) decrements the claim counter twice and drives it negative.
+     */
+    private val releasedTokens = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+
     @Volatile
     private var type: Int? = null
 
@@ -51,6 +61,10 @@ class RoutedOutputObserver @Inject constructor() {
     /** Withdraws the claim of the stream that owns [mine] only if it is still the current one. */
     private fun releaseClaim(mine: Int) {
         if (mine != holders.get()) return
+        // A token releases at most once. The ownership guard above proves this stream is still the
+        // current one, but not that it has not already released: a retired stream's token equals
+        // holders forever, so stop() followed by release() would otherwise decrement twice.
+        if (!releasedTokens.add(mine)) return
         claimHolders.decrementAndGet()
         type = null
     }

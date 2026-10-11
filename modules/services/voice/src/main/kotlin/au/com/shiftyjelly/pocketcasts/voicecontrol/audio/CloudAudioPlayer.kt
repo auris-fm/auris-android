@@ -50,6 +50,14 @@ class CloudAudioPlayer(
     private val observedRoute = routedOutputObserver?.observe()
 
     /**
+     * Converts decoded PCM to the recorder's timeline, holding phase across chunks.
+     *
+     * Per-player state on purpose: the reference is written chunk by chunk, so continuity belongs to
+     * this stream's frame sequence rather than to a single conversion call.
+     */
+    private val resampler = ChunkResampler()
+
+    /**
      * Audio attributes that route through the shared STREAM_MUSIC output path.
      *
      * USAGE_MEDIA + CONTENT_TYPE_SPEECH maps to AudioManager.STREAM_MUSIC, the same
@@ -413,13 +421,19 @@ class CloudAudioPlayer(
                     // The decoded PCM is at the codec's rate; the recorder's timeline is 16 kHz.
                     // Recording it unchanged would store rate/16000 times too many samples for the
                     // span of audio they represent, so the reference would claim a duration that
-                    // never played and correlation could never align against it. Resample to the
-                    // recorder's rate, keeping the producer-clock position computed from the
-                    // samples actually submitted (not the resampled count, which is a different
-                    // number at any other rate).
-                    val referenceFloats = resampleToRecorderRate(floats, currentSampleRate)
-                    val positionMs = (submittedSamples * 1_000L) / currentSampleRate
-                    playbackBufferRecorder?.write(referenceFloats, positionMs)
+                    // never played and correlation could never align against it. Resample through the
+                    // stateful resampler so successive chunks stay phase-continuous: a frame whose
+                    // length does not divide into a whole output count would otherwise drop its
+                    // remainder every time and drift off the producer clock.
+                    resampler.beginChunk(currentSampleRate)
+                    val referenceFloats = resampler.resample(floats)
+                    // The producer position of this chunk's FIRST sample, from the CUMULATIVE submitted
+                    // count of the chunks before it. write() adds this chunk's own duration, so passing
+                    // the end here would count the chunk twice; and deriving it per chunk would floor
+                    // away each chunk's sub-millisecond remainder, so the clock falls behind over a
+                    // long answer.
+                    val chunkStartMs = (submittedSamples * 1_000L) / currentSampleRate
+                    playbackBufferRecorder?.write(referenceFloats, chunkStartMs)
                     submittedSamples += floats.size
                     offset += written
                 }
@@ -503,32 +517,91 @@ class CloudAudioPlayer(
         /**
          * Resamples [samples] from [sourceRateHz] to the recorder's 16 kHz timeline.
          *
-         * Linear interpolation over the source samples: the reference is used for correlation, so a
-         * faithful time axis matters more than audio quality. At the recorder's own rate the input is
-         * returned unchanged, which is the common case and avoids touching the samples at all.
-         *
-         * The output length is derived from the input's DURATION, `size * recorderRate / sourceRate`,
-         * so a 48 kHz frame of N samples becomes N/3 samples -- the same span of time, not a
-         * re-interpretation of the same count at a different rate.
+         * Stateless single-shot conversion, kept for callers that need one buffer. Prefer
+         * [ChunkResampler] for a stream: with a fractional ratio this discards each chunk's
+         * remainder independently, so successive chunks drift off the producer clock.
          */
         internal fun resampleToRecorderRate(
             samples: FloatArray,
             sourceRateHz: Int,
             targetRateHz: Int = PlaybackBufferRecorder.SAMPLE_RATE,
         ): FloatArray {
-            if (sourceRateHz == targetRateHz || samples.isEmpty()) return samples
-            val outLength = (samples.size.toLong() * targetRateHz / sourceRateHz).toInt()
-            if (outLength <= 0) return FloatArray(0)
-            val out = FloatArray(outLength)
-            val step = sourceRateHz.toDouble() / targetRateHz
-            for (i in 0 until outLength) {
-                val src = i * step
-                val lo = src.toInt()
-                val hi = if (lo + 1 < samples.size) lo + 1 else lo
-                val frac = (src - lo).toFloat()
-                out[i] = samples[lo] + (samples[hi] - samples[lo]) * frac
+            val resampler = ChunkResampler(targetRateHz)
+            resampler.beginChunk(sourceRateHz)
+            return resampler.resample(samples)
+        }
+
+        /**
+         * Resamples a stream of chunks while preserving phase and audio continuity across them.
+         *
+         * A per-chunk conversion cannot be correct in general: a chunk whose length does not divide
+         * into a whole output count drops its remainder, so a long answer loses samples at every
+         * boundary and the reference drifts behind the audio that actually played. This holds back
+         * the tail it cannot yet interpolate against and prepends it to the next chunk, so the
+         * emitted count over N chunks equals the emitted count for their concatenation.
+         */
+        internal class ChunkResampler(
+            private val targetRateHz: Int = PlaybackBufferRecorder.SAMPLE_RATE,
+        ) {
+            private var sourceRateHz = 0
+            private var step = 1.0
+
+            /** Position in the current virtual chunk at which the next output sample is due. */
+            private var cursor = 0.0
+
+            /** The unconsumed tail of the previous chunk, carried into the next one. */
+            private var carry = FloatArray(0)
+
+            /** Starts a chunk at [rateHz], carrying position and tail from the previous one. */
+            fun beginChunk(rateHz: Int) {
+                if (rateHz != sourceRateHz) {
+                    sourceRateHz = rateHz
+                    step = rateHz.toDouble() / targetRateHz
+                    cursor = 0.0
+                    carry = FloatArray(0)
+                }
             }
-            return out
+
+            /**
+             * Converts one chunk, continuing the previous chunk's phase. The unconsumed tail is kept
+             * for the next call, so no audio is dropped at a boundary and none is repeated.
+             */
+            fun resample(samples: FloatArray): FloatArray {
+                if (sourceRateHz == targetRateHz || samples.isEmpty()) {
+                    // At the target rate the samples pass through, but a carried tail from a previous
+                    // rate must not be stranded.
+                    if (carry.isEmpty()) return samples
+                    val joined = carry + samples
+                    carry = FloatArray(0)
+                    return joined
+                }
+                // Work on the carried tail plus this chunk, so the interpolation that could not be
+                // completed last time is completed now rather than dropped.
+                val source = if (carry.isEmpty()) samples else carry + samples
+                val out = ArrayList<Float>((source.size / step).toInt() + 2)
+                var idx = cursor
+                while (true) {
+                    val lo = idx.toInt()
+                    // Need lo and lo+1 present to interpolate between.
+                    if (lo + 1 >= source.size) break
+                    val frac = (idx - lo).toFloat()
+                    out.add(source[lo] + (source[lo + 1] - source[lo]) * frac)
+                    idx += step
+                }
+                // Hold back everything from the last emitted sample's floor onward: the next chunk
+                // continues from there, so the boundary sample is interpolated, not lost.
+                val consumed = idx.toInt()
+                if (consumed >= source.size) {
+                    carry = FloatArray(0)
+                    cursor = idx - source.size
+                } else {
+                    carry = source.copyOfRange(consumed, source.size)
+                    cursor = idx - consumed
+                }
+                val result = FloatArray(out.size)
+                for (i in out.indices) result[i] = out[i]
+                return result
+            }
         }
 
         /**

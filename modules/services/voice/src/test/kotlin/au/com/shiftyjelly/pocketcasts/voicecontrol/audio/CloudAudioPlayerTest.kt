@@ -394,6 +394,57 @@ class CloudAudioPlayerTest {
     }
 
     @Test
+    fun `successive 48 kHz chunks keep their audio continuous across the chunk boundary`() {
+        // A 100 ms block converts to an integral 1600 samples, so it cannot show what happens when a
+        // chunk's length does NOT divide into a whole output count -- and real socket frames rarely
+        // land on 100 ms boundaries. With a fractional ratio, resampling each chunk from its own index
+        // 0 discards the remainder every time, so the output cursor and the producer clock drift apart
+        // and the reference no longer lines up with the audio that played.
+        val recorder = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder(
+            au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap(),
+        )
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            playbackBufferRecorder = recorder,
+        )
+        wired.setCodec("pcm@48k")
+
+        // 1000 frames at 48 kHz = 20.833 ms, which is 333.33 samples at 16 kHz: fractional.
+        val chunk = ByteArray(2000)
+        for (i in 0 until 1000) {
+            val v = 8000
+            chunk[i * 2] = (v and 0xFF).toByte()
+            chunk[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+        }
+        val chunks = 30
+        repeat(chunks) { wired.submitFrame(chunk) }
+        wired.play()
+
+        // 30 chunks of 1000 frames is 30000 frames = 625 ms of audio at 48 kHz, which is exactly
+        // 10000 samples at the recorder's 16 kHz. Truncating per chunk stores 30 * 333 = 9990.
+        val expected = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.SAMPLE_RATE * 625 / 1000
+        assertEquals(
+            "30 chunks of 20.833 ms must total 625 ms of reference audio, not 30 truncated chunks",
+            expected,
+            recorder.snapshot().size,
+        )
+        // The reference position is bounded to within a millisecond of the true end, not exact:
+        // PlaybackBufferRecorder.write floors each chunk's own duration (pcm.size * 1000 / SAMPLE_RATE),
+        // so a chunk that is not a whole number of milliseconds at 16 kHz loses its remainder there.
+        // What matters -- and what a per-chunk resample would break -- is that the error does NOT
+        // ACCUMULATE: a drifting clock would be tens of milliseconds out after 30 chunks, and further
+        // out the longer the answer runs, which is what defeats correlation against the mic.
+        val position = recorder.lastRecordedPositionMs()!!
+        assertTrue(
+            "the producer clock must track the 625 ms of submitted audio (within a millisecond of " +
+                "rounding), not drift behind it; was $position",
+            position in 624L..625L,
+        )
+        wired.release()
+    }
+
+    @Test
     fun `a partial sink write records only the accepted prefix`() {
         // The cloud answer must record accepted samples, not the whole submitted frame: a reference
         // holding audio the sink rejected would correlate against audio that never played.

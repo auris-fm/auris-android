@@ -245,6 +245,64 @@ class CloudAudioPlayerTest {
     }
 
     @Test
+    fun `stopping the player withdraws its routed observation`() {
+        // The published route must not outlive the stream that reported it. stop() ends the answer,
+        // so a route left published afterwards describes audio that is no longer sounding -- and the
+        // monitor would keep answering with it for a stream that is gone.
+        val observer = au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver()
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            routedOutputObserver = observer,
+        )
+        // Exercise the production path: play() starts the audible heartbeat, which is what publishes
+        // this stream's routed output. The player claims the slot on construction.
+        wired.submitFrame(byteArrayOf(0x00, 0x01, 0x02, 0x03))
+        wired.play()
+        assertTrue(
+            "precondition: the playing stream holds the observation",
+            observer.holdsAClaim(),
+        )
+
+        wired.stop()
+
+        assertEquals(
+            "stop must withdraw the observation: the stream that reported it has ended",
+            null,
+            observer.current(),
+        )
+        assertFalse("stop must release the claim, not just the value", observer.holdsAClaim())
+        wired.release()
+    }
+
+    @Test
+    fun `draining and stopping withdraws the routed observation`() {
+        // drainAndStop() is the turn-finished path, so it carries the same obligation as stop().
+        val observer = au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver()
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            routedOutputObserver = observer,
+        )
+        wired.submitFrame(byteArrayOf(0x00, 0x01, 0x02, 0x03))
+        wired.play()
+        assertTrue(
+            "precondition: the playing stream holds the observation",
+            observer.holdsAClaim(),
+        )
+
+        wired.drainAndStop()
+
+        assertEquals(
+            "drainAndStop must withdraw the observation",
+            null,
+            observer.current(),
+        )
+        assertFalse("drainAndStop must release the claim", observer.holdsAClaim())
+        wired.release()
+    }
+
+    @Test
     fun `a partial sink write records only the accepted prefix`() {
         // The cloud answer must record accepted samples, not the whole submitted frame: a reference
         // holding audio the sink rejected would correlate against audio that never played.

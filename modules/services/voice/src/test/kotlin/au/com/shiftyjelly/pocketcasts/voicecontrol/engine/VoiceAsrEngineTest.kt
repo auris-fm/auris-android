@@ -58,6 +58,7 @@ import org.mockito.Mockito.times
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
 import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.eq
 
 class VoiceAsrEngineTest {
@@ -422,7 +423,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
 
         // Wake word not detected: full segment flows through during grace
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
@@ -484,7 +485,7 @@ class VoiceAsrEngineTest {
         )
         // The filter refuses this segment: it is the playback the app itself submitted, returning to
         // the mic. No speaker diarization runs (hasSpeakerId=false), so the bleed check is what decides.
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(false)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(false)
         // Counted so the row's "no reset" half is observed rather than assumed.
         `when`(utteranceFilter.reset()).thenAnswer { resets += 1 }
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
@@ -737,7 +738,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,
@@ -787,7 +788,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,
@@ -860,7 +861,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = true,
@@ -918,7 +919,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = wakeDetected,
@@ -971,7 +972,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,
@@ -1028,7 +1029,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             WakeWordResult(detected = false, confidence = 0f),
         )
@@ -1080,7 +1081,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             WakeWordResult(detected = false, confidence = 0f),
         )
@@ -1131,7 +1132,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             WakeWordResult(detected = false, confidence = 0f),
         )
@@ -1196,7 +1197,7 @@ class VoiceAsrEngineTest {
                     ),
                 ),
             )
-            `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
+            `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
             `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
                 WakeWordResult(detected = false, confidence = 0f),
             )
@@ -1269,7 +1270,7 @@ class VoiceAsrEngineTest {
                     ),
                 ),
             )
-            `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
+            `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
             `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
                 WakeWordResult(detected = false, confidence = 0f),
             )
@@ -1324,7 +1325,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,
@@ -1509,7 +1510,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         kotlinx.coroutines.runBlocking {
             `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(wakeWordResult)
         }

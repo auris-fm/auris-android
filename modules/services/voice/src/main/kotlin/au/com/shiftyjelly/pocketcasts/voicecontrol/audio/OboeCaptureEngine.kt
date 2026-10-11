@@ -53,6 +53,21 @@ internal object OboeNative {
     const val NO_ROUTED_DEVICE = 0
 
     /**
+     * The live stream's frame/time observation, as
+     * `[framePosition, timestampNs, sampleRate, observable]`.
+     *
+     * `framePosition` and `timestampNs` describe ONE instant on the platform's monotonic clock, and
+     * `sampleRate` converts between them, so a sample at stream position `p` is at
+     * `timestampNs + (p - framePosition) * 1e9 / sampleRate`. `observable == 0` means the platform
+     * reports no timestamp for this stream; callers must treat the alignment as unknown rather than
+     * substituting the frame counter for a time.
+     *
+     * Read on the polling thread, never from the audio callback -- the platform documents that calling
+     * the timestamp API there is unreliable before Android R.
+     */
+    external fun nativeCaptureClock(): LongArray
+
+    /**
      * Whether libonnxruntime.so is already loaded in this process. Lets a test assert that capture
      * succeeds without wake/embedding/transcriber setup having run first.
      */
@@ -202,11 +217,19 @@ internal class OboeCaptureEngine(
                                     frames.add(PcmAudioFrame(frameSamples, OboeConfig.SAMPLE_RATE_HZ))
                                     offset += frameSize
                                 }
+                                // The segment's own instant on the capture clock, read HERE rather
+                                // than where the frames are judged: this is the moment the stream
+                                // reports the segment as complete, and the drain loop is the thread
+                                // the platform documents as safe for the timestamp call. Reading it
+                                // later would fold in the queueing between the two points and place
+                                // the segment at a time it was already delivered, not captured.
+                                val clock = OboeNative.nativeCaptureClock()
                                 emit(
                                     VoiceSegmenterResult.SpeechEnded(
                                         frames = frames,
                                         speechOnsetSample = speechOnsetSample,
                                         speechEndSample = speechEndSample,
+                                        captureClock = clock,
                                     ),
                                 )
                             }

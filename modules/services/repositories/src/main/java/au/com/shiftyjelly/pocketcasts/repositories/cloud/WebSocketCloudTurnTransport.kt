@@ -164,7 +164,24 @@ class WebSocketCloudTurnTransport(
         channel: Channel<CloudRouteEvent>,
         event: CloudRouteEvent,
     ) {
-        channel.trySend(event)
+        val result = channel.trySend(event)
+        if (result.isFailure) {
+            // The terminal event could not be enqueued, so closing normally would end the turn with
+            // the reason for ending it lost -- the sink turns a missing error into silence. Close
+            // with the CAUSE instead: the consumer surfaces it as a thrown failure, which the sink
+            // can act on, and correctness no longer depends on which buffer filled first.
+            Timber.w(
+                "Cloud route: terminal event could not be enqueued, failing the turn — %s",
+                event::class.simpleName,
+            )
+            channel.close(
+                IllegalStateException(
+                    "Cloud route: channel full, could not deliver terminal " +
+                        "${event::class.simpleName}",
+                ),
+            )
+            return
+        }
         channel.close()
     }
 

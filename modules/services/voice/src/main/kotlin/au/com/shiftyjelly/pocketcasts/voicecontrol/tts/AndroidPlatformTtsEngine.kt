@@ -63,6 +63,15 @@ class AndroidPlatformTtsEngine @Inject constructor(
     @Volatile
     private var activeTrack: AudioTrack? = null
 
+    /**
+     * The sink write, injectable so a test can present a refusal.
+     *
+     * A refused `AudioTrack.write` needs a real failing track, which a unit test cannot construct, and
+     * the truncation it causes is otherwise unreachable -- the same reason [CloudAudioPlayer] exposes
+     * its own write for the cloud path. Defaults to the real `AudioTrack.write`.
+     */
+    internal var writeToSink: ((track: AudioTrack, samples: ShortArray, offset: Int, count: Int) -> Int)? = null
+
     /** Frames submitted by the last utterance and how far playback had advanced when it returned. */
     @Volatile
     private var framesWritten = 0
@@ -249,10 +258,22 @@ class AndroidPlatformTtsEngine @Inject constructor(
             track.play()
             playbackActive = true
             var offset = 0
+            var writeRefused = false
             while (offset < clip.samples.size) {
-                val written = track.write(clip.samples, offset, clip.samples.size - offset)
+                val writer = writeToSink
+                val written = if (writer != null) {
+                    writer(track, clip.samples, offset, clip.samples.size - offset)
+                } else {
+                    track.write(clip.samples, offset, clip.samples.size - offset)
+                }
                 if (written <= 0) {
+                    // A refused write means the answer is TRUNCATED, not finished. Leaving it as a
+                    // silent break made it indistinguishable from a clean end: `offset` stays at the
+                    // count the sink accepted, the drain loop below then waits only for frames that
+                    // have already played, `speak()` returns normally and nothing reaches
+                    // onPlaybackFailure -- so the user hears a cut-off reply and sees no error.
                     Timber.w("TTS: AudioTrack.write returned $written")
+                    writeRefused = true
                     break
                 }
                 recordAccepted(
@@ -273,6 +294,14 @@ class AndroidPlatformTtsEngine @Inject constructor(
             }
             framesWritten = offset
             framesPlayedAtReturn = track.playbackHeadPosition
+            // Surface the truncation through the same channel the cloud path uses, so a caller can
+            // avoid reporting a completed answer that was actually cut short.
+            if (writeRefused) {
+                throw TtsPlaybackIncompleteException(
+                    framesWritten = framesWritten,
+                    framesPlayed = framesPlayedAtReturn,
+                )
+            }
             // A bounded wait that expires is an EXPLICIT incomplete-playback outcome, not a
             // successful completion: the caller must not be told the answer finished when queued
             // audio is still outstanding.

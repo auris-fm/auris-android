@@ -21,6 +21,15 @@ data class PlaybackState(
     val showNotesImageUrl: String? = null,
     val chapters: Chapters = Chapters(),
     val lastChangeFrom: String? = null,
+
+    /**
+     * The source of the command that produced this state, when it was a play/pause/stop command.
+     *
+     * Carried ON the emission rather than read later from shared state: an observer may process this
+     * state after a newer command has replaced a "last command" field, and would then attribute the
+     * wrong cause to this stop. Each emission states its own cause.
+     */
+    val changedBySource: String? = null,
     val playbackIssue: PlaybackIssue? = null,
     val lastErrorMessage: String? = null,
     val playbackSpeed: Double = 1.0,

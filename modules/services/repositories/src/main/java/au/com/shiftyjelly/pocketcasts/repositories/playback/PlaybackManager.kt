@@ -274,29 +274,24 @@ open class PlaybackManager @Inject constructor(
     }
 
     /**
-     * The source of the last command that STOPPED playback, or null when none has.
-     *
-     * Event provenance, not state: the voice path's own hold pause and an external stop produce the
-     * same playing-to-stopped transition, so a caller that must tell them apart cannot ask how the
-     * player looks now, nor which revision it is on -- the voice pause is deliberately excluded from
-     * the revision, so it shares a revision with stops it did not cause. What separates them is the
-     * command that caused the stop, recorded here at the moment it is issued.
+     * The source of the command currently being applied, so the state it produces can carry its own
+     * cause. Transient and consumed when the state is emitted; an observer reads the cause from the
+     * emission it is processing rather than from a shared "last command" field it may outlive.
      */
     @Volatile
-    private var lastStopSource: SourceView? = null
-
-    /** The source of the last command that stopped playback, or null when none has. */
-    fun lastStopSourceView(): SourceView? = lastStopSource
+    private var commandSourceInFlight: SourceView? = null
 
     private fun notePlaybackCommand(sourceView: SourceView) {
-        if (sourceView == SourceView.VOICE_COMMANDS) {
-            // The voice path's own hold pause: recorded as the stop's provenance but excluded from
-            // the revision, exactly as before.
-            lastStopSource = sourceView
-            return
-        }
-        lastStopSource = sourceView
+        commandSourceInFlight = sourceView
+        if (sourceView == SourceView.VOICE_COMMANDS) return
         playbackCommandCount.incrementAndGet()
+    }
+
+    /** The source of the command that produced the state being emitted, or null when none is in flight. */
+    fun consumeCommandSource(): String? {
+        val source = commandSourceInFlight
+        commandSourceInFlight = null
+        return source?.key
     }
 
     private var updateCount = 0
@@ -1078,7 +1073,15 @@ open class PlaybackManager @Inject constructor(
         if (!transientLoss) {
             focusManager.giveUpAudioFocus()
             playbackStateRelay.blockingFirst().let { playbackState ->
-                playbackStateRelay.accept(playbackState.copy(transientLoss = false))
+                // The pause's source rides ON this emission, so an observer processing it later
+                // attributes the stop to the command that caused it rather than to whatever command
+                // has since become the most recent one.
+                playbackStateRelay.accept(
+                    playbackState.copy(
+                        transientLoss = false,
+                        changedBySource = sourceView.key,
+                    ),
+                )
             }
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Paused - Not transient")
             trackPlaybackEvent(sourceView) { source, contentType ->
@@ -1089,7 +1092,12 @@ open class PlaybackManager @Inject constructor(
             }
         } else {
             playbackStateRelay.blockingFirst().let { playbackState ->
-                playbackStateRelay.accept(playbackState.copy(transientLoss = true))
+                playbackStateRelay.accept(
+                    playbackState.copy(
+                        transientLoss = true,
+                        changedBySource = sourceView.key,
+                    ),
+                )
             }
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Paused - Transient")
         }

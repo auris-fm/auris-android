@@ -50,6 +50,50 @@ class CloudRouteSinkTest {
     )
 
     @Test
+    fun `saved episode A positions cannot follow episode B`() = runTest {
+        // @reviewer's measured case: reference positions recorded while episode A played were sent when
+        // episode B was asked about. A position is a position IN an episode, so it describes that
+        // episode -- and a saved value must not outlive its subject.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+
+        // Episode A records its reference history.
+        deps.cloudPlaybackContextState.record(
+            referencePositionMs = 100L,
+            previousReferencePositionMs = 300L,
+            episodeId = "A",
+        )
+
+        sink.routeToCloud(
+            "about A",
+            VoiceIntent.CloudTier.Premium,
+            PlaybackContext(episodeId = "A", clientPositionMs = 0L),
+        )
+        val forA = deps.routeTurns.last().context
+        assertEquals(
+            "episode A sees its own saved history",
+            listOf(100L),
+            forA.recentReferencePositions,
+        )
+        assertEquals(300L, forA.previousReferencePositionMs)
+
+        // Episode B must NOT inherit it.
+        sink.routeToCloud(
+            "about B",
+            VoiceIntent.CloudTier.Premium,
+            PlaybackContext(episodeId = "B", clientPositionMs = 0L),
+        )
+        val forB = deps.routeTurns.last().context
+        assertTrue(
+            "saved A positions cannot be sent as B (recent=${forB.recentReferencePositions} " +
+                "previous=${forB.previousReferencePositionMs})",
+            forB.recentReferencePositions.isEmpty() && forB.previousReferencePositionMs == null,
+        )
+    }
+
+    @Test
     fun `a fresh wake begins a new conversation even though an earlier handle exists`() = runTest {
         // @reviewer's executed finding: a fresh wake RESUMEd the previous conversation, which makes a
         // new user act look like a continuation of whatever was being discussed before it.
@@ -246,7 +290,8 @@ class CloudRouteSinkTest {
         )
         // Recorded BEFORE the turn, which is the whole point: the saved history exists when the
         // builder runs, so a case that recorded it during the route would leave the state empty and
-        // could not see the merge it is about.
+        // could not see the merge it is about. No episode is named, which is the state this case is
+        // about: positions with no subject at all.
         deps.cloudPlaybackContextState.record(
             referencePositionMs = 100L,
             previousReferencePositionMs = 300L,
@@ -288,10 +333,12 @@ class CloudRouteSinkTest {
         val deps = TestDeps(
             routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
         )
-        // Recorded BEFORE the turn: the saved history is what this case asserts is retained.
+        // Recorded BEFORE the turn, AGAINST the episode this turn is about -- a saved position belongs
+        // to the episode it was recorded from, so the control must name it to assert retention.
         deps.cloudPlaybackContextState.record(
             referencePositionMs = 100L,
             previousReferencePositionMs = 300L,
+            episodeId = "episode-1",
         )
         val sink = deps.sink()
 
@@ -417,7 +464,15 @@ class CloudRouteSinkTest {
 
         // preQuote is playback-timeline; the context state must carry the
         // reference-timeline conversion (45s reference == 60s playback here).
-        assertEquals(45_000L, state.snapshot().previousReferencePositionMs)
+        assertEquals(
+            "episode-id",
+            playbackContext.episodeId,
+        )
+        assertEquals(
+            "the recorded value is read back FOR the episode it was recorded from",
+            45_000L,
+            state.snapshot(playbackContext.episodeId).previousReferencePositionMs,
+        )
         // stop_quote recovery still uses the playback-timeline position.
         assertTrue(deps.playback.calls.contains("seekTo:45"))
         assertTrue(deps.playback.calls.contains("resume"))
@@ -431,6 +486,10 @@ class CloudRouteSinkTest {
         val state = CloudPlaybackContextState(
             recentReferencePositions = emptyList(),
             previousReferencePositionMs = 300L,
+            // The episode the saved value belongs to: the assertion below is that THIS episode's
+            // previous reference is CLEARED when the mapping is unavailable, not that some other
+            // episode's value is invisible.
+            episodeId = "episode-id",
         )
         val deps = TestDeps(
             fingerprintTimingManager = fingerprint,
@@ -450,7 +509,7 @@ class CloudRouteSinkTest {
         sink.routeToCloud("play the quote", VoiceIntent.CloudTier.Premium, playbackContext)
 
         // Turn 2+ regression guard: null must clear, not retain turn 1's value.
-        assertEquals(null, state.snapshot().previousReferencePositionMs)
+        assertEquals(null, state.snapshot("episode-id").previousReferencePositionMs)
     }
 
     @Test
@@ -879,6 +938,9 @@ class CloudRouteSinkTest {
         val state = CloudPlaybackContextState(
             recentReferencePositions = listOf(100L, 200L),
             previousReferencePositionMs = 300L,
+            // The episode these positions belong to: the context below is about `episode-id`, so this
+            // is the only episode for which the saved history may be offered.
+            episodeId = "episode-id",
         )
         val deps = TestDeps(
             cloudPlaybackContextState = state,
@@ -1997,6 +2059,8 @@ class CloudRouteSinkTest {
         private val baseUrl: String = "https://cloud.example.com",
         private val userId: String = "user_test",
         clientPositionMs: Long = 50_000L,
+        /** The episode the sink's own provider reports, so recorded positions have a subject. */
+        private val episodeId: String? = "episode-id",
         // Mockito defaults Int? to 0; unmapped seeks must see null so we fall back to referenceMs.
         // A NONZERO-OFFSET mapping by default: reference seconds map to sink seconds plus an offset,
         // as dynamic ad insertion produces. An identity mapping cannot distinguish the two timelines
@@ -2058,8 +2122,16 @@ class CloudRouteSinkTest {
         val routeTurns = mutableListOf<CloudRouteTurn>()
         private val explicitInvoker = routeInvoker
 
+        /**
+         * The provider the SINK reads, which must name the SAME episode the fixture's context does:
+         * saved reference positions are recorded against the episode they describe, so a provider
+         * without one records them against nothing and a later read cannot find them.
+         */
         private val playbackContextProvider = object : PlaybackContextProvider {
-            override fun current(): PlaybackContext = PlaybackContext(clientPositionMs = clientPositionMs)
+            override fun current(): PlaybackContext = PlaybackContext(
+                episodeId = episodeId,
+                clientPositionMs = clientPositionMs,
+            )
         }
 
         /** The admission component the sink uses, so a case can declare its live window. */

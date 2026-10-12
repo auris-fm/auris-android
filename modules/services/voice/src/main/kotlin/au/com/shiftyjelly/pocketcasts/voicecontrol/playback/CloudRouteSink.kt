@@ -631,7 +631,10 @@ class CloudRouteSink internal constructor(
     }
 
     private fun buildRouteContext(context: PlaybackContext): CloudRouteContext {
-        val state = cloudPlaybackContextState.snapshot()
+        // The saved positions are requested FOR THIS EPISODE: a position recorded while another
+        // episode played describes that episode, and sending it here would name a reference in a
+        // recording the turn is not about.
+        val state = cloudPlaybackContextState.snapshot(context.episodeId)
         val episodeId = context.episodeId?.takeIf { it.isNotEmpty() }
         // THE NO-EPISODE RULE IS APPLIED HERE, LAST, after every source of enrichment. The saved state
         // holds reference positions accumulated while an episode WAS playing; merging them into a turn
@@ -880,6 +883,9 @@ class CloudRouteSink internal constructor(
         cloudPlaybackContextState.record(
             referencePositionMs = referenceMs,
             previousReferencePositionMs = previousReferenceMs,
+            // Recorded AGAINST the episode it describes, so a later turn about a different episode
+            // cannot inherit it.
+            episodeId = playbackContextProvider.current().episodeId,
         )
     }
 

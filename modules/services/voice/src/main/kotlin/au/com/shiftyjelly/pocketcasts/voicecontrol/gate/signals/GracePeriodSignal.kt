@@ -284,7 +284,9 @@ class GracePeriodSignal @Inject constructor() {
         //
         // THE TRANSITION IS UNDER THE MONITOR AND THE CALLBACK IS NOT: a notification delivered while
         // holding the lock would run other components' code inside it, and a component that calls back
-        // in would deadlock. The value is captured inside and delivered after.
+        // in would deadlock. The ENDED generation is READ under the monitor and the callback then runs
+        // AFTER the counter has advanced -- the notification reports the window that ended, which is the
+        // previous generation, not the one now current.
         val ending = synchronized(windowLock) {
             val previous = generation
             generation += 1

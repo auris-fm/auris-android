@@ -1228,6 +1228,30 @@ open class PlaybackManager @Inject constructor(
     private val selectedPlayerLock = Any()
 
     /**
+     * How many times a player has been POINTED AT A DIFFERENT EPISODE since it was created.
+     *
+     * Capture-then-release is not enough on its own. Both the seek and the reconfiguration capture their
+     * player under [selectedPlayerLock] and then call a SUSPENDING operation after releasing it -- and a
+     * lock cannot span a suspension. So a load can land between the seek's check and its
+     * `seekToTimeMs`, and the seek would then move audio that now belongs to another recording.
+     *
+     * This counter is the INCARNATION of the player's relationship to an episode. The seek captures it
+     * with the player and re-checks it AT THE CALL: if the player has been pointed at a different episode
+     * in between, the captured incarnation is stale and the seek is refused. What cannot be excluded by
+     * holding a lock across a suspension is refused by detecting that the world moved.
+     */
+    @Volatile
+    private var playerEpisodeIncarnation: Long = 0L
+
+    /** The player-episode incarnation, so a case can assert a captured one goes stale. */
+    internal fun playerEpisodeIncarnationForTest(): Long = playerEpisodeIncarnation
+
+    /** Points a player at another episode, as a load does, bumping the incarnation. */
+    internal fun bumpPlayerEpisodeIncarnationForTest() {
+        synchronized(selectedPlayerLock) { playerEpisodeIncarnation++ }
+    }
+
+    /**
      * The outcome of an episode-scoped mutation, with the episode and pre-action position THE OWNER
      * captured when it decided.
      *
@@ -1406,9 +1430,16 @@ open class PlaybackManager @Inject constructor(
             val target = player
             if (target?.episodeUuid != episodeUuid) return false
             selected.playedUpToMs = positionMs
-            target
+            // THE INCARNATION TRAVELS WITH THE CAPTURE, so the call below can tell whether the player has
+            // been pointed at a different episode in the meantime.
+            target to playerEpisodeIncarnation
         }
-        seekTarget.seekToTimeMs(positionMs)
+        // RE-CHECKED AT THE CALL. Holding the monitor across this suspension is impossible, so the
+        // exclusion is achieved by detecting the change rather than by preventing it: if the player has
+        // been loaded with another episode since the capture, this seek no longer describes the audio it
+        // would move.
+        if (playerEpisodeIncarnation != seekTarget.second) return false
+        seekTarget.first.seekToTimeMs(positionMs)
         return true
     }
 
@@ -2674,7 +2705,13 @@ open class PlaybackManager @Inject constructor(
             // `load` SUSPENDS, so it is called after the boundary is released, exactly as the seek is.
             // What the boundary establishes is which player is being reconfigured and that the selection
             // did not change beneath the decision; the call itself then acts on that captured player.
-            val reconfigured = synchronized(selectedPlayerLock) { player }
+            val reconfigured = synchronized(selectedPlayerLock) {
+                // POINTING A PLAYER AT ANOTHER EPISODE IS A NEW INCARNATION. Bumped under the same
+                // boundary the seek captures it in, so a seek holding the old value is refused at its
+                // call rather than moving the newly loaded recording.
+                playerEpisodeIncarnation++
+                player
+            }
             reconfigured?.load(episode.playedUpToMs)
             onPlayerPaused()
         }

@@ -405,6 +405,19 @@ sealed interface EpisodeOperationResult {
 
     /** The operation was refused -- a different episode is selected, or the binding was absent. */
     data object Refused : EpisodeOperationResult
+
+    /**
+     * The operation was ISSUED and no outcome came back, so whether it ran is UNKNOWN.
+     *
+     * DISTINCT FROM [Refused], and the distinction is the whole point. A refusal is a DECISION a caller
+     * may act on; unknown means we do not know, so RETRYING COULD REPEAT an operation the other side
+     * already performed. Collapsing it into Refused would make an unknowable outcome look safely
+     * retryable, and collapsing it into [Accepted] would claim a success nobody observed.
+     */
+    data class Unknown(
+        val episodeId: String?,
+        val preActionPositionMs: Long?,
+    ) : EpisodeOperationResult
 }
 
 /**

@@ -182,10 +182,16 @@ class PlaybackManagerPlaybackSink @Inject constructor(
                 expectedEpisodeId,
                 resolvedSeconds * 1000,
             )
-            return if (scoped != null) {
-                EpisodeOperationResult.Accepted(scoped.episodeUuid, scoped.preActionPositionMs?.toLong())
-            } else {
-                EpisodeOperationResult.Refused
+            return when {
+                // UNKNOWN SURVIVES TO THE CALLER. The owner issued the request and could not learn its
+                // outcome, so reporting Refused here would make an unknowable execution look retryable.
+                scoped != null && scoped.unknown ->
+                    EpisodeOperationResult.Unknown(scoped.episodeUuid, scoped.preActionPositionMs?.toLong())
+
+                scoped != null ->
+                    EpisodeOperationResult.Accepted(scoped.episodeUuid, scoped.preActionPositionMs?.toLong())
+
+                else -> EpisodeOperationResult.Refused
             }
         }
         // NO EXPECTATION MEANS THE CALLER HAS NO EPISODE-SPECIFIC SUBJECT. Legitimate only for an

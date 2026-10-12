@@ -275,6 +275,33 @@ class PlaybackManagerPlaybackSinkTest {
     }
 
     @Test
+    fun `an UNKNOWN execution survives the sink as Unknown, not as Refused`() = runTest {
+        // @reviewer's cloud-consumer failure: a ScopedMutation marked unknown passed through the real sink
+        // but reached the caller as Refused. That is the collapse the whole distinction exists to prevent:
+        // Refused reads as "nothing happened, safe to retry", and a retry could REPEAT an operation the
+        // player already performed.
+        val manager = mock<PlaybackManager>()
+        org.mockito.kotlin.whenever(
+            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()),
+        ).thenReturn(PlaybackManager.ScopedMutation("episode-A", preActionPositionMs = null, unknown = true))
+
+        val result = sink(manager).seekTo(
+            positionSeconds = 100,
+            episodeDurationSeconds = 1800,
+            expectedEpisodeId = "episode-A",
+        )
+
+        assertTrue(
+            "an unknown execution must reach the caller as Unknown (result=$result)",
+            result is EpisodeOperationResult.Unknown,
+        )
+        assertFalse(
+            "and it must NOT be reported as a refusal, which a caller would retry",
+            result is EpisodeOperationResult.Refused,
+        )
+    }
+
+    @Test
     fun `the REAL manager REFUSES a bound seek on a player that cannot enforce the binding`() = runTest {
         // A player without the enforcement reports `enforcesEpisodeBoundSeek = false`, so the default
         // check-then-delegate would carry the very gap the contract exists to close. The bound call must

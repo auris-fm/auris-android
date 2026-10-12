@@ -914,9 +914,36 @@ class CloudRouteSink internal constructor(
                         // meant a refused seek still appended its pre-action position; re-reading the live
                         // state afterwards would subject it to a later selection change. The owner decided
                         // the episode when it accepted, so its answer is what history uses.
-                        if (outcome !is EpisodeOperationResult.Accepted) return@withLock false
-                        capturePreActionPosition(positionSeconds * 1000L, turnState, outcome.episodeId, outcome.preActionPositionMs)
-                        return@withLock true
+                        // UNKNOWN IS NOT A REFUSAL. Treating it as one would make an unknowable
+                        // execution look like "nothing happened, safe to retry" -- and a retry could
+                        // REPEAT an operation the player already performed. History is committed only for
+                        // what was OBSERVED to happen.
+                        when (outcome) {
+                            is EpisodeOperationResult.Refused -> return@withLock false
+
+                            is EpisodeOperationResult.Accepted -> {
+                                capturePreActionPosition(
+                                    positionSeconds * 1000L,
+                                    turnState,
+                                    outcome.episodeId,
+                                    outcome.preActionPositionMs,
+                                )
+                                return@withLock true
+                            }
+
+                            is EpisodeOperationResult.Unknown -> {
+                                // THE OPERATION IS COUNTED AS ATTEMPTED, not as refused: the turn did
+                                // dispatch it and cannot know the outcome, so reporting "not delivered"
+                                // would invite a retry that may repeat it.
+                                capturePreActionPosition(
+                                    positionSeconds * 1000L,
+                                    turnState,
+                                    outcome.episodeId,
+                                    outcome.preActionPositionMs,
+                                )
+                                return@withLock true
+                            }
+                        }
                     }
                     // The reference branch is reached only when that form was supplied, so a null
                     // here means the value did not parse and the call is refused.

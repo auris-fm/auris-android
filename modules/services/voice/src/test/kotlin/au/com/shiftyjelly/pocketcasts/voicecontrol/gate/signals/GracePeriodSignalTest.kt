@@ -308,6 +308,45 @@ class GracePeriodSignalTest {
     }
 
     @Test
+    fun `recording a prepared request blocks on the same monitor as the transitions`() {
+        // `notePreparedRequest` was `@Synchronized`, which takes the INSTANCE monitor -- a DIFFERENT lock
+        // from windowLock, so it serialized against other `@Synchronized` members and against nothing
+        // that mattered. The window it notes a request for is decided by the transitions, so the write
+        // must be ordered with them.
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+
+        val holding = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val noted = java.util.concurrent.CountDownLatch(1)
+
+        val holder = Thread {
+            synchronized(signal.windowMonitorForTest()) {
+                holding.countDown()
+                release.await(3, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        }.apply { start() }
+        holding.await(3, java.util.concurrent.TimeUnit.SECONDS)
+
+        Thread {
+            signal.notePreparedRequest(window)
+            noted.countDown()
+        }.apply { start() }
+
+        assertFalse(
+            "recording a prepared request must wait for the window monitor",
+            noted.await(150, java.util.concurrent.TimeUnit.MILLISECONDS),
+        )
+        release.countDown()
+        assertTrue(
+            "and it proceeds once the monitor is free",
+            noted.await(3, java.util.concurrent.TimeUnit.SECONDS),
+        )
+        holder.join(3_000)
+    }
+
+    @Test
     fun `a completion PARKED at the monitor cannot reopen a window privacy closed`() {
         // @reviewer's parked-completion control, and @spec's requirement that the origin/liveness
         // validation sit INSIDE the same windowLock transaction as the extension. When the check runs

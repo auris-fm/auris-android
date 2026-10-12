@@ -58,8 +58,7 @@ class GracePeriodSignal @Inject constructor() {
      * runs. Reading `isActive` at execution time cannot express that -- a fresh wake would look like a
      * continuation of the previous conversation.
      */
-    @Synchronized
-    fun capturedGeneration(): Long = generation
+    fun capturedGeneration(): Long = synchronized(windowLock) { generation }
 
     /**
      * Advances the window WITHOUT cancelling the outstanding timer.
@@ -82,12 +81,13 @@ class GracePeriodSignal @Inject constructor() {
      * A request whose captured window is no longer current has been superseded, and must not act on
      * the current one -- including when a newer window is open and active.
      */
-    @Synchronized
-    fun isCurrent(captured: Long): Boolean = // EQUAL GENERATION IS NOT ENOUGH: a window closed by a privacy event must reject even an origin
+    fun isCurrent(captured: Long): Boolean = synchronized(windowLock) {
+        // EQUAL GENERATION IS NOT ENOUGH: a window closed by a privacy event must reject even an origin
         // that still matches numerically, because the whole point of that close is that nothing keeps
         // listening after the app was backgrounded. Comparing numbers alone would admit a request whose
         // window has been invalidated.
         captured == generation && _isActive.value && !closedByPrivacy
+    }
 
     /**
      * Whether the request being prepared is the FIRST of its window, so it begins a conversation.
@@ -100,8 +100,7 @@ class GracePeriodSignal @Inject constructor() {
      * [isFirstRequestOfWindow] is therefore what the caller passes, and this only checks that the
      * window it belongs to is still the current one.
      */
-    @Synchronized
-    fun isWakeOriginated(captured: Long, isFirstRequestOfWindow: Boolean): Boolean = isFirstRequestOfWindow && captured == wakeGeneration
+    fun isWakeOriginated(captured: Long, isFirstRequestOfWindow: Boolean): Boolean = synchronized(windowLock) { isFirstRequestOfWindow && captured == wakeGeneration }
 
     /**
      * Whether [captured]'s window has ALREADY had a request prepared under it.
@@ -110,16 +109,18 @@ class GracePeriodSignal @Inject constructor() {
      * the first one begins a conversation, later ones continue it. Kept here rather than derived from
      * `isActive`, because the window being open says nothing about whether anything has been sent in it.
      */
-    @Synchronized
-    fun hasPreparedRequest(captured: Long): Boolean = requestPreparedForGeneration == captured
+    fun hasPreparedRequest(captured: Long): Boolean = synchronized(windowLock) { requestPreparedForGeneration == captured }
 
     /**
      * Records that a request has been prepared under [captured], so a later one knows it is a
      * continuation rather than the wake's own request.
      */
-    @Synchronized
     fun notePreparedRequest(captured: Long) {
-        requestPreparedForGeneration = captured
+        // UNDER THE SAME MONITOR as every other writer. `@Synchronized` takes the INSTANCE monitor, which
+        // is a DIFFERENT lock from [windowLock] -- so it serialized this write against other
+        // `@Synchronized` members and against nothing that matters, while the transitions it must be
+        // ordered with took [windowLock]. Two locks for one state is not synchronization.
+        synchronized(windowLock) { requestPreparedForGeneration = captured }
     }
 
     /**
@@ -270,7 +271,7 @@ class GracePeriodSignal @Inject constructor() {
         // a wake is not a continuation of whatever was being discussed before it. The window it opens
         // is marked as wake-originated, so a turn captured under it prepares CREATE even if an older
         // conversation handle still exists.
-        wakeGeneration = generation
+        synchronized(windowLock) { wakeGeneration = generation }
     }
 
     /**

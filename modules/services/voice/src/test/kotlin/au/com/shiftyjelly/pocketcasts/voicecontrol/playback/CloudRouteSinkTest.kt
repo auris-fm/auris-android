@@ -2758,11 +2758,11 @@ class CloudRouteSinkTest {
 
         override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
             calls += "skipForward:$seconds"
-            return EpisodeOperationResult.Accepted
+            return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
         }
         override suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
             calls += "skipBackward:$seconds"
-            return EpisodeOperationResult.Accepted
+            return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
         }
 
         override suspend fun seekTo(
@@ -2788,7 +2788,7 @@ class CloudRouteSinkTest {
                 positionSeconds
             }
             calls += "seekTo:$resolved"
-            return EpisodeOperationResult.Accepted
+            return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
         }
 
         // Whether the sink is on the episode the operation was planned for. ABSENT MEANS "AGREE": the

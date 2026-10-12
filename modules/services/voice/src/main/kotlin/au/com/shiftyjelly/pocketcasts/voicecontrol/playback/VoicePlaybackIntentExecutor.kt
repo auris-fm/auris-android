@@ -389,8 +389,19 @@ class VoicePlaybackIntentExecutor @Inject constructor(
  * must not imply the sink knows it.
  */
 sealed interface EpisodeOperationResult {
-    /** The operation reached the player, on the episode it was bound to. */
-    data object Accepted : EpisodeOperationResult
+    /**
+     * The operation reached the player, on the episode it was bound to.
+     *
+     * [episodeId] and [preActionPositionMs] ARE PART OF THE RESULT, not something a caller re-reads
+     * afterwards. A caller that reads the live state once the operation was accepted reads whatever is
+     * selected NOW, which a later change may have made a different recording -- and history recorded
+     * against it would attribute the position to an episode the action never touched. The owner decides
+     * the episode when it accepts the operation, so the owner's answer is what history must use.
+     */
+    data class Accepted(
+        val episodeId: String?,
+        val preActionPositionMs: Long?,
+    ) : EpisodeOperationResult
 
     /** The operation was refused -- a different episode is selected, or the binding was absent. */
     data object Refused : EpisodeOperationResult

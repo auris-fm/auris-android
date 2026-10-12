@@ -910,10 +910,11 @@ class CloudRouteSink internal constructor(
                         // the episode end. Clamping it here would turn "seek back 30 s from the end"
                         // into "seek to the beginning", a different instruction.
                         val outcome = playbackSink.seekTo(positionSeconds, episodeDurationSeconds(), turnEpisodeId)
-                        // HISTORY IS COMMITTED ONLY FOR AN ACCEPTED OPERATION, and against the episode
-                        // the operation was BOUND to. Recording first meant a refused seek still
-                        // appended its pre-action position -- @reviewer's measured case.
-                        if (outcome != EpisodeOperationResult.Accepted) return@withLock false
+                        // HISTORY IS COMMITTED FROM THE ACCEPTED RESULT'S OWN PROVENANCE. Recording first
+                        // meant a refused seek still appended its pre-action position; re-reading the live
+                        // state afterwards would subject it to a later selection change. The owner decided
+                        // the episode when it accepted, so its answer is what history uses.
+                        if (outcome !is EpisodeOperationResult.Accepted) return@withLock false
                         capturePreActionPosition(positionSeconds * 1000L, turnState)
                         return@withLock true
                     }
@@ -954,7 +955,7 @@ class CloudRouteSink internal constructor(
                         episodeDurationSeconds(),
                         turnEpisodeId,
                     )
-                    restored == EpisodeOperationResult.Accepted
+                    restored is EpisodeOperationResult.Accepted
                 }
 
                 "pause" -> {
@@ -994,9 +995,9 @@ class CloudRouteSink internal constructor(
                     when {
                         delta != null && delta != 0 -> {
                             if (delta > 0) {
-                                playbackSink.skipForward(delta, turnEpisodeId) == EpisodeOperationResult.Accepted
+                                playbackSink.skipForward(delta, turnEpisodeId) is EpisodeOperationResult.Accepted
                             } else {
-                                playbackSink.skipBackward(-delta, turnEpisodeId) == EpisodeOperationResult.Accepted
+                                playbackSink.skipBackward(-delta, turnEpisodeId) is EpisodeOperationResult.Accepted
                             }
                             true
                         }
@@ -1007,15 +1008,15 @@ class CloudRouteSink internal constructor(
                         // configured skip interval here, and the sink's own comment says null means
                         // exactly that.
                         delta == null && direction == null -> {
-                            playbackSink.skipForward(null, turnEpisodeId) == EpisodeOperationResult.Accepted
+                            playbackSink.skipForward(null, turnEpisodeId) is EpisodeOperationResult.Accepted
                         }
 
                         delta == null && direction == "backward" -> {
-                            playbackSink.skipBackward(null, turnEpisodeId) == EpisodeOperationResult.Accepted
+                            playbackSink.skipBackward(null, turnEpisodeId) is EpisodeOperationResult.Accepted
                         }
 
                         delta == null && direction == "forward" -> {
-                            playbackSink.skipForward(null, turnEpisodeId) == EpisodeOperationResult.Accepted
+                            playbackSink.skipForward(null, turnEpisodeId) is EpisodeOperationResult.Accepted
                         }
 
                         // An unstated amount with a stated unrecognised direction: refused rather
@@ -1097,7 +1098,7 @@ class CloudRouteSink internal constructor(
             (playbackMs / 1000).coerceAtLeast(0),
             episodeDurationSeconds(),
             expectedEpisodeId,
-        ) == EpisodeOperationResult.Accepted
+        ) is EpisodeOperationResult.Accepted
     }
 
     private fun Map<String, Any?>.positionSeconds(): Int? {

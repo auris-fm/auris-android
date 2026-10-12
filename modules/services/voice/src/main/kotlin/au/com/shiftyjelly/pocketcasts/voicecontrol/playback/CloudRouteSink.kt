@@ -926,7 +926,7 @@ class CloudRouteSink internal constructor(
                     // was ACCEPTED, against the episode it was bound to.
                     val accepted = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock false
                     // HISTORY FROM THE ACCEPTED RESULT, never a live re-read.
-                    capturePreActionPosition(accepted.preActionPositionMs ?: referenceMs, turnState, accepted.episodeId)
+                    capturePreActionPosition(referenceMs, turnState, accepted.episodeId)
                     return@withLock true
                 }
 
@@ -934,7 +934,7 @@ class CloudRouteSink internal constructor(
                     val referenceMs = params.referencePositionMs() ?: return@withLock false
                     // Same rule: the seek is attempted FIRST and history follows only an accepted one.
                     val accepted = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock false
-                    capturePreActionPosition(accepted.preActionPositionMs ?: referenceMs, turnState, accepted.episodeId)
+                    capturePreActionPosition(referenceMs, turnState, accepted.episodeId)
                     // THE RESUME IS BOUND TO THE EPISODE THE QUOTE WAS PLAYED FROM -- this is the call
                     // the quote's own resume makes, not the standalone "resume" action. A quote means
                     // "hear this, then carry on with the recording we were in", so resuming a
@@ -1059,7 +1059,7 @@ class CloudRouteSink internal constructor(
         }
     }
 
-    private fun capturePreActionPosition(referenceMs: Long, turnState: TurnState, acceptedEpisodeId: String?) {
+    private fun capturePreActionPosition(targetReferenceMs: Long, turnState: TurnState, acceptedEpisodeId: String?) {
         // THE OWNER'S EPISODE IS THE SUBJECT, not a live re-read. This runs only once the operation was
         // ACCEPTED, and the accepted result carries the episode the owner decided on -- so the position
         // is recorded against the recording the action actually touched. Re-reading the provider here
@@ -1094,7 +1094,12 @@ class CloudRouteSink internal constructor(
         // deliberately not asking.
         if (acceptedEpisodeId == null) return
         cloudPlaybackContextState.record(
-            referencePositionMs = referenceMs,
+            // THE REQUESTED TARGET, not the pre-action position. These are two different quantities:
+            // this is the reference-timeline position the action ASKED for, while `previousPlaybackMs`
+            // above is where the client WAS. Passing the accepted operation's pre-action playback
+            // position here would record a playback instant as the reference target -- a value on the
+            // wrong timeline AND the wrong quantity.
+            referencePositionMs = targetReferenceMs,
             previousReferencePositionMs = previousReferenceMs,
             episodeId = acceptedEpisodeId,
         )

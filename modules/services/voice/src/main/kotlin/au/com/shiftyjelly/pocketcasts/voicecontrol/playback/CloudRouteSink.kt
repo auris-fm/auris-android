@@ -608,8 +608,15 @@ class CloudRouteSink internal constructor(
         // would not hold, because the enrichment below reintroduces them.
         val hasEpisode = episodeId != null
         return CloudRouteContext(
-            recentConversation = CloudRouteLimits.clampConversation(conversationMemory.recent())
-                .takeIf { it.isNotEmpty() },
+            // NO CLIENT CONVERSATION HISTORY ON A CLOUD FRAME. The owning spec forbids
+            // `context.recent_conversation` here and requires a wire omission assertion: the Worker
+            // owns cloud conversation history, so sending our own would duplicate it and let a
+            // client-side copy diverge from the conversation the server is actually maintaining.
+            // Conversation IDENTITY replaces it -- the turn says WHICH conversation it belongs to
+            // rather than re-sending what it thinks was said.
+            //
+            // Local conversation memory stays LOCAL: the local intent path still uses it.
+            recentConversation = null,
             // An absent episode stays absent: no substitution, and no empty string that would claim
             // a subject this turn does not have.
             episodeId = episodeId,

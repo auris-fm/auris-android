@@ -50,6 +50,32 @@ class CloudRouteSinkTest {
     )
 
     @Test
+    fun `cloud frames carry NO local conversation history, asserted on the serialized frame`() = runTest {
+        // @spec's requirement: the omission is asserted on the ACTUAL serialized cloud frame, with
+        // local conversation memory POPULATED -- a case that left memory empty could not tell an
+        // intentional omission from an empty one.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+
+        // Populate LOCAL memory by recording a completed exchange, then ask a question.
+        deps.conversationMemory.record("what is this podcast about", "it is about birds")
+        sink.routeToCloud("and this one", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        val turn = deps.routeTurns.last()
+        assertTrue(
+            "the turn must not carry local history as cloud context " +
+                "(recent=${turn.context.recentConversation})",
+            turn.context.recentConversation.isNullOrEmpty(),
+        )
+
+        // The WIRE assertion lives in the repositories module, where the encoder is visible
+        // (`CloudTurnRouteTest`): it serializes a frame whose context DOES hold history and asserts the
+        // key is absent, so the omission is pinned at the encoder rather than assumed from the model.
+    }
+
+    @Test
     fun `the first turn CREATES a client-minted conversation and a later grace turn RESUMES it`() = runTest {
         // @spec's admission contract: the CLIENT generates the handle, CREATE carries it, and a later
         // turn inside the live grace window resumes the SAME conversation.
@@ -939,25 +965,43 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `completed turn records bounded conversation context for the next turn`() = runTest {
+    fun `a completed turn records local memory, which cloud frames still must not carry`() = runTest {
+        // REVERSED from its earlier form, which asserted that the SECOND turn carried the recorded
+        // exchange as cloud context. The owning spec forbids `recent_conversation` on cloud frames --
+        // the Worker owns cloud history -- so that expectation encoded the defect.
+        //
+        // Local memory still RECORDS the exchange (it serves the local intent path), and this case
+        // keeps that half while asserting the cloud frame does not carry it.
         val memory = CloudConversationMemory()
-        val deps = TestDeps(conversationMemory = memory, events = flowOf(CloudRouteEvent.Token("an answer"), CloudRouteEvent.Done(1, 1)))
+        val deps = TestDeps(
+            conversationMemory = memory,
+            events = flowOf(CloudRouteEvent.Token("an answer"), CloudRouteEvent.Done(1, 1)),
+        )
         val sink = deps.sink()
 
         sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
         sink.routeToCloud("a follow-up", VoiceIntent.CloudTier.Premium, playbackContext)
 
-        // The first turn omitted the field; the second carries the recorded exchange.
-        assertEquals(null, deps.routeTurns.first().context.recentConversation)
-        assertEquals(
-            listOf(
-                CloudRouteConversationEntry.ROLE_USER to "a question",
-                CloudRouteConversationEntry.ROLE_ASSISTANT to "an answer",
+        // The local record IS kept -- both exchanges, in order, which is what local memory is for.
+        val remembered = memory.recent().map { it.role to it.text }
+        assertTrue(
+            "the completed exchange is remembered locally (remembered=$remembered)",
+            remembered.containsAll(
+                listOf(
+                    CloudRouteConversationEntry.ROLE_USER to "a question",
+                    CloudRouteConversationEntry.ROLE_ASSISTANT to "an answer",
+                ),
             ),
-            deps.routeTurns.last().context.recentConversation!!.map { it.role to it.text },
         )
-        // Never exceeds the spec bound.
-        assertTrue(deps.routeTurns.last().context.recentConversation!!.size <= CloudRouteLimits.MAX_CONVERSATION_ENTRIES)
+        // ...and NEITHER turn carries it as cloud context, whatever memory holds.
+        assertTrue(
+            "no cloud turn carries local history (first=${deps.routeTurns.first().context.recentConversation})",
+            deps.routeTurns.first().context.recentConversation.isNullOrEmpty(),
+        )
+        assertTrue(
+            "not even after memory is populated (last=${deps.routeTurns.last().context.recentConversation})",
+            deps.routeTurns.last().context.recentConversation.isNullOrEmpty(),
+        )
     }
 
     @Test

@@ -220,14 +220,14 @@ class CloudRouteSink internal constructor(
      * Returns null when the origin has been superseded: nothing is sent, so no conversation is created
      * on behalf of a turn that has already been replaced.
      */
-    suspend fun prepareTurn(
+    override suspend fun prepareTurn(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
-        isLiveGraceTurn: Boolean = false,
-        capturedOrigin: Long? = null,
-        isWakeOriginated: Boolean = false,
-        hint: CloudRouteHint? = null,
+        isLiveGraceTurn: Boolean,
+        capturedOrigin: Long?,
+        isWakeOriginated: Boolean,
+        hint: CloudRouteHint?,
     ): CloudRouteTurn? {
         val origin = capturedOrigin ?: conversationAdmission.currentOriginForTest()
         val admission = conversationAdmission.prepare(

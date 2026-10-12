@@ -36,6 +36,14 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         logicalRequestId: String,
     ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = cloudRouteSink.retainedTurnFor(logicalRequestId)
 
+    /**
+     * Reported when releasing a retained turn FAILS, so a hidden failure becomes a visible one.
+     *
+     * Set by the owner that manages the session; unset means the release failure is logged and no more,
+     * which is still not silent.
+     */
+    var onRetirementFailure: ((logicalRequestId: String, cause: Throwable) -> Unit)? = null
+
     /** The manager this executor installed its release on, so teardown can remove it. */
     private var boundDialogManager:
         au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager? = null
@@ -56,7 +64,16 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         // Through the INTERFACE, not a cast: the release is part of the contract, so a caller cannot
         // reach a sink that silently ignores it.
         dialogManager.onRequestAbandoned = { logical ->
-            runCatching { cloudRouteSink.forgetRetained(logical) }
+            // NOT SWALLOWED. A release that fails leaves the turn retained for the life of the process,
+            // and a silent catch makes that indistinguishable from a release that worked -- the
+            // hidden-failure shape this whole mechanism exists to avoid. A failure is reported through
+            // the path the owner watches, so it is visible where the session is managed.
+            try {
+                cloudRouteSink.forgetRetained(logical)
+            } catch (t: Throwable) {
+                onRetirementFailure?.invoke(logical, t)
+                Timber.w(t, "[Voice] releasing the turn retained for %s failed", logical)
+            }
         }
         boundDialogManager = dialogManager
     }

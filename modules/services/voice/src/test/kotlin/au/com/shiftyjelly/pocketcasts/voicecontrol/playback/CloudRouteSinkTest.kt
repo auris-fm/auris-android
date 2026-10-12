@@ -51,6 +51,58 @@ class CloudRouteSinkTest {
     )
 
     @Test
+    fun `an ordinary request is retryable while its window lives and retired once it is superseded`() = runTest {
+        // @spec's ordinary-request lifecycle: a pending dialog does not own an ordinary ASR request, so
+        // the WINDOW is what ends its retryability -- retain while it lives, retire when it is
+        // superseded, and refuse an explicit retry once retired.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(1)
+
+        val prepared = sink.prepareTurn(
+            request = "an ordinary question",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = playbackContext,
+            capturedOrigin = 1,
+            isWakeOriginated = true,
+            logicalRequestId = "ordinary-1",
+        )!!
+        assertNotNull(
+            "the turn is retained while its window lives",
+            deps.conversationAdmission.retained("ordinary-1"),
+        )
+
+        // A SUCCESSOR WINDOW: the ordinary request's window is superseded.
+        val retired = deps.conversationAdmission.beginOrigin(2)
+
+        assertTrue(
+            "advancing the window retires the superseded request's turn (retired=$retired)",
+            retired.contains("ordinary-1"),
+        )
+        assertNull(
+            "and it is no longer retained",
+            deps.conversationAdmission.retained("ordinary-1"),
+        )
+
+        // An explicit RETRY of the retired identity must not resurrect it.
+        val retry = sink.prepareTurn(
+            request = "an ordinary question",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = playbackContext,
+            capturedOrigin = 1,
+            isWakeOriginated = false,
+            logicalRequestId = "ordinary-1",
+        )
+        assertTrue(
+            "a retry under a retired identity does not reuse the retired turn " +
+                "(reused=${retry?.requestId == prepared.requestId})",
+            retry?.requestId != prepared.requestId,
+        )
+    }
+
+    @Test
     fun `a retry of an earlier logical request reuses its turn on the REAL sink path`() = runTest {
         // @reviewer's bounded case, on the production sink rather than a fake: the fake returns numbered
         // IDs and always a turn, so a case driving it cannot distinguish a real retry from a fresh

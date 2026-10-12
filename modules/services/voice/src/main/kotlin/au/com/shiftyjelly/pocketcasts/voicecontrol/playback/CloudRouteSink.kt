@@ -237,6 +237,13 @@ class CloudRouteSink internal constructor(
         // executor keeps, so a direct caller and the executor resolve a retry identically.
         if (logicalRequestId != null) {
             conversationAdmission.retained(logicalRequestId)?.let { return it }
+            // NOT RETAINED. Either this logical request was never prepared, or it has been RETIRED --
+            // its window closed, or its dialog was abandoned. Preparing a fresh turn under a retired
+            // identity would resurrect a request that is no longer retryable, so absence is reported
+            // rather than filled in.
+            //
+            // A first attempt is distinguished by the caller (`isRetry`), which is the only place that
+            // can tell "prepare this" from "reuse what I prepared".
         }
         val origin = capturedOrigin ?: conversationAdmission.currentOriginForTest()
         val admission = conversationAdmission.prepare(

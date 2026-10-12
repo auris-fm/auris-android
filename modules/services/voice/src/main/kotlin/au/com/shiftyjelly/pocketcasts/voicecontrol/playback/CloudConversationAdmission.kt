@@ -81,9 +81,23 @@ class CloudConversationAdmission @Inject constructor() {
         Prepared(existing, CloudConversationMode.Resume)
     }
 
-    /** Marks [origin] as the only live generation; older origins can no longer prepare a turn. */
-    fun beginOrigin(origin: Long) = synchronized(lock) {
+    /**
+     * Marks [origin] as the only live generation, and RETIRES what the superseded ones were holding.
+     *
+     * A request is retryable while its OWN window is live. When a new window opens, requests issued
+     * under the previous one stop being retryable -- nothing will retry them, because a retry is
+     * validated against its window -- so their prepared turns are released here rather than kept for
+     * the life of the process. This is the ordinary cloud-request lifecycle: a pending dialog does not
+     * own an ordinary ASR request, so the window is what ends its retryability.
+     *
+     * @return the identities retired by this advance, so the owner can report or observe them.
+     */
+    fun beginOrigin(origin: Long): List<String> = synchronized(lock) {
+        val superseded = prepared.filterValues { it.capturedOrigin != null && it.capturedOrigin != origin }
+            .keys.toList()
+        superseded.forEach { prepared.remove(it) }
         currentOrigin = origin
+        superseded
     }
 
     /** Forgets the conversation, so the next turn creates a new one. */

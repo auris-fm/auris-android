@@ -611,6 +611,42 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `an UNKNOWN action is carried as Unknown, not as nothing and not as confirmed`() {
+        // @spec: "returning true for Unknown still reports confirmed execution" -- the defect is that the
+        // Boolean could not distinguish the three. The RESPONSE cannot show the difference: an `Action`
+        // event makes the turn handled regardless, so Unknown and Refused both yield Silent. What the
+        // mechanism carries is the ACTION OUTCOME, and it must keep all three apart.
+        val unknown = CloudRouteSink.mergeActionOutcome(
+            CloudRouteSink.Companion.ActionOutcome.None,
+            CloudRouteSink.Companion.ActionOutcome.Unknown,
+        )
+        assertNotEquals(
+            "an unknown action must not be recorded as nothing having happened",
+            CloudRouteSink.Companion.ActionOutcome.None,
+            unknown,
+        )
+        assertNotEquals(
+            "and it must not be recorded as confirmed execution, which nobody observed",
+            CloudRouteSink.Companion.ActionOutcome.Confirmed,
+            unknown,
+        )
+        assertEquals(
+            "it is carried as UNKNOWN, distinctly",
+            CloudRouteSink.Companion.ActionOutcome.Unknown,
+            unknown,
+        )
+        // AND A CONFIRMED OUTCOME IS NOT DOWNGRADED by a later unknown one.
+        assertEquals(
+            "confirmation is not replaced by a later unknown",
+            CloudRouteSink.Companion.ActionOutcome.Confirmed,
+            CloudRouteSink.mergeActionOutcome(
+                CloudRouteSink.Companion.ActionOutcome.Confirmed,
+                CloudRouteSink.Companion.ActionOutcome.Unknown,
+            ),
+        )
+    }
+
+    @Test
     fun `an UNBOUND reference position is refused rather than applied to whatever is playing`() = runTest {
         // @spec's unbound case: a reference position is a position IN a recording, so with no episode to
         // be a position in there is nothing it can be a position in. A null expectation must not turn an
@@ -2907,6 +2943,7 @@ class CloudRouteSinkTest {
             // MIRRORS THE PRODUCTION REFUSAL. The fake used to record every call unconditionally, so a
             // mutation removing the episode binding left it unchanged and the case could not fail for
             // the defect. The binding is part of the contract now, so the fake honours it.
+            seekOutcomeForTest?.let { return it }
             if (!accepts(expectedEpisodeId)) {
                 calls += "seekToRefused:$positionSeconds"
                 // REFUSED, not Accepted. Reporting acceptance here made the fake claim a refusal had
@@ -2930,6 +2967,9 @@ class CloudRouteSinkTest {
         // moved to another episode. A default of "refuse" would make every unrelated case fail for a
         // reason that has nothing to do with what it is about.
         var currentEpisodeIdForTest: String? = null
+
+        /** Overrides the outcome a seek reports, so a case can drive accepted/refused/unknown. */
+        var seekOutcomeForTest: EpisodeOperationResult? = null
 
         // The PRE-ACTION POSITION the owner would report. The production manager snapshots this at its
         // mutation, so the fake supplies it here: a case that asserts history must not rely on the

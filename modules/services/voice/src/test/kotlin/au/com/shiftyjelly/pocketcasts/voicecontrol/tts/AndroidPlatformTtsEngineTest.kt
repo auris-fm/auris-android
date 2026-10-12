@@ -550,6 +550,12 @@ class AndroidPlatformTtsEngineTest {
             fake.stopCalls,
         )
         assertNull("the old playback must not throw in this ordering (failure=$oldFailure)", oldFailure)
+        // @spec's flag assertion: the old utterance never reached playback, so it must not have
+        // claimed the shared flag -- an utterance that wrote nothing has no playing audio to report.
+        assertFalse(
+            "a superseded utterance that never wrote must not leave the playback flag set",
+            wired.isPlayingSynthesizedAudio(),
+        )
         wired.release()
     }
 
@@ -624,6 +630,14 @@ class AndroidPlatformTtsEngineTest {
             "but the OLD utterance's own blocked track must have been stopped even though a " +
                 "successor owns the engine (ownedTrackStops=$ownedTrackStops)",
             ownedTrackStops >= 1,
+        )
+        // @spec: the counter runs AFTER runCatching(stop), so on its own it is not evidence the stop
+        // SUCCEEDED. The owned track's own reported state is the direct measurement.
+        val ownedState = wired.ownedTrackPlaybackStateForTest()
+        assertTrue(
+            "the owned track must actually report a non-playing state, not merely have been asked " +
+                "to stop (state=$ownedState)",
+            ownedState == null || ownedState != android.media.AudioTrack.PLAYSTATE_PLAYING,
         )
         wired.release()
     }

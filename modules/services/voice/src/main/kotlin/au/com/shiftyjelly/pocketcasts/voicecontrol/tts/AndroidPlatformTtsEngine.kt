@@ -84,6 +84,17 @@ class AndroidPlatformTtsEngine @Inject constructor(
     @Volatile
     private var playbackActive = false
 
+    /**
+     * Which PLAYBACK INSTANCE the shared [playbackActive] flag describes, or null when none.
+     *
+     * Ownership is by instance, not by synthesis generation: a superseded utterance that never wrote
+     * anything has no playback to report, and an old teardown must not clear a real successor's flag.
+     * The generation says whose ENGINE claim is current; this says whose AUDIO is playing, and those
+     * can differ during a handover.
+     */
+    @Volatile
+    private var playbackOwner: Any? = null
+
     @Volatile
     private var framesPlayedAtReturn = 0
 
@@ -307,7 +318,11 @@ class AndroidPlatformTtsEngine @Inject constructor(
         }
         try {
             track.play()
+            // This instance owns the flag from here: it has audio actually playing. A superseded
+            // utterance that returns before this point never claims the flag at all.
+            playbackOwner = this
             playbackActive = true
+            lastOwnedTrack = track
             var offset = 0
             var writeRefused = false
             while (offset < clip.samples.size) {
@@ -388,12 +403,12 @@ class AndroidPlatformTtsEngine @Inject constructor(
         } finally {
             watcher?.cancel()
             stopperScope.cancel()
-            // Only the CURRENT utterance may clear the shared playback flag: an old render exiting
-            // while a successor is audibly playing must not report that nothing is playing.
-            synthesisLock.withLock {
-                if (synthesisGeneration == mine) {
-                    playbackActive = false
-                }
+            // Clear the shared flag only if THIS playback instance owns it: an old render exiting
+            // while a successor is audibly playing must not report that nothing is playing, and a
+            // superseded utterance that never reached playback never claimed the flag to begin with.
+            if (playbackOwner === this) {
+                playbackActive = false
+                playbackOwner = null
             }
             // Clear the shared field only if it still points at THIS utterance's track: a successor
             // may have replaced it, and nulling the field would orphan the successor's stop path.
@@ -420,6 +435,16 @@ class AndroidPlatformTtsEngine @Inject constructor(
     @Volatile
     var ownedTrackStopsForTest: Int = 0
         private set
+
+    /**
+     * The playback state of the most recently owned track, or null when none was created. Test
+     * visibility so a case can measure the STOP directly rather than trusting a counter that runs
+     * after a best-effort call.
+     */
+    fun ownedTrackPlaybackStateForTest(): Int? = lastOwnedTrack?.state
+
+    @Volatile
+    private var lastOwnedTrack: AudioTrack? = null
 
     /** True while a synthesized utterance is playing, so a caller can observe playback in progress. */
     fun isPlayingSynthesizedAudio(): Boolean = playbackActive

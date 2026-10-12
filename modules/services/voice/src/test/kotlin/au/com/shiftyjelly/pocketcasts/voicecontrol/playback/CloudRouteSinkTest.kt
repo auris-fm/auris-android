@@ -518,6 +518,67 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a bound skip keeps the CALLER'S expectation rather than adopting the current episode`() = runTest {
+        // @reviewer's finding: `skipForwardSuspend` re-read the queue, so a bound skip for A that found B
+        // selected would adopt B as its subject and proceed -- under A's intent. The caller's expectation
+        // must travel with the call.
+        val deps = TestDeps(
+            episodeId = "A",
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "skip_forward",
+                    params = mapOf("seconds" to 30),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // The player has moved to B, so a skip planned for A must be refused.
+        deps.playback.currentEpisodeIdForTest = "B"
+        val sink = deps.sink()
+
+        sink.routeToCloud(
+            "about episode A",
+            VoiceIntent.CloudTier.Premium,
+            PlaybackContext(episodeId = "A", clientPositionMs = 0L),
+        )
+
+        assertTrue(
+            "a skip planned for A must not proceed against B (calls=${deps.playback.calls})",
+            !deps.playback.calls.any { it.startsWith("skipForward:") },
+        )
+    }
+
+    @Test
+    fun `a quote resume does not resume a replacement episode`() = runTest {
+        // The quote's own resume is bound to the recording the quote came from.
+        val deps = TestDeps(
+            episodeId = "A",
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "play_quote",
+                    params = mapOf("reference_position_ms" to 45_000_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        deps.playback.currentEpisodeIdForTest = "B"
+        val sink = deps.sink()
+
+        sink.routeToCloud(
+            "play the quote",
+            VoiceIntent.CloudTier.Premium,
+            PlaybackContext(episodeId = "A", clientPositionMs = 0L),
+        )
+
+        assertTrue(
+            "a quote whose episode was replaced must not seek or resume (calls=${deps.playback.calls})",
+            !deps.playback.calls.any { it.startsWith("seekTo:") || it == "resume" },
+        )
+    }
+
+    @Test
     fun `a REFUSED bound skip is not reported as a performed action`() = runTest {
         // @spec's requirement: the scoped mutation's own payload decides, and statistics/history follow
         // ACCEPTANCE. A refused skip moved nothing, so reporting it as performed would publish a skip
@@ -2780,7 +2841,7 @@ class CloudRouteSinkTest {
             return VoiceResponse.Silent
         }
 
-        override suspend fun resume(): VoiceResponse {
+        override suspend fun resume(expectedEpisodeId: String?): VoiceResponse {
             resumeStarted.complete(Unit)
             resumeGate?.await()
             calls += "resume"

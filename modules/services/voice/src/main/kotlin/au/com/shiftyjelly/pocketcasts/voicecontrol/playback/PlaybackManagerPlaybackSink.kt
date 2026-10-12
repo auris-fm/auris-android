@@ -82,7 +82,13 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
-    override suspend fun resume(): VoiceResponse {
+    override suspend fun resume(expectedEpisodeId: String?): VoiceResponse {
+        // THROUGH THE OWNER when the caller has an episode-specific subject. A quote's resume is about
+        // the recording the quote came from, so it must not start a replacement.
+        if (expectedEpisodeId != null) {
+            playbackManager.resumeIfPlaying(expectedEpisodeId, sourceView = SourceView.VOICE_COMMANDS)
+            return VoiceResponse.Silent
+        }
         playbackManager.playQueueSuspend(sourceView = SourceView.VOICE_COMMANDS)
         return VoiceResponse.Silent
     }

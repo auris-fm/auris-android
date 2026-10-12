@@ -236,14 +236,24 @@ class AndroidPlatformTtsEngine @Inject constructor(
                 tts?.stop()
             }
         }
+        // THIS utterance's ownership claim. The write loop checks it between writes: a SUPERSEDING
+        // reply bumps the generation, and an old reply blocked in (or looping through) writes must
+        // stop promptly rather than keep talking under the successor. This is the seam the
+        // job-completion hook cannot cover -- a blocked write never completes, so the hook never
+        // fires until the write returns.
+        val mine = synthesisLock.withLock { synthesisGeneration }
+        playbackGenerationForTest = mine
         try {
-            playSynthesizedInternal(wav)
+            playSynthesizedInternal(wav) { synthesisLock.withLock { synthesisGeneration != mine } }
         } finally {
             stopper?.dispose()
         }
     }
 
-    private suspend fun playSynthesizedInternal(wav: File) = withContext(Dispatchers.IO) {
+    private suspend fun playSynthesizedInternal(
+        wav: File,
+        superseded: () -> Boolean,
+    ) = withContext(Dispatchers.IO) {
         playbackIncomplete = false
         val clip = runCatching {
             wav.inputStream().use { EarconAudio.decodeWavToMono(it) }
@@ -260,6 +270,15 @@ class AndroidPlatformTtsEngine @Inject constructor(
             var offset = 0
             var writeRefused = false
             while (offset < clip.samples.size) {
+                // Supersession check per iteration: when a newer reply has claimed the engine, this
+                // one stops HERE -- at the top of the loop and, through the seam's own unblocking,
+                // promptly after a blocked write returns. Without this the old reply's remaining
+                // writes continue under the successor.
+                if (superseded()) {
+                    activeTrack?.runCatching { stop() }
+                    tts?.runCatching { stop() }
+                    return@withContext
+                }
                 val writer = writeToSink
                 val written = if (writer != null) {
                     writer(track, clip.samples, offset, clip.samples.size - offset)
@@ -342,6 +361,17 @@ class AndroidPlatformTtsEngine @Inject constructor(
 
     /** How many times speak() has been entered, so a test can assert a failure does not re-run it. */
     fun speakInvocations(): Int = speakCount
+
+    /**
+     * The generation active when the most recent playback loop started, exposed so the blocked-write
+     * regression can observe the same comparison the loop makes.
+     */
+    @Volatile
+    var playbackGenerationForTest: Int = -1
+        private set
+
+    /** The engine's current ownership generation. Test visibility; see [playbackGenerationForTest]. */
+    fun currentGenerationForTest(): Int = synthesisLock.withLock { synthesisGeneration }
 
     private fun recordAccepted(
         samples: ShortArray,

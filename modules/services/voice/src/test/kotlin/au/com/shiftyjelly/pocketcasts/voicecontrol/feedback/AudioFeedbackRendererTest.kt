@@ -187,6 +187,66 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `ending the session stops subsequent cue attribution`() {
+        // @reviewer's lifecycle probe: after endSession, an already-accepted cue must not keep
+        // claiming fresh output -- the session is over, so nothing it was attributed to is still
+        // sounding for the user.
+        renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(1_100) }
+        renderer.endSession()
+        val before = renderer.emissionNotesForTest()
+        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(2_500) }
+        assertEquals(
+            "a released earcon must not keep claiming new output " +
+                "(before=$before after=${renderer.emissionNotesForTest()})",
+            before,
+            renderer.emissionNotesForTest(),
+        )
+    }
+
+    @Test
+    fun `a cue stops being attributed once its own span has elapsed`() {
+        // @reviewer's second probe: coverage must be bounded by the cue, so a claimed 1_500 ms span
+        // cannot still be emitting notes at 2_000 ms. The bound is a ceiling on a cue that never
+        // reports progress; a cue still reporting Playing past it must not extend past it.
+        renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(1_500L)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        // Snapshot just BEFORE the span is crossed (span 1_500 ms): the submission note plus the one
+        // at 1_000 ms. The next tick would land at 2_000 ms, PAST the cue's own span -- that is the
+        // note the ceiling must prevent, and it is the difference the guard makes.
+        kotlinx.coroutines.runBlocking {
+            repeat(52) {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                kotlinx.coroutines.delay(20)
+            }
+        }
+        val beforeCrossing = renderer.emissionNotesForTest()
+        // Now let the crossing tick happen.
+        kotlinx.coroutines.runBlocking {
+            repeat(80) {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                kotlinx.coroutines.delay(20)
+            }
+        }
+        assertEquals(
+            "a cue may not emit another attribution note once its own span has elapsed " +
+                "(beforeCrossing=$beforeCrossing after=${renderer.emissionNotesForTest()})",
+            beforeCrossing,
+            renderer.emissionNotesForTest(),
+        )
+        renderer.release()
+    }
+
+    @Test
     fun `an earcon the player refuses is not reported as emitted audio`() = runTest {
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(false)
 

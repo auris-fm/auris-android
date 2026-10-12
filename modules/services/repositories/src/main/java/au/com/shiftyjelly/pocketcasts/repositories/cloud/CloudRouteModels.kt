@@ -5,10 +5,24 @@ import com.squareup.moshi.JsonClass
 
 @JsonClass(generateAdapter = true)
 data class CloudRouteContext(
-    @Json(name = "episode_id") val episodeId: String,
+    /**
+     * The episode the answer concerns, or NULL when there is none -- discovery with nothing playing.
+     *
+     * Null is OMITTED on the wire, which is the honest representation of "no current episode". It is
+     * deliberately not an empty string and not a substitute: a fabricated identifier would claim a
+     * subject the turn does not have, and the server cannot tell that apart from a real episode whose
+     * id happens to be blank.
+     */
+    @Json(name = "episode_id") val episodeId: String? = null,
     @Json(name = "podcast_id") val podcastId: String? = null,
     @Json(name = "reference_position_ms") val referencePositionMs: Long? = null,
-    @Json(name = "client_position_ms") val clientPositionMs: Long,
+    /**
+     * The client's own play position, or null when no episode is playing.
+     *
+     * Absent rather than zero: zero is a real position (the very start), so reporting it for "nothing
+     * is playing" would place the turn at an instant that does not exist.
+     */
+    @Json(name = "client_position_ms") val clientPositionMs: Long? = null,
     @Json(name = "recent_reference_positions") val recentReferencePositions: List<Long> = emptyList(),
     @Json(name = "previous_reference_position_ms") val previousReferencePositionMs: Long? = null,
     /** Null (omitted on the wire) when there is no recent conversation. */

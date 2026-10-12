@@ -25,6 +25,53 @@ class PlaybackManagerPlaybackSinkTest {
     )
 
     @Test
+    fun `a seek bound to another episode is refused AT THE SINK, not by its caller`() = runTest {
+        // THE BOUNDARY IS THE PRODUCTION SINK, so the case must drive IT rather than a fake. This is the
+        // same principle as the signed-position case above: a caller-side check can be overtaken by a
+        // selection change between the check and the mutation, and the caller's mutex cannot exclude a
+        // change made anywhere else in the app. Only the owner of what is playing can decide "which
+        // episode is selected" and "seek it" as ONE step.
+        //
+        // A fake sink that models the refusal cannot fail when the PRODUCTION check is removed -- it
+        // would only be testing its own copy -- which is exactly why this case lives here.
+        val manager = mock<PlaybackManager>()
+        org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenReturn(
+            au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+                uuid = "episode-B",
+                podcastUuid = "podcast-1",
+                publishedDate = java.util.Date(),
+            ),
+        )
+
+        sink(manager).seekTo(positionSeconds = 100, episodeDurationSeconds = 1800, expectedEpisodeId = "episode-A")
+
+        verify(manager, org.mockito.kotlin.never()).seekToTimeMsSuspend(
+            org.mockito.kotlin.any(),
+            org.mockito.kotlin.anyOrNull(),
+        )
+    }
+
+    @Test
+    fun `a seek bound to the episode now playing still reaches the player`() = runTest {
+        // The positive control: the binding must not refuse the ordinary case, or the check above would
+        // be satisfied by refusing everything.
+        val manager = mock<PlaybackManager>()
+        org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenReturn(
+            au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+                uuid = "episode-A",
+                podcastUuid = "podcast-1",
+                publishedDate = java.util.Date(),
+            ),
+        )
+
+        sink(manager).seekTo(positionSeconds = 100, episodeDurationSeconds = 1800, expectedEpisodeId = "episode-A")
+
+        val positionMs = argumentCaptor<Int>()
+        verify(manager).seekToTimeMsSuspend(positionMs.capture(), org.mockito.kotlin.anyOrNull())
+        assertEquals(100_000, positionMs.firstValue)
+    }
+
+    @Test
     fun `a negative position resolves as an offset back from the episode end`() = runTest {
         // voice-intents: "non-negative values are offsets from the beginning, 0 means beginning, and
         // negative values are offsets back from the episode end." -30 s against a 1800 s episode is

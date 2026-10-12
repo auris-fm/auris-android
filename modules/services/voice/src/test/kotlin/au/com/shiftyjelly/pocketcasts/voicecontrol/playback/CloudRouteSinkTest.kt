@@ -485,6 +485,7 @@ class CloudRouteSinkTest {
         )
         // The user changes episode MID-TURN: the provider now reports B while the turn is about A.
         deps.selectEpisodeForTest("B")
+        deps.playback.currentEpisodeIdForTest = "B"
         // (the provider started on A, matching the turn, so the ONLY difference is the selection change)
         val sink = deps.sink()
 
@@ -497,7 +498,7 @@ class CloudRouteSinkTest {
         assertTrue(
             "an action planned for episode A must not seek the player now holding episode B " +
                 "(calls=${deps.playback.calls})",
-            deps.playback.calls.none { it.startsWith("seekTo") },
+            deps.playback.calls.none { it.startsWith("seekTo:") },
         )
     }
 
@@ -2633,16 +2634,27 @@ class CloudRouteSinkTest {
             return VoiceResponse.Silent
         }
 
-        override suspend fun skipForward(seconds: Int?): VoiceResponse {
+        override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): VoiceResponse {
             calls += "skipForward:$seconds"
             return VoiceResponse.Silent
         }
-        override suspend fun skipBackward(seconds: Int?): VoiceResponse {
+        override suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String?): VoiceResponse {
             calls += "skipBackward:$seconds"
             return VoiceResponse.Silent
         }
 
-        override suspend fun seekTo(positionSeconds: Int, episodeDurationSeconds: Int): VoiceResponse {
+        override suspend fun seekTo(
+            positionSeconds: Int,
+            episodeDurationSeconds: Int,
+            expectedEpisodeId: String?,
+        ): VoiceResponse {
+            // MIRRORS THE PRODUCTION REFUSAL. The fake used to record every call unconditionally, so a
+            // mutation removing the episode binding left it unchanged and the case could not fail for
+            // the defect. The binding is part of the contract now, so the fake honours it.
+            if (!accepts(expectedEpisodeId)) {
+                calls += "seekToRefused:$positionSeconds"
+                return VoiceResponse.Silent
+            }
             // Resolve the schema's signed semantics the same way production does, so a fake cannot
             // make a negative position pass by clamping it where the real sink resolves an offset.
             val resolved = if (positionSeconds < 0) {
@@ -2653,6 +2665,14 @@ class CloudRouteSinkTest {
             calls += "seekTo:$resolved"
             return VoiceResponse.Silent
         }
+
+        // Whether the sink is on the episode the operation was planned for. ABSENT MEANS "AGREE": the
+        // ordinary case is that nothing changed, so a case has to say so explicitly when the player
+        // moved to another episode. A default of "refuse" would make every unrelated case fail for a
+        // reason that has nothing to do with what it is about.
+        var currentEpisodeIdForTest: String? = null
+
+        private fun accepts(expectedEpisodeId: String?): Boolean = expectedEpisodeId == null || currentEpisodeIdForTest == null || expectedEpisodeId == currentEpisodeIdForTest
 
         override fun nextEpisode(): VoiceResponse = VoiceResponse.Silent
     }

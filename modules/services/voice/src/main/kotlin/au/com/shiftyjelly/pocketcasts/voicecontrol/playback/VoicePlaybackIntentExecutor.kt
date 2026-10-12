@@ -396,18 +396,31 @@ interface VoicePlaybackSink {
      */
     suspend fun pauseAsHold(): VoiceResponse
     suspend fun resume(): VoiceResponse
-    suspend fun skipForward(seconds: Int?): VoiceResponse
-    suspend fun skipBackward(seconds: Int?): VoiceResponse
+    suspend fun skipForward(seconds: Int?, expectedEpisodeId: String? = null): VoiceResponse
+    suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String? = null): VoiceResponse
 
     /**
-     * Seek to a signed absolute episode position.
+     * Seek to a signed absolute episode position, ON [expectedEpisodeId].
+     *
+     * [expectedEpisodeId] MAKES VALIDATION AND MUTATION ONE DECISION. A separate check cannot work: the
+     * selection can change between the check and the mutation, and `turnMutex` cannot exclude a change
+     * made elsewhere in the app -- it only serializes this turn's own operations. Passing the episode
+     * the position was computed for lets the owner that reads the current selection refuse, atomically,
+     * a mutation addressed to a different recording.
+     *
+     * Null means the caller has no episode-specific subject: the operation is episode-INDEPENDENT (a
+     * pause, a resume) and is not refused on this ground.
      *
      * The schema's semantics belong to this call rather than to its callers: non-negative values are
      * offsets from the beginning, 0 is the beginning, and a NEGATIVE value is an offset back from the
      * episode end. [episodeDurationSeconds] is what makes the negative case resolvable -- clamping it
      * to zero would turn "seek back 30 s from the end" into "seek to the beginning".
      */
-    suspend fun seekTo(positionSeconds: Int, episodeDurationSeconds: Int): VoiceResponse
+    suspend fun seekTo(
+        positionSeconds: Int,
+        episodeDurationSeconds: Int,
+        expectedEpisodeId: String? = null,
+    ): VoiceResponse
     fun nextEpisode(): VoiceResponse
 }
 

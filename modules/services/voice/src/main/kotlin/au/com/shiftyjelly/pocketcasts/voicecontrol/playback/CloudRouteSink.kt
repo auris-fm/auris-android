@@ -915,7 +915,7 @@ class CloudRouteSink internal constructor(
                         // state afterwards would subject it to a later selection change. The owner decided
                         // the episode when it accepted, so its answer is what history uses.
                         if (outcome !is EpisodeOperationResult.Accepted) return@withLock false
-                        capturePreActionPosition(positionSeconds * 1000L, turnState, outcome.episodeId)
+                        capturePreActionPosition(positionSeconds * 1000L, turnState, outcome.episodeId, outcome.preActionPositionMs)
                         return@withLock true
                     }
                     // The reference branch is reached only when that form was supplied, so a null
@@ -926,7 +926,7 @@ class CloudRouteSink internal constructor(
                     // was ACCEPTED, against the episode it was bound to.
                     val accepted = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock false
                     // HISTORY FROM THE ACCEPTED RESULT, never a live re-read.
-                    capturePreActionPosition(referenceMs, turnState, accepted.episodeId)
+                    capturePreActionPosition(referenceMs, turnState, accepted.episodeId, accepted.preActionPositionMs)
                     return@withLock true
                 }
 
@@ -934,7 +934,7 @@ class CloudRouteSink internal constructor(
                     val referenceMs = params.referencePositionMs() ?: return@withLock false
                     // Same rule: the seek is attempted FIRST and history follows only an accepted one.
                     val accepted = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock false
-                    capturePreActionPosition(referenceMs, turnState, accepted.episodeId)
+                    capturePreActionPosition(referenceMs, turnState, accepted.episodeId, accepted.preActionPositionMs)
                     // THE RESUME IS BOUND TO THE EPISODE THE QUOTE WAS PLAYED FROM -- this is the call
                     // the quote's own resume makes, not the standalone "resume" action. A quote means
                     // "hear this, then carry on with the recording we were in", so resuming a
@@ -1059,18 +1059,23 @@ class CloudRouteSink internal constructor(
         }
     }
 
-    private fun capturePreActionPosition(targetReferenceMs: Long, turnState: TurnState, acceptedEpisodeId: String?) {
+    private fun capturePreActionPosition(
+        targetReferenceMs: Long,
+        turnState: TurnState,
+        acceptedEpisodeId: String?,
+        preActionPositionMs: Long?,
+    ) {
         // THE OWNER'S EPISODE IS THE SUBJECT, not a live re-read. This runs only once the operation was
         // ACCEPTED, and the accepted result carries the episode the owner decided on -- so the position
         // is recorded against the recording the action actually touched. Re-reading the provider here
         // would record against whatever a LATER selection change made current, which is a different
         // recording, and the accepted result is the only thing that can say otherwise.
         //
-        // The position itself comes from the live provider because a PRE-action position is by
-        // definition the client's position BEFORE the mutation, which only the provider knows; the
-        // EPISODE it is attributed to is what the accepted result supplies.
-        val current = playbackContextProvider.current()
-        val previousPlaybackMs = current.clientPositionMs.takeIf { acceptedEpisodeId == null || current.episodeId == acceptedEpisodeId }
+        // THE PRE-ACTION POSITION COMES FROM THE OWNER, NOT FROM A LATER READ. `preActionPositionMs`
+        // was snapshotted by the manager at the mutation, so it IS the position before the action. The
+        // provider answers "where is the client NOW", which after an accepted seek is the TARGET, not
+        // the starting point -- reading it here would record the destination as the previous position.
+        val previousPlaybackMs = preActionPositionMs
         // preQuotePositionMs stays on the playback timeline: stop_quote seeks the local player back to
         // it. When NO episode is playing there is no position to return to, so this records null and
         // the restore path refuses -- substituting zero would send the user to the start of a

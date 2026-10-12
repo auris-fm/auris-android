@@ -1064,6 +1064,47 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `history uses the OWNER'S pre-action snapshot, not a later provider read`() = runTest {
+        // THE OBSERVATION THAT DISTINGUISHES THE TWO. The provider reports the position the CLIENT has
+        // NOW, which after an accepted seek is the DESTINATION; the owner reports the position BEFORE the
+        // mutation. A case where those differ is the only one that can tell which value history used --
+        // with them equal, a live read and the owner's snapshot are indistinguishable, which is why the
+        // earlier cases could not see the difference.
+        val fingerprint = mock<FingerprintTimingManager>()
+        whenever(fingerprint.referenceTime(60_000)).thenReturn(45.0)
+        whenever(fingerprint.playbackTimeMs(45_000.0)).thenReturn(45_000)
+        val state = CloudPlaybackContextState()
+        val deps = TestDeps(
+            fingerprintTimingManager = fingerprint,
+            cloudPlaybackContextState = state,
+            // WHERE THE CLIENT IS NOW -- deliberately different from the pre-action snapshot below.
+            clientPositionMs = 999_000L,
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "play_quote",
+                    params = mapOf("reference_position_ms" to 45_000_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // THE OWNER'S SNAPSHOT: the position BEFORE the action, on the playback timeline.
+        deps.playback.preActionPositionMsForTest = 60_000L
+        val sink = deps.sink()
+
+        sink.routeToCloud("play the quote", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        val recorded = state.snapshot("episode-id")
+        // 60_000 playback maps to 45_000 reference. The provider's 999_000 would map far away, so a live
+        // read cannot produce this value.
+        assertTrue(
+            "the recorded previous reference must come from the OWNER'S snapshot (60_000 playback), not " +
+                "the provider's current position (999_000): recorded=${recorded.previousReferencePositionMs}",
+            recorded.previousReferencePositionMs == 45_000L,
+        )
+    }
+
+    @Test
     fun `play_quote records previous position on the reference timeline`() = runTest {
         val fingerprint = mock<FingerprintTimingManager>()
         whenever(fingerprint.referenceTime(60_000)).thenReturn(45.0)
@@ -2846,16 +2887,16 @@ class CloudRouteSinkTest {
             resumeGate?.await()
             calls += "resume"
             host?.playing = true
-            return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
+            return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = preActionPositionMsForTest)
         }
 
         override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
             calls += "skipForward:$seconds"
-            return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
+            return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = preActionPositionMsForTest)
         }
         override suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
             calls += "skipBackward:$seconds"
-            return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
+            return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = preActionPositionMsForTest)
         }
 
         override suspend fun seekTo(
@@ -2881,7 +2922,7 @@ class CloudRouteSinkTest {
                 positionSeconds
             }
             calls += "seekTo:$resolved"
-            return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
+            return EpisodeOperationResult.Accepted(expectedEpisodeId, preActionPositionMsForTest)
         }
 
         // Whether the sink is on the episode the operation was planned for. ABSENT MEANS "AGREE": the
@@ -2889,6 +2930,11 @@ class CloudRouteSinkTest {
         // moved to another episode. A default of "refuse" would make every unrelated case fail for a
         // reason that has nothing to do with what it is about.
         var currentEpisodeIdForTest: String? = null
+
+        // The PRE-ACTION POSITION the owner would report. The production manager snapshots this at its
+        // mutation, so the fake supplies it here: a case that asserts history must not rely on the
+        // provider being read afterwards, because production no longer does that.
+        var preActionPositionMsForTest: Long? = 60_000L
 
         private fun accepts(expectedEpisodeId: String?): Boolean = expectedEpisodeId == null || currentEpisodeIdForTest == null || expectedEpisodeId == currentEpisodeIdForTest
 

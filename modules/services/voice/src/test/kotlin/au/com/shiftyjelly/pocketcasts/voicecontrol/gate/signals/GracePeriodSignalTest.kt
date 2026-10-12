@@ -311,6 +311,18 @@ class GracePeriodSignalTest {
             "the successor's allowance survives the refused claim",
             signal.issueEscalation(second),
         )
+        // REPLACEMENT IS AN ENDING TOO, and this is the half that needed its own path: a wake replaces
+        // the window in force, so what the replaced window held must stop being retryable AT THAT
+        // MOMENT -- not when some later request happens to be admitted. A window whose successor never
+        // runs a request otherwise kept its prepared turn indefinitely.
+        val ended = mutableListOf<Long>()
+        signal.onWindowEnded = { ended += it }
+        signal.onWakeWordDetected()
+        assertTrue(
+            "opening a window reports the window it replaced (ended=$ended)",
+            ended.isNotEmpty(),
+        )
+
         // COVERAGE NOTE, because two mechanisms overlap here and only one is pinned: mutating the
         // window-open reset away leaves this case PASSING, since the ORIGIN CHECK already refuses the
         // stale claim before it can spend anything. The reset is defensive -- it matters only for a

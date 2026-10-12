@@ -574,20 +574,35 @@ class CloudRouteSink internal constructor(
 
     private fun buildRouteContext(context: PlaybackContext): CloudRouteContext {
         val state = cloudPlaybackContextState.snapshot()
+        val episodeId = context.episodeId?.takeIf { it.isNotEmpty() }
+        // THE NO-EPISODE RULE IS APPLIED HERE, LAST, after every source of enrichment. The saved state
+        // holds reference positions accumulated while an episode WAS playing; merging them into a turn
+        // that has no episode sends positions belonging to a recording the turn is not about, and the
+        // server rejects playback positions without an episode. Applying the rule at the provider alone
+        // would not hold, because the enrichment below reintroduces them.
+        val hasEpisode = episodeId != null
         return CloudRouteContext(
             recentConversation = CloudRouteLimits.clampConversation(conversationMemory.recent())
                 .takeIf { it.isNotEmpty() },
             // An absent episode stays absent: no substitution, and no empty string that would claim
             // a subject this turn does not have.
-            episodeId = context.episodeId?.takeIf { it.isNotEmpty() },
+            episodeId = episodeId,
             podcastId = context.podcastId?.takeIf { it.isNotEmpty() },
-            referencePositionMs = context.referencePositionMs,
-            clientPositionMs = context.clientPositionMs,
-            recentReferencePositions = context.recentReferencePositions.ifEmpty {
-                state.recentReferencePositions
+            // Every playback position is omitted without an episode -- reference, client, recent and
+            // previous alike. They are positions IN an episode; without one there is nothing they can
+            // be positions in, and a saved value describes the episode it was saved from.
+            referencePositionMs = context.referencePositionMs.takeIf { hasEpisode },
+            clientPositionMs = context.clientPositionMs.takeIf { hasEpisode },
+            recentReferencePositions = if (hasEpisode) {
+                context.recentReferencePositions.ifEmpty { state.recentReferencePositions }
+            } else {
+                emptyList()
             },
-            previousReferencePositionMs = context.previousReferencePositionMs
-                ?: state.previousReferencePositionMs,
+            previousReferencePositionMs = if (hasEpisode) {
+                context.previousReferencePositionMs ?: state.previousReferencePositionMs
+            } else {
+                null
+            },
         )
     }
 

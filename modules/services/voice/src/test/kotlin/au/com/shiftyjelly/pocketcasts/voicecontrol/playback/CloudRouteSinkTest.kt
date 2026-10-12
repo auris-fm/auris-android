@@ -29,6 +29,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.kotlin.any
@@ -46,6 +47,86 @@ class CloudRouteSinkTest {
         referencePositionMs = 1_230_000L,
         clientPositionMs = 50_000L,
     )
+
+    @Test
+    fun `a discovery turn after saved reference state carries no playback positions at all`() = runTest {
+        // @reviewer's stateful case: the saved state accumulates reference positions while an episode
+        // IS playing, and the builder merged them in unconditionally -- so a later turn with no episode
+        // still carried positions belonging to a recording it is not about, which the server rejects.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        // Recorded BEFORE the turn, which is the whole point: the saved history exists when the
+        // builder runs, so a case that recorded it during the route would leave the state empty and
+        // could not see the merge it is about.
+        deps.cloudPlaybackContextState.record(
+            referencePositionMs = 100L,
+            previousReferencePositionMs = 300L,
+        )
+        val sink = deps.sink()
+
+        // A discovery turn: nothing is playing.
+        sink.routeToCloud(
+            "what should I listen to",
+            VoiceIntent.CloudTier.Premium,
+            PlaybackContext(
+                episodeId = null,
+                podcastId = null,
+                clientPositionMs = null,
+                referencePositionMs = null,
+            ),
+        )
+
+        val turn = deps.routeTurns.last()
+        assertNull("no episode means no episode id", turn.context.episodeId)
+        assertNull("and no client position", turn.context.clientPositionMs)
+        assertNull("and no reference position", turn.context.referencePositionMs)
+        assertTrue(
+            "and the saved reference history must not be reintroduced " +
+                "(recent=${turn.context.recentReferencePositions})",
+            turn.context.recentReferencePositions.isEmpty(),
+        )
+        assertNull(
+            "nor a saved previous reference",
+            turn.context.previousReferencePositionMs,
+        )
+    }
+
+    @Test
+    fun `a turn with a current episode keeps its saved reference history`() = runTest {
+        // The positive control @spec asked for: with an episode current, the saved reference history is
+        // retained, so the omission above is about the missing episode rather than about the builder
+        // dropping positions unconditionally.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        // Recorded BEFORE the turn: the saved history is what this case asserts is retained.
+        deps.cloudPlaybackContextState.record(
+            referencePositionMs = 100L,
+            previousReferencePositionMs = 300L,
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud(
+            "what happened",
+            VoiceIntent.CloudTier.Premium,
+            PlaybackContext(
+                episodeId = "episode-1",
+                podcastId = "podcast-1",
+                clientPositionMs = 5_000L,
+            ),
+        )
+
+        val turn = deps.routeTurns.last()
+        assertEquals("episode-1", turn.context.episodeId)
+        assertEquals(5_000L, turn.context.clientPositionMs)
+        assertTrue(
+            "an episode's saved reference history is retained " +
+                "(recent=${turn.context.recentReferencePositions})",
+            turn.context.recentReferencePositions.isNotEmpty() ||
+                turn.context.previousReferencePositionMs != null,
+        )
+    }
 
     @Test
     fun `upstream throw during collect still restores auto pause`() = runTest {
@@ -1721,7 +1802,7 @@ class CloudRouteSinkTest {
                 (seconds * 1000).toInt() + REFERENCE_TO_SINK_OFFSET_MS
             }
         },
-        private val cloudPlaybackContextState: CloudPlaybackContextState = CloudPlaybackContextState(),
+        val cloudPlaybackContextState: CloudPlaybackContextState = CloudPlaybackContextState(),
         private val events: kotlinx.coroutines.flow.Flow<CloudRouteEvent> = flowOf(CloudRouteEvent.Done(0, 0)),
         val renderer: CloudSearchResultsRenderer? = null,
         /** Whether the host app is playing while this turn runs. */

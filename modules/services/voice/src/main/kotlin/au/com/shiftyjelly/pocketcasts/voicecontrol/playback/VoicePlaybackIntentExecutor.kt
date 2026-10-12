@@ -257,24 +257,24 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                     // No amount stated; sink applies its interval in direction.
                     // Pass null so the sink uses the app's configured interval.
                     when (intent.direction) {
-                        "backward" -> playbackSink.skipBackward(null)
-                        else -> playbackSink.skipForward(null)
+                        "backward" -> playbackSink.skipBackward(null).asLocalResponse()
+                        else -> playbackSink.skipForward(null).asLocalResponse()
                     }
                 }
 
                 0 -> VoiceResponse.Silent
 
                 // explicit "stay put"
-                in Int.MIN_VALUE..-1 -> playbackSink.skipBackward(abs(delta))
+                in Int.MIN_VALUE..-1 -> playbackSink.skipBackward(abs(delta)).asLocalResponse()
 
-                else -> playbackSink.skipForward(delta)
+                else -> playbackSink.skipForward(delta).asLocalResponse()
             }
         }
 
         is VoiceIntent.Playback.SeekAbsolute -> playbackSink.seekTo(
             intent.positionSeconds,
             episodeDurationSeconds = currentEpisodeDurationSeconds(),
-        )
+        ).asLocalResponse()
 
         VoiceIntent.Playback.NextEpisode -> playbackSink.nextEpisode()
     }
@@ -378,6 +378,34 @@ class VoicePlaybackIntentExecutor @Inject constructor(
     }
 }
 
+/**
+ * The outcome of an episode-scoped playback operation.
+ *
+ * IT IS NOT [VoiceResponse]. The sink answers `Silent` for an ACCEPTED operation and for a REFUSED one
+ * alike, so a caller reading the response cannot tell them apart -- and a caller that commits history
+ * from a refusal records an action that never happened. This says plainly which occurred.
+ *
+ * [Accepted] carries no position: what to record is the caller's own pre-action value, and this type
+ * must not imply the sink knows it.
+ */
+sealed interface EpisodeOperationResult {
+    /** The operation reached the player, on the episode it was bound to. */
+    data object Accepted : EpisodeOperationResult
+
+    /** The operation was refused -- a different episode is selected, or the binding was absent. */
+    data object Refused : EpisodeOperationResult
+}
+
+/**
+ * The response a LOCAL playback intent reports for an episode-scoped operation.
+ *
+ * Local intents carry no cloud episode binding -- their episode-independence is the existing contract --
+ * so they are not refused for one and this maps the outcome back to the `Silent` they always returned.
+ * The EPISODE-SCOPED caller does not use this: it reads the outcome directly, because a refusal there
+ * must not be reported as a performed action.
+ */
+fun EpisodeOperationResult.asLocalResponse(): VoiceResponse = VoiceResponse.Silent
+
 interface VoicePlaybackSink {
     /** Lower the host player's volume (duck) while cloud audio plays through the shared output. */
     suspend fun duck(): VoiceResponse
@@ -396,8 +424,8 @@ interface VoicePlaybackSink {
      */
     suspend fun pauseAsHold(): VoiceResponse
     suspend fun resume(): VoiceResponse
-    suspend fun skipForward(seconds: Int?, expectedEpisodeId: String? = null): VoiceResponse
-    suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String? = null): VoiceResponse
+    suspend fun skipForward(seconds: Int?, expectedEpisodeId: String? = null): EpisodeOperationResult
+    suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String? = null): EpisodeOperationResult
 
     /**
      * Seek to a signed absolute episode position, ON [expectedEpisodeId].
@@ -420,7 +448,7 @@ interface VoicePlaybackSink {
         positionSeconds: Int,
         episodeDurationSeconds: Int,
         expectedEpisodeId: String? = null,
-    ): VoiceResponse
+    ): EpisodeOperationResult
     fun nextEpisode(): VoiceResponse
 }
 

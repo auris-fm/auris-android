@@ -909,22 +909,30 @@ class CloudRouteSink internal constructor(
                         // The signed semantics belong to the sink: a negative is an offset back from
                         // the episode end. Clamping it here would turn "seek back 30 s from the end"
                         // into "seek to the beginning", a different instruction.
+                        val outcome = playbackSink.seekTo(positionSeconds, episodeDurationSeconds(), turnEpisodeId)
+                        // HISTORY IS COMMITTED ONLY FOR AN ACCEPTED OPERATION, and against the episode
+                        // the operation was BOUND to. Recording first meant a refused seek still
+                        // appended its pre-action position -- @reviewer's measured case.
+                        if (outcome != EpisodeOperationResult.Accepted) return@withLock false
                         capturePreActionPosition(positionSeconds * 1000L, turnState)
-                        playbackSink.seekTo(positionSeconds, episodeDurationSeconds(), turnEpisodeId)
                         return@withLock true
                     }
                     // The reference branch is reached only when that form was supplied, so a null
                     // here means the value did not parse and the call is refused.
                     if (referenceMs == null) return@withLock false
+                    // A reference target with no usable mapping, or no episode to be a position IN, is
+                    // refused rather than approximated -- and history is committed ONLY when the seek
+                    // was ACCEPTED, against the episode it was bound to.
+                    if (!seekToReference(referenceMs, turnEpisodeId)) return@withLock false
                     capturePreActionPosition(referenceMs, turnState)
-                    // A reference target with no usable mapping is refused, not approximated.
-                    seekToReference(referenceMs, turnEpisodeId)
+                    return@withLock true
                 }
 
                 "play_quote" -> {
                     val referenceMs = params.referencePositionMs() ?: return@withLock false
-                    capturePreActionPosition(referenceMs, turnState)
+                    // Same rule: the seek is attempted FIRST and history follows only an accepted one.
                     if (!seekToReference(referenceMs, turnEpisodeId)) return@withLock false
+                    capturePreActionPosition(referenceMs, turnState)
                     // Cleared before the suspending call so the flag never
                     // outlives the player state it refers to. (Here a throw
                     // would make the finally resume, which is what this action
@@ -978,9 +986,9 @@ class CloudRouteSink internal constructor(
                     when {
                         delta != null && delta != 0 -> {
                             if (delta > 0) {
-                                playbackSink.skipForward(delta, turnEpisodeId)
+                                playbackSink.skipForward(delta, turnEpisodeId) == EpisodeOperationResult.Accepted
                             } else {
-                                playbackSink.skipBackward(-delta, turnEpisodeId)
+                                playbackSink.skipBackward(-delta, turnEpisodeId) == EpisodeOperationResult.Accepted
                             }
                             true
                         }
@@ -991,18 +999,15 @@ class CloudRouteSink internal constructor(
                         // configured skip interval here, and the sink's own comment says null means
                         // exactly that.
                         delta == null && direction == null -> {
-                            playbackSink.skipForward(null, turnEpisodeId)
-                            true
+                            playbackSink.skipForward(null, turnEpisodeId) == EpisodeOperationResult.Accepted
                         }
 
                         delta == null && direction == "backward" -> {
-                            playbackSink.skipBackward(null, turnEpisodeId)
-                            true
+                            playbackSink.skipBackward(null, turnEpisodeId) == EpisodeOperationResult.Accepted
                         }
 
                         delta == null && direction == "forward" -> {
-                            playbackSink.skipForward(null, turnEpisodeId)
-                            true
+                            playbackSink.skipForward(null, turnEpisodeId) == EpisodeOperationResult.Accepted
                         }
 
                         // An unstated amount with a stated unrecognised direction: refused rather
@@ -1061,12 +1066,25 @@ class CloudRouteSink internal constructor(
      * @return true when the seek was performed, false when the mapping is unavailable.
      */
     private suspend fun seekToReference(referenceMs: Long, expectedEpisodeId: String?): Boolean {
+        // AN EPISODE-SPECIFIC REFERENCE POSITION MUST BE BOUND TO AN EPISODE. A reference position is a
+        // position IN a recording, so a null expectation here would turn it into an unrestricted seek:
+        // the position would be applied to whatever happens to be playing, which is the substitution the
+        // episode guard exists to prevent. Refused rather than approximated.
+        if (expectedEpisodeId == null) return false
         val referenceSeconds = referenceMs / 1000.0
         val playbackMs = fingerprintTimingManager.playbackTimeMs(referenceSeconds) ?: return false
-        // The mapped result is sink time and non-negative by construction, so the signed-offset rule
-        // does not apply; duration is passed for the call's own contract rather than used here.
-        playbackSink.seekTo((playbackMs / 1000).coerceAtLeast(0), episodeDurationSeconds(), expectedEpisodeId)
-        return true
+        // THE SINK'S OUTCOME IS THE OUTCOME. Returning true unconditionally reported an action as
+        // PERFORMED even when the sink refused it -- and the caller commits history from this result, so
+        // a refused seek still recorded its pre-action position against the episode.
+        //
+        // The sink resolves to Silent for both acceptance and refusal, so it cannot be read off the
+        // response type; the expected-episode operation is what makes acceptance decidable here, because
+        // a bound operation either reaches the player or is refused for its binding.
+        return playbackSink.seekTo(
+            (playbackMs / 1000).coerceAtLeast(0),
+            episodeDurationSeconds(),
+            expectedEpisodeId,
+        ) == EpisodeOperationResult.Accepted
     }
 
     private fun Map<String, Any?>.positionSeconds(): Int? {

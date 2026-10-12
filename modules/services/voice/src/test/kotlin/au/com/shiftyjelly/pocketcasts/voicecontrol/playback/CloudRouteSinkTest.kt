@@ -427,6 +427,128 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a REFUSED seek does not record its pre-action position against the other episode`() = runTest {
+        // @reviewer's explicit-refusal history case. The sink is independently on episode B and refuses
+        // A's seek, yet B's history became [700,100] -- because `capturePreActionPosition` ran BEFORE the
+        // outcome was known, and `seekToReference` returned true after ignoring the sink's refusal.
+        //
+        // History is a record of what HAPPENED. An action that never reached the player did not happen,
+        // and recording its position against the episode now playing is the history-corruption the
+        // episode binding exists to prevent.
+        val state = CloudPlaybackContextState()
+        val deps = TestDeps(
+            cloudPlaybackContextState = state,
+            episodeId = "A",
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("position_seconds" to 100),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // The player has moved to B, so the seek bound to A is REFUSED.
+        deps.playback.currentEpisodeIdForTest = "B"
+        val sink = deps.sink()
+
+        sink.routeToCloud(
+            "about episode A",
+            VoiceIntent.CloudTier.Premium,
+            PlaybackContext(episodeId = "A", clientPositionMs = 0L),
+        )
+
+        assertTrue(
+            "a refused seek must not be recorded as a performed action " +
+                "(calls=${deps.playback.calls} recorded=${state.snapshot("B").recentReferencePositions})",
+            !deps.playback.calls.any { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
+    fun `a REFUSED reference seek does not record history, and a refused quote does not either`() = runTest {
+        // The REFERENCE branch is where @reviewer measured this, and it is a DIFFERENT branch from
+        // `position_seconds`: that one routes to the plain seek, this one through the fingerprint
+        // mapping. A case for one cannot see a defect in the other -- which is how my first version of
+        // this control passed while the reference branch still recorded history on a refusal.
+        //
+        // Both reference verbs are covered because both recorded first: `seek_to` with
+        // `reference_position_ms`, and `play_quote`.
+        listOf("seek_to" to "reference_position_ms", "play_quote" to "reference_position_ms").forEach { (action, field) ->
+            val state = CloudPlaybackContextState()
+            val deps = TestDeps(
+                cloudPlaybackContextState = state,
+                episodeId = "A",
+                events = flowOf(
+                    CloudRouteEvent.Action(
+                        tool = "playback",
+                        action = action,
+                        params = mapOf(field to 45_000_000L),
+                    ),
+                    CloudRouteEvent.Done(1, 0),
+                ),
+            )
+            // The player has moved to B, so the reference seek bound to A is REFUSED.
+            deps.playback.currentEpisodeIdForTest = "B"
+            val sink = deps.sink()
+
+            sink.routeToCloud(
+                "about episode A",
+                VoiceIntent.CloudTier.Premium,
+                PlaybackContext(episodeId = "A", clientPositionMs = 0L),
+            )
+
+            // THE HISTORY IS THE OBSERVATION, not the call list. A refused operation records nothing,
+            // so the episode's saved positions must be exactly what they were -- an assertion about
+            // `calls` alone passes whether or not history was corrupted, which is how my first version
+            // of this control survived its mutation.
+            assertTrue(
+                "$action: a refused reference seek must not reach the player " +
+                    "(calls=${deps.playback.calls})",
+                !deps.playback.calls.any { it.startsWith("seekTo:") },
+            )
+            assertTrue(
+                "$action: and it must not record history against any episode " +
+                    "(A=${state.snapshot("A").recentReferencePositions} " +
+                    "B=${state.snapshot("B").recentReferencePositions})",
+                state.snapshot("A").recentReferencePositions.isEmpty() &&
+                    state.snapshot("B").recentReferencePositions.isEmpty(),
+            )
+        }
+    }
+
+    @Test
+    fun `an UNBOUND reference position is refused rather than applied to whatever is playing`() = runTest {
+        // @spec's unbound case: a reference position is a position IN a recording, so with no episode to
+        // be a position in there is nothing it can be a position in. A null expectation must not turn an
+        // episode-specific operation into an unrestricted seek.
+        val deps = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "play_quote",
+                    params = mapOf("reference_position_ms" to 45_000_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        // A turn with NO episode: an episode-specific reference action has nothing to act on.
+        sink.routeToCloud(
+            "play the quote",
+            VoiceIntent.CloudTier.Premium,
+            PlaybackContext(episodeId = null, clientPositionMs = 0L),
+        )
+
+        assertTrue(
+            "an unbound reference action must not seek whatever is playing " +
+                "(calls=${deps.playback.calls})",
+            !deps.playback.calls.any { it.startsWith("seekTo:") },
+        )
+    }
+
+    @Test
     fun `an action still executes while the player is on the episode the turn is about`() = runTest {
         // The guard must not refuse everything. A turn about episode A, with the player still on A, is
         // exactly the case the action exists for -- and a guard that disabled actions universally would
@@ -2634,26 +2756,29 @@ class CloudRouteSinkTest {
             return VoiceResponse.Silent
         }
 
-        override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): VoiceResponse {
+        override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
             calls += "skipForward:$seconds"
-            return VoiceResponse.Silent
+            return EpisodeOperationResult.Accepted
         }
-        override suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String?): VoiceResponse {
+        override suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
             calls += "skipBackward:$seconds"
-            return VoiceResponse.Silent
+            return EpisodeOperationResult.Accepted
         }
 
         override suspend fun seekTo(
             positionSeconds: Int,
             episodeDurationSeconds: Int,
             expectedEpisodeId: String?,
-        ): VoiceResponse {
+        ): EpisodeOperationResult {
             // MIRRORS THE PRODUCTION REFUSAL. The fake used to record every call unconditionally, so a
             // mutation removing the episode binding left it unchanged and the case could not fail for
             // the defect. The binding is part of the contract now, so the fake honours it.
             if (!accepts(expectedEpisodeId)) {
                 calls += "seekToRefused:$positionSeconds"
-                return VoiceResponse.Silent
+                // REFUSED, not Accepted. Reporting acceptance here made the fake claim a refusal had
+                // been performed, so a caller recording history from the outcome saw success and the
+                // defect was invisible: the fake told the caller what the production sink would not.
+                return EpisodeOperationResult.Refused
             }
             // Resolve the schema's signed semantics the same way production does, so a fake cannot
             // make a negative position pass by clamping it where the real sink resolves an offset.
@@ -2663,7 +2788,7 @@ class CloudRouteSinkTest {
                 positionSeconds
             }
             calls += "seekTo:$resolved"
-            return VoiceResponse.Silent
+            return EpisodeOperationResult.Accepted
         }
 
         // Whether the sink is on the episode the operation was planned for. ABSENT MEANS "AGREE": the

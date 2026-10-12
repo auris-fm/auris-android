@@ -1189,18 +1189,25 @@ open class PlaybackManager @Inject constructor(
         seekComplete?.invoke()
     }
 
-    fun seekIfPlayingToTimeMs(episodeUuid: String, positionMs: Int, seekComplete: (() -> Unit)? = null) {
+    fun seekIfPlayingToTimeMs(episodeUuid: String, positionMs: Int, seekComplete: (() -> Unit)? = null): Boolean {
         // double checking the episode uuid as this may change during the launch
         if (getCurrentEpisode()?.uuid != episodeUuid) {
-            return
+            return false
         }
+        // THE ANSWER IS THE OWNER'S DECISION, MADE HERE rather than inferred by a caller from a response
+        // that says the same thing whether the seek happened or not. The second check is the one that
+        // matters: it runs INSIDE the launch, immediately before seeking, so a selection change landing
+        // between the first check and the seek is still caught -- the race no caller-side check can close.
+        var accepted = false
         launch {
             if (getCurrentEpisode()?.uuid == episodeUuid) {
+                accepted = true
                 cancelPendingChapterSeek()
                 seekToTimeMsInternal(positionMs)
                 seekComplete?.invoke()
             }
         }
+        return accepted
     }
 
     private suspend fun seekToTimeMsInternal(duration: Duration) {

@@ -87,41 +87,41 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         return VoiceResponse.Silent
     }
 
-    override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): VoiceResponse {
-        // SAME RULE AS seekTo: the episode the action was planned for is validated here, where the
-        // selection is read and the mutation is made, so a change between them cannot slip through.
-        if (expectedEpisodeId != null && playbackManager.getCurrentEpisode()?.uuid != expectedEpisodeId) {
-            Timber.i("[VoicePipeline] refused: skipForward planned for a different episode")
-            return VoiceResponse.Silent
+    override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
+        // SAME RULE AS seekTo: an episode-bound skip is refused when the player has moved to another
+        // recording, because the skip's magnitude was chosen for the one it was planned against.
+        if (expectedEpisodeId != null) {
+            if (playbackManager.getCurrentEpisode()?.uuid != expectedEpisodeId) {
+                Timber.i("[VoicePipeline] refused: skipForward planned for a different episode")
+                return EpisodeOperationResult.Refused
+            }
+            playbackManager.skipForwardSuspend(SourceView.VOICE_COMMANDS, seconds)
+            return EpisodeOperationResult.Accepted
         }
         playbackManager.skipForwardSuspend(SourceView.VOICE_COMMANDS, seconds)
-        return VoiceResponse.Silent
+        return EpisodeOperationResult.Accepted
     }
 
-    override suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String?): VoiceResponse {
-        // SAME RULE AS seekTo: the episode the action was planned for is validated here, where the
-        // selection is read and the mutation is made, so a change between them cannot slip through.
-        if (expectedEpisodeId != null && playbackManager.getCurrentEpisode()?.uuid != expectedEpisodeId) {
-            Timber.i("[VoicePipeline] refused: skipBackward planned for a different episode")
-            return VoiceResponse.Silent
+    override suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
+        // SAME RULE AS seekTo: an episode-bound skip is refused when the player has moved to another
+        // recording, because the skip's magnitude was chosen for the one it was planned against.
+        if (expectedEpisodeId != null) {
+            if (playbackManager.getCurrentEpisode()?.uuid != expectedEpisodeId) {
+                Timber.i("[VoicePipeline] refused: skipBackward planned for a different episode")
+                return EpisodeOperationResult.Refused
+            }
+            playbackManager.skipBackwardSuspend(SourceView.VOICE_COMMANDS, seconds)
+            return EpisodeOperationResult.Accepted
         }
         playbackManager.skipBackwardSuspend(SourceView.VOICE_COMMANDS, seconds)
-        return VoiceResponse.Silent
+        return EpisodeOperationResult.Accepted
     }
 
     override suspend fun seekTo(
         positionSeconds: Int,
         episodeDurationSeconds: Int,
         expectedEpisodeId: String?,
-    ): VoiceResponse {
-        // THE EPISODE CHECK AND THE SEEK ARE ONE STEP. `PlaybackManager` is the owner of what is playing,
-        // so it is the only place where "which episode is selected now" and "seek it" can be decided
-        // together -- a check made by the caller can be overtaken by a selection change in between, and
-        // the caller's mutex does not exclude changes made anywhere else in the app.
-        if (expectedEpisodeId != null && playbackManager.getCurrentEpisode()?.uuid != expectedEpisodeId) {
-            Timber.i("[VoicePipeline] refused: seek planned for a different episode")
-            return VoiceResponse.Silent
-        }
+    ): EpisodeOperationResult {
         // The schema's signed semantics, resolved here rather than by each caller: a negative value is
         // an offset back from the episode end. Clamping it would silently convert "seek back 30 s
         // from the end" into "seek to the beginning", which is a different instruction.
@@ -130,8 +130,22 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         } else {
             positionSeconds
         }
+        // THE OWNING OPERATION CARRIES THE EXPECTATION. A check here followed by a position-only seek
+        // is still a RACE: the selection can change between them, and no lock this adapter holds can
+        // exclude a change made elsewhere in the app. `seekIfPlayingToTimeMs` is the manager's own
+        // episode-scoped seek -- it re-reads the selection INSIDE the operation, immediately before
+        // seeking -- so validation and mutation happen AT THE OWNER, not merely consecutively here.
+        if (expectedEpisodeId != null) {
+            // ACCEPTED ONLY WHEN THE OWNER ACCEPTED IT. `seekIfPlayingToTimeMs` re-reads the selection
+            // inside the operation, so a refusal is decided at the owner and reported as one.
+            val accepted = playbackManager.seekIfPlayingToTimeMs(expectedEpisodeId, resolvedSeconds * 1000)
+            return if (accepted) EpisodeOperationResult.Accepted else EpisodeOperationResult.Refused
+        }
+        // NO EXPECTATION MEANS THE CALLER HAS NO EPISODE-SPECIFIC SUBJECT. Legitimate only for an
+        // episode-INDEPENDENT operation: an episode-specific one must never reach here with a null,
+        // because the null would turn it into an unrestricted seek. Callers refuse those instead.
         playbackManager.seekToTimeMsSuspend(resolvedSeconds * 1000)
-        return VoiceResponse.Silent
+        return EpisodeOperationResult.Accepted
     }
 
     override fun nextEpisode(): VoiceResponse {

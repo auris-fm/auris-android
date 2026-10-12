@@ -478,48 +478,55 @@ class EarconPlayerTest {
 
     @Test
     fun `releasing the worker between selection and submission cannot reject the submission`() {
-        // @reviewer's point about my first attempt: putting only the SELECTION inside the lock left the
-        // window open, because `submit` still ran outside it. This drives the REAL submission path with
-        // a controlled executor, so a rejection would be observed directly.
+        // DETERMINISTIC, and it drives the PRODUCTION path. The earlier version was two racing threads
+        // whose own comment admitted it passed with the fix mutated back: it could neither fail for the
+        // defect nor avoid false alarms.
         //
-        // HONEST STATUS: this is a RACING probe, not a controlled one -- two threads race and the window
-        // is narrow, so 200 iterations do not reliably land in it. MUTATING THE FIX BACK (submit outside
-        // the lock) leaves this case PASSING, which is how I know it does not constrain the lock. It is
-        // kept as a smoke check and labelled as such; @reviewer's gated-executor seam is what would make
-        // it decisive.
+        // The executor records the moment it is SELECTED, and refuses if it is USED after that moment has
+        // been made visible to another thread. Sequencing it explicitly makes the two paths differ:
+        //
+        //   fixed   selection and submit happen in one locked step, so "used after selected" is never
+        //           observable to the releaser: the submission succeeds.
+        //   defect  the submit happens after the lock is dropped, so the releaser's shutdown is visible
+        //           by then and the submission is refused.
         val player = EarconPlayer(context)
-        val gate = java.util.concurrent.CountDownLatch(1)
-        val gated = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
-            Thread(runnable, "gated-worker")
-        }
-        player.installExecutorForTest(gated)
+        val selected = java.util.concurrent.CountDownLatch(1)
+        val releaserRan = java.util.concurrent.CountDownLatch(1)
+        val delegate = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val guarded = object : java.util.concurrent.AbstractExecutorService() {
+            override fun shutdown() {}
+            override fun shutdownNow(): MutableList<Runnable> = mutableListOf()
+            override fun isShutdown(): Boolean = false
+            override fun isTerminated(): Boolean = false
+            override fun awaitTermination(timeout: Long, unit: java.util.concurrent.TimeUnit): Boolean = false
 
-        // The releaser shuts the controlled executor down while the submission is being attempted.
-        val releaser = Thread {
-            gate.await()
-            player.installExecutorForTest(gated)
-            gated.shutdown()
-        }.apply { start() }
+            @Suppress("SUBTLE_OVERRIDE")
+            override fun execute(command: Runnable) {
+                // SELECTED: another thread may now release, which is the state the lock must exclude.
+                selected.countDown()
 
-        val results = java.util.concurrent.CopyOnWriteArrayList<Throwable>()
-        val submitter = Thread {
-            repeat(200) {
-                try {
-                    player.submitForTest { 1 }.get()
-                } catch (t: Throwable) {
-                    results.add(t)
-                }
+                // If the release has already COMPLETED by the time this executor is used, the selection
+                // and the use were separate steps -- the defect -- and the release wins.
+                val releasedFirst = releaserRan.await(200, java.util.concurrent.TimeUnit.MILLISECONDS)
+                if (releasedFirst) throw java.util.concurrent.RejectedExecutionException("worker released")
+                delegate.execute(command)
             }
+        }
+        player.installExecutorForTest(guarded)
+
+        // Releases as soon as the executor has been selected. Under the fix the submission is already
+        // inside the lock, so the release cannot complete in time.
+        Thread {
+            selected.await(2, java.util.concurrent.TimeUnit.SECONDS)
+            player.shutdownExecutorForTest()
+            releaserRan.countDown()
         }.apply { start() }
 
-        gate.countDown()
-        submitter.join(5_000)
-        releaser.join(5_000)
-
-        assertTrue(
-            "no submission may be rejected by a concurrent release " +
-                "(failures=${results.map { it::class.simpleName }})",
-            results.isEmpty(),
+        assertEquals(
+            "selection and submission must be one locked step, so a release landing between them " +
+                "cannot reject the submission",
+            1,
+            player.submitForTest { 1 },
         )
     }
 }

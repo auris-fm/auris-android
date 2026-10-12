@@ -330,6 +330,54 @@ class GracePeriodSignalTest {
     }
 
     @Test
+    fun `the readers agree with the transitions they read`() {
+        // @reviewer's reader-lock finding. `escalationRefusal`, `isClosedByPrivacy` and `currentGeneration`
+        // read the SAME fields the transitions write, so leaving them unlocked meant a reader could
+        // observe a HALF-APPLIED transition. Holding the monitor must block them, exactly as it blocks a
+        // writer -- if a reader answers while the monitor is held, it is reading a state mid-change.
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWakeWordDetected()
+
+        val holding = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val answered = java.util.concurrent.CountDownLatch(1)
+
+        val holder = Thread {
+            synchronized(signal.windowMonitorForTest()) {
+                holding.countDown()
+                release.await(3, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        }.apply { start() }
+        holding.await(3, java.util.concurrent.TimeUnit.SECONDS)
+
+        // EACH READER IS OBSERVED ON ITS OWN. Calling all three on one thread let the FIRST locked one
+        // hide an unlocked sibling: the mutation that unlocked `isClosedByPrivacy` survived, because the
+        // other two still blocked and the thread never finished. A control has to make the reader it is
+        // about the only thing that can decide the outcome.
+        val readers: List<Pair<String, () -> Any?>> = listOf(
+            "escalationRefusal" to { signal.escalationRefusal() },
+            "isClosedByPrivacy" to { signal.isClosedByPrivacy() },
+            "currentGeneration" to { signal.currentGeneration },
+        )
+        val unguarded = mutableListOf<String>()
+        readers.forEach { (name, read) ->
+            val done = java.util.concurrent.CountDownLatch(1)
+            Thread {
+                read()
+                done.countDown()
+            }.apply { start() }
+            if (done.await(150, java.util.concurrent.TimeUnit.MILLISECONDS)) unguarded += name
+        }
+        release.countDown()
+        holder.join(3_000)
+
+        assertTrue(
+            "every reader of window state must wait for the monitor; answered while held: $unguarded",
+            unguarded.isEmpty(),
+        )
+    }
+
+    @Test
     fun `a wake's marker is never visible before its window`() {
         // Mutation B taught me the previous case could not see this: holding the monitor only proves the
         // wake WAITS, and a marker written BEFORE it waits is invisible to that observation. What the

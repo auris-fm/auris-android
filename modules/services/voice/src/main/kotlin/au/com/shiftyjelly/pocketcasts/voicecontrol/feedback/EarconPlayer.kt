@@ -96,14 +96,30 @@ class EarconPlayer(
     }
 
     /** Runs [block] on the player's own thread and returns its result, so call order is preserved. */
-    // Submits [block] through the REAL submission path, so a test can drive the lock discipline with a
-    // gated executor and observe a rejection directly rather than from a stress run's timing.
-    internal fun <T> submitForTest(block: () -> T): java.util.concurrent.Future<T> = synchronized(executorLock) { executorForLocked().submit(block) }
+    // DRIVES THE PRODUCTION PATH. This used to re-implement the locking (`synchronized { ... submit }`),
+    // so a test could not observe the discipline at all: mutating the REAL path left every case passing,
+    // because the cases ran THIS copy. A test seam must route through the mechanism, not restate it.
+    internal fun <T> submitForTest(block: () -> T): T = onPlayerThread(block)
 
     // Replaces the worker with [service], so a test controls when it is shut down.
 
     internal fun installExecutorForTest(service: java.util.concurrent.ExecutorService) {
         synchronized(executorLock) { executor = service }
+    }
+
+    /**
+     * Shuts the worker down the way [release] does: UNDER [executorLock].
+     *
+     * Shutting down outside the lock opens a window production does not have -- the executor can be
+     * disabled between the lock being taken and `submit` running, and the submission is then REJECTED.
+     * A test that shuts down directly therefore reports a failure the real discipline cannot produce,
+     * which makes it a false alarm rather than a control.
+     */
+    internal fun shutdownExecutorForTest() {
+        synchronized(executorLock) {
+            executor?.shutdown()
+            executor = null
+        }
     }
 
     /** The worker, created on demand. Caller holds [executorLock]. */

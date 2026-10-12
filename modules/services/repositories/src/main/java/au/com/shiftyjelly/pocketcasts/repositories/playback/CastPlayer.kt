@@ -194,30 +194,35 @@ class CastPlayer(
         // remote seek is issued, is what refuses a re-pointed receiver instead of moving another
         // recording -- a check outside this call could only observe that it had changed.
         return withContext(Dispatchers.Main) {
-            // THE BINDING CHECK READS THROUGH THE SAME LOCK `setEpisode` WRITES UNDER, so a re-pointing
-            // cannot land between the check and the seek below. Reading `episodeUuid` directly would be a
-            // read of a field another thread may be changing -- the check-then-act window again.
-            if (currentEpisodeUuidLocked() != expectedEpisodeUuid) {
-                Timber.i("CastPlayer refused a seek: episode changed")
-                return@withContext false
-            }
-            if (isMediaLoaded) {
-                // NO REMOTE CLIENT MEANS UNAVAILABLE, NOT ACCEPTED. The previous form used `?.` and then
-                // reported true regardless, so a cast seek that reached no receiver was reported as
-                // performed -- the same "counting a non-event as delivered" defect as elsewhere.
-                val client = remoteMediaClient ?: return@withContext false
-                val seekOptions = MediaSeekOptions.Builder()
-                    .setPosition(positionMs.toLong())
-                    .setCustomData(customData)
-                    .setResumeState(MediaSeekOptions.RESUME_STATE_UNCHANGED)
-                    .build()
-                client.seek(seekOptions)
-                true
-            } else {
-                val local = localEpisodeUuid ?: return@withContext false
-                // THE LOAD'S OWN RESULT IS THE ANSWER, rather than a silent success after a void call.
-                loadEpisode(local, positionMs, true)
-            }
+            // THE LOCK IS HELD ACROSS VALIDATION **AND** ISSUING THE REQUEST. Checking under the lock and
+            // then releasing it before the seek leaves the window open again: `setEpisode` can land in
+            // between and the request would be issued against the REPLACEMENT. The check and the issue are
+            // ONE STEP, so a re-pointing waits for it rather than overtaking it.
+            //
+            // Nothing inside the monitor SUSPENDS -- the remote seek/load is a request, and `loadEpisode`
+            // only builds media info and calls `load` -- which is what makes this holdable.
+            synchronized(episodeLock) {
+                if (localEpisodeUuid != expectedEpisodeUuid) {
+                    Timber.i("CastPlayer refused a seek: episode changed")
+                    return@synchronized null
+                }
+                if (isMediaLoaded) {
+                    // NO REMOTE CLIENT MEANS UNAVAILABLE, NOT ACCEPTED. `?.` followed by `true` reported a
+                    // cast seek that reached no receiver as performed.
+                    val client = remoteMediaClient ?: return@synchronized null
+                    val seekOptions = MediaSeekOptions.Builder()
+                        .setPosition(positionMs.toLong())
+                        .setCustomData(customData)
+                        .setResumeState(MediaSeekOptions.RESUME_STATE_UNCHANGED)
+                        .build()
+                    client.seek(seekOptions)
+                    true
+                } else {
+                    val local = localEpisodeUuid ?: return@synchronized null
+                    // THE LOAD'S OWN RESULT IS THE ANSWER, rather than a silent success after a void call.
+                    loadEpisode(local, positionMs, true)
+                }
+            } ?: false
         }
     }
 

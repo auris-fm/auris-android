@@ -296,4 +296,120 @@ class EarconPlayerTest {
             player.completion(),
         )
     }
+
+    @Test
+    fun `a queued first cue does not move the second cue's consumed boundary backwards`() {
+        // @reviewer's measured case: cue 1 is queued (head 50 of its 100 frames played) and cue 2 adds
+        // 100 more, so only 50 of cue 2's frames can have sounded. Reading the head at submission
+        // understated the boundary and reported cue 2 Consumed early. The boundary is the frame
+        // FRONTIER the track has accepted.
+        val mockPlayer = EarconPlayer(context)
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
+        val clip = clipClass.declaredConstructors.single().apply { isAccessible = true }
+            .newInstance(mockPlayer, ShortArray(100), 16000)
+        mockPlayer.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(mockPlayer, track)
+        @Suppress("UNCHECKED_CAST")
+        mockPlayer.javaClass.getDeclaredField("clips").apply { isAccessible = true }
+            .set(mockPlayer, mapOf(EarconId.WAKE_WORD to clip))
+
+        var head = 0
+        mockPlayer.readPlaybackHeadFrames = { head }
+
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+        head = 50 // half of cue 1 has sounded; cue 1 is still queued
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+        head = 150 // cue 1 finished (100), so only 50 of cue 2's frames have sounded
+
+        assertEquals(
+            "only 50 of the second cue's 100 frames have been consumed (head=$head)",
+            EarconPlayer.EarconCompletion.Playing,
+            mockPlayer.completion(),
+        )
+        head = 200
+        assertEquals(
+            "and it is Consumed once the frontier is reached",
+            EarconPlayer.EarconCompletion.Consumed,
+            mockPlayer.completion(),
+        )
+        mockPlayer.release()
+    }
+
+    @Test
+    fun `a head that advances during submission does not move the accepted boundary`() {
+        // The single-cue form of the same defect: the head moves WHILE the frames are being accepted,
+        // so a boundary read from the head at submission is already stale when the cue finishes.
+        val mockPlayer = EarconPlayer(context)
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16000)
+        var headDuringWrite = 0
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer {
+            headDuringWrite = 100
+            it.getArgument<Int>(2)
+        }
+        val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
+        val clip = clipClass.declaredConstructors.single().apply { isAccessible = true }
+            .newInstance(mockPlayer, ShortArray(100), 16000)
+        mockPlayer.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(mockPlayer, track)
+        @Suppress("UNCHECKED_CAST")
+        mockPlayer.javaClass.getDeclaredField("clips").apply { isAccessible = true }
+            .set(mockPlayer, mapOf(EarconId.WAKE_WORD to clip))
+        mockPlayer.readPlaybackHeadFrames = { headDuringWrite }
+
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+
+        assertEquals(
+            "all 100 submitted frames are already consumed, so the cue is complete",
+            EarconPlayer.EarconCompletion.Consumed,
+            mockPlayer.completion(),
+        )
+        mockPlayer.release()
+    }
+
+    @Test
+    fun `an installed observer returning null stays unavailable rather than using the platform head`() {
+        // @reviewer's third case: a selected observation of null means "not observable". Falling back
+        // to the platform head would fabricate an observation the observer explicitly did not make.
+        val mockPlayer = EarconPlayer(context)
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
+        val clip = clipClass.declaredConstructors.single().apply { isAccessible = true }
+            .newInstance(mockPlayer, ShortArray(100), 16000)
+        mockPlayer.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(mockPlayer, track)
+        @Suppress("UNCHECKED_CAST")
+        mockPlayer.javaClass.getDeclaredField("clips").apply { isAccessible = true }
+            .set(mockPlayer, mapOf(EarconId.WAKE_WORD to clip))
+        mockPlayer.readPlaybackHeadFrames = { null }
+
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+
+        assertEquals(
+            "a nil selected observer is UNAVAILABLE, not a platform-head reading",
+            EarconPlayer.EarconCompletion.Unknown,
+            mockPlayer.completion(),
+        )
+        mockPlayer.release()
+    }
 }

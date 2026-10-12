@@ -150,9 +150,19 @@ class EarconPlayer(
             //
             // The origin is where the head stood when this cue began, and the target is that origin
             // plus the frames this cue submitted -- so the comparison is about THIS cue's audio.
-            val origin = readPlaybackHeadFrames?.invoke(audioTrack) ?: audioTrack.playbackHeadPosition
-            cueHeadOrigin = origin
-            cueHeadTarget = origin + offset
+            // THE TARGET IS THE ACCEPTED-FRAME FRONTIER, not the head at submission.
+            //
+            // The head cannot be observed reliably while frames are still being written -- the platform
+            // advances it as the track drains, and a mock or a real device may move it DURING the write
+            // loop. Taking "origin + this cue's frames" therefore understates whenever earlier audio is
+            // still queued (a second cue reported Consumed at the first cue's total) and misstates a
+            // single cue whose head advanced while its frames were accepted.
+            //
+            // The frontier is the total frames this track has ACCEPTED, which is exactly what must
+            // sound before this cue is done: every frame submitted before it, plus its own.
+            acceptedFramesTotal += offset
+            cueHeadTarget = acceptedFramesTotal
+            cueHeadOrigin = acceptedFramesTotal - offset
             emittedFrames = offset
             emittedRateHz = clip.sampleRateHz
             true
@@ -176,6 +186,10 @@ class EarconPlayer(
 
     @Volatile
     private var emittedRateHz: Int = 0
+
+    /** Total frames this TRACK has accepted, across every cue played on it. */
+    @Volatile
+    private var acceptedFramesTotal: Int = 0
 
     /** Where the track's cumulative head stood when the most recent cue started. */
     @Volatile
@@ -218,10 +232,15 @@ class EarconPlayer(
     fun completion(): EarconCompletion {
         val current = track ?: return EarconCompletion.Unknown
         if (emittedFrames <= 0) return EarconCompletion.Unknown
-        val head = readPlaybackHeadFrames?.invoke(current)
-            ?: current.playbackHeadPosition
-        // CUMULATIVE, not cue-relative: the head counts every frame the track has ever played, so the
-        // target is this cue's origin plus its own accepted frames.
+        // An installed observer is AUTHORITATIVE: its null means "not observable", and falling back
+        // to the platform head would fabricate an observation the caller said does not exist.
+        val head = if (readPlaybackHeadFrames != null) {
+            readPlaybackHeadFrames!!.invoke(current) ?: return EarconCompletion.Unknown
+        } else {
+            current.playbackHeadPosition
+        }
+        // CUMULATIVE: the head counts every frame the track has ever played, so the comparison is
+        // against the frontier this cue's accepted frames reach.
         return if (head >= cueHeadTarget) EarconCompletion.Consumed else EarconCompletion.Playing
     }
 
@@ -307,6 +326,9 @@ class EarconPlayer(
             .build()
         created.play()
         track = created
+        // A NEW track's head starts at zero, so the frontier restarts with it. Carrying the previous
+        // track's total forward would make the first cue on the new track unreachable.
+        acceptedFramesTotal = 0
         return created
     }
 

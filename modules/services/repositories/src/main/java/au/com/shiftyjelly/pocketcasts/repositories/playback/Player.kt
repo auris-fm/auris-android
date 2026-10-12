@@ -105,7 +105,11 @@ interface Player {
         // Refusing at the DEFAULT is what stops a direct caller from reaching an unrestricted seek
         // through it, which the manager's guard alone cannot prevent: a caller that invokes the player
         // operation without going through the manager is exactly the bypass @reviewer isolated.
-        error("seekToTimeMsIfEpisode requires an implementation that enforces the episode binding")
+        // REFUSED, NOT THROWN. A throw is a FAULT the caller cannot handle, while an unsupported binding
+        // is an OUTCOME it can act on -- and a throw from a path a future caller reaches would surface as
+        // an uncaught failure far from its cause. The declared refused outcome says the same thing
+        // without making an unsupported player a crash.
+        return EpisodeSeekOutcome.Refused
     }
 
     /**

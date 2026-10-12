@@ -51,6 +51,40 @@ class CloudRouteSinkTest {
     )
 
     @Test
+    fun `every dispatched turn carries the conversation identity the Worker requires`() = runTest {
+        // The staged Worker makes identity MANDATORY: a turn missing both fields is `invalid_request`.
+        // Every path that dispatches must therefore carry the pair -- a turn without it is refused by
+        // the server, so the client must not be able to produce one at all.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+
+        // Both entry points, including one with no captured window at all.
+        sink.routeToCloud("with a captured window", VoiceIntent.CloudTier.Premium, playbackContext, capturedOrigin = 1)
+        sink.routeToCloud("and with none", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloudWithHint(
+            request = "and via the typed-flow entry point",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = playbackContext,
+            hint = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint("playback"),
+        )
+
+        assertEquals("all three dispatched", 3, deps.routeTurns.size)
+        deps.routeTurns.forEach { turn ->
+            assertTrue(
+                "a turn must carry a conversation handle or the Worker rejects it " +
+                    "(turn=${turn.request})",
+                !turn.conversationId.isNullOrBlank(),
+            )
+            assertNotNull(
+                "and its mode (turn=${turn.request})",
+                turn.conversationMode,
+            )
+        }
+    }
+
+    @Test
     fun `retrying a prepared turn reuses its identity without re-preparing`() = runTest {
         // @spec's controller retry contract: the prepared turn is IMMUTABLE. Retrying it must reuse its
         // request ID, handle and mode -- re-preparing would mint a SECOND conversation and consume the

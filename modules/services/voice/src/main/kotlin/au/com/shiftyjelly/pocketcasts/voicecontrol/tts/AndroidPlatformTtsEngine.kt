@@ -172,6 +172,10 @@ class AndroidPlatformTtsEngine @Inject constructor(
 
         val wav = File(appContext.cacheDir, "voice_tts_${System.currentTimeMillis()}.wav")
         try {
+            // The ownership claim made at synthesis, carried into playback: playback must never
+            // re-read the global generation, or an utterance whose successor claimed during synthesis
+            // would adopt the successor's generation and believe itself the owner.
+            var ownershipToken = -1
             val synthesized = suspendCancellableCoroutine { continuation ->
                 engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     @Deprecated("Deprecated in Java")
@@ -196,7 +200,10 @@ class AndroidPlatformTtsEngine @Inject constructor(
                 // shared engine -- stopping then silences the successor rather than this utterance.
                 // Claim and stop under the same boundary a successor claims under, so a successor
                 // cannot start between the ownership check and the stop.
-                val mine = synthesisLock.withLock { ++synthesisGeneration }
+                // The token lives beyond this block: it is carried into playback as the utterance's
+                // ownership claim.
+                ownershipToken = synthesisLock.withLock { ++synthesisGeneration }
+                val mine = ownershipToken
                 continuation.invokeOnCancellation {
                     synthesisLock.withLock {
                         if (synthesisGeneration == mine) {
@@ -219,7 +226,11 @@ class AndroidPlatformTtsEngine @Inject constructor(
                 }
             }
             if (!synthesized) return
-            playSynthesized(wav)
+            // The token is the one THIS utterance claimed at synthesis -- carried forward, never
+            // re-read. Re-reading at playback start would let an utterance whose successor claimed
+            // the engine during synthesis ADOPT the successor's generation and believe itself the
+            // owner.
+            playSynthesized(wav, ownershipToken = ownershipToken)
         } finally {
             wav.delete()
         }
@@ -229,14 +240,15 @@ class AndroidPlatformTtsEngine @Inject constructor(
      * Plays the synthesized WAV through an owned AudioTrack and records the accepted prefix into
      * the echo reference, so the answer is part of what the filter correlates against.
      */
-    private suspend fun playSynthesized(wav: File) = withContext(Dispatchers.IO) {
+    private suspend fun playSynthesized(wav: File, ownershipToken: Int) = withContext(Dispatchers.IO) {
         // Cancelling the caller must stop playback immediately: the render job is cancelled before
         // every response, and an answer that keeps talking is indistinguishable from a foreign app
         // to our own gate.
         val playback = coroutineContext[Job]
-        // THIS utterance's ownership claim, taken BEFORE the stop hook registers so the hook can
-        // protect a successor that has already claimed a later generation.
-        val mine = synthesisLock.withLock { synthesisGeneration }
+        // The token claimed at SYNTHESIS, not a fresh read: a successor that claimed the engine
+        // between synthesis and playback must leave this utterance holding the OLDER token, so every
+        // guard below correctly sees it as superseded.
+        val mine = ownershipToken
         // The write loop checks the generation BETWEEN writes (supersession) and a watcher inside
         // [playSynthesizedInternal] observes the job's cancelling transition (cancellation); both own
         // only THIS utterance's track, which is why the watcher lives there, where the track exists.

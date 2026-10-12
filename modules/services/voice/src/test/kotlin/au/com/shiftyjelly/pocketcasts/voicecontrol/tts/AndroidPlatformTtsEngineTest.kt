@@ -14,6 +14,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -484,6 +485,71 @@ class AndroidPlatformTtsEngineTest {
             kotlinx.coroutines.withTimeoutOrNull(5_000) { newJob.join() }
         }
         scope.cancel()
+        wired.release()
+    }
+
+    @Test
+    fun `a successor claiming during the old utterance's synthesis does not let the old playback adopt its generation`() {
+        // @spec's ordering: the ownership token must be carried from the SYNTHESIS claim. If playback
+        // re-read the global generation, an old utterance whose successor claimed during its own
+        // synthesis would ADOPT the successor's generation, believe itself the owner, and its
+        // teardown would stop the successor's output.
+        //
+        // With the token carried, the old playback starts ALREADY superseded: it must exit without
+        // writing and without touching the shared engine -- which is what the assertions below
+        // measure. (A first version of this case expected a write, which was wrong: an already
+        // superseded reply writes nothing at all.)
+        val oldSynthesizing = java.util.concurrent.CountDownLatch(1)
+        val (wired, fake) = engineWithFakeSynthesizer(onSynthesize = { oldSynthesizing.countDown() })
+        fake.onInitialized?.invoke(true)
+        fake.emitRealWav = true
+        wired.drainWaitMs = 0
+
+        val writes = java.util.concurrent.atomic.AtomicInteger()
+        wired.writeToSink = { _, _, _, count ->
+            writes.incrementAndGet()
+            count
+        }
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        var oldFailure: Throwable? = null
+        val oldJob = scope.launch {
+            try {
+                wired.speak("old reply", "en")
+            } catch (t: Throwable) {
+                oldFailure = t
+            }
+        }
+        // speak touches the platform engine on Main, so idle Robolectric's looper while waiting.
+        val oldClaimed = (0 until 100).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            oldSynthesizing.await(10, java.util.concurrent.TimeUnit.MILLISECONDS)
+        }
+        assertTrue("the old utterance must enter synthesis (and claim) first", oldClaimed)
+
+        // The successor claims the engine BEFORE the old playback starts.
+        wired.claimSynthesisForTest()
+        // Let the old synthesis finish so its playback begins with the ORIGINAL, older token.
+        fake.listener?.onDone(fake.lastUtteranceId)
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(5_000) { oldJob.join() }
+            kotlinx.coroutines.delay(100)
+        }
+        scope.cancel()
+
+        assertEquals(
+            "the old playback holds its ORIGINAL token, sees itself superseded, and writes nothing " +
+                "(writes=${writes.get()})",
+            0,
+            writes.get(),
+        )
+        assertEquals(
+            "and it must NOT stop the successor's engine (stopCalls=${fake.stopCalls})",
+            0,
+            fake.stopCalls,
+        )
+        assertNull("the old playback must not throw in this ordering (failure=$oldFailure)", oldFailure)
         wired.release()
     }
 

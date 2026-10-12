@@ -96,25 +96,42 @@ class EarconPlayer(
     }
 
     /** Runs [block] on the player's own thread and returns its result, so call order is preserved. */
+    // Submits [block] through the REAL submission path, so a test can drive the lock discipline with a
+    // gated executor and observe a rejection directly rather than from a stress run's timing.
+    internal fun <T> submitForTest(block: () -> T): java.util.concurrent.Future<T> = synchronized(executorLock) { executorForLocked().submit(block) }
+
+    // Replaces the worker with [service], so a test controls when it is shut down.
+
+    internal fun installExecutorForTest(service: java.util.concurrent.ExecutorService) {
+        synchronized(executorLock) { executor = service }
+    }
+
+    /** The worker, created on demand. Caller holds [executorLock]. */
+    private fun executorForLocked(): java.util.concurrent.ExecutorService {
+        val existing = executor?.takeIf { !it.isShutdown }
+        if (existing != null) return existing
+        return java.util.concurrent.Executors
+            .newSingleThreadExecutor { runnable ->
+                Thread(runnable, WORKER_THREAD_NAME).apply { isDaemon = true }
+                    .also { workerForTest = it }
+            }
+            .also { executor = it }
+    }
+
     private fun <T> onPlayerThread(block: () -> T): T {
         // SUBMIT UNDER THE SAME LOCK THAT SHUTS THE EXECUTOR DOWN. `executorFor()` can hand back a
         // service that `release()` shuts down before `submit` runs, and the submit is then REJECTED --
         // a throw under contention, which is exactly what the serialisation exists to prevent. The
         // window is between choosing the executor and using it.
-        val service = synchronized(executorLock) {
-            val existing = executor?.takeIf { !it.isShutdown }
-            if (existing != null) {
-                existing
-            } else {
-                java.util.concurrent.Executors
-                    .newSingleThreadExecutor { runnable ->
-                        Thread(runnable, WORKER_THREAD_NAME).apply { isDaemon = true }
-                            .also { workerForTest = it }
-                    }
-                    .also { executor = it }
-            }
+        // SELECTION **AND SUBMISSION** SHARE THE LOCK `release()` TAKES. Selecting inside the lock and
+        // submitting outside it leaves the same window: `release()` can shut the executor down between
+        // the two, and the submission is then REJECTED -- the throw under contention the serialisation
+        // exists to prevent. Only the WAIT is outside, because holding the lock across it would block
+        // the very release that is allowed to run.
+        val future = synchronized(executorLock) {
+            executorForLocked().submit(block)
         }
-        return service.submit(block).get()
+        return future.get()
     }
 
     init {

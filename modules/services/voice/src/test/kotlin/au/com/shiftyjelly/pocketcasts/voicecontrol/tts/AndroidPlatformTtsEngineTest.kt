@@ -321,6 +321,70 @@ class AndroidPlatformTtsEngineTest {
     }
 
     @Test
+    fun `cancelling while a write is blocked stops the owned output without waiting for the write`() {
+        // @spec's correction to the supersession fix: between-write checks cover SUPERSESSION, but a
+        // write already BLOCKED when cancellation lands cannot reach the next check -- the stop must
+        // be initiated BY the cancellation, while the write is still blocked, and a plain completion
+        // hook would wait for the very write it needs to interrupt.
+        val (wired, fake) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        fake.emitRealWav = true
+        wired.drainWaitMs = 0
+
+        val enteredWrite = java.util.concurrent.CountDownLatch(1)
+        val releaseWrite = java.util.concurrent.CountDownLatch(1)
+        val stoppedWhileBlocked = java.util.concurrent.atomic.AtomicBoolean(false)
+        wired.writeToSink = { _, _, _, count ->
+            enteredWrite.countDown()
+            // Hold the write until the test has observed whether cancellation stopped the output
+            // behind it. If cancellation waits for this write, the flag stays false.
+            releaseWrite.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            count
+        }
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        val job = scope.launch {
+            try {
+                wired.speak("a long reply", "en")
+            } catch (t: Throwable) {
+                // EXPECTED: the interrupted playback surfaces as incomplete. Swallowed here so the
+                // failure does not leak as an uncaught exception into the next runTest.
+            }
+        }
+        val queued = (0 until 50).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            fake.synthesizeCount > 0
+        }
+        assertTrue("the utterance must reach synthesis", queued)
+        fake.listener?.onDone(fake.lastUtteranceId)
+        assertTrue(
+            "the reply must reach its first write",
+            enteredWrite.await(5, java.util.concurrent.TimeUnit.SECONDS),
+        )
+
+        // Cancel while the write is blocked.
+        job.cancel()
+        // Give the watcher its 10ms poll window, then look WITHOUT releasing the write.
+        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(300) }
+        stoppedWhileBlocked.set(fake.stopCalls > 0)
+
+        releaseWrite.countDown()
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(5_000) { job.join() }
+            kotlinx.coroutines.delay(100)
+        }
+        scope.cancel()
+
+        assertTrue(
+            "cancellation must stop the owned output while the write is still blocked " +
+                "(stopCalls=${fake.stopCalls})",
+            stoppedWhileBlocked.get(),
+        )
+        wired.release()
+    }
+
+    @Test
     fun `a superseded reply stops at the next write instead of continuing under the successor`() {
         // @spec's focused blocked-write regression for TTS:262. The seam blocks INSIDE the first
         // write -- the state a slow or contended output actually produces. While it is blocked, a

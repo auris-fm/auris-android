@@ -1422,6 +1422,14 @@ open class PlaybackManager @Inject constructor(
             if (current?.uuid != episodeUuid) return null
             player?.takeIf { it.episodeUuid == episodeUuid } ?: return null
         }
+        // THE SAME GUARD AS THE NON-CAPTURING PATH. Calling the player directly here bypassed
+        // `enforcesEpisodeBoundSeek`, so an unsupported player would have been DOWNGRADED to the default
+        // check-then-delegate -- the very gap the contract exists to close, reachable through the
+        // capturing path alone. ONE RULE, EVERY CALL SITE.
+        if (!target.enforcesEpisodeBoundSeek) {
+            Timber.w("[Playback] refused: player cannot enforce an episode-bound seek")
+            return null
+        }
         val before = target.seekToTimeMsIfEpisode(positionMs, episodeUuid) ?: return null
         return episodeUuid to before.toInt()
     }

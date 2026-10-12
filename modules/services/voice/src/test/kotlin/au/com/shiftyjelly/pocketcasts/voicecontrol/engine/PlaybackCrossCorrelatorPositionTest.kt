@@ -198,68 +198,62 @@ class PlaybackCrossCorrelatorPositionTest {
     }
 
     @Test
-    fun `the candidate interval is empty only when it leaves the reference, and a partial overlap still searches`() {
-        // @spec's boundary requirement, computed in the function's OWN units rather than guessed. One
-        // millisecond at 16 kHz is 16 samples, so a "one frame" boundary is not representable in
-        // integer milliseconds; the representable boundary is the OVERLAP boundary.
+    fun `both overlap edges are pinned at equality and one millisecond outside it`() {
+        // @reviewer's strengthening: BOTH clamp boundaries carry matching audio, so the mutation has a
+        // failing signal at either end rather than only where the bleed happened to sit. Every value
+        // below is computed from the reference's real geometry, not chosen:
         //
-        // Geometry of this fixture: reference 0..10_000 ms (last usable offset 158_400), bleed at
-        // offset 2_000 = 125 ms, and the interval for a mic at p ms is offsets [p - 500, p - 50] ms.
-        // The bleed is admitted exactly when 175 <= p <= 625 ms, because
-        //     p - 500 <= 125 <= p - 50.
-        val (samples, mic) = referenceWithBleedAt(burstStart = 2_000)
-        val ref = PlaybackReference(samples, rate, startPositionMs = 0L)
+        //   reference 160_000 samples = 10_000 ms; last usable offset = 158_400 (= 9_900 ms)
+        //   interval for a mic at p ms = offsets [(p-500), (p-50)] ms
+        //   NEAR edge: the interval reaches offset 0 when p = 50 ms; below 50 ms it is entirely
+        //              before the reference
+        //   FAR edge:  the interval's LOWER edge lands exactly on the last usable offset 158_400 when
+        //              (p - 500) * 16 == 158_400, i.e. p == 10_400 ms; one millisecond later the whole
+        //              interval is past it.
+        val rate16 = rate
+        val nearSamples = FloatArray(160_000) { 0f }.also {
+            tone(1_600, 300.0).copyInto(it, 0) // matching audio AT offset 0
+        }
+        val farSamples = FloatArray(160_000) { 0f }.also {
+            tone(1_600, 300.0).copyInto(it, 158_400) // matching audio AT the last usable offset
+        }
+        val mic = FloatArray(1_600) { i -> 0.3f * tone(1_600, 300.0)[i] }
         val correlator = PlaybackCrossCorrelator()
 
-        // Unavailable alignment: no position, so the default window is searched and finds the bleed.
+        val nearRef = PlaybackReference(nearSamples, rate16, startPositionMs = 0L)
+        val farRef = PlaybackReference(farSamples, rate16, startPositionMs = 0L)
+
+        // Controls: each boundary's audio is genuinely findable when the interval admits it.
         assertTrue(
-            "no position leaves the default window in play",
-            correlator.isPlaybackBleed(mic, ref, micPositionMs = null),
+            "the near-edge audio is found when the interval reaches offset 0",
+            correlator.isPlaybackBleed(mic, nearRef, micPositionMs = 550L),
+        )
+        assertTrue(
+            "the far-edge audio is found exactly at its boundary (p = 10_400 ms, where the interval's " +
+                "lower edge lands on the last usable offset)",
+            correlator.isPlaybackBleed(mic, farRef, micPositionMs = 10_400L),
         )
 
-        // The LOWER boundary of admission, computed above: at 175 ms the interval first covers the
-        // bleed. Below it the interval no longer covers the bleed -- and the measurement there is
-        // NOT asserted as "no bleed", because a partially clamped interval (offsets -6400..800 ->
-        // 0..800) correlates against a near-silent reference region and can score above the
-        // threshold. That artefact belongs to the correlation function, not to the interval rule,
-        // and asserting it here would enshrine it; it is reported instead.
-        assertTrue(
-            "at the computed lower boundary (175 ms) the interval first covers the bleed",
-            correlator.isPlaybackBleed(mic, ref, micPositionMs = 175L),
+        // EQUALITY at each edge: the interval still overlaps, so it is searched -- and because the
+        // clamp target holds matching audio, a clamping implementation would FIND it here.
+        assertFalse(
+            "at the near edge (p = 50 ms) the interval reaches offset 0 but the timing still admits " +
+                "it, so the boundary audio is legitimately found",
+            !correlator.isPlaybackBleed(mic, nearRef, micPositionMs = 50L),
         )
 
-        // An interval that overlaps the reference only PARTIALLY is still searched: at p = 500 ms the
-        // interval is offsets 0..7_200, which reaches past the reference's own start, and it still
-        // admits the bleed. This is the case a naive "clamp or empty" rule gets wrong.
-        assertTrue(
-            "a partially overlapping interval is searched and finds the bleed",
-            correlator.isPlaybackBleed(mic, ref, micPositionMs = 500L),
-        )
-
-        // THE DISCRIMINATOR between Empty and clamping, which the fixture above cannot show: a
-        // clamped interval searches the boundary offset it landed on, while Empty refuses. So the
-        // bleed is placed AT that boundary offset. If the code clamped, the search would run at
-        // offset 0 and FIND the bleed; because the timing is valid and excludes the reference, it
-        // must refuse instead.
-        val (boundarySamples, boundaryMic) = referenceWithBleedAt(burstStart = 0)
-        val boundaryRef = PlaybackReference(boundarySamples, rate, startPositionMs = 0L)
-        assertTrue(
-            "the boundary-offset bleed is found when the interval admits it",
-            correlator.isPlaybackBleed(boundaryMic, boundaryRef, micPositionMs = 500L),
+        // ONE MILLISECOND OUTSIDE each edge: the interval no longer overlaps the reference, so the
+        // trusted timing excludes it and the answer must be no bleed -- NOT a clamp onto the boundary
+        // offset, which would find the audio sitting exactly there.
+        assertFalse(
+            "1 ms inside the near boundary (p = 49 ms) the interval is before the reference: no bleed " +
+                "even though matching audio sits at offset 0",
+            correlator.isPlaybackBleed(mic, nearRef, micPositionMs = 49L),
         )
         assertFalse(
-            "and a VALID EMPTY interval must refuse it rather than clamp onto offset 0 and find it",
-            correlator.isPlaybackBleed(boundaryMic, boundaryRef, micPositionMs = 0L),
-        )
-
-        // The same rule at the far end: an interval entirely past the last usable offset.
-        assertFalse(
-            "an interval entirely past the reference's last usable offset admits nothing",
-            correlator.isPlaybackBleed(mic, ref, micPositionMs = 10_550L),
-        )
-        assertFalse(
-            "as does one entirely past its last usable offset",
-            correlator.isPlaybackBleed(mic, ref, micPositionMs = 10_550L),
+            "1 ms past the far boundary (p = 10_401 ms) the interval is past the last usable offset: " +
+                "no bleed even though matching audio sits there",
+            correlator.isPlaybackBleed(mic, farRef, micPositionMs = 10_401L),
         )
     }
 }

@@ -271,7 +271,29 @@ class GracePeriodSignal @Inject constructor() {
         timerJob = scope.launch {
             delay(timeoutMs)
             _isActive.value = false
+            // THE TIMEOUT ENDS THE WINDOW, so requests issued under it stop being retryable exactly as
+            // they do when a privacy close ends it. Without this, a request whose window simply expired
+            // kept its prepared turn for the life of the process -- the leak the lifecycle exists to
+            // prevent, reached by the most ordinary ending there is.
+            notifyWindowEnded()
         }
+    }
+
+    /**
+     * Told which window ended, whenever it ends: a privacy close, a route change, or the timeout.
+     *
+     * ONE notification for EVERY ending, rather than a branch per cause, because the retryability rule
+     * is about the window rather than about why it closed.
+     */
+    var onWindowEnded: ((generation: Long) -> Unit)? = null
+
+    private fun closeWindowAndNotify() {
+        _isActive.value = false
+        notifyWindowEnded()
+    }
+
+    private fun notifyWindowEnded() {
+        onWindowEnded?.invoke(generation)
     }
 
     /** Called when audio route changes — immediately ends grace period. */
@@ -283,7 +305,7 @@ class GracePeriodSignal @Inject constructor() {
     private fun closeByPrivacy() {
         privacyClosures.incrementAndGet()
         timerJob?.cancel()
-        _isActive.value = false
         closedByPrivacy = true
+        closeWindowAndNotify()
     }
 }

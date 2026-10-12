@@ -417,6 +417,16 @@ class VoiceControlService : Service() {
             Timber.w(cause, "[VoiceControl] releasing the turn retained for %s failed", logical)
         }
 
+        // EVERY WAY A WINDOW ENDS RETIRES WHAT IT WAS HOLDING -- privacy close, route change, or the
+        // timeout -- because retryability is about the window, not about why it closed. Binding it here
+        // rather than at each closing site is what keeps the rule in one place.
+        gracePeriodSignal.onWindowEnded = { ended ->
+            val retired = voicePlaybackIntentExecutor.endWindow(ended)
+            if (retired.isNotEmpty()) {
+                Timber.i("[VoiceControl] window %d ended, retired %d prepared turn(s)", ended, retired.size)
+            }
+        }
+
         modelsReadyCondition.update(isReady = true)
         Timber.i("Voice control models ready")
     }
@@ -806,7 +816,11 @@ class VoiceControlService : Service() {
         mediaSession = null
         // REMOVED WITH THE SESSION. A binding left behind would point the manager at a sink whose
         // session has ended, and one cleared too early would lose the notifications it exists for.
+        // REMOVED WITH THE SESSION, both hooks: one left behind would report into a session that has
+        // ended, and the failure receiver is the same shape of leak.
         voicePlaybackIntentExecutor.unbindDialogAbandonment()
+        voicePlaybackIntentExecutor.onRetirementFailure = null
+        gracePeriodSignal.onWindowEnded = null
         voiceRecognizer.release()
         // END THE SESSION, do not dispose. This runs on every stop, and the renderer is a Hilt
         // @Singleton: disposing here meant the next start had no feedback at all, silently. Disposal

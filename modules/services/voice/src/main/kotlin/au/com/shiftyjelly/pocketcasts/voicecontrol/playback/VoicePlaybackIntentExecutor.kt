@@ -44,6 +44,15 @@ class VoicePlaybackIntentExecutor @Inject constructor(
      */
     var onRetirementFailure: ((logicalRequestId: String, cause: Throwable) -> Unit)? = null
 
+    /**
+     * Retires every prepared turn belonging to [endedGeneration], reporting what it retired.
+     *
+     * The window-ended lifecycle, reachable by the owner that observes windows ending. A request is
+     * retryable while ITS window lives, so a window ending for ANY reason retires what it holds.
+     */
+    fun endWindow(endedGeneration: Long): List<String> = (cloudRouteSink as? au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSink)
+        ?.endWindow(endedGeneration) ?: emptyList()
+
     /** The manager this executor installed its release on, so teardown can remove it. */
     private var boundDialogManager:
         au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager? = null

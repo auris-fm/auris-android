@@ -120,6 +120,19 @@ class CloudConversationAdmission @Inject constructor() {
     private val prepared =
         mutableMapOf<String, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
 
+    /**
+     * Retires every prepared turn belonging to [endedGeneration], reporting what it retired.
+     *
+     * The window-ended lifecycle: a window can end by privacy close, route change or timeout, and
+     * requests issued under it stop being retryable in all three. Callers that only advance windows
+     * (`beginOrigin`) cover replacement; this covers the endings that are not a replacement.
+     */
+    fun endWindow(endedGeneration: Long): List<String> = synchronized(lock) {
+        val retired = prepared.filterValues { it.capturedOrigin == endedGeneration }.keys.toList()
+        retired.forEach { prepared.remove(it) }
+        retired
+    }
+
     /** The turn already prepared for [logicalRequestId], when a retry names one. */
     fun retained(logicalRequestId: String): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = synchronized(lock) { prepared[logicalRequestId] }
 

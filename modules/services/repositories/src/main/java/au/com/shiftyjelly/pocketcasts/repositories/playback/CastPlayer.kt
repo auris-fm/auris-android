@@ -222,9 +222,14 @@ class CastPlayer(
                         .setCustomData(customData)
                         .setResumeState(MediaSeekOptions.RESUME_STATE_UNCHANGED)
                         .build()
-                    client.seek(seekOptions)
-                    // The seek is ISSUED; its result is awaited below.
-                    Issued.None
+                    // THE SEEK'S RESULT IS RETAINED AND AWAITED TOO. Discarding it and reporting accepted
+                    // immediately was the very defect I had just fixed for the load, left in place for the
+                    // seek: the caller would see acceptance BEFORE the receiver had acted, and with no
+                    // pre-action position. ISSUED IS NOT COMPLETED, for either request.
+                    //  is declared non-null on this SDK: the request is always issued once a client
+                    // exists, and any receiver-level failure arrives through the callback below.
+                    val pending = client.seek(seekOptions)
+                    Issued.Pending(pending = pending, positionMs = before)
                 } else {
                     val local = localEpisodeUuid ?: return@synchronized Issued.Refused
                     // THE LOAD IS ISSUED UNDER THIS BOUNDARY; its PendingResult is carried out so the
@@ -238,8 +243,6 @@ class CastPlayer(
         }
         return when (issued) {
             Issued.Refused -> Player.EpisodeSeekOutcome.Refused
-
-            Issued.None -> Player.EpisodeSeekOutcome.accepted(positionMs = null)
 
             is Issued.Pending -> {
                 // ISSUED IS NOT COMPLETED. Only the receiver's callback says whether it performed the
@@ -255,9 +258,6 @@ class CastPlayer(
     private sealed interface Issued {
         /** The binding was refused, or no receiver took the request. */
         data object Refused : Issued
-
-        /** A seek was issued; its result is awaited after the lock is released. */
-        data object None : Issued
 
         /** A load was issued, with its pending result and the pre-action position it was issued with. */
         data class Pending(

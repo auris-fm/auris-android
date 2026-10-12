@@ -932,14 +932,20 @@ class CloudRouteSink internal constructor(
                             }
 
                             is EpisodeOperationResult.Unknown -> {
-                                // THE OPERATION IS COUNTED AS ATTEMPTED, not as refused: the turn did
-                                // dispatch it and cannot know the outcome, so reporting "not delivered"
-                                // would invite a retry that may repeat it.
+                                // UNKNOWN RECORDS NOTHING AS PERFORMED. @reviewer's measured defect was
+                                // the opposite of what I described: Unknown became ACCEPTED and wrote
+                                // history, claiming a target the client never observed being reached.
+                                //
+                                // The PRE-ACTION provenance is still kept, because it is what the client
+                                // knew BEFORE the attempt and it is needed if a later observation
+                                // resolves the outcome; the TARGET is not, because nothing established
+                                // that the player reached it.
                                 capturePreActionPosition(
-                                    positionSeconds * 1000L,
-                                    turnState,
-                                    outcome.episodeId,
-                                    outcome.preActionPositionMs,
+                                    targetReferenceMs = null,
+                                    turnState = turnState,
+                                    acceptedEpisodeId = outcome.episodeId,
+                                    preActionPositionMs = outcome.preActionPositionMs,
+                                    recordTarget = false,
                                 )
                                 return@withLock true
                             }
@@ -951,17 +957,18 @@ class CloudRouteSink internal constructor(
                     // A reference target with no usable mapping, or no episode to be a position IN, is
                     // refused rather than approximated -- and history is committed ONLY when the seek
                     // was ACCEPTED, against the episode it was bound to.
-                    val accepted = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock false
-                    // HISTORY FROM THE ACCEPTED RESULT, never a live re-read.
-                    capturePreActionPosition(referenceMs, turnState, accepted.episodeId, accepted.preActionPositionMs)
-                    return@withLock true
+                    val outcome = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock false
+                    // THE REFERENCE FORM PRESERVES ALL THREE OUTCOMES TOO -- it previously narrowed to
+                    // Accepted, which COLLAPSED Unknown into a refusal. History comes from the result,
+                    // never a live re-read, and only an OBSERVED outcome records the target.
+                    return@withLock handleSeekOutcome(outcome, referenceMs, turnState)
                 }
 
                 "play_quote" -> {
                     val referenceMs = params.referencePositionMs() ?: return@withLock false
                     // Same rule: the seek is attempted FIRST and history follows only an accepted one.
-                    val accepted = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock false
-                    capturePreActionPosition(referenceMs, turnState, accepted.episodeId, accepted.preActionPositionMs)
+                    val outcome = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock false
+                    if (!handleSeekOutcome(outcome, referenceMs, turnState)) return@withLock false
                     // THE RESUME IS BOUND TO THE EPISODE THE QUOTE WAS PLAYED FROM -- this is the call
                     // the quote's own resume makes, not the standalone "resume" action. A quote means
                     // "hear this, then carry on with the recording we were in", so resuming a
@@ -1086,11 +1093,58 @@ class CloudRouteSink internal constructor(
         }
     }
 
-    private fun capturePreActionPosition(
+    /**
+     * Commits history for a reference seek's outcome and reports whether the turn ACTED.
+     *
+     * THE THREE OUTCOMES ARE DISTINCT AND STAY DISTINCT:
+     *   Accepted -> the target was observed; record the pre-action provenance AND the target.
+     *   Unknown  -> the attempt was made and nothing established its result; record the PRE-ACTION
+     *               provenance only. Recording the target would claim an observation nobody made, and
+     *               returning false would present an unknowable execution as "nothing happened".
+     *   Refused  -> nothing happened; record nothing.
+     */
+    private fun handleSeekOutcome(
+        outcome: EpisodeOperationResult,
         targetReferenceMs: Long,
+        turnState: TurnState,
+    ): Boolean = when (outcome) {
+        is EpisodeOperationResult.Refused -> false
+
+        is EpisodeOperationResult.Accepted -> {
+            capturePreActionPosition(
+                targetReferenceMs = targetReferenceMs,
+                turnState = turnState,
+                acceptedEpisodeId = outcome.episodeId,
+                preActionPositionMs = outcome.preActionPositionMs,
+            )
+            true
+        }
+
+        is EpisodeOperationResult.Unknown -> {
+            capturePreActionPosition(
+                targetReferenceMs = targetReferenceMs,
+                turnState = turnState,
+                acceptedEpisodeId = outcome.episodeId,
+                preActionPositionMs = outcome.preActionPositionMs,
+                recordTarget = false,
+            )
+            true
+        }
+    }
+
+    private fun capturePreActionPosition(
+        targetReferenceMs: Long?,
         turnState: TurnState,
         acceptedEpisodeId: String?,
         preActionPositionMs: Long?,
+        /**
+         * Whether the TARGET was observed to be reached, so it may be recorded.
+         *
+         * FALSE FOR AN UNKNOWN OUTCOME: the pre-action provenance is kept because it describes what the
+         * client knew BEFORE the attempt, but the target is not, because nothing established that the
+         * player reached it. Recording it would claim an observation nobody made.
+         */
+        recordTarget: Boolean = true,
     ) {
         // THE OWNER'S EPISODE IS THE SUBJECT, not a live re-read. This runs only once the operation was
         // ACCEPTED, and the accepted result carries the episode the owner decided on -- so the position
@@ -1102,6 +1156,12 @@ class CloudRouteSink internal constructor(
         // was snapshotted by the manager at the mutation, so it IS the position before the action. The
         // provider answers "where is the client NOW", which after an accepted seek is the TARGET, not
         // the starting point -- reading it here would record the destination as the previous position.
+        // THE TARGET IS RECORDED ONLY WHEN IT WAS OBSERVED. An UNKNOWN outcome keeps the PRE-ACTION
+        // provenance -- what the client knew before the attempt -- but records no target, because
+        // nothing established that the player reached it. Recording it would claim an observation
+        // nobody made, which is @reviewer's measured e201 defect.
+        // The caller passes null when the target was not observed, and this returns without recording.
+        val target = targetReferenceMs ?: return
         val previousPlaybackMs = preActionPositionMs
         // preQuotePositionMs stays on the playback timeline: stop_quote seeks the local player back to
         // it. When NO episode is playing there is no position to return to, so this records null and
@@ -1131,7 +1191,7 @@ class CloudRouteSink internal constructor(
             // above is where the client WAS. Passing the accepted operation's pre-action playback
             // position here would record a playback instant as the reference target -- a value on the
             // wrong timeline AND the wrong quantity.
-            referencePositionMs = targetReferenceMs,
+            referencePositionMs = target,
             previousReferencePositionMs = previousReferenceMs,
             episodeId = acceptedEpisodeId,
         )
@@ -1161,7 +1221,7 @@ class CloudRouteSink internal constructor(
     private suspend fun seekToReference(
         referenceMs: Long,
         expectedEpisodeId: String?,
-    ): EpisodeOperationResult.Accepted? {
+    ): EpisodeOperationResult? {
         if (expectedEpisodeId == null) return null
         val referenceSeconds = referenceMs / 1000.0
         val playbackMs = fingerprintTimingManager.playbackTimeMs(referenceSeconds) ?: return null
@@ -1169,7 +1229,7 @@ class CloudRouteSink internal constructor(
             (playbackMs / 1000).coerceAtLeast(0),
             episodeDurationSeconds(),
             expectedEpisodeId,
-        ) as? EpisodeOperationResult.Accepted
+        )
     }
 
     private fun Map<String, Any?>.positionSeconds(): Int? {

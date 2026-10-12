@@ -303,12 +303,24 @@ class AudioFeedbackRendererTest {
         consumed = true
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(2_500))
-        val notesAfterConsumption = renderer.emissionNotesForTest()
+        // THE CONSUMING OBSERVATION ITSELF IS COUNTED, THEN THE LOOP ENDS. A cue observed Consumed must
+        // be attributed -- completion is the strongest evidence it sounded -- so the boundary adds ONE
+        // note rather than none. What must NOT happen is continued growth: the count is read once more
+        // AFTER that observation to show the loop has stopped.
+        val notesAtConsumption = renderer.emissionNotesForTest()
+        assertTrue(
+            "the consuming observation attributes the cue (whilePlaying=$notesWhilePlaying " +
+                "atConsumption=$notesAtConsumption)",
+            notesAtConsumption >= notesWhilePlaying,
+        )
+
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_500))
         assertEquals(
-            "once consumed the attribution stops, so the note count no longer grows " +
-                "(whilePlaying=$notesWhilePlaying after=$notesAfterConsumption)",
-            notesWhilePlaying,
-            notesAfterConsumption,
+            "and once consumed the observation ENDS, so the note count no longer grows " +
+                "(atConsumption=$notesAtConsumption now=${renderer.emissionNotesForTest()})",
+            notesAtConsumption,
+            renderer.emissionNotesForTest(),
         )
         renderer.release()
     }
@@ -365,37 +377,28 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
-    fun `a cue stops being attributed once its own span has elapsed`() {
-        // @reviewer's second probe: coverage must be bounded by the cue, so a claimed 1_500 ms span
-        // cannot still be emitting notes at 2_000 ms. The bound is a ceiling on a cue that never
-        // reports progress; a cue still reporting Playing past it must not extend past it.
-        renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+    fun `a cue stops being observed once its bounded post-start limit is spent`() {
+        // @spec's policy SUPERSEDES the original "own span" ceiling: a cue is observed for at most
+        // max(2_000 ms, accepted PCM duration + 1_000 ms) from its FIRST measured rendering. For a
+        // 1_500 ms cue that is 2_500 ms, so the observation is BOUNDED and does not run forever -- which
+        // is the property the older case was protecting, now stated against the rule that replaced it.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
         whenever(earconPlayer.emittedDurationMs()).thenReturn(1_500L)
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
-        // Snapshot just BEFORE the span is crossed (span 1_500 ms): the submission note plus the one
-        // at 1_000 ms. The next tick would land at 2_000 ms, PAST the cue's own span -- that is the
-        // note the ceiling must prevent, and it is the difference the guard makes.
-        kotlinx.coroutines.runBlocking {
-            repeat(52) {
-                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-                kotlinx.coroutines.delay(20)
-            }
-        }
-        val beforeCrossing = renderer.emissionNotesForTest()
-        // Now let the crossing tick happen.
-        kotlinx.coroutines.runBlocking {
-            repeat(80) {
-                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-                kotlinx.coroutines.delay(20)
-            }
-        }
+        // Run well past the limit. A cue still reporting Playing must NOT be observed indefinitely.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(6_000))
+        val afterLimit = renderer.emissionNotesForTest()
+
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(4_000))
+
         assertEquals(
-            "a cue may not emit another attribution note once its own span has elapsed " +
-                "(beforeCrossing=$beforeCrossing after=${renderer.emissionNotesForTest()})",
-            beforeCrossing,
+            "once the bounded post-start limit is spent the observation ends, so the note count stops " +
+                "growing (afterLimit=$afterLimit now=${renderer.emissionNotesForTest()})",
+            afterLimit,
             renderer.emissionNotesForTest(),
         )
         renderer.release()

@@ -427,6 +427,81 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `an action still executes while the player is on the episode the turn is about`() = runTest {
+        // The guard must not refuse everything. A turn about episode A, with the player still on A, is
+        // exactly the case the action exists for -- and a guard that disabled actions universally would
+        // pass the case above for the wrong reason.
+        val state = CloudPlaybackContextState()
+        val deps = TestDeps(
+            cloudPlaybackContextState = state,
+            // THE PROVIDER AND THE TURN NAME THE SAME EPISODE, which is what "still on it" means.
+            episodeId = "A",
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("position_seconds" to 100),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud(
+            "about episode A",
+            VoiceIntent.CloudTier.Premium,
+            PlaybackContext(episodeId = "A", clientPositionMs = 0L),
+        )
+
+        assertTrue(
+            "an action must still execute while the player is on the turn's own episode " +
+                "(calls=${deps.playback.calls})",
+            deps.playback.calls.any { it.startsWith("seekTo") },
+        )
+    }
+
+    @Test
+    fun `an action planned for episode A does not seek episode B after the selection changes`() = runTest {
+        // @spec's delayed episode-action rule: an action originating in episode A must not seek or
+        // append history to episode B after selection changes.
+        //
+        // The turn is planned against episode A and the USER then selects B while the turn is in
+        // flight -- an ordinary act that opens no new cloud turn, so `activeTurnId` still names this
+        // turn and the ownership guard does not fire. Every playback verb is then addressed to
+        // "whatever is playing", which is now B, so a seek computed for A lands in B at a position that
+        // means nothing there.
+        val state = CloudPlaybackContextState()
+        val deps = TestDeps(
+            cloudPlaybackContextState = state,
+            episodeId = "A",
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "seek_to",
+                    params = mapOf("position_seconds" to 100),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // The user changes episode MID-TURN: the provider now reports B while the turn is about A.
+        deps.selectEpisodeForTest("B")
+        // (the provider started on A, matching the turn, so the ONLY difference is the selection change)
+        val sink = deps.sink()
+
+        sink.routeToCloud(
+            "about episode A",
+            VoiceIntent.CloudTier.Premium,
+            PlaybackContext(episodeId = "A", clientPositionMs = 0L),
+        )
+
+        assertTrue(
+            "an action planned for episode A must not seek the player now holding episode B " +
+                "(calls=${deps.playback.calls})",
+            deps.playback.calls.none { it.startsWith("seekTo") },
+        )
+    }
+
+    @Test
     fun `a fresh wake begins a new conversation even though an earlier handle exists`() = runTest {
         // @reviewer's executed finding: a fresh wake RESUMEd the previous conversation, which makes a
         // new user act look like a continuation of whatever was being discussed before it.
@@ -2460,9 +2535,18 @@ class CloudRouteSinkTest {
          * saved reference positions are recorded against the episode they describe, so a provider
          * without one records them against nothing and a later read cannot find them.
          */
+        // The episode the provider reports. MUTABLE, because a user can change episode while a turn is
+        // in flight -- the ordinary way an action planned for one episode would otherwise be addressed
+        // to another.
+        private var liveEpisodeId: String? = episodeId
+
+        fun selectEpisodeForTest(id: String) {
+            liveEpisodeId = id
+        }
+
         private val playbackContextProvider = object : PlaybackContextProvider {
             override fun current(): PlaybackContext = PlaybackContext(
-                episodeId = episodeId,
+                episodeId = liveEpisodeId,
                 clientPositionMs = clientPositionMs,
             )
         }

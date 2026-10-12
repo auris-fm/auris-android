@@ -542,7 +542,14 @@ class CloudRouteSink internal constructor(
                         // an unknown action, missing parameters and superseded turns, and an ignored
                         // action followed by a blank Done must not pass for a turn that delivered
                         // something.
-                        executedAction = executeAction(event.tool, event.action, event.params, turnState, myId) || executedAction
+                        executedAction = executeAction(
+                            event.tool,
+                            event.action,
+                            event.params,
+                            turnState,
+                            myId,
+                            plannedEpisodeId = context.episodeId,
+                        ) || executedAction
                     }
 
                     is CloudRouteEvent.AudioFrame -> {
@@ -861,8 +868,23 @@ class CloudRouteSink internal constructor(
         params: Map<String, Any?>,
         turnState: TurnState,
         myId: Long,
+        plannedEpisodeId: String?,
     ): Boolean {
         if (tool != "playback") return false
+
+        // AN ACTION BELONGS TO THE EPISODE IT WAS PLANNED AGAINST. Turn ownership is not enough:
+        // selecting another episode opens NO new cloud turn, so `activeTurnId` still names this one and
+        // its ownership guard does not fire -- while every playback verb addresses "whatever is playing",
+        // which is now the other episode. A seek computed for A then lands in B at a position that means
+        // nothing there, and an equivalent skip appends history to the wrong recording.
+        //
+        // Read here, at execution, rather than captured at admission: the question is whether the player
+        // is STILL on the episode the turn is about, which only the current selection can answer. A turn
+        // with no episode has nothing to compare, so it is not refused on this ground -- its positions
+        // are already omitted for the same reason.
+        val turnEpisodeId = plannedEpisodeId?.takeIf { it.isNotEmpty() }
+        val currentEpisodeId = playbackContextProvider.current().episodeId?.takeIf { it.isNotEmpty() }
+        if (turnEpisodeId != null && currentEpisodeId != turnEpisodeId) return false
 
         // Player-state changes are serialized with ownership: a superseded
         // turn must not seek/resume/pause the player its successor now owns.

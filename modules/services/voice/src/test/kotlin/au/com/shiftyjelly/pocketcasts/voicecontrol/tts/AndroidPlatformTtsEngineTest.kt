@@ -319,6 +319,86 @@ class AndroidPlatformTtsEngineTest {
             failure is TtsPlaybackIncompleteException,
         )
     }
+
+    @Test
+    fun `a superseded reply stops at the next write instead of continuing under the successor`() {
+        // @spec's focused blocked-write regression for TTS:262. The seam blocks INSIDE the first
+        // write -- the state a slow or contended output actually produces. While it is blocked, a
+        // successor claims the engine; when the write unblocks, the old reply must perform NO
+        // further writes. The job-completion hook cannot provide this: a blocked write never
+        // completes, so the hook never fires until the write returns -- which is the untraced seam.
+        val (wired, fake) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        fake.emitRealWav = true
+        wired.drainWaitMs = 0
+
+        val enteredWrite = java.util.concurrent.CountDownLatch(1)
+        val releaseWrite = java.util.concurrent.CountDownLatch(1)
+        val writes = java.util.concurrent.atomic.AtomicInteger()
+        var supersededWhileBlocked = false
+        wired.writeToSink = { _, _, _, count ->
+            val n = writes.incrementAndGet()
+            if (n == 1) {
+                enteredWrite.countDown()
+                // Bounded: an indefinite block here hangs the whole suite rather than failing.
+                releaseWrite.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                supersededWhileBlocked =
+                    wired.playbackGenerationForTest < wired.currentGenerationForTest()
+                // Accept HALF: the clip cannot fit in one write, so reaching "no further writes"
+                // requires the loop to have exited via supersession rather than exhaustion. Without
+                // this the whole clip lands in write one and the case has no degree of freedom --
+                // the earlier version of this case survived the mutation for exactly that reason.
+                count / 2
+            } else {
+                count
+            }
+        }
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        var failure: Throwable? = null
+        val job = scope.launch {
+            try {
+                wired.speak("first reply", "en")
+            } catch (t: Throwable) {
+                failure = t
+            }
+        }
+        val queued = (0 until 50).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            fake.synthesizeCount > 0
+        }
+        assertTrue("the utterance must reach synthesis", queued)
+        fake.listener?.onDone(fake.lastUtteranceId)
+
+        val reached = enteredWrite.await(5, java.util.concurrent.TimeUnit.SECONDS)
+        System.err.println(
+            "[DIAG] reached=$reached writes=" + writes.get() + " synth=" + fake.synthesizeCount +
+                " failure=" + failure,
+        )
+        assertTrue("the reply must reach its first write (failure=$failure)", reached)
+        // The successor claims the engine while the first reply is blocked mid-write: a new speak()
+        // bumps the generation under the same lock the old reply's loop checks.
+        wired.claimSynthesisForTest()
+        releaseWrite.countDown()
+        runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(5_000) { job.join() }
+            kotlinx.coroutines.delay(100)
+        }
+        scope.cancel()
+
+        assertTrue(
+            "the write was blocked when the successor claimed the engine",
+            supersededWhileBlocked,
+        )
+        assertEquals(
+            "the superseded reply must perform no further writes after the blocked one " +
+                "(writes=${writes.get()})",
+            1,
+            writes.get(),
+        )
+        wired.release()
+    }
 }
 
 private fun java.io.DataOutputStream.writeIntLE(value: Int) {

@@ -485,7 +485,8 @@ class VoicePlaybackIntentExecutorTest {
             preparedAfterAB,
             sinks.cloudRoute.preparedTurns.size,
         )
-        val dispatchedA = sinks.cloudRoute.preparedDispatches.filter { it.request == "question A" }
+        // The fake carries the logical id in the request text, so the filter matches on the prefix.
+        val dispatchedA = sinks.cloudRoute.preparedDispatches.filter { it.request.startsWith("question A") }
         assertEquals("A was dispatched twice, once initially and once as a retry", 2, dispatchedA.size)
         assertEquals(
             "and both carried A's OWN request ID",
@@ -1121,9 +1122,17 @@ class VoicePlaybackIntentExecutorTest {
             capturedOrigin: Long?,
             isWakeOriginated: Boolean,
             hint: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint?,
+            logicalRequestId: String?,
         ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn {
+            // Mirrors the production rule: a logical request that already has a turn reuses it, so the
+            // fake cannot mask a retry by minting a fresh one.
+            logicalRequestId?.let { id ->
+                preparedTurns.firstOrNull { it.request.endsWith("|$id") }?.let { return it }
+            }
             val prepared = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn(
-                request = request,
+                // The logical id is carried in the request text so the fake can key on it exactly as
+                // production keys on the identity field.
+                request = if (logicalRequestId != null) "$request|$logicalRequestId" else request,
                 context = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext(),
                 requestId = "prepared-${preparedTurns.size + 1}",
                 conversationId = "handle-${preparedTurns.size + 1}",

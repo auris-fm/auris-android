@@ -93,6 +93,18 @@ class CloudConversationAdmission @Inject constructor() {
 
     private var currentOrigin: Long = 0
 
+    /** Prepared turns by logical request, so a retry reuses the turn its first attempt fixed. */
+    private val prepared =
+        mutableMapOf<String, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
+
+    /** The turn already prepared for [logicalRequestId], when a retry names one. */
+    fun retained(logicalRequestId: String): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = synchronized(lock) { prepared[logicalRequestId] }
+
+    /** Retains [turn] for [logicalRequestId] until it is no longer retryable. */
+    fun retain(logicalRequestId: String, turn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn) {
+        synchronized(lock) { prepared[logicalRequestId] = turn }
+    }
+
     /** The origin currently declared live. Exposed so a caller with no captured window can use it. */
     fun currentOriginForTest(): Long = synchronized(lock) { currentOrigin }
 

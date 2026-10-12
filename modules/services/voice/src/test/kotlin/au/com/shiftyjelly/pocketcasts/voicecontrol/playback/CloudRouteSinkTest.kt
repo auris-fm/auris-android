@@ -51,6 +51,53 @@ class CloudRouteSinkTest {
     )
 
     @Test
+    fun `a retry of an earlier logical request reuses its turn on the REAL sink path`() = runTest {
+        // @reviewer's bounded case, on the production sink rather than a fake: the fake returns numbered
+        // IDs and always a turn, so a case driving it cannot distinguish a real retry from a fresh
+        // preparation. Here the turns come from the real admission and their identities are the ones
+        // the sink actually resolved.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(1)
+
+        suspend fun prepare(request: String, logical: String) = sink.prepareTurn(
+            request = request,
+            tier = VoiceIntent.CloudTier.Premium,
+            context = playbackContext,
+            capturedOrigin = 1,
+            isWakeOriginated = true,
+            // The LOGICAL identity is what a retry is recognised by -- without it every prepare is a
+            // new user act, which is the behaviour the same-text cases exist to pin separately.
+            logicalRequestId = logical,
+        )
+
+        val first = prepare("first", "logical-A")!!
+        sink.dispatchPrepared(first)
+        val second = prepare("second", "logical-B")!!
+        sink.dispatchPrepared(second)
+        val retryOfFirst = prepare("retry first", "logical-A")!!
+
+        assertEquals(
+            "the retry reuses the FIRST turn's request ID (first=${first.requestId} " +
+                "retry=${retryOfFirst.requestId})",
+            first.requestId,
+            retryOfFirst.requestId,
+        )
+        assertEquals(
+            "and its conversation handle",
+            first.conversationId,
+            retryOfFirst.conversationId,
+        )
+        assertTrue(
+            "while the second logical request kept its own",
+            second.requestId != retryOfFirst.requestId &&
+                second.conversationId != retryOfFirst.conversationId,
+        )
+    }
+
+    @Test
     fun `a retry whose window was superseded is refused, not dispatched`() = runTest {
         // @reviewer's invalidation case: a prepared turn retried AFTER its window was superseded still
         // reached transport. A retry must re-validate its own captured origin, so a superseded turn is

@@ -1369,11 +1369,23 @@ open class PlaybackManager @Inject constructor(
     ): ScopedMutation? {
         if (getCurrentEpisode()?.uuid != episodeUuid) return null
         cancelPendingChapterSeek()
-        val before = synchronized(selectedPlayerLock) {
+        // THE PRE-ACTION POSITION IS THE PLAYER'S, READ AT THE DECISION.
+        //
+        // `episode.playedUpToMs` is PERSISTED PROGRESS, which the player updates on its own schedule and
+        // which can lag the audio actually playing -- so it is not "the position before the mutation".
+        // The player is the authority on where playback IS, and reading it here, under the same boundary
+        // that decides and before the mutation is issued, is what makes the value a genuine
+        // pre-action snapshot rather than a later observation of something that has already moved.
+        // CAPTURED BEFORE THE MUTATION AND AFTER THE BINDING IS ESTABLISHED. `getCurrentPositionMs`
+        // suspends, so it cannot be read inside the monitor -- but it is still a genuine PRE-action
+        // snapshot, because nothing has moved the player yet: the seek is issued below. The ORDER is
+        // what makes it pre-action, and the binding check above is what makes it the right episode's.
+        val target = synchronized(selectedPlayerLock) {
             val selected = getCurrentEpisode()
             if (selected?.uuid != episodeUuid) return null
-            selected.playedUpToMs
+            player?.takeIf { it.episodeUuid == episodeUuid } ?: return null
         }
+        val before = target.getCurrentPositionMs()
         if (!seekToTimeMsInternalIfEpisode(episodeUuid, positionMs)) return null
         return ScopedMutation(episodeUuid, before)
     }

@@ -115,17 +115,6 @@ class CloudAudioPlayer(
      */
     private var trackFrames = 0L
 
-    /**
-     * [submittedSamples] at the moment the CURRENT track was created.
-     *
-     * `AudioTrack.getTimestamp().framePosition` is the TRACK's own frame index, which restarts at zero
-     * for a new track, while [submittedSamples] counts the whole answer. A codec change rebuilds the
-     * track, so comparing the two directly would offset every later chunk by the frames already sent
-     * before the rebuild -- a jump of however long the answer had been running, in the one quantity the
-     * echo filter compares the capture instant against. Subtracting this base puts the observation and
-     * the chunk on the same index.
-     */
-    private var trackFrameBase = 0L
     private var released = false
     private var decodeCodec: MediaCodec? = null
     private var decodeBuffering = false
@@ -610,10 +599,12 @@ class CloudAudioPlayer(
         sampleRateHz: Int,
     ): Long {
         if (sampleRateHz <= 0) return observation.nanoTime
-        // Both sides are TRACK-relative. The observation's framePosition is the track's own index and
-        // restarts at zero when the track is rebuilt; firstFrameOfChunk is the answer-wide count. Note
-        // that both are monotonic within one track, so a rate change doesn't break the identity --
-        // the frames index the track regardless of how long each one is.
+        // Both sides are TRACK-relative, which is the reason the subtraction is meaningful:
+        // framePosition is the track's own index, and firstFrameOfChunk is [trackFrames] -- the
+        // frames this track has been handed since it was created, which restarts at zero with the
+        // track exactly as framePosition does. A codec change resets both together, so no re-basing
+        // offset is needed. Both count frames at the track's rate, so the difference is frames and
+        // the sample-rate division below converts that difference to time.
         val framesAhead = firstFrameOfChunk - observation.framePosition
         // Zero or negative means the observation names this chunk's own frame or a later one. That is
         // a track reset, a stale read, or an observation from a rebuilt track; the observation's own

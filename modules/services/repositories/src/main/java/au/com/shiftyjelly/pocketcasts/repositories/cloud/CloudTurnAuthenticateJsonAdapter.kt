@@ -78,16 +78,19 @@ internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<Clou
             }
             writer.endArray()
         }
-        if (context.episodeId.isNotEmpty()) {
+        // Each field is written only when it HAS a value. An absent episode, podcast, position or
+        // reference is omitted rather than defaulted: a zero position is a real instant (the very
+        // start) and an empty id claims a subject, so neither can stand in for "none".
+        if (context.episodeId?.isNotEmpty() == true) {
             writer.name("episode_id").value(context.episodeId)
         }
         if (context.podcastId?.isNotEmpty() == true) {
             writer.name("podcast_id").value(context.podcastId)
         }
-        if (context.referencePositionMs != 0L) {
+        if (context.referencePositionMs != null) {
             writer.name("reference_position_ms").value(context.referencePositionMs)
         }
-        if (context.clientPositionMs != 0L) {
+        if (context.clientPositionMs != null) {
             writer.name("client_position_ms").value(context.clientPositionMs)
         }
         if (context.recentReferencePositions.isNotEmpty()) {

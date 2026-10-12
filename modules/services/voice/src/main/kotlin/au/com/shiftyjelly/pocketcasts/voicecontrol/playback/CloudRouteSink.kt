@@ -577,8 +577,10 @@ class CloudRouteSink internal constructor(
         return CloudRouteContext(
             recentConversation = CloudRouteLimits.clampConversation(conversationMemory.recent())
                 .takeIf { it.isNotEmpty() },
-            episodeId = context.episodeId,
-            podcastId = context.podcastId.takeIf { it.isNotEmpty() },
+            // An absent episode stays absent: no substitution, and no empty string that would claim
+            // a subject this turn does not have.
+            episodeId = context.episodeId?.takeIf { it.isNotEmpty() },
+            podcastId = context.podcastId?.takeIf { it.isNotEmpty() },
             referencePositionMs = context.referencePositionMs,
             clientPositionMs = context.clientPositionMs,
             recentReferencePositions = context.recentReferencePositions.ifEmpty {
@@ -779,16 +781,22 @@ class CloudRouteSink internal constructor(
 
     private fun capturePreActionPosition(referenceMs: Long, turnState: TurnState) {
         val previousPlaybackMs = playbackContextProvider.current().clientPositionMs
-        // preQuotePositionMs stays on the playback timeline: stop_quote seeks
-        // the local player back to it.
+        // preQuotePositionMs stays on the playback timeline: stop_quote seeks the local player back to
+        // it. When NO episode is playing there is no position to return to, so this records null and
+        // the restore path refuses -- substituting zero would send the user to the start of a
+        // recording they were not listening to.
         turnState.preQuotePositionMs = previousPlaybackMs
         // previous_reference_position_ms is a reference-timeline value on the
         // wire — convert from the playback timeline (ad/intro offset). When no
         // mapping exists yet, omit the field rather than send a wrong-timeline
         // value.
-        val previousReferenceMs = fingerprintTimingManager
-            .referenceTime(previousPlaybackMs.toInt())
-            ?.let { referenceSeconds -> (referenceSeconds * 1000).toLong() }
+        // With no episode playing there is no playback instant to map onto the reference timeline,
+        // so the previous reference is absent rather than derived from a substituted zero.
+        val previousReferenceMs = previousPlaybackMs?.let { playbackMs ->
+            fingerprintTimingManager
+                .referenceTime(playbackMs.toInt())
+                ?.let { referenceSeconds -> (referenceSeconds * 1000).toLong() }
+        }
         cloudPlaybackContextState.record(
             referencePositionMs = referenceMs,
             previousReferencePositionMs = previousReferenceMs,

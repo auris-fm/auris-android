@@ -129,10 +129,12 @@ sealed interface VoiceIntent {
 }
 
 data class PlaybackContext(
-    val episodeId: String = "",
-    val podcastId: String = "",
+    /** The episode being played, or null when nothing is playing -- discovery with no subject. */
+    val episodeId: String? = null,
+    val podcastId: String? = null,
     val referencePositionMs: Long? = null,
-    val clientPositionMs: Long = 0L,
+    /** The play position, or null when there is no episode to have a position in. */
+    val clientPositionMs: Long? = null,
     val recentReferencePositions: List<Long> = emptyList(),
     val previousReferencePositionMs: Long? = null,
 )

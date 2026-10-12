@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -51,6 +52,71 @@ class CloudTurnRouteTest {
         assertEquals(listOf(CloudRouteCapabilities.SEARCH_RESULTS_V1), frame.capabilities)
         assertEquals(CloudRouteCodecs.advertised, frame.codecs)
         assertEquals(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")), events)
+    }
+
+    @Test
+    fun `discovery with no current episode omits the episode and position fields entirely`() = runTest {
+        // @spec's contract check: a turn with nothing playing must still dispatch, carrying an ABSENT
+        // playback context -- and the absence must survive to the wire. An empty episode id or a zero
+        // position would both be real values: the first claims a subject the turn does not have, the
+        // second places it at the very start of a recording nobody is playing.
+        val transport = FakeTransport(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")))
+        val discovery = CloudRouteTurn(
+            request = "what podcasts are trending",
+            context = CloudRouteContext(), // no episode, no position
+            requestId = "req-discovery",
+            capabilities = listOf(CloudRouteCapabilities.SEARCH_RESULTS_V1),
+        )
+
+        route(transport).route(discovery).toList()
+
+        val frame = transport.frames.single() as CloudTurnFrame.Authenticate
+        // The TYPED fields are absent...
+        assertNull("no episode means no episode_id in the context", frame.context.episodeId)
+        assertNull("and no client_position_ms", frame.context.clientPositionMs)
+
+        // ...and the WIRE carries no such keys at all. Asserting only the typed context would pass
+        // even if the encoder substituted an empty id or a zero position, because the substitution
+        // happens at serialization -- so the serialized frame is the thing under test.
+        val json = CloudRouteJson.authenticateAdapter.toJson(frame)
+        assertFalse(
+            "the wire must not name an episode for a turn that has none (json=$json)",
+            json.contains("episode_id"),
+        )
+        assertFalse(
+            "and must not report a position that does not exist (json=$json)",
+            json.contains("client_position_ms"),
+        )
+        assertFalse("nor a reference position", json.contains("reference_position_ms"))
+        assertFalse("nor a podcast id", json.contains("podcast_id"))
+    }
+
+    @Test
+    fun `a turn with a current episode carries its local position`() = runTest {
+        // The control for the case above: with an episode the fields ARE present, so the omission
+        // above is about absence rather than about the encoder dropping them.
+        val transport = FakeTransport(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")))
+        val withEpisode = CloudRouteTurn(
+            request = "what am I listening to",
+            context = CloudRouteContext(
+                episodeId = "e-42",
+                podcastId = "p-9",
+                clientPositionMs = 91_000L,
+            ),
+            requestId = "req-with-episode",
+        )
+
+        route(transport).route(withEpisode).toList()
+
+        val frame = transport.frames.single() as CloudTurnFrame.Authenticate
+        assertEquals("e-42", frame.context.episodeId)
+        assertEquals("p-9", frame.context.podcastId)
+        assertEquals(91_000L, frame.context.clientPositionMs)
+        // And the control reaches the wire too: with an episode the fields ARE serialized, so the
+        // omission above is about absence rather than about the encoder dropping them.
+        val json = CloudRouteJson.authenticateAdapter.toJson(frame)
+        assertTrue("the episode reaches the wire (json=$json)", json.contains("\"episode_id\":\"e-42\""))
+        assertTrue("with its position", json.contains("\"client_position_ms\":91000"))
     }
 
     @Test

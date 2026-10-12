@@ -141,7 +141,7 @@ class GracePeriodSignal @Inject constructor() {
      * Exposed because a privacy closure does not pass through the playback layer, so code that
      * restores playback state cannot detect it via the playback command revision.
      */
-    fun isClosedByPrivacy(): Boolean = closedByPrivacy
+    fun isClosedByPrivacy(): Boolean = synchronized(windowLock) { closedByPrivacy }
 
     /**
      * How many times a privacy event has closed the window. Monotonic and never reset by a wake, so a
@@ -288,15 +288,17 @@ class GracePeriodSignal @Inject constructor() {
      * already spent its one dispatch) and conflating them made a real run hard
      * to read.
      */
-    fun escalationRefusal(): String = when {
-        closedByPrivacy -> "no open window (closed by a privacy event)"
-        !_isActive.value -> "no open window"
-        escalationUsed && escalatedGeneration == generation -> "allowance spent in this window"
-        else -> "available"
+    fun escalationRefusal(): String = synchronized(windowLock) {
+        when {
+            closedByPrivacy -> "no open window (closed by a privacy event)"
+            !_isActive.value -> "no open window"
+            escalationUsed && escalatedGeneration == generation -> "allowance spent in this window"
+            else -> "available"
+        }
     }
 
     /** The window a dispatch issued now would belong to. */
-    val currentGeneration: Long get() = generation
+    val currentGeneration: Long get() = synchronized(windowLock) { generation }
 
     // Issues the window's single escalation, returning the generation it was issued under, or null
     // when it is refused.
@@ -413,8 +415,10 @@ class GracePeriodSignal @Inject constructor() {
         // extension closes the window it belongs to and cannot touch a successor.
         synchronized(windowLock) {
             _isActive.value = true
-            timerJob?.cancel()
-            timerJob = armTimer(ownedGeneration = generation)
+            // ARMED THROUGH armTimerForLocked, like every other open: arming directly here skipped the
+            // ownership re-check, so this one path could install a timer owned by a window that a
+            // concurrent transition had already replaced.
+            armTimerForLocked(ownedGeneration = generation)
         }
     }
 

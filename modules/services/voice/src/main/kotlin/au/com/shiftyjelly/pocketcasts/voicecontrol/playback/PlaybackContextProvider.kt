@@ -37,7 +37,9 @@ class PlaybackManagerPlaybackContextProvider @Inject constructor(
         } else {
             null
         }
-        val state = cloudPlaybackContextState.snapshot()
+        // Screened by episode for the same reason as the sink's: a saved position belongs to the
+        // episode it was recorded from.
+        val state = cloudPlaybackContextState.snapshot(episode?.uuid)
         return PlaybackContext(
             // Absence is passed through as ABSENCE. `orEmpty()` fabricated an empty identifier that
             // serializes as a real `episode_id` on the wire, so a discovery turn with nothing playing

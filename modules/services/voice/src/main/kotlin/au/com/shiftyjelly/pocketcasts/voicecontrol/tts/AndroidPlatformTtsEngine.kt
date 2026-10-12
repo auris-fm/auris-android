@@ -15,9 +15,13 @@ import javax.inject.Inject
 import kotlin.concurrent.withLock
 import kotlin.coroutines.coroutineContext
 import kotlin.coroutines.resume
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import timber.log.Timber
@@ -230,23 +234,38 @@ class AndroidPlatformTtsEngine @Inject constructor(
         // every response, and an answer that keeps talking is indistinguishable from a foreign app
         // to our own gate.
         val playback = coroutineContext[Job]
-        val stopper = playback?.invokeOnCompletion { cause ->
-            if (cause != null) {
-                activeTrack?.runCatching { stop() }
-                tts?.stop()
-            }
-        }
-        // THIS utterance's ownership claim. The write loop checks it between writes: a SUPERSEDING
-        // reply bumps the generation, and an old reply blocked in (or looping through) writes must
-        // stop promptly rather than keep talking under the successor. This is the seam the
-        // job-completion hook cannot cover -- a blocked write never completes, so the hook never
-        // fires until the write returns.
+        // THIS utterance's ownership claim, taken BEFORE the stop hook registers so the hook can
+        // protect a successor that has already claimed a later generation.
         val mine = synthesisLock.withLock { synthesisGeneration }
+        // A plain completion handler waits for the job to FINISH, and a write blocked inside
+        // withContext(IO) prevents exactly that -- so cancellation of a blocked write would wait for
+        // the very write it needs to interrupt. The 3-argument onCancellingToo hook is internal API
+        // in this coroutines version, so the cancelling transition is observed by a WATCHER in a
+        // sibling scope polling `playJob.isActive`, which flips the moment cancellation begins --
+        // while the write is still blocked. The generation check protects a successor: if a later
+        // utterance already holds the boundary, stopping here would silence the successor.
+        val stopperScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val watcher = if (playback != null) {
+            stopperScope.launch {
+                while (playback.isActive) kotlinx.coroutines.delay(10L)
+                if (playback.isCancelled && synthesisLock.withLock { synthesisGeneration == mine }) {
+                    activeTrack?.runCatching { stop() }
+                    tts?.runCatching { stop() }
+                }
+            }
+        } else {
+            null
+        }
+        // The write loop checks the same generation BETWEEN writes: a SUPERSEDING reply (not a
+        // cancellation) bumps the generation, and an old reply looping through writes must stop
+        // promptly rather than keep talking under the successor.
+        val supersededMine = mine
         playbackGenerationForTest = mine
         try {
-            playSynthesizedInternal(wav) { synthesisLock.withLock { synthesisGeneration != mine } }
+            playSynthesizedInternal(wav) { synthesisLock.withLock { synthesisGeneration != supersededMine } }
         } finally {
-            stopper?.dispose()
+            // The watcher ends when the play job does; this bounds it if that never happens.
+            stopperScope.cancel()
         }
     }
 

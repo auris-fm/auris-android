@@ -455,6 +455,52 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `a retry of a turn prepared under an older window is refused after a successor opens`() = runTest {
+        // @reviewer's regression: prepare under generation 1, open generation 2, then retry the SAME
+        // logical request with the new dispatch's stamp. The RETENTION lookup returns the OLD turn, so
+        // validating the incoming stamp passes while the turn being sent belongs to a superseded window.
+        // The check must run on the TURN's own captured origin.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        val first = signal.capturedGeneration()
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "prepared under window 1",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = first,
+                logicalRequestId = "logical-1",
+            ),
+        )
+        val dispatchesAfterFirst = sinks.cloudRoute.preparedDispatches.size
+
+        // A SUCCESSOR window opens.
+        signal.onWakeWordDetected()
+        val successor = signal.capturedGeneration()
+        assertNotEquals("the window moved", first, successor)
+
+        // Retry the SAME logical request, stamped with the NEW window.
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "prepared under window 1",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = successor,
+                logicalRequestId = "logical-1",
+                isRetry = true,
+            ),
+        )
+
+        assertEquals(
+            "a retry of a turn from a superseded window must not dispatch, whatever stamp it carries " +
+                "(dispatches=${sinks.cloudRoute.preparedDispatches.size})",
+            dispatchesAfterFirst,
+            sinks.cloudRoute.preparedDispatches.size,
+        )
+    }
+
+    @Test
     fun `a retry naming an UNKNOWN logical request is refused rather than treated as new input`() = runTest {
         // @spec's unknown-retry refusal: a retry whose identity was never prepared is not a retry of
         // anything. Treating it as new input would create a conversation for a request whose own

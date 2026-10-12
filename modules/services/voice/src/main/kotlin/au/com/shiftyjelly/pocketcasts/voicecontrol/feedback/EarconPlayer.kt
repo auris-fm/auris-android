@@ -40,6 +40,10 @@ class EarconPlayer(
     private val executorLock = Any()
     private var executor: java.util.concurrent.ExecutorService? = null
 
+    /** The worker thread THIS player started, for a test to observe its liveness directly. */
+    @Volatile
+    private var workerForTest: Thread? = null
+
     /**
      * The player's own single thread, created on demand.
      *
@@ -54,6 +58,11 @@ class EarconPlayer(
         executor?.takeIf { !it.isShutdown } ?: java.util.concurrent.Executors
             .newSingleThreadExecutor { runnable ->
                 Thread(runnable, WORKER_THREAD_NAME).apply { isDaemon = true }
+                    // THIS player's worker, retained so a test can observe THAT thread rather than any
+                    // thread that happens to share the name. A name scan sees other players' workers
+                    // still winding down and reads a released worker as live; observing the instance
+                    // this player started is both deterministic and about the right subject.
+                    .also { workerForTest = it }
             }
             .also { executor = it }
     }
@@ -71,15 +80,19 @@ class EarconPlayer(
      * The worker is released only when the reference is gone AND no `earcon-player` thread is still
      * alive, so both are checked.
      */
-    internal fun workerIsShutdownForTest(): Boolean = synchronized(executorLock) {
-        val service = executor
-        val shutDown = service?.isShutdown ?: true
-        shutDown && !anyWorkerThreadAlive()
-    }
-
-    /** Whether any worker thread is still running, so a released-but-live worker is not read as gone. */
-    private fun anyWorkerThreadAlive(): Boolean = Thread.getAllStackTraces().keys.any {
-        it.name == WORKER_THREAD_NAME && it.isAlive
+    internal fun workerIsShutdownForTest(): Boolean {
+        // Both halves of "released": the executor is shut down AND this player's own thread has ENDED.
+        //
+        // `shutdown()` is ASYNCHRONOUS -- it accepts the request and the thread finishes its queue
+        // afterwards -- so reading liveness immediately would report a released worker as live. The
+        // observation therefore WAITS for the thread to end, bounded, which is what "released" means:
+        // an unbounded wait would hang on a worker that never stops, and no wait would report a
+        // stopped worker as running.
+        val thread = workerForTest
+        val shutDown = synchronized(executorLock) { executor?.isShutdown ?: true }
+        if (thread == null) return shutDown
+        thread.join(WORKER_RELEASE_TIMEOUT_MS)
+        return shutDown && !thread.isAlive
     }
 
     /** Runs [block] on the player's own thread and returns its result, so call order is preserved. */
@@ -393,6 +406,9 @@ class EarconPlayer(
     internal companion object {
         /** The name the worker thread carries, so the test observer can find it by name. */
         const val WORKER_THREAD_NAME = "earcon-player"
+
+        /** How long a test waits for a released worker to end before reporting it as still running. */
+        private const val WORKER_RELEASE_TIMEOUT_MS = 2_000L
 
         /** The rate the shared echo reference and the correlator work at. */
         const val REFERENCE_RATE_HZ = 16_000

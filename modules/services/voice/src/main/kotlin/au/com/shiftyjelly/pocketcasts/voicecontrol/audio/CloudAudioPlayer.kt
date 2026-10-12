@@ -115,6 +115,17 @@ class CloudAudioPlayer(
      */
     private var trackFrames = 0L
 
+    /**
+     * Incremented every time a NEW track is created.
+     *
+     * Both the track's frame index and this answer's frame counters restart at zero on a rebuild, so
+     * numbers from before and after agree while describing different audio. An observation and a block
+     * record carry the generation they were made under, and the recorder matches only within one
+     * generation -- which is what stops an old-track observation from selecting a new-track block once
+     * the new write head passes the old frame number.
+     */
+    private var trackGeneration = 0L
+
     private var released = false
     private var decodeCodec: MediaCodec? = null
     private var decodeBuffering = false
@@ -418,8 +429,10 @@ class CloudAudioPlayer(
             .build()
 
         audioTrack = track
-        // A new track's frame index starts at zero, so the track-side counter restarts with it.
+        // A new track's frame index starts at zero, so the track-side counter restarts with it, and
+        // everything recorded against the previous track is now from another incarnation.
         trackFrames = 0L
+        trackGeneration += 1L
     }
 
     private fun drainFrames() {
@@ -516,17 +529,20 @@ class CloudAudioPlayer(
                         // mapping is built from these records; they retire with their samples.
                         trackStartFrame = trackFrames,
                         trackEndFrame = trackFrames + written.toLong() / bytesPerFrame,
+                        trackGeneration = trackGeneration,
                         // A rendered-frame observation when the platform reports one, else the
                         // producer's own placement -- the cumulative submitted count, from the chunks
                         // before this one (write() adds this chunk's own duration). The count is
                         // retained because it is what makes the window's DURATION checkable and it is
                         // what a drifting resample would break.
                         positionMs = renderMs ?: (submittedSamples * 1_000L) / currentSampleRate,
-                        // The axis is claimed ONLY for the render observation. An unlabelled position
-                        // says "producer placement", which is recorded but can never anchor a window
-                        // -- so the fallback path, which is exactly where the answer is unknown,
-                        // cannot advertise a monotonic alignment it does not have.
-                        axis = renderMs?.let { PositionAxis.Monotonic },
+                        // NO AXIS, even when renderMs came from a real observation: the extrapolated
+                        // chunk instant is a PREDICTION about unrendered audio, and prediction
+                        // metadata stays separate from observed alignment. Observed alignment is
+                        // claimed only by the rendered-block mapping, which selects blocks the
+                        // observation's frame actually names. (The estimate still sets the recorded
+                        // position, which duration checks rely on; it just cannot anchor.)
+                        axis = null,
                     )
                     submittedSamples += floats.size
                     // The track's own frame count, advanced by the frames just written at the track's
@@ -541,6 +557,7 @@ class CloudAudioPlayer(
                             observation.framePosition,
                             observation.nanoTime,
                             currentSampleRate,
+                            trackGeneration,
                         )
                     }
                     offset += written

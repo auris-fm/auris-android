@@ -203,14 +203,26 @@ class AudioFeedbackRenderer(
             // regular heartbeat only while the cue's own span has not been crossed.
             val firstWaitMs = minOf(EMISSION_HEARTBEAT_MS, maxOf(boundMs, 1L))
             var observed = false
-            // THE HEARTBEAT TICKS MUST FIT STRICTLY INSIDE THE SPAN; the FIRST wait is the exception,
-            // because a cue shorter than one tick has no room for any tick and must still be observed.
-            while (!disposed && (if (observed) elapsed + EMISSION_HEARTBEAT_MS < boundMs else true)) {
+            // THE LOOP DOES NOT EXIT MERELY BECAUSE THE CUE'S NOMINAL SPAN HAS PASSED -- it exits when the
+            // cue is OBSERVED TO HAVE ENDED. A cue that is still QUEUED has not sounded yet, and stopping
+            // at its estimated duration would end the observation BEFORE the sound it is waiting for:
+            // "queued short cue rendered after its duration is still attributed" is exactly that case.
+            // The span is a bound on the WAIT, not a statement that the cue is over.
+            var stillQueued = false
+            while (!disposed) {
+                if (observed && !stillQueued && elapsed + EMISSION_HEARTBEAT_MS >= boundMs) return@launch
                 delay(if (observed) EMISSION_HEARTBEAT_MS else firstWaitMs)
                 elapsed += if (observed) EMISSION_HEARTBEAT_MS else firstWaitMs
                 observed = true
                 when (earconPlayer.completion()) {
-                    EarconPlayer.EarconCompletion.Consumed -> return@launch
+                    // CONSUMED IS MEASURED RENDERING, so it NOTES BEFORE ENDING. The head has passed
+                    // every accepted frame, which is the STRONGEST evidence the cue sounded -- and a cue
+                    // that finished BETWEEN observations would otherwise never be attributed at all.
+                    // Returning here without noting treated completion as if it proved nothing.
+                    EarconPlayer.EarconCompletion.Consumed -> {
+                        noteEmitted()
+                        return@launch
+                    }
 
                     EarconPlayer.EarconCompletion.Unknown -> return@launch
 
@@ -218,10 +230,17 @@ class AudioFeedbackRenderer(
                     // an emitted sound is one the listener could hear, and this one has not started.
                     // The loop keeps waiting, which is what makes the queued delay covered rather than
                     // mistaken for silence.
-                    EarconPlayer.EarconCompletion.Queued -> Unit
+                    EarconPlayer.EarconCompletion.Queued -> {
+                        // STILL QUEUED: keep waiting past the estimate, because the sound has not begun.
+                        stillQueued = true
+                    }
 
                     // Observed sounding: refresh the attribution so the gate knows the sound is ours.
-                    EarconPlayer.EarconCompletion.Playing -> noteEmitted()
+                    EarconPlayer.EarconCompletion.Playing -> {
+                        // Observed sounding, so the cue is no longer merely waiting.
+                        stillQueued = false
+                        noteEmitted()
+                    }
                 }
             }
         }

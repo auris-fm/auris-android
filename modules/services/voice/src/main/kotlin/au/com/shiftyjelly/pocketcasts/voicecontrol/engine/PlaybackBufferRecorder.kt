@@ -137,6 +137,131 @@ class PlaybackBufferRecorder @Inject constructor(
     /** No axis recorded yet, or no timestamped contribution has arrived. */
     private var positionAxis: PositionAxis? = null
 
+    /** Total samples ever written, across retirements. Names a sample's absolute position. */
+    private var totalWritten = 0L
+
+    /**
+     * One contribution's mapping onto the track's frame index, retained so a render observation can
+     * later select the block it actually names.
+     *
+     * The record RETIRES WITH ITS SAMPLES: when the ring wraps past [endAbsoluteSample], the record
+     * is dropped, because a frame range whose audio is no longer retained cannot anchor a window --
+     * selecting it would place samples that no longer exist.
+     */
+    private class RetainedBlock(
+        val startTrackFrame: Long,
+        val endTrackFrame: Long,
+        val endAbsoluteSample: Long,
+    )
+
+    private val blocks = ArrayDeque<RetainedBlock>()
+
+    /**
+     * The latest render observation whose frame could be matched to retained audio, as
+     * `[frameOnTrack, timeMs, trackRateHz]`, or null when none is in force.
+     *
+     * An observation is accepted only when its frame is at or before the current write head -- a
+     * frame AHEAD of everything written names audio that does not exist here (a track reset or a
+     * stale read), and accepting it would anchor retained samples to a reading that does not describe
+     * them. Unmatched stays unavailable.
+     */
+    private var renderObservation: Triple<Long, Long, Int>? = null
+
+    /**
+     * Records where a contribution sits on the track's frame index, alongside its samples.
+     *
+     * Called by the render path for each chunk; the episode tap does not call it, because its
+     * contributions have no track-frame identity to record.
+     */
+    private fun recordBlock(startTrackFrame: Long, endTrackFrame: Long) {
+        // totalWritten was already advanced by write(); the block's end names that same position.
+        if (endTrackFrame > startTrackFrame) {
+            blocks.addLast(RetainedBlock(startTrackFrame, endTrackFrame, totalWritten))
+        }
+        // Retire block records whose samples the ring has already dropped. The retained count mirrors
+        // snapshotLocked's sizing, so a record survives exactly as long as its audio does.
+        val retained = if (filled) buffer.size else writePos
+        val oldestAlive = totalWritten - retained
+        while (blocks.isNotEmpty() && blocks.first().endAbsoluteSample <= oldestAlive) {
+            blocks.removeFirst()
+        }
+        // An observation matched against records that have since retired is no longer matchable.
+        val obs = renderObservation
+        if (obs != null && blocks.none { it.endTrackFrame <= obs.first }) {
+            renderObservation = null
+        }
+    }
+
+    /**
+     * Records a render observation for the rendered-block mapping, or drops the previous one when the
+     * new observation cannot be matched.
+     *
+     * An observation naming a frame at or before the write head can select the retained block that
+     * frame belongs to. A frame AHEAD of the write head cannot: nothing written yet occupies it, so
+     * the observation is refused and the previous one is cleared -- the mapping reports unavailable
+     * rather than anchoring to a reading that does not describe the retained audio.
+     */
+    fun onRenderObservation(frameOnTrack: Long, timeMs: Long, trackRateHz: Int) {
+        synchronized(lock) {
+            val writeHeadFrame = blocks.lastOrNull()?.endTrackFrame ?: 0L
+            renderObservation =
+                if (frameOnTrack in 1..writeHeadFrame && trackRateHz > 0) {
+                    Triple(frameOnTrack, timeMs, trackRateHz)
+                } else {
+                    null
+                }
+        }
+    }
+
+    /**
+     * The reference window that has actually RENDERED, as selected by the observation's frame.
+     *
+     * The window ends at the newest retained block whose END FRAME is at or before the observed
+     * frame: that audio has sounded, while anything after it is still queued and is EXCLUDED -- queued
+     * PCM must not stand for rendered progress, because the filter would otherwise correlate the
+     * microphone against audio the listener has not heard yet.
+     *
+     * The window's END instant is the observation's time, translated from the observed frame back to
+     * the block's end frame at the track's rate -- the frame/time relation preserved as a translation,
+     * not clamped to the block's own position. The START is derived from the window's duration, which
+     * is exact because the window is contiguous retained audio.
+     *
+     * Null when nothing can be said: no observation in force, no retained block at or before the
+     * observed frame, or the matching records have retired with their samples. Absent stays absent.
+     */
+    fun renderedReference(): PlaybackReference? {
+        synchronized(lock) {
+            val obs = renderObservation ?: return null
+            val (obsFrame, obsTimeMs, trackRateHz) = obs
+            val rendered = blocks.lastOrNull { it.endTrackFrame <= obsFrame } ?: return null
+            val retained = if (filled) buffer.size else writePos
+            val oldestAlive = totalWritten - retained
+            if (rendered.endAbsoluteSample <= oldestAlive) return null
+            val includedSamples = (rendered.endAbsoluteSample - oldestAlive).toInt()
+            if (includedSamples <= 0) return null
+            // The block's end frame sounded at the observation's instant minus the frames between it
+            // and the observed frame. Frames-to-time uses the TRACK's rate: both quantities are on the
+            // track's index, so that is the rate the difference is expressed in.
+            val endMs = obsTimeMs - (obsFrame - rendered.endTrackFrame) * 1_000L / trackRateHz
+            val startMs = endMs - includedSamples * 1_000L / SAMPLE_RATE
+            return PlaybackReference(
+                tailSamples(includedSamples),
+                SAMPLE_RATE,
+                startMs,
+            )
+        }
+    }
+
+    /** The newest [count] retained samples, in order. Caller holds [lock]. */
+    private fun tailSamples(count: Int): FloatArray {
+        val result = FloatArray(count)
+        for (i in 0 until count) {
+            val from = ((writePos - count + i) % buffer.size + buffer.size) % buffer.size
+            result[i] = buffer[from]
+        }
+        return result
+    }
+
     /**
      * @param positionMs the position of the chunk's FIRST sample, or null when the contributing
      * renderer supplies no timestamp (earcons and TTS do not). An untimed chunk contributes SAMPLES
@@ -144,13 +269,23 @@ class PlaybackBufferRecorder @Inject constructor(
      * window look like it has a valid mapping to a clock nothing measured for this audio.
      * @param axis which clock [positionMs] is on. Ignored when [positionMs] is null.
      */
-    fun write(pcm: FloatArray, positionMs: Long? = null, axis: PositionAxis? = null) {
+    fun write(
+        pcm: FloatArray,
+        positionMs: Long? = null,
+        axis: PositionAxis? = null,
+        trackStartFrame: Long? = null,
+        trackEndFrame: Long? = null,
+    ) {
         val axisClaimed = axis != null
         synchronized(lock) {
+            totalWritten += pcm.size
             for (sample in pcm) {
                 buffer[writePos] = sample
                 writePos = (writePos + 1) % buffer.size
                 if (writePos == 0) filled = true
+            }
+            if (trackStartFrame != null && trackEndFrame != null) {
+                recordBlock(trackStartFrame, trackEndFrame)
             }
             if (positionMs != null) {
                 // The position of the newest sample: the chunk's start plus its duration at 16 kHz.

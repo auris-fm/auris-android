@@ -280,7 +280,7 @@ class CloudRouteSink internal constructor(
      * is held for the life of the process, and a later dispatch naming a finished request would be
      * admitted as a retry of work that is done.
      */
-    fun forgetRetained(logicalRequestId: String) {
+    override fun forgetRetained(logicalRequestId: String) {
         conversationAdmission.forgetRetained(logicalRequestId)
         retentionReleased?.invoke(logicalRequestId)
     }

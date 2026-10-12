@@ -36,6 +36,10 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         logicalRequestId: String,
     ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = cloudRouteSink.retainedTurnFor(logicalRequestId)
 
+    /** The manager this executor installed its release on, so teardown can remove it. */
+    private var boundDialogManager:
+        au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager? = null
+
     /**
      * Connects a dialog manager's abandonment reports to this sink's retention release.
      *
@@ -49,12 +53,26 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         // turn retained for it. The sink is not made a dependency of the manager -- the router already
         // reaches the manager, so that would close a cycle -- and the binding is installed here, at
         // composition, where both are in hand.
+        // Through the INTERFACE, not a cast: the release is part of the contract, so a caller cannot
+        // reach a sink that silently ignores it.
         dialogManager.onRequestAbandoned = { logical ->
-            runCatching {
-                (cloudRouteSink as? au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSink)
-                    ?.forgetRetained(logical)
-            }
+            runCatching { cloudRouteSink.forgetRetained(logical) }
         }
+        boundDialogManager = dialogManager
+    }
+
+    /**
+     * Removes the abandonment binding installed by [bindDialogAbandonment].
+     *
+     * TEARDOWN MATTERS BOTH WAYS. A binding left in place after the sink it points at is gone keeps an
+     * obsolete consumer: the manager would report abandoned requests into a released object. And a
+     * binding cleared while the manager is still live would LOSE retirement notifications, leaving
+     * prepared turns retained for the life of the process. Called wherever the session that installed
+     * it ends.
+     */
+    fun unbindDialogAbandonment() {
+        boundDialogManager?.onRequestAbandoned = null
+        boundDialogManager = null
     }
 
     suspend fun execute(intent: VoiceIntent): VoiceResponse {
@@ -450,6 +468,14 @@ interface VoiceCloudRouteSink {
      * acyclic.
      */
     fun onRetentionReleased(consumer: (logicalRequestId: String) -> Unit)
+
+    /**
+     * Forgets the turn retained for [logicalRequestId]: no retry of it is coming.
+     *
+     * Part of the CONTRACT rather than a detail of one implementation: the release has to work through
+     * the interface, or a caller could reach a sink that silently ignores it.
+     */
+    fun forgetRetained(logicalRequestId: String)
 
     /** The turn retained for [logicalRequestId], so a caller can tell a retry from new input. */
     fun retainedTurnFor(

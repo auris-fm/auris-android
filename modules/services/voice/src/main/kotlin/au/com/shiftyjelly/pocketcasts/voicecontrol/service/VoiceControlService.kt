@@ -67,6 +67,17 @@ class VoiceControlService : Service() {
 
     @Inject lateinit var voicePlaybackIntentExecutor: VoicePlaybackIntentExecutor
 
+    /**
+     * The clarification-dialog owner, injected so its abandonment reports can be bound to the cloud
+     * sink's retention release.
+     *
+     * Field injection rather than a constructor dependency: the ROUTER already reaches this manager,
+     * and the sink is reachable from it, so making the sink depend on the manager closes a cycle Hilt
+     * rejects outright.
+     */
+    @Inject lateinit var voiceDialogManager:
+        au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager
+
     @Inject lateinit var playbackContextMonitor: PlaybackContextMonitor
 
     @Inject lateinit var audioRouteMonitor: AndroidAudioRouteMonitor
@@ -391,6 +402,12 @@ class VoiceControlService : Service() {
             return
         }
         Timber.i("Intent router initialized")
+
+        // THE PRODUCTION COMPOSITION CALL, installed once the router is ready and the sink is live.
+        // Before this, a dialog's abandoned request kept its prepared turn: nothing was told to forget
+        // it, so a later dispatch naming a finished request could be admitted as a retry of work that
+        // is done.
+        voicePlaybackIntentExecutor.bindDialogAbandonment(voiceDialogManager)
 
         modelsReadyCondition.update(isReady = true)
         Timber.i("Voice control models ready")
@@ -779,6 +796,9 @@ class VoiceControlService : Service() {
         mediaSession?.isActive = false
         mediaSession?.release()
         mediaSession = null
+        // REMOVED WITH THE SESSION. A binding left behind would point the manager at a sink whose
+        // session has ended, and one cleared too early would lose the notifications it exists for.
+        voicePlaybackIntentExecutor.unbindDialogAbandonment()
         voiceRecognizer.release()
         // END THE SESSION, do not dispose. This runs on every stop, and the renderer is a Hilt
         // @Singleton: disposing here meant the next start had no feedback at all, silently. Disposal

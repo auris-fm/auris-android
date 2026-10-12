@@ -129,6 +129,14 @@ class CloudRouteSink internal constructor(
      */
     private class TurnState {
         var preQuotePositionMs: Long? = null
+
+        /**
+         * Whether an action in this turn was ISSUED with an unknowable outcome.
+         *
+         * Recorded on the TURN because the Boolean `executeAction` result cannot express it: it reaches
+         * the turn's final outcome from inside a function whose whole contract is performed-or-not.
+         */
+        var actionUnknown: Boolean = false
     }
 
     /**
@@ -379,7 +387,15 @@ class CloudRouteSink internal constructor(
         }
         val turnState = TurnState()
         var tokenBuffer = ""
-        var executedAction = false
+        // THE TURN'S ACTION OUTCOME IS THREE-VALUED, not a flag. A Boolean collapses "the action was
+        // confirmed performed" with "the action was attempted and its outcome is unknown", so an
+        // unknowable execution would be reported as DELIVERED -- claiming a success nobody observed.
+        var actionOutcome = ActionOutcome.None
+
+        // Raised where a three-way outcome is KNOWN; the Boolean `executeAction` result cannot express it.
+        fun noteOutcome(outcome: ActionOutcome) {
+            actionOutcome = mergeActionOutcome(actionOutcome, outcome)
+        }
         var handledResult = false
         var audioPlayed = false
         var ducked = false
@@ -542,14 +558,16 @@ class CloudRouteSink internal constructor(
                         // an unknown action, missing parameters and superseded turns, and an ignored
                         // action followed by a blank Done must not pass for a turn that delivered
                         // something.
-                        executedAction = executeAction(
+                        val performed = executeAction(
                             event.tool,
                             event.action,
                             event.params,
                             turnState,
                             myId,
                             plannedEpisodeId = context.episodeId,
-                        ) || executedAction
+                        )
+                        if (performed) noteOutcome(ActionOutcome.Confirmed)
+                        if (turnState.actionUnknown) noteOutcome(ActionOutcome.Unknown)
                     }
 
                     is CloudRouteEvent.AudioFrame -> {
@@ -638,7 +656,11 @@ class CloudRouteSink internal constructor(
 
                             // The turn delivered something else — an action it actually performed,
                             // or a result it rendered. Silence is right: that was the answer.
-                            executedAction || handledResult -> VoiceResponse.Silent
+                            // A CONFIRMED action or a rendered result is the answer. An UNKNOWN action is
+                            // reported as delivered too -- the turn DID dispatch it, and saying "nothing
+                            // happened" would invite a repeat -- but the two are distinguished in the
+                            // value rather than merged, so a caller can tell them apart.
+                            actionOutcome != ActionOutcome.None || handledResult -> VoiceResponse.Silent
 
                             else -> {
                                 // No tokens and nothing done: an unexpected empty turn, not a search
@@ -947,6 +969,7 @@ class CloudRouteSink internal constructor(
                                     preActionPositionMs = outcome.preActionPositionMs,
                                     recordTarget = false,
                                 )
+                                turnState.actionUnknown = true
                                 return@withLock true
                             }
                         }
@@ -1128,6 +1151,7 @@ class CloudRouteSink internal constructor(
                 preActionPositionMs = outcome.preActionPositionMs,
                 recordTarget = false,
             )
+            turnState.actionUnknown = true
             true
         }
     }
@@ -1253,5 +1277,30 @@ class CloudRouteSink internal constructor(
         private const val KEY_CLOUD_ERROR_PREFIX = "cloud_error_"
         private const val KEY_CLOUD_ERROR_GENERIC = "cloud_error_generic"
         private const val KEY_CLOUD_INCOMPLETE_TURN = "general.cloud_incomplete_turn"
+
+        /** What the turn's playback action achieved, as far as the client could OBSERVE. */
+        internal enum class ActionOutcome {
+            /** No action was performed or attempted. */
+            None,
+
+            /** The action was ISSUED and its outcome could not be established. */
+            Unknown,
+
+            /** The action was CONFIRMED performed. */
+            Confirmed,
+        }
+
+        /**
+         * Combines two action outcomes, keeping the STRONGEST evidence but never downgrading an observation.
+         *
+         * UNKNOWN IS NEVER REDUCED TO None: an attempted-but-unknowable action must not become "nothing
+         * happened" merely because a later action in the same turn did nothing. Nor is it upgraded to
+         * Confirmed: nothing observed it happening.
+         */
+        internal fun mergeActionOutcome(previous: ActionOutcome, next: ActionOutcome): ActionOutcome = when {
+            previous == ActionOutcome.Confirmed || next == ActionOutcome.Confirmed -> ActionOutcome.Confirmed
+            previous == ActionOutcome.Unknown || next == ActionOutcome.Unknown -> ActionOutcome.Unknown
+            else -> ActionOutcome.None
+        }
     }
 }

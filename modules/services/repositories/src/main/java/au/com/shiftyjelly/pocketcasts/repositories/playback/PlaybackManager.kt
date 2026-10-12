@@ -1201,6 +1201,13 @@ open class PlaybackManager @Inject constructor(
      */
     private val selectedPlayerLock = Any()
 
+    // NOT YET PROTECTED BY [selectedPlayerLock]: `playNow`/`playNowSync`, which is the path that WRITES
+    // the selected episode and reconfigures a reused player for it. The seek path validates the player's
+    // OWN episode at its mutation, which is what makes a captured reference safe there; the write side
+    // still changes the pair outside this boundary, so the reconfiguration can interleave with it. Left
+    // explicit rather than implied, because a lock that covers one side of a pair reads as if it covers
+    // both.
+
     suspend fun seekToTimeMsSuspend(positionMs: Int, seekComplete: (() -> Unit)? = null) {
         cancelPendingChapterSeek()
         seekToTimeMsInternal(positionMs)
@@ -1320,10 +1327,17 @@ open class PlaybackManager @Inject constructor(
         val seekTarget = synchronized(selectedPlayerLock) {
             val selected = getCurrentEpisode()
             if (selected?.uuid != episodeUuid) return false
+            // THE PLAYER'S OWN EPISODE MUST MATCH TOO. A player is REUSED across episodes -- the same
+            // instance is reconfigured for the next recording -- so a captured reference does not by
+            // itself establish WHICH episode it addresses. The queue naming the episode is not enough:
+            // the pointer can be reconfigured to another episode between the capture and the suspending
+            // seek, and that seek would then be applied to audio the caller never asked to move.
+            val target = player
+            if (target?.episodeUuid != episodeUuid) return false
             selected.playedUpToMs = positionMs
-            player
+            target
         }
-        seekTarget?.seekToTimeMs(positionMs)
+        seekTarget.seekToTimeMs(positionMs)
         return true
     }
 

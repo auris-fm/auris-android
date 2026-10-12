@@ -208,10 +208,15 @@ class CastPlayer(
                     Timber.i("CastPlayer refused a seek: episode changed")
                     return@synchronized null
                 }
-                // THE PRE-ACTION POSITION IS READ AT THE MUTATION, inside the same exclusion boundary.
-                // A cast receiver reports its position synchronously, so this does not suspend and the
-                // lock holds across it.
-                val before = remoteMediaClient?.approximateStreamPosition ?: return@synchronized null
+                // THE RECEIVER'S OWN EPISODE MUST MATCH before its position can be called this
+                // operation's pre-action value. `approximateStreamPosition` describes whatever the
+                // RECEIVER is playing, which is `remoteEpisodeUuid` -- not `localEpisodeUuid`, the
+                // episode this client INTENDS to play. During a load they differ, so an unvalidated read
+                // would report the OLD recording's position as the provenance of an operation on the new
+                // one: the same substitution the binding exists to prevent, one layer down.
+                val before = remoteMediaClient?.approximateStreamPosition
+                    ?.takeIf { remoteEpisodeUuid != null && TextUtils.equals(remoteEpisodeUuid, expectedEpisodeUuid) }
+                    ?: return@synchronized null
                 if (isMediaLoaded) {
                     // NO REMOTE CLIENT MEANS UNAVAILABLE, NOT ACCEPTED. `?.` followed by `true` reported a
                     // cast seek that reached no receiver as performed.

@@ -1281,11 +1281,15 @@ class VoicePlaybackIntentExecutorTest {
             isWakeOriginated: Boolean,
             hint: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint?,
             logicalRequestId: String?,
-        ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn {
+            isRetry: Boolean,
+        ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? {
             // Mirrors the production rule: a logical request that already has a turn reuses it, so the
             // fake cannot mask a retry by minting a fresh one.
             logicalRequestId?.let { id ->
                 preparedTurns.firstOrNull { it.request.endsWith("|$id") }?.let { return it }
+                // Mirrors the production rule: a RETRY that misses is refused rather than prepared,
+                // because preparing would resurrect a request that is no longer retryable.
+                if (isRetry) return null
             }
             val prepared = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn(
                 // The logical id is carried in the request text so the fake can key on it exactly as

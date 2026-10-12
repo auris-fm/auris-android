@@ -409,6 +409,14 @@ class VoiceControlService : Service() {
         // is done.
         voicePlaybackIntentExecutor.bindDialogAbandonment(voiceDialogManager)
 
+        // THE PRODUCTION RECEIVER for a failed release. The hook existed with nothing bound to it, so a
+        // release failure was logged and otherwise invisible -- and a release that fails leaves the
+        // prepared turn retained for the life of the process. The session owner is where that is
+        // visible, because the session is what the retention belongs to.
+        voicePlaybackIntentExecutor.onRetirementFailure = { logical, cause ->
+            Timber.w(cause, "[VoiceControl] releasing the turn retained for %s failed", logical)
+        }
+
         modelsReadyCondition.update(isReady = true)
         Timber.i("Voice control models ready")
     }

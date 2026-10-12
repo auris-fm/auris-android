@@ -474,6 +474,8 @@ interface VoiceCloudRouteSink {
         hint: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint? = null,
         /** The logical request this turn belongs to, for the retry path. */
         logicalRequestId: String? = null,
+        /** True when the caller is retrying, so a lookup miss refuses rather than prepares. */
+        isRetry: Boolean = false,
     ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn?
 
     /**

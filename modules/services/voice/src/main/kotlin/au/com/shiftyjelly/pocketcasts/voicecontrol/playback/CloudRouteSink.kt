@@ -230,6 +230,8 @@ class CloudRouteSink internal constructor(
         hint: CloudRouteHint?,
         /** The logical request this turn belongs to, when the caller is preparing a retry. */
         logicalRequestId: String?,
+        /** True when the caller is RETRYING, so a lookup miss is a refusal rather than a first attempt. */
+        isRetry: Boolean,
     ): CloudRouteTurn? {
         // A RETRY REUSES ITS TURN rather than minting a new one. The caller names the logical request;
         // if a turn already exists for it, this returns THAT turn unchanged, so its request ID, handle
@@ -237,6 +239,11 @@ class CloudRouteSink internal constructor(
         // executor keeps, so a direct caller and the executor resolve a retry identically.
         if (logicalRequestId != null) {
             conversationAdmission.retained(logicalRequestId)?.let { return it }
+            // A lookup MISS IS NOT A REASON TO PREPARE. The comment above said so and the code did not:
+            // it fell through and built a fresh turn, which resurrected a request that is not retryable.
+            // Only a FIRST ATTEMPT may prepare under a new identity, and the caller says which it is
+            // (`isRetry`), so a miss under a RETRY is refused here rather than filled in.
+            if (isRetry) return null
             // NOT RETAINED. Either this logical request was never prepared, or it has been RETIRED --
             // its window closed, or its dialog was abandoned. Preparing a fresh turn under a retired
             // identity would resurrect a request that is no longer retryable, so absence is reported

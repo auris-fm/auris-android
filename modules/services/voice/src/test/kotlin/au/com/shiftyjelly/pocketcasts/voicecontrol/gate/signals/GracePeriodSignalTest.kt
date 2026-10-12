@@ -308,6 +308,100 @@ class GracePeriodSignalTest {
     }
 
     @Test
+    fun `an UNSTAMPED command that replaces a window still reports the window it ended`() = runTest {
+        // @reviewer: the unstamped branch called `openWindowLocked()` and DISCARDED the ended
+        // generation, so a command that replaced a window emitted NO retirement callback. "A replacement
+        // is an ending" -- and this was the one open path that ignored it.
+        val retired = mutableListOf<Long>()
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWindowEnded = { retired += it }
+        signal.onWakeWordDetected()
+        val first = signal.capturedGeneration()
+
+        // An unstamped command: a fresh act the app handled locally, with no window of its own.
+        signal.onCommandRecognized(fromGeneration = null)
+        val second = signal.capturedGeneration()
+
+        assertTrue("the window advanced", second != first)
+        assertTrue(
+            "the replaced window must be reported even on the unstamped path (retired=$retired)",
+            retired.contains(first),
+        )
+    }
+
+    @Test
+    fun `a wake's marker is never visible before its window`() {
+        // Mutation B taught me the previous case could not see this: holding the monitor only proves the
+        // wake WAITS, and a marker written BEFORE it waits is invisible to that observation. What the
+        // split actually produces is a MARKER AHEAD OF ITS WINDOW -- the next wake's generation, while
+        // the current window is still the old one. `isWakeOriginated` must never report a window that
+        // does not exist yet, so this reads the marker while the monitor is held.
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+
+        val holding = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val holder = Thread {
+            synchronized(signal.windowMonitorForTest()) {
+                holding.countDown()
+                release.await(3, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        }.apply { start() }
+        holding.await(3, java.util.concurrent.TimeUnit.SECONDS)
+
+        // Attempt a wake while the monitor is held. A correct wake writes NOTHING before it waits, so
+        // the only wake-originated window is still `window`; a split wake has already written the NEXT
+        // generation as wake-originated, and that window does not exist at all.
+        Thread { signal.onWakeWordDetected() }.apply { start() }
+        Thread.sleep(100)
+
+        val ahead = signal.wakeOriginatedGenerationForTest()
+        release.countDown()
+        holder.join(3_000)
+
+        assertTrue(
+            "the wake marker must not name a window ahead of the live one " +
+                "(marker=$ahead live=$window)",
+            ahead == window,
+        )
+    }
+
+    @Test
+    fun `a wake sets its marker in the same transition that opens the window`() {
+        // The marker and the opening are the SAME act. Setting the marker around `openWindow()` left a
+        // moment where the window was open under the PREVIOUS marker, which a concurrent reader could
+        // observe. This holds the monitor and asserts a wake cannot proceed at all while it is held --
+        // so the marker cannot be written outside the transition either.
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWakeWordDetected()
+
+        val holding = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val woke = java.util.concurrent.CountDownLatch(1)
+
+        val holder = Thread {
+            synchronized(signal.windowMonitorForTest()) {
+                holding.countDown()
+                release.await(3, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        }.apply { start() }
+        holding.await(3, java.util.concurrent.TimeUnit.SECONDS)
+
+        Thread {
+            signal.onWakeWordDetected()
+            woke.countDown()
+        }.apply { start() }
+        assertFalse(
+            "a wake must not open or mark while the monitor is held",
+            woke.await(150, java.util.concurrent.TimeUnit.MILLISECONDS),
+        )
+        release.countDown()
+        assertTrue("and it proceeds once released", woke.await(3, java.util.concurrent.TimeUnit.SECONDS))
+        holder.join(3_000)
+    }
+
+    @Test
     fun `recording a prepared request blocks on the same monitor as the transitions`() {
         // `notePreparedRequest` was `@Synchronized`, which takes the INSTANCE monitor -- a DIFFERENT lock
         // from windowLock, so it serialized against other `@Synchronized` members and against nothing

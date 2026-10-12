@@ -77,6 +77,25 @@ interface Player {
     suspend fun setPlaybackEffects(playbackEffects: PlaybackEffects)
     fun updateAudioOnly() {}
     suspend fun seekToTimeMs(positionMs: Int)
+
+    /**
+     * Seeks [positionMs] ONLY while this player still addresses [expectedEpisodeUuid], reporting whether
+     * it did.
+     *
+     * THE EPISODE IS CHECKED HERE, IN THE PLAYER'S OWN MUTATING OPERATION, because nowhere else can be
+     * early enough. A player is REUSED across episodes, and `seekToTimeMs` SUSPENDS -- so a caller-side
+     * check before or after it can only OBSERVE that the player changed, by which point the seek it
+     * issued has already run on the wrong audio. A returned false cannot undo a mutation.
+     *
+     * The default implementation performs that check and delegates, which is correct for a player whose
+     * `episodeUuid` reflects what it was loaded with. A player that can be re-pointed concurrently
+     * should override this to re-read the field immediately before its own mutation point.
+     */
+    suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Boolean {
+        if (episodeUuid != expectedEpisodeUuid) return false
+        seekToTimeMs(positionMs)
+        return true
+    }
     suspend fun isPlaying(): Boolean
     suspend fun isBuffering(): Boolean
     suspend fun durationMs(): Int?

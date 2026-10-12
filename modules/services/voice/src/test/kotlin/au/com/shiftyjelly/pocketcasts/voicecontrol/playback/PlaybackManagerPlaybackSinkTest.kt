@@ -98,6 +98,14 @@ class PlaybackManagerPlaybackSinkTest {
                 entered.complete(Unit)
                 proceed.await()
             }
+
+            override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Boolean {
+                entered.complete(Unit)
+                proceed.await()
+                // The player's own mutation point: re-pointed means REFUSED, with no seek performed.
+                if (configured != expectedEpisodeUuid) return false
+                return true
+            }
         }
         org.mockito.kotlin.whenever(manager.player).thenReturn(target)
         org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenReturn(
@@ -165,6 +173,17 @@ class PlaybackManagerPlaybackSinkTest {
                 entered.complete(Unit)
                 proceed.await()
                 actedOn = configured
+            }
+
+            override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Boolean {
+                // THE PLAYER'S OWN MUTATION POINT: it records the seek only while it still addresses the
+                // episode it was asked about, which is what makes a re-pointing REFUSED rather than
+                // merely detected after the damage.
+                entered.complete(Unit)
+                proceed.await()
+                if (configured != expectedEpisodeUuid) return false
+                actedOn = configured
+                return true
             }
         }
         org.mockito.kotlin.whenever(manager.player).thenReturn(target)

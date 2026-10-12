@@ -174,17 +174,16 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         // episode-scoped seek -- it re-reads the selection INSIDE the operation, immediately before
         // seeking -- so validation and mutation happen AT THE OWNER, not merely consecutively here.
         if (expectedEpisodeId != null) {
-            // ACCEPTED ONLY WHEN THE OWNER ACCEPTED IT. `seekIfPlayingToTimeMs` re-reads the selection
-            // inside the operation, so a refusal is decided at the owner and reported as one.
-            // THE PRE-ACTION POSITION IS READ WHILE THE BINDING STILL HOLDS -- before the seek moves it --
-            // and travels WITH the result, so a caller never re-reads a state that may have changed.
-            val before = playbackManager.getCurrentEpisode()
-                ?.takeIf { it.uuid == expectedEpisodeId }
-                ?.playedUpToMs
-                ?.toLong()
-            val accepted = playbackManager.seekIfPlayingToTimeMs(expectedEpisodeId, resolvedSeconds * 1000)
-            return if (accepted) {
-                EpisodeOperationResult.Accepted(expectedEpisodeId, before)
+            // THE OWNER BOTH DECIDES AND CAPTURES. `seekIfPlayingCapturing` validates the selection and
+            // the player's own episode under its boundary AND reports the pre-action position it saw
+            // there, so this adapter cannot report a position read from a state that changed between its
+            // own observation and the owner's decision.
+            val scoped = playbackManager.seekIfPlayingCapturing(
+                expectedEpisodeId,
+                resolvedSeconds * 1000,
+            )
+            return if (scoped != null) {
+                EpisodeOperationResult.Accepted(scoped.episodeUuid, scoped.preActionPositionMs?.toLong())
             } else {
                 EpisodeOperationResult.Refused
             }

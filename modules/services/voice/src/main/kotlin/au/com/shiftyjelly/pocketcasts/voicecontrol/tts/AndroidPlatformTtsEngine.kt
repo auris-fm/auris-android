@@ -237,40 +237,16 @@ class AndroidPlatformTtsEngine @Inject constructor(
         // THIS utterance's ownership claim, taken BEFORE the stop hook registers so the hook can
         // protect a successor that has already claimed a later generation.
         val mine = synthesisLock.withLock { synthesisGeneration }
-        // A plain completion handler waits for the job to FINISH, and a write blocked inside
-        // withContext(IO) prevents exactly that -- so cancellation of a blocked write would wait for
-        // the very write it needs to interrupt. The 3-argument onCancellingToo hook is internal API
-        // in this coroutines version, so the cancelling transition is observed by a WATCHER in a
-        // sibling scope polling `playJob.isActive`, which flips the moment cancellation begins --
-        // while the write is still blocked. The generation check protects a successor: if a later
-        // utterance already holds the boundary, stopping here would silence the successor.
-        val stopperScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        val watcher = if (playback != null) {
-            stopperScope.launch {
-                while (playback.isActive) kotlinx.coroutines.delay(10L)
-                if (playback.isCancelled && synthesisLock.withLock { synthesisGeneration == mine }) {
-                    activeTrack?.runCatching { stop() }
-                    tts?.runCatching { stop() }
-                }
-            }
-        } else {
-            null
-        }
-        // The write loop checks the same generation BETWEEN writes: a SUPERSEDING reply (not a
-        // cancellation) bumps the generation, and an old reply looping through writes must stop
-        // promptly rather than keep talking under the successor.
-        val supersededMine = mine
+        // The write loop checks the generation BETWEEN writes (supersession) and a watcher inside
+        // [playSynthesizedInternal] observes the job's cancelling transition (cancellation); both own
+        // only THIS utterance's track, which is why the watcher lives there, where the track exists.
         playbackGenerationForTest = mine
-        try {
-            playSynthesizedInternal(wav) { synthesisLock.withLock { synthesisGeneration != supersededMine } }
-        } finally {
-            // The watcher ends when the play job does; this bounds it if that never happens.
-            stopperScope.cancel()
-        }
+        playSynthesizedInternal(wav, mine) { synthesisLock.withLock { synthesisGeneration != mine } }
     }
 
     private suspend fun playSynthesizedInternal(
         wav: File,
+        mine: Int,
         superseded: () -> Boolean,
     ) = withContext(Dispatchers.IO) {
         playbackIncomplete = false
@@ -283,6 +259,27 @@ class AndroidPlatformTtsEngine @Inject constructor(
             return@withContext
         }
         activeTrack = track
+        // Cancellation watcher, owning THIS utterance's LOCAL track. `isActive` flips the moment the
+        // job is cancelled -- a write blocked inside withContext(IO) cannot reach the loop's own
+        // check, so the stop must be initiated from outside the blocked call. The generation guard
+        // protects a successor: a cancelled old utterance whose generation has been superseded must
+        // not stop the successor's track or engine. The shared `activeTrack` field is touched ONLY
+        // through [clearOwnedTrack], which clears it if -- and only if -- it still points at this
+        // utterance's instance.
+        val playbackJob = coroutineContext[Job]
+        val stopperScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val watcher = if (playbackJob != null) {
+            stopperScope.launch {
+                while (playbackJob.isActive) kotlinx.coroutines.delay(10L)
+                if (playbackJob.isCancelled && synthesisLock.withLock { synthesisGeneration == mine }) {
+                    track.runCatching { stop() }
+                    tts?.runCatching { stop() }
+                    clearOwnedTrack(track)
+                }
+            }
+        } else {
+            null
+        }
         try {
             track.play()
             playbackActive = true
@@ -294,8 +291,14 @@ class AndroidPlatformTtsEngine @Inject constructor(
                 // promptly after a blocked write returns. Without this the old reply's remaining
                 // writes continue under the successor.
                 if (superseded()) {
-                    activeTrack?.runCatching { stop() }
-                    tts?.runCatching { stop() }
+                    // Stop THIS utterance's track, never the shared field: a successor may have
+                    // replaced `activeTrack` already, and stopping the field would silence it. The
+                    // shared engine is guarded by the generation for the same reason.
+                    track.runCatching { stop() }
+                    if (synthesisLock.withLock { synthesisGeneration == mine }) {
+                        tts?.runCatching { stop() }
+                    }
+                    clearOwnedTrack(track)
                     return@withContext
                 }
                 val writer = writeToSink
@@ -353,10 +356,23 @@ class AndroidPlatformTtsEngine @Inject constructor(
                 )
             }
         } finally {
+            watcher?.cancel()
+            stopperScope.cancel()
             playbackActive = false
-            activeTrack = null
+            // Clear the shared field only if it still points at THIS utterance's track: a successor
+            // may have replaced it, and nulling the field would orphan the successor's stop path.
+            clearOwnedTrack(track)
             runCatching { track.stop() }
             runCatching { track.release() }
+        }
+    }
+
+    /** Clears [activeTrack] only when it still refers to [track] -- this utterance's own instance. */
+    private fun clearOwnedTrack(track: AudioTrack) {
+        synthesisLock.withLock {
+            if (activeTrack === track) {
+                activeTrack = null
+            }
         }
     }
 

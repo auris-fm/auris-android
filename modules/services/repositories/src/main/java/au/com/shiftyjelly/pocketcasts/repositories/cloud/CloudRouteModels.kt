@@ -84,6 +84,14 @@ data class CloudRouteTurn(
     val conversationId: String? = null,
     /** How this turn relates to [conversationId]. Null when there is no conversation to relate to. */
     val conversationMode: CloudConversationMode? = null,
+    /**
+     * The window this turn was CAPTURED under, or null when it was not captured.
+     *
+     * Carried so a RETRY is validated against the window the turn belongs to rather than against
+     * whichever window is current when it is finally retried -- otherwise a retry of a superseded
+     * request would be admitted under its successor.
+     */
+    val capturedOrigin: Long? = null,
 )
 
 /** Capability names negotiated with the server (cloud-assistant.md). */

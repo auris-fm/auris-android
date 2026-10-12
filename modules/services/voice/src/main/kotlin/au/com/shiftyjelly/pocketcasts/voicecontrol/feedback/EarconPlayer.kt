@@ -143,6 +143,16 @@ class EarconPlayer(
                 offset += written
             }
             lastPlayedId = id
+            // THE HEAD IS CUMULATIVE ACROSS CUES ON ONE TRACK, so completion must compare it against a
+            // cumulative target. Comparing it against this cue's own frame COUNT made a second cue
+            // read Consumed immediately: the head already stood at the first cue's total, which
+            // exceeds the second cue's count before any of its frames had sounded.
+            //
+            // The origin is where the head stood when this cue began, and the target is that origin
+            // plus the frames this cue submitted -- so the comparison is about THIS cue's audio.
+            val origin = readPlaybackHeadFrames?.invoke(audioTrack) ?: audioTrack.playbackHeadPosition
+            cueHeadOrigin = origin
+            cueHeadTarget = origin + offset
             emittedFrames = offset
             emittedRateHz = clip.sampleRateHz
             true
@@ -166,6 +176,14 @@ class EarconPlayer(
 
     @Volatile
     private var emittedRateHz: Int = 0
+
+    /** Where the track's cumulative head stood when the most recent cue started. */
+    @Volatile
+    private var cueHeadOrigin: Int = 0
+
+    /** The cumulative head position this cue reaches when all its accepted frames have sounded. */
+    @Volatile
+    private var cueHeadTarget: Int = 0
 
     /**
      * The duration of the cue the sink ACCEPTED, in milliseconds, from the frames accepted and the
@@ -202,7 +220,9 @@ class EarconPlayer(
         if (emittedFrames <= 0) return EarconCompletion.Unknown
         val head = readPlaybackHeadFrames?.invoke(current)
             ?: current.playbackHeadPosition
-        return if (head >= emittedFrames) EarconCompletion.Consumed else EarconCompletion.Playing
+        // CUMULATIVE, not cue-relative: the head counts every frame the track has ever played, so the
+        // target is this cue's origin plus its own accepted frames.
+        return if (head >= cueHeadTarget) EarconCompletion.Consumed else EarconCompletion.Playing
     }
 
     /** What the output has been observed to have done with the accepted cue. */
@@ -221,6 +241,8 @@ class EarconPlayer(
             track?.runCatching { stop() }
             emittedFrames = 0
             emittedRateHz = 0
+            cueHeadOrigin = 0
+            cueHeadTarget = 0
             lastPlayedId = null
         }
     }

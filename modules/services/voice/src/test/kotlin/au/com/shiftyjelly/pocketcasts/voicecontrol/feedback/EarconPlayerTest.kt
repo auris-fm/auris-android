@@ -241,4 +241,59 @@ class EarconPlayerTest {
         )
         player.release()
     }
+
+    @Test
+    fun `a second cue cannot inherit the first cue's consumed head`() {
+        // @reviewer's measured defect: the track's playback head is CUMULATIVE across cues, while
+        // completion compared it against the cue's own frame COUNT. So a second cue read Consumed
+        // immediately -- the head already stood at the first cue's total, which exceeds the second
+        // cue's count before any of its frames had sounded.
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+
+        val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
+        val clip = clipClass.declaredConstructors.single().apply { isAccessible = true }
+            .newInstance(player, ShortArray(100), 16000)
+        player.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(player, track)
+        @Suppress("UNCHECKED_CAST")
+        player.javaClass.getDeclaredField("clips").apply { isAccessible = true }
+            .set(player, mapOf(EarconId.WAKE_WORD to clip))
+
+        var head = 0
+        player.readPlaybackHeadFrames = { head }
+
+        assertTrue("the first cue is accepted", player.play(EarconId.WAKE_WORD))
+        assertEquals(
+            "the first cue is PLAYING while the head has not reached its frames",
+            EarconPlayer.EarconCompletion.Playing,
+            player.completion(),
+        )
+        head = 100
+        assertEquals(
+            "and CONSUMED once it has",
+            EarconPlayer.EarconCompletion.Consumed,
+            player.completion(),
+        )
+
+        assertTrue("the second cue is accepted", player.play(EarconId.WAKE_WORD))
+        assertEquals(
+            "a cue whose frames have not advanced must not inherit the previous cue's head " +
+                "(head=$head)",
+            EarconPlayer.EarconCompletion.Playing,
+            player.completion(),
+        )
+        head = 200
+        assertEquals(
+            "and it is CONSUMED once its own frames have sounded",
+            EarconPlayer.EarconCompletion.Consumed,
+            player.completion(),
+        )
+    }
 }

@@ -19,6 +19,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.lfm.CloudEscalationPolicy
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.withLogicalRequest
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.IntentRoutingInput
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.TranslationKind
@@ -399,6 +400,12 @@ class VoiceAsrEngine @Inject constructor(
         // the window that opened during the wait, so a request issued before a successor wake would
         // act as though it belonged to the successor.
         val windowAtRequest = gracePeriodSignal.capturedGeneration()
+        // THE LOGICAL IDENTITY FOR AN ORDINARY CLOUD REQUEST IS MINTED HERE, at input registration and
+        // BEFORE the recognition suspends. It is not derivable from the transcript: a retry of the same
+        // request must name the SAME value, and two separate user acts that happen to say the same
+        // words must not. The dialog path mints its own for clarification flows; this is the producer
+        // for a plain utterance that goes straight to the cloud.
+        val logicalRequestId = java.util.UUID.randomUUID().toString()
         val outcome = recognizer.recognize(input, ctx)
         val elapsedMs = System.currentTimeMillis() - t0
         val intent = outcome.intent
@@ -413,7 +420,13 @@ class VoiceAsrEngine @Inject constructor(
             )
             // A cloud turn outlives the window it was issued in, so it carries
             // that window's identity and cannot extend a later one.
-            handler(intent.stampedForWindow(windowAtRequest))
+            handler(
+                intent
+                    .stampedForWindow(windowAtRequest)
+                    // Only a CLOUD turn carries a logical identity: it is the one dispatch that is
+                    // prepared once and may be retried. A local intent has no wire identity to reuse.
+                    .let { it.withLogicalRequest(logicalRequestId) },
+            )
             return
         }
 
@@ -474,6 +487,10 @@ class VoiceAsrEngine @Inject constructor(
                         tier = VoiceIntent.CloudTier.Unknown,
                         windowGeneration = issuedUnder,
                         origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
+                        // A LOGICAL IDENTITY HERE TOO. This is the other ordinary cloud dispatch site,
+                        // and a request without an identity cannot be retried as the same request --
+                        // it would be admitted as a new user act instead.
+                        logicalRequestId = java.util.UUID.randomUUID().toString(),
                     ),
                 )
             }

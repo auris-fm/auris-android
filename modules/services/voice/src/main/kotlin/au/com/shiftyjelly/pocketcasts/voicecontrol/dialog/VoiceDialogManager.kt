@@ -13,9 +13,12 @@ class VoiceDialogManager @Inject constructor(
     private val mapper: ToolCallMapper,
 ) {
     /**
-     * Called with a logical request's identity when its dialog is ABANDONED, so anything retaining a
-     * prepared turn for it can forget it. Set by the wiring that owns retention; a no-op when unset, so
-     * a manager without retention behind it behaves exactly as before.
+     * Called with a logical request's identity when its dialog is ABANDONED or REPLACED, so anything
+     * retaining a prepared turn for it can forget it.
+     *
+     * INJECTED, not left for a caller to remember: a callback that nothing binds is a lifecycle that
+     * does not run, and the retention it was meant to release grows for the life of the process. The
+     * binding is supplied by the graph that owns the retention.
      */
     var onRequestAbandoned: ((logicalRequestId: String) -> Unit)? = null
 

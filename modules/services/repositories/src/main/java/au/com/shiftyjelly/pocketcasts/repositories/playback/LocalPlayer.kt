@@ -202,23 +202,27 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
 
     override val enforcesEpisodeBoundSeek: Boolean get() = true
 
-    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Boolean {
+    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Long? {
         return withContext(Dispatchers.Main) {
-            if (positionMs < 0) return@withContext false
-            // THE CHECK AND THE MUTATION ARE ONE STEP, under the lock `setEpisode` writes under.
+            if (positionMs < 0) return@withContext null
+            // THE CHECK, THE PRE-ACTION SNAPSHOT AND THE MUTATION ARE ONE STEP, under the lock
+            // `setEpisode` writes under. The position is read HERE, so it describes what the player was
+            // at the moment it decided -- not what a caller read around the call.
             synchronized(episodeLock) {
                 if (episodeLocation?.episode?.uuid != expectedEpisodeUuid) {
                     LogBuffer.i(LogBuffer.TAG_PLAYBACK, "LocalPlayer refused a seek: episode changed")
                     return@synchronized null
                 }
+                // The NON-SUSPENDING inner form: the public one wraps in withContext, which a monitor cannot hold.
+                val before = handleCurrentPositionMs().toLong()
                 LogBuffer.i(LogBuffer.TAG_PLAYBACK, "LocalPlayer seekToToTimeMs %.3f", positionMs / 1000f)
                 this@LocalPlayer.positionMs = positionMs
                 if (handleIsPrepared()) {
                     onSeekStart(positionMs)
                     handleSeekToTimeMs(positionMs)
                 }
-                true
-            } ?: false
+                before
+            }
         }
     }
 

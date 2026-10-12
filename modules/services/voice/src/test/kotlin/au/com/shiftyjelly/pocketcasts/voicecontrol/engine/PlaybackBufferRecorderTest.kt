@@ -105,6 +105,52 @@ class PlaybackBufferRecorderTest {
     }
 
     @Test
+    fun `a contribution that does not meet the surviving tail is not accepted as adjacent`() {
+        // @spec's retirement-seam defect: `retire()` cleared `expectedNextPositionMs` while samples
+        // survived, so the FIRST post-retire contribution could not be compared against the tail. A
+        // contribution that does not meet the tail was therefore accepted as adjacent, hiding a
+        // discontinuity the retained window cannot cover.
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+
+        // Contiguous audio ending at 2000 ms.
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 1_000L, axis = PositionAxis.Monotonic)
+        recorder.retire()
+
+        // The next contribution is 5 s later: a discontinuity, compared against the TAIL's end.
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 7_000L, axis = PositionAxis.Monotonic)
+
+        val reference = recorder.reference()
+        assertTrue(
+            "a contribution that does not meet the surviving tail must not be treated as adjacent " +
+                "(start=${reference.startPositionMs} end=${reference.endPositionMs})",
+            reference.startPositionMs == null,
+        )
+    }
+
+    @Test
+    fun `a CONTIGUOUS contribution after retire still anchors`() {
+        // The positive control: the metadata must be kept, not made permanently distrustful.
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 1_000L, axis = PositionAxis.Monotonic)
+        recorder.retire()
+
+        // The next contribution MEETS the tail's end, so the window stays contiguous.
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 2_000L, axis = PositionAxis.Monotonic)
+
+        val reference = recorder.reference()
+        assertTrue(
+            "a contribution meeting the tail's end must still anchor " +
+                "(start=${reference.startPositionMs} end=${reference.endPositionMs})",
+            reference.startPositionMs != null,
+        )
+    }
+
+    @Test
     fun `a hole INSIDE the retained tail still suppresses the anchor after retire`() {
         // retire() replaces the retained span, so a hole outside the surviving tail is gone with it --
         // but the tail keeps the NEWEST samples, so a hole inside the tail still separates them.

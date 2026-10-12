@@ -158,12 +158,18 @@ class PlaybackBufferRecorder @Inject constructor(
      */
     fun retire() {
         synchronized(lock) {
-            // The retained span is replaced, so a hole OUTSIDE the surviving tail is gone with it. The
-            // hole's position is NOT cleared unconditionally: the tail keeps the newest samples, so a
-            // hole inside the tail still separates them and the window is still not contiguous.
-            expectedNextPositionMs = null
+            // THE SURVIVING TAIL KEEPS ITS CONTINUITY METADATA. Clearing `expectedNextPositionMs` while
+            // samples survive would forget where the tail ENDS, so the FIRST contribution after the
+            // retirement could not be compared against it -- and a contribution that does not meet the
+            // tail would be accepted as adjacent, hiding a discontinuity the window cannot cover. The
+            // tail's end is exactly what the next contribution must be checked against.
+            //
+            // Only when NO samples survive does the metadata describe nothing, and then it is cleared.
             // Nothing was ever submitted: there is no tail to keep and no stale audio to retire.
-            if (!filled && writePos == 0) return
+            if (!filled && writePos == 0) {
+                expectedNextPositionMs = null
+                return
+            }
             val keep = minOf(DELAY_TAIL_SAMPLES, buffer.size, if (filled) buffer.size else writePos)
             val tail = FloatArray(keep)
             // Copy the newest `keep` samples in order, wrapping as needed, then write them back so the

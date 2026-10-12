@@ -1237,18 +1237,58 @@ open class PlaybackManager @Inject constructor(
         positionMs: Int,
         seekComplete: (() -> Unit)? = null,
     ): Boolean {
-        // The episode must be the one the position was computed for, checked at the mutation itself.
         if (getCurrentEpisode()?.uuid != episodeUuid) {
             return false
         }
         cancelPendingChapterSeek()
-        seekToTimeMsInternal(positionMs)
+        // THE MUTATION ITSELF RE-DECIDES. The check above is an early refusal, not the guarantee: this
+        // call suspends below, and a replacement can land in that suspension. The episode-scoped internal
+        // seek decides at the player mutation, where nothing can await in between.
+        if (!seekToTimeMsInternalIfEpisode(episodeUuid, positionMs)) {
+            return false
+        }
         seekComplete?.invoke()
         return true
     }
 
     private suspend fun seekToTimeMsInternal(duration: Duration) {
         seekToTimeMsInternal(duration.inWholeMilliseconds.toInt())
+    }
+
+    /**
+     * The episode-scoped form of [seekToTimeMsInternal]: the seek is performed ONLY while
+     * [episodeUuid] is still the selected episode, and THAT CHECK IS THE MUTATION'S OWN STEP.
+     *
+     * The check cannot be separated from the mutation. This method SUSPENDS twice before reaching the
+     * player -- once to publish the media-session position and once to update the paused state -- and an
+     * episode replacement can land in either suspension. Re-reading the selection before those
+     * suspensions therefore does not exclude a change across them; re-reading it immediately before
+     * `player?.seekToTimeMs` does, because that read and that mutation are the same uninterrupted step
+     * and nothing in between can await.
+     *
+     * @return true when the seek was performed, false when the selection had moved.
+     */
+    private suspend fun seekToTimeMsInternalIfEpisode(episodeUuid: String, positionMs: Int): Boolean {
+        val episode = getCurrentEpisode()
+        if (episode?.uuid != episodeUuid) return false
+        LogBuffer.i(LogBuffer.TAG_PLAYBACK, "PlaybackService seekToTimeMsInternalIfEpisode %.3f ", positionMs.toDouble() / 1000.0)
+        if (player == null) return false
+
+        // Publish the media-session position. This SUSPENDS, so the selection may change across it --
+        // which is exactly why the deciding read is the one below, not this one.
+        withContext(Dispatchers.Main) {
+            playbackStateRelay.blockingFirst().let { playbackState ->
+                playbackStateRelay.accept(playbackState.copy(positionMs = positionMs, lastChangeFrom = LastChangeFrom.OnUserSeeking.value))
+            }
+        }
+
+        // THE DECIDING READ AND THE MUTATION ARE ONE STEP: no suspension lies between them, so a
+        // replacement cannot land in a gap that does not exist.
+        val selected = getCurrentEpisode()
+        if (selected?.uuid != episodeUuid) return false
+        selected.playedUpToMs = positionMs
+        player?.seekToTimeMs(positionMs)
+        return true
     }
 
     private suspend fun seekToTimeMsInternal(positionMs: Int) {

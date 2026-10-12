@@ -92,16 +92,24 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         // recording, because the skip's magnitude was chosen for the one it was planned against.
         if (expectedEpisodeId != null) {
             // THROUGH THE OWNER, which re-reads the selection and performs the skip as one step.
+            val before = playbackManager.getCurrentEpisode()
+                ?.takeIf { it.uuid == expectedEpisodeId }
+                ?.playedUpToMs
+                ?.toLong()
             val accepted = playbackManager.skipIfPlaying(
                 episodeUuid = expectedEpisodeId,
                 forward = true,
                 sourceView = SourceView.VOICE_COMMANDS,
                 jumpAmountSeconds = seconds,
             )
-            return if (accepted) EpisodeOperationResult.Accepted else EpisodeOperationResult.Refused
+            return if (accepted) {
+                EpisodeOperationResult.Accepted(expectedEpisodeId, before)
+            } else {
+                EpisodeOperationResult.Refused
+            }
         }
         playbackManager.skipForwardSuspend(SourceView.VOICE_COMMANDS, seconds)
-        return EpisodeOperationResult.Accepted
+        return EpisodeOperationResult.Accepted(episodeId = null, preActionPositionMs = null)
     }
 
     override suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
@@ -109,16 +117,24 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         // recording, because the skip's magnitude was chosen for the one it was planned against.
         if (expectedEpisodeId != null) {
             // THROUGH THE OWNER, which re-reads the selection and performs the skip as one step.
+            val before = playbackManager.getCurrentEpisode()
+                ?.takeIf { it.uuid == expectedEpisodeId }
+                ?.playedUpToMs
+                ?.toLong()
             val accepted = playbackManager.skipIfPlaying(
                 episodeUuid = expectedEpisodeId,
                 forward = false,
                 sourceView = SourceView.VOICE_COMMANDS,
                 jumpAmountSeconds = seconds,
             )
-            return if (accepted) EpisodeOperationResult.Accepted else EpisodeOperationResult.Refused
+            return if (accepted) {
+                EpisodeOperationResult.Accepted(expectedEpisodeId, before)
+            } else {
+                EpisodeOperationResult.Refused
+            }
         }
         playbackManager.skipBackwardSuspend(SourceView.VOICE_COMMANDS, seconds)
-        return EpisodeOperationResult.Accepted
+        return EpisodeOperationResult.Accepted(episodeId = null, preActionPositionMs = null)
     }
 
     override suspend fun seekTo(
@@ -142,14 +158,25 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         if (expectedEpisodeId != null) {
             // ACCEPTED ONLY WHEN THE OWNER ACCEPTED IT. `seekIfPlayingToTimeMs` re-reads the selection
             // inside the operation, so a refusal is decided at the owner and reported as one.
+            // THE PRE-ACTION POSITION IS READ WHILE THE BINDING STILL HOLDS -- before the seek moves it --
+            // and travels WITH the result, so a caller never re-reads a state that may have changed.
+            val before = playbackManager.getCurrentEpisode()
+                ?.takeIf { it.uuid == expectedEpisodeId }
+                ?.playedUpToMs
+                ?.toLong()
             val accepted = playbackManager.seekIfPlayingToTimeMs(expectedEpisodeId, resolvedSeconds * 1000)
-            return if (accepted) EpisodeOperationResult.Accepted else EpisodeOperationResult.Refused
+            return if (accepted) {
+                EpisodeOperationResult.Accepted(expectedEpisodeId, before)
+            } else {
+                EpisodeOperationResult.Refused
+            }
         }
         // NO EXPECTATION MEANS THE CALLER HAS NO EPISODE-SPECIFIC SUBJECT. Legitimate only for an
         // episode-INDEPENDENT operation: an episode-specific one must never reach here with a null,
         // because the null would turn it into an unrestricted seek. Callers refuse those instead.
         playbackManager.seekToTimeMsSuspend(resolvedSeconds * 1000)
-        return EpisodeOperationResult.Accepted
+        // UNBOUND: no episode-specific subject, so there is no episode or bound position to report.
+        return EpisodeOperationResult.Accepted(episodeId = null, preActionPositionMs = null)
     }
 
     override fun nextEpisode(): VoiceResponse {

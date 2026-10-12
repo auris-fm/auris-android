@@ -1157,11 +1157,11 @@ class VoicePlaybackIntentExecutorTest {
         }
         override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
             calls += "skipForward:$seconds"
-            return EpisodeOperationResult.Accepted
+            return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
         }
         override suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
             calls += "skipBackward:$seconds"
-            return EpisodeOperationResult.Accepted
+            return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
         }
         override suspend fun seekTo(
             positionSeconds: Int,
@@ -1176,7 +1176,7 @@ class VoicePlaybackIntentExecutorTest {
                 positionSeconds
             }
             calls += "seekTo:$resolved"
-            return EpisodeOperationResult.Accepted
+            return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
         }
         override fun nextEpisode(): VoiceResponse {
             calls += "nextEpisode"

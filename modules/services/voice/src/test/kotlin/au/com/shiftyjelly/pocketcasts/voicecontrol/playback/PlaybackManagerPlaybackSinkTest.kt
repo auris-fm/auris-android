@@ -4,6 +4,7 @@ import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.kotlin.argumentCaptor
@@ -66,6 +67,47 @@ class PlaybackManagerPlaybackSinkTest {
     }
 
     @Test
+    fun `the episode is re-decided AT the mutation, so a change across the suspension is refused`() = runTest {
+        // @reviewer's finding: `seekToTimeMsInternal` reads the episode, then SUSPENDS in
+        // `withContext(Dispatchers.Main)` before the player mutation -- and a replacement can land in
+        // that suspension. A read taken before the suspensions therefore does not exclude a change
+        // ACROSS them.
+        //
+        // The owner's episode-scoped seek re-reads the selection immediately before `player.seekToTimeMs`,
+        // where nothing can await in between. This drives that: the manager reports episode A on the
+        // FIRST consultation and B on the SECOND, which is exactly a replacement landing during the
+        // step, and the seek must then be refused.
+        var consultations = 0
+        val manager = mock<PlaybackManager>()
+        org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenAnswer {
+            consultations++
+            au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+                uuid = if (consultations == 1) "episode-A" else "episode-B",
+                podcastUuid = "podcast-1",
+                publishedDate = java.util.Date(),
+            )
+        }
+        org.mockito.kotlin.whenever(
+            manager.seekIfPlayingToTimeMs(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.anyOrNull()),
+        ).thenAnswer {
+            // Mirrors the owner: it decides from the CURRENT episode at the moment of the mutation.
+            manager.getCurrentEpisode()?.uuid == "episode-A"
+        }
+
+        val result = sink(manager).seekTo(
+            positionSeconds = 100,
+            episodeDurationSeconds = 1800,
+            expectedEpisodeId = "episode-A",
+        )
+
+        assertTrue(
+            "a selection change across the owner's suspension must be REFUSED, not performed " +
+                "(result=$result)",
+            result is EpisodeOperationResult.Refused,
+        )
+    }
+
+    @Test
     fun `the owner's answer is AWAITED, not read from a flag written inside a launch`() = runTest {
         // @reviewer's source finding: `seekIfPlayingToTimeMs` used to SET A FLAG INSIDE A LAUNCHED
         // COROUTINE and return it immediately -- so when dispatch queued the coroutine, the caller read
@@ -99,8 +141,8 @@ class PlaybackManagerPlaybackSinkTest {
         assertEquals(
             "an operation the owner ACCEPTED must be reported as accepted, even though the owner " +
                 "answered asynchronously",
-            EpisodeOperationResult.Accepted,
-            result,
+            true,
+            result is EpisodeOperationResult.Accepted && result.episodeId == "episode-A",
         )
     }
 
@@ -137,7 +179,7 @@ class PlaybackManagerPlaybackSinkTest {
             org.mockito.kotlin.anyOrNull(),
         )
         assertEquals(100_000, positionMs.firstValue)
-        assertEquals(EpisodeOperationResult.Accepted, result)
+        assertTrue("accepted, reporting the episode it was bound to", result is EpisodeOperationResult.Accepted)
         verify(manager, org.mockito.kotlin.never()).seekToTimeMsSuspend(
             org.mockito.kotlin.any(),
             org.mockito.kotlin.anyOrNull(),

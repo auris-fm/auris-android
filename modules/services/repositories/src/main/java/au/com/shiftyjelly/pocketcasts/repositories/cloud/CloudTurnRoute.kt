@@ -57,6 +57,11 @@ class CloudTurnRoute(
             capabilities = turn.capabilities,
             codecs = CloudRouteCodecs.advertised,
             routeHint = turn.routeHint,
+            // Carried from the turn the caller prepared, not derived here: a route that looked up
+            // "the current conversation" at send time would let a retry or a superseded origin borrow
+            // whichever handle happened to be current.
+            conversationId = turn.conversationId,
+            conversationMode = turn.conversationMode?.wireValue,
         )
         val socket = transport ?: WebSocketCloudTurnTransport(baseUrl, okHttpClient)
         // Everything the socket reports is the turn's outcome — including a refused upgrade, which

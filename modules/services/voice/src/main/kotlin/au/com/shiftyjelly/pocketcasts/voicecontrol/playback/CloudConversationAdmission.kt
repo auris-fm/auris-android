@@ -105,6 +105,21 @@ class CloudConversationAdmission @Inject constructor() {
         synchronized(lock) { prepared[logicalRequestId] = turn }
     }
 
+    /**
+     * Forgets [logicalRequestId]'s turn, because it is no longer retryable.
+     *
+     * RETENTION MUST END. A prepared turn held indefinitely keeps an identity alive that nothing will
+     * retry: a later dispatch naming it would be admitted as a retry of work that is finished, and the
+     * store would grow for the life of the process. The lifecycle removes a request when its dialog is
+     * abandoned, replaced, or completed without a retry pending.
+     */
+    fun forgetRetained(logicalRequestId: String) {
+        synchronized(lock) { prepared.remove(logicalRequestId) }
+    }
+
+    /** How many turns are currently retained. Test visibility for the lifecycle contract. */
+    fun retainedCount(): Int = synchronized(lock) { prepared.size }
+
     /** The origin currently declared live. Exposed so a caller with no captured window can use it. */
     fun currentOriginForTest(): Long = synchronized(lock) { currentOrigin }
 

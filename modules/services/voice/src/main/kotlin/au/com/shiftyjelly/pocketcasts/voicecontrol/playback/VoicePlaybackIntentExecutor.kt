@@ -31,6 +31,11 @@ class VoicePlaybackIntentExecutor @Inject constructor(
      */
     private val playbackManager: PlaybackManager,
 ) {
+    /** The turn retained for [logicalRequestId], if any. Delegates to the sink's store. */
+    private fun retainedForLogical(
+        logicalRequestId: String,
+    ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = cloudRouteSink.retainedTurnFor(logicalRequestId)
+
     suspend fun execute(intent: VoiceIntent): VoiceResponse {
         // Recorded *before* the action runs: the revision is what a cloud turn
         // compares at restore time, and a user's pause that has already reached
@@ -59,6 +64,22 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                 // resolves a retry, because the SINK retains turns by logical request and returns the
                 // existing one unchanged. Retention therefore lives in one place, and a direct sink
                 // caller and this executor cannot disagree about what a retry is.
+                //
+                // AN UNKNOWN RETRY IS REFUSED. A dispatch naming a logical request that was never
+                // prepared is not a retry of anything -- treating it as new input would silently create
+                // a conversation for a request whose own identity is unresolvable, which is the
+                // substitution this whole mechanism exists to prevent.
+                // The refusal applies to a RETRY, not to a first attempt: a first attempt naming a
+                // logical request is exactly how that request comes to exist.
+                if (intent.isRetry) {
+                    val logical = intent.logicalRequestId
+                    val known = logical != null &&
+                        (intent.preparedTurn != null || retainedForLogical(logical) != null)
+                    if (!known) {
+                        Timber.i("[Voice] refused: retry of unknown logical request ${intent.logicalRequestId}")
+                        return VoiceResponse.Silent
+                    }
+                }
                 val alreadyPrepared = intent.preparedTurn
                 if (alreadyPrepared != null) {
                     val captureForRetry = alreadyPrepared.capturedOrigin
@@ -379,6 +400,11 @@ interface VoiceCloudRouteSink {
         hint: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint? = null,
         /** The logical request this turn belongs to, for the retry path. */
         logicalRequestId: String? = null,
+    ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn?
+
+    /** The turn retained for [logicalRequestId], so a caller can tell a retry from new input. */
+    fun retainedTurnFor(
+        logicalRequestId: String,
     ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn?
 
     /**

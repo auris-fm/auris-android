@@ -455,6 +455,56 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `a retry naming an UNKNOWN logical request is refused rather than treated as new input`() = runTest {
+        // @spec's unknown-retry refusal: a retry whose identity was never prepared is not a retry of
+        // anything. Treating it as new input would create a conversation for a request whose own
+        // identity is unresolvable -- the substitution this mechanism exists to prevent.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+        signal.onWakeWordDetected()
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "never prepared",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = signal.capturedGeneration(),
+                logicalRequestId = "never-prepared",
+                isRetry = true,
+            ),
+        )
+
+        assertTrue(
+            "an unknown retry reaches neither preparation nor transport " +
+                "(prepared=${sinks.cloudRoute.preparedTurns.size} " +
+                "dispatched=${sinks.cloudRoute.preparedDispatches.size})",
+            sinks.cloudRoute.preparedTurns.isEmpty() && sinks.cloudRoute.preparedDispatches.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `a FIRST attempt naming a logical request is not refused`() = runTest {
+        // The control: the refusal is about retries, not about the identity. A first attempt naming a
+        // logical request is exactly how that request comes to exist.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+        signal.onWakeWordDetected()
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "first attempt",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = signal.capturedGeneration(),
+                logicalRequestId = "fresh-request",
+            ),
+        )
+
+        assertEquals("a first attempt prepares normally", 1, sinks.cloudRoute.preparedTurns.size)
+        assertEquals("and dispatches", 1, sinks.cloudRoute.preparedDispatches.size)
+    }
+
+    @Test
     fun `a retry of an EARLIER logical request still finds its own turn after a later one`() = runTest {
         // @reviewer's retired-ID case: executing logical A, then B, then retrying A must reuse A's turn.
         // With a single retention slot, B OVERWROTE A, so the retry of A found nothing and created a
@@ -1114,6 +1164,14 @@ class VoicePlaybackIntentExecutorTest {
         /** The turns prepared on a first dispatch, so a case can assert identity was minted once. */
         val preparedTurns = mutableListOf<au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
 
+        /** Retained turns by logical request, mirroring the sink's store. */
+        private val retained =
+            mutableMapOf<String, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
+
+        override fun retainedTurnFor(
+            logicalRequestId: String,
+        ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = retained[logicalRequestId]
+
         override suspend fun prepareTurn(
             request: String,
             tier: VoiceIntent.CloudTier,
@@ -1140,6 +1198,7 @@ class VoicePlaybackIntentExecutorTest {
                 capturedOrigin = capturedOrigin,
             )
             preparedTurns += prepared
+            logicalRequestId?.let { retained[it] = prepared }
             // Recorded at PREPARE time: production resolves the window and wake selection here, so a
             // case asserts what the executor actually decided, not what a call site happened to pass.
             graceFlags += isLiveGraceTurn

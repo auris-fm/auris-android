@@ -271,6 +271,8 @@ class CloudRouteSink internal constructor(
      * Returns the response the normal path would, including the refusal when the retry's origin has
      * been invalidated in the meantime.
      */
+    override fun retainedTurnFor(logicalRequestId: String): CloudRouteTurn? = conversationAdmission.retained(logicalRequestId)
+
     override suspend fun dispatchPrepared(prepared: CloudRouteTurn): VoiceResponse = routeTurn(
         request = prepared.request,
         tier = VoiceIntent.CloudTier.Premium,

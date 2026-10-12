@@ -67,6 +67,64 @@ class PlaybackBufferRecorderTest {
     }
 
     @Test
+    fun `the anchor RETURNS once the hole has been overwritten, so the guard is not a permanent latch`() {
+        // @spec's requirement: a hole is a property of the RETAINED RANGE, not a latch on the recorder.
+        // After one dropped chunk, an anchor suppressed forever would discard a good alignment for the
+        // rest of the session. Once the ring has overwritten the audio before the hole, every retained
+        // sample lies on one side of it and the window is contiguous again.
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+
+        // A hole: 0..1000 then a jump to 4000..5000.
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 4_000L, axis = PositionAxis.Monotonic)
+        assertTrue(
+            "the hole removes the anchor while both sides are retained",
+            recorder.reference().startPositionMs == null,
+        )
+
+        // Write past a full buffer (2 s) so the audio BEFORE the hole is overwritten. Everything now
+        // retained is at or after the hole, contiguous, and after the resume position.
+        var t = 5_000L
+        repeat(2) {
+            recorder.write(FloatArray(16_000) { 0.5f }, positionMs = t, axis = PositionAxis.Monotonic)
+            t += 1_000L
+        }
+
+        val reference = recorder.reference()
+        assertTrue(
+            "once the hole is overwritten the window is contiguous again and must anchor " +
+                "(start=${reference.startPositionMs} end=${reference.endPositionMs})",
+            reference.startPositionMs != null,
+        )
+        assertEquals(
+            "and the recovered anchor is end minus duration",
+            reference.endPositionMs!! - (reference.samples.size * 1_000L) / reference.sampleRateHz,
+            reference.startPositionMs,
+        )
+    }
+
+    @Test
+    fun `a hole INSIDE the retained tail still suppresses the anchor after retire`() {
+        // retire() replaces the retained span, so a hole outside the surviving tail is gone with it --
+        // but the tail keeps the NEWEST samples, so a hole inside the tail still separates them.
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+
+        // The hole must sit INSIDE the surviving 500 ms tail -- that is what "inside the tail" means.
+        // Two 250 ms blocks with a 100 ms gap: the tail keeps the newest 500 ms, which spans BOTH sides
+        // of the hole, so the retained samples are still separated by it.
+        recorder.write(FloatArray(4_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(4_000) { 0.5f }, positionMs = 350L, axis = PositionAxis.Monotonic)
+
+        recorder.retire()
+        assertTrue(
+            "a hole inside the retained tail must still suppress the anchor",
+            recorder.reference().startPositionMs == null,
+        )
+    }
+
+    @Test
     fun `contiguous rendered audio still anchors, so the gap guard cannot silently disable the anchor`() {
         // THE GUARD MUST NOT BE ALWAYS-OFF. Removing a fabricated anchor is only correct if a real one
         // survives: a window of genuinely adjacent rendered audio is exactly the case the anchor exists

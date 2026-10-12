@@ -209,6 +209,46 @@ class CloudRouteSink internal constructor(
         hint = hint,
     )
 
+    /**
+     * Prepares a turn ONCE, for a controller that may dispatch it more than once.
+     *
+     * The returned turn is immutable and already carries its identity: request ID, conversation handle
+     * and mode were fixed when it was prepared. A RETRY reuses it unchanged -- it must not re-prepare,
+     * because re-preparing would mint a second conversation and consume the wake selection a second
+     * time, so a retried request would look like a new user act.
+     *
+     * Returns null when the origin has been superseded: nothing is sent, so no conversation is created
+     * on behalf of a turn that has already been replaced.
+     */
+    suspend fun prepareTurn(
+        request: String,
+        tier: VoiceIntent.CloudTier,
+        context: PlaybackContext,
+        isLiveGraceTurn: Boolean = false,
+        capturedOrigin: Long? = null,
+        isWakeOriginated: Boolean = false,
+        hint: CloudRouteHint? = null,
+    ): CloudRouteTurn? {
+        val origin = capturedOrigin ?: conversationAdmission.currentOriginForTest()
+        val admission = conversationAdmission.prepare(
+            origin = origin,
+            isLiveGraceTurn = isLiveGraceTurn,
+            isWakeOriginated = isWakeOriginated,
+        ) ?: return null
+        return CloudRouteTurn(
+            request = request,
+            context = buildRouteContext(context),
+            requestId = UUID.randomUUID().toString(),
+            capabilities = advertisedCapabilities(),
+            routeHint = hint,
+            conversationId = admission.conversationId,
+            conversationMode = admission.mode,
+        )
+    }
+
+    /** Dispatches an ALREADY PREPARED turn, unchanged. Used by a retry. */
+    suspend fun dispatchPrepared(turn: CloudRouteTurn): Flow<CloudRouteEvent> = openRoute(turn)
+
     private suspend fun routeTurn(
         request: String,
         tier: VoiceIntent.CloudTier,

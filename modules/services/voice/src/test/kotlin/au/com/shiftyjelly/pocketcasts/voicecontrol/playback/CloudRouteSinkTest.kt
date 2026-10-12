@@ -30,6 +30,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -48,6 +49,54 @@ class CloudRouteSinkTest {
         referencePositionMs = 1_230_000L,
         clientPositionMs = 50_000L,
     )
+
+    @Test
+    fun `retrying a prepared turn reuses its identity without re-preparing`() = runTest {
+        // @spec's controller retry contract: the prepared turn is IMMUTABLE. Retrying it must reuse its
+        // request ID, handle and mode -- re-preparing would mint a SECOND conversation and consume the
+        // wake selection again, so a retried request would look like a new user act.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(1)
+
+        val prepared = sink.prepareTurn(
+            request = "a question worth retrying",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = playbackContext,
+            capturedOrigin = 1,
+            isWakeOriginated = true,
+        )
+        assertNotNull("the turn is prepared", prepared)
+
+        // Dispatch it twice, as a controller retry would.
+        sink.dispatchPrepared(prepared!!).collect { }
+        sink.dispatchPrepared(prepared).collect { }
+
+        val turns = deps.routeTurns
+        assertEquals("both attempts dispatched", 2, turns.size)
+        assertEquals(
+            "the retry reuses the request ID",
+            turns[0].requestId,
+            turns[1].requestId,
+        )
+        assertEquals(
+            "and the conversation handle",
+            turns[0].conversationId,
+            turns[1].conversationId,
+        )
+        assertEquals(
+            "and the mode",
+            turns[0].conversationMode,
+            turns[1].conversationMode,
+        )
+        assertEquals(
+            "so no SECOND conversation was created by the retry: exactly one handle is in play",
+            1,
+            setOf(turns[0].conversationId, turns[1].conversationId).size,
+        )
+    }
 
     @Test
     fun `a valid request under a LATER window is adopted, not refused as stale`() = runTest {

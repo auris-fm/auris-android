@@ -80,6 +80,69 @@ class PlaybackManagerPlaybackSinkTest {
     @Test
     fun `the REAL manager seeks a target that stays on its episode`() = probeActualManagerReuse(reuse = false)
 
+    @Test
+    fun `the REAL manager refuses a re-pointing that does NOT advance the incarnation counter`() = runTest {
+        // @reviewer's remaining gap: only the paused-load branch advances the counter, while the playing
+        // and queue-selection reconfiguration paths need not. A seek relying on the COUNTER alone would
+        // therefore miss a re-pointing made by a path that does not advance it.
+        //
+        // This case re-points the player WITHOUT touching the counter at all, so the only thing that can
+        // refuse it is the seek reading the PLAYER'S OWN episode after its suspending call.
+        val manager = mock<PlaybackManager>()
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val proceed = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var configured = "episode-A"
+        val target = object : au.com.shiftyjelly.pocketcasts.repositories.playback.Player by mock() {
+            override val episodeUuid: String? get() = configured
+            override suspend fun seekToTimeMs(positionMs: Int) {
+                entered.complete(Unit)
+                proceed.await()
+            }
+        }
+        org.mockito.kotlin.whenever(manager.player).thenReturn(target)
+        org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenReturn(
+            au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+                uuid = "episode-A",
+                podcastUuid = "podcast-1",
+                publishedDate = java.util.Date(),
+            ),
+        )
+        org.mockito.kotlin.whenever(manager.playbackStateRelay)
+            .thenReturn(com.jakewharton.rxrelay2.BehaviorRelay.createDefault(PlaybackState()))
+        PlaybackManager::class.java.getDeclaredField("selectedPlayerLock")
+            .apply { isAccessible = true }
+            .set(manager, Any())
+        val method = PlaybackManager::class.java.declaredMethods
+            .single { it.name == "seekToTimeMsInternalIfEpisode" }
+            .apply { isAccessible = true }
+
+        kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
+        try {
+            val operation = async {
+                kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn<Boolean> { continuation ->
+                    method.invoke(manager, "episode-A", 100_000, continuation)
+                }
+            }
+            runCurrent()
+            assertTrue("the seek reached the player", entered.isCompleted)
+            // RE-POINTED WITHOUT ADVANCING THE COUNTER: the only observation that can catch this is the
+            // player's own episode, read after the call.
+            configured = "episode-B"
+            proceed.complete(Unit)
+            runCurrent()
+            val accepted = operation.await()
+
+            assertFalse(
+                "a re-pointing that advanced no counter must still be refused, because the seek reads " +
+                    "the PLAYER rather than only the counter",
+                accepted,
+            )
+        } finally {
+            proceed.complete(Unit)
+            kotlinx.coroutines.Dispatchers.resetMain()
+        }
+    }
+
     /**
      * Executes the ACTUAL private manager seek against a substituted player whose `seekToTimeMs`
      * suspends, then re-points that player at another episode WHILE THE SEEK IS IN FLIGHT.

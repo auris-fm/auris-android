@@ -292,8 +292,9 @@ class EarconPlayerTest {
         assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
 
         assertEquals(
-            "a cue on a NEW track starts Playing, as any unfinshed cue does",
-            EarconPlayer.EarconCompletion.Playing,
+            "a cue on a NEW track that has not begun sounding is QUEUED, not Playing: its frames " +
+                "have been accepted and the head has not passed its first frame",
+            EarconPlayer.EarconCompletion.Queued,
             mockPlayer.completion(),
         )
         repeat(100) { advanceSecond() }
@@ -334,8 +335,9 @@ class EarconPlayerTest {
 
         assertTrue("the first cue is accepted", player.play(EarconId.WAKE_WORD))
         assertEquals(
-            "the first cue is PLAYING while the head has not reached its frames",
-            EarconPlayer.EarconCompletion.Playing,
+            "the first cue is QUEUED while the head has not passed its first frame: accepted, " +
+                "not yet audible",
+            EarconPlayer.EarconCompletion.Queued,
             player.completion(),
         )
         head = 100
@@ -348,8 +350,9 @@ class EarconPlayerTest {
         assertTrue("the second cue is accepted", player.play(EarconId.WAKE_WORD))
         assertEquals(
             "a cue whose frames have not advanced must not inherit the previous cue's head " +
-                "(head=$head)",
-            EarconPlayer.EarconCompletion.Playing,
+                "(head=$head): it is QUEUED, which is the whole point -- inheriting the head would " +
+                "have reported it CONSUMED with none of its frames sounded",
+            EarconPlayer.EarconCompletion.Queued,
             player.completion(),
         )
         head = 200

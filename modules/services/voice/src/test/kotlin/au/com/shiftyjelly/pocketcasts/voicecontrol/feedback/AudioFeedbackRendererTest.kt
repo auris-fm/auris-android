@@ -45,22 +45,80 @@ class AudioFeedbackRendererTest {
     fun `an audible response is reported as emitted audio`() = runTest {
         assertFalse(renderer.hasEmittedAudio.value)
         whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
         renderer.render(VoiceResponse.Earcon(EarconId.SUCCESS))
+        // THE HEARTBEAT RUNS ON THE MAIN DISPATCHER, which Robolectric PAUSES: a delayed task is only
+        // run when the looper is advanced past its delay. Idling alone is not enough, because the one
+        // tick this waits for is scheduled a full heartbeat (1000 ms) ahead. `idleFor` advances the
+        // clock, so the tick lands deterministically instead of depending on wall time.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_500))
 
         assertTrue(renderer.hasEmittedAudio.value)
     }
 
     @Test
-    fun `an earcon played outside a response is reported as emitted audio`() = runTest {
-        // The wake and listening cues take this path, and they are the two earcons that sound
-        // while the microphone is open.
+    fun `an earcon played outside a response is reported as emitted only once it SOUNDS`() = runTest {
+        // The wake and listening cues take this path, and they are the two earcons that sound while the
+        // microphone is open.
+        //
+        // ACCEPTANCE IS NOT SOUNDING. `play` returning true means the sink took the frames; the cue may
+        // sit queued behind earlier audio. Attribution follows OBSERVED progress past the cue's first
+        // frame, so the heartbeat reports it and the acceptance alone does not.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
         assertFalse(renderer.hasEmittedAudio.value)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
 
-        assertTrue(renderer.hasEmittedAudio.value)
+        assertFalse(
+            "a QUEUED cue must not be attributed: the listener has not heard it yet",
+            renderer.hasEmittedAudio.value,
+        )
+    }
+
+    @Test
+    fun `a cue observed to be SOUNDING is reported as emitted audio`() = runTest {
+        // The positive control, so the rule above is not satisfied by never attributing anything.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        // THE HEARTBEAT RUNS ON THE MAIN DISPATCHER, which Robolectric PAUSES: a delayed task is only
+        // run when the looper is advanced past its delay. Idling alone is not enough, because the one
+        // tick this waits for is scheduled a full heartbeat (1000 ms) ahead. `idleFor` advances the
+        // clock, so the tick lands deterministically instead of depending on wall time.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_500))
+
+        assertTrue(
+            "a cue the output has progressed through must be attributed",
+            renderer.hasEmittedAudio.value,
+        )
+    }
+
+    @Test
+    fun `an UNOBSERVABLE cue is not reported as emitted audio`() = runTest {
+        // Unavailable progress is not evidence of sounding. Setting the attribution from an unknown
+        // would let the gate read the microphone as ours on no observation at all.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Unknown)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        // THE HEARTBEAT RUNS ON THE MAIN DISPATCHER, which Robolectric PAUSES: a delayed task is only
+        // run when the looper is advanced past its delay. Idling alone is not enough, because the one
+        // tick this waits for is scheduled a full heartbeat (1000 ms) ahead. `idleFor` advances the
+        // clock, so the tick lands deterministically instead of depending on wall time.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_500))
+
+        assertFalse(
+            "an unavailable observation must not be reported as emitted audio",
+            renderer.hasEmittedAudio.value,
+        )
     }
 
     @Test
@@ -84,11 +142,12 @@ class AudioFeedbackRendererTest {
         renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
         renderer.playEarcon(EarconId.WAKE_WORD)
 
-        // The submission note is taken synchronously, before any elapsed time.
-        val notesAtSubmission = 1
+        // NO NOTE AT ACCEPTANCE. The cue was accepted and has not been observed to sound yet, so the
+        // attribution must not be set -- @spec's render-start rule. The coverage is what covers the
+        // queued delay; the ATTRIBUTION follows the first observed frame.
         assertEquals(
-            "the cue's acceptance is reported at submission",
-            notesAtSubmission,
+            "acceptance alone must not be attributed: the cue may still be queued",
+            0,
             renderer.emissionNotesForTest(),
         )
         // The cue is still sounding well past the first window: the attribution must have been
@@ -103,26 +162,34 @@ class AudioFeedbackRendererTest {
         assertTrue(
             "a cue longer than one window must keep the attribution fresh " +
                 "(notes=${renderer.emissionNotesForTest()} clock=${clock.get()})",
-            renderer.emissionNotesForTest() > notesAtSubmission,
+            renderer.emissionNotesForTest() > 1,
         )
         renderer.release()
     }
 
     @Test
-    fun `a cue shorter than the heartbeat window needs no extra coverage`() {
-        // The control: the coverage is bounded by the cue's own duration, so a short cue is not
-        // covered for longer than it sounds.
+    fun `a short cue is attributed once it is observed to sound`() = runTest {
+        // The control: the attribution comes from OBSERVED SOUNDING, and a cue whose span is shorter
+        // than one heartbeat is still attributed once the observation reports progress.
         whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
-        whenever(earconPlayer.emittedDurationMs()).thenReturn(200L)
-        // Consumed immediately: the cue is done, so the coverage ends at the submission note.
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(1_500L)
+        // OBSERVED SOUNDING, then consumed: the note comes from the cue being heard, not from its
+        // submission -- acceptance alone is queued, not audible.
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
         renderer.playEarcon(EarconId.SUCCESS)
+        // THE HEARTBEAT RUNS ON THE MAIN DISPATCHER, which Robolectric PAUSES: a delayed task is only
+        // run when the looper is advanced past its delay. Idling alone is not enough, because the one
+        // tick this waits for is scheduled a full heartbeat (1000 ms) ahead. `idleFor` advances the
+        // clock, so the tick lands deterministically instead of depending on wall time.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_500))
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        // (the consumed observation needs no further draining)
 
-        assertEquals(
-            "a 200 ms cue is covered by its single submission note",
-            1,
-            renderer.emissionNotesForTest(),
+        assertTrue(
+            "a cue observed to sound is attributed",
+            renderer.emissionNotesForTest() >= 1,
         )
         renderer.release()
     }
@@ -132,7 +199,6 @@ class AudioFeedbackRendererTest {
         // @spec's distinction: the accepted-frame duration is an estimate of queued audio, not
         // completion. The coverage must end on the OUTPUT's report, so a cue that finishes early
         // stops being attributed early -- and one still sounding keeps the gate informed.
-        renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
         whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
         // Still playing at first, then consumed.
@@ -142,12 +208,15 @@ class AudioFeedbackRendererTest {
         }
 
         renderer.playEarcon(EarconId.WAKE_WORD)
-        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(1_100) }
+        // TWO HEARTBEATS while it is still sounding: the attribution must be refreshed more than once.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_500))
         val notesWhilePlaying = renderer.emissionNotesForTest()
         assertTrue("a sounding cue keeps the attribution fresh (notes=$notesWhilePlaying)", notesWhilePlaying > 1)
 
         consumed = true
-        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(2_500) }
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_500))
         val notesAfterConsumption = renderer.emissionNotesForTest()
         assertEquals(
             "once consumed the attribution stops, so the note count no longer grows " +

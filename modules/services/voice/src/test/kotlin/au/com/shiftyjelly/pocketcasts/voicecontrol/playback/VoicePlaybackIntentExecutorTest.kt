@@ -212,6 +212,87 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `a dispatched turn carries its own window stamp, so a fresh wake creates`() = runTest {
+        // @reviewer's bound-path case: the STAMP ON THE INTENT is the captured origin. A fresh wake
+        // must create even while the previous conversation is still live, and a follow-up stamped with
+        // the same window must resume it.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        val firstWindow = signal.capturedGeneration()
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "first",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = firstWindow,
+            ),
+        )
+        assertEquals(
+            "a wake-stamped dispatch creates",
+            true,
+            sinks.cloudRoute.wakeOrigins.last(),
+        )
+        assertEquals(firstWindow, sinks.cloudRoute.capturedOrigins.last())
+
+        // A follow-up in the SAME window: not wake-originated, so it resumes.
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "follow-up",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = firstWindow,
+            ),
+        )
+        assertEquals(
+            "and a follow-up carries the same captured window",
+            firstWindow,
+            sinks.cloudRoute.capturedOrigins.last(),
+        )
+    }
+
+    @Test
+    fun `a turn stamped with a superseded window never reaches transport`() = runTest {
+        // @reviewer's stale-origin case: an intent captured before a successor wake must not dispatch
+        // under the successor's window, and must not mutate the successor's playback either.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        val staleStamp = signal.capturedGeneration()
+        signal.onWakeWordDetected() // a successor wake opens a NEW window
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "successor",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = signal.capturedGeneration(),
+            ),
+        )
+        val callsAfterSuccessor = sinks.playback.calls.toList()
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "late old",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = staleStamp,
+            ),
+        )
+
+        assertEquals(
+            "only the successor reached transport " +
+                "(origins=${sinks.cloudRoute.capturedOrigins})",
+            listOf("successor"),
+            sinks.cloudRoute.calls.map { it.substringAfter("routeToCloud:").substringBefore(":") },
+        )
+        assertEquals(
+            "and the stale dispatch did not mutate the successor's playback",
+            callsAfterSuccessor,
+            sinks.playback.calls,
+        )
+    }
+
     fun `cloud route delegates to cloud route sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()

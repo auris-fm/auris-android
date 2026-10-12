@@ -36,6 +36,13 @@ class CloudConversationAdmission @Inject constructor() {
      * live grace turn RESUMES; anything else begins a new conversation and CREATES.
      */
     fun prepare(origin: Long, isLiveGraceTurn: Boolean, isWakeOriginated: Boolean): Prepared? = synchronized(lock) {
+        // A turn is admitted only under the window that is CURRENT. The FIRST turn of a window
+        // declares its own captured origin current -- nothing else would admit it, and without this a
+        // live window that has simply not run a turn yet is indistinguishable from a superseded one.
+        if (requiresAdoption) {
+            currentOrigin = origin
+            requiresAdoption = false
+        }
         if (origin != currentOrigin) return null
         val existing = handle
         // A WAKE ORIGIN ALWAYS STARTS A CONVERSATION: a request captured under a wake is a new user
@@ -55,7 +62,14 @@ class CloudConversationAdmission @Inject constructor() {
     /** Marks [origin] as the only live generation; older origins can no longer prepare a turn. */
     fun beginOrigin(origin: Long) = synchronized(lock) {
         currentOrigin = origin
+        requiresAdoption = false
     }
+
+    /**
+     * True until an origin has been declared or adopted: the first prepared turn adopts its own
+     * captured window, so a window that has not run a turn yet is not read as superseded.
+     */
+    private var requiresAdoption = true
 
     /** Forgets the conversation, so the next turn creates a new one. */
     fun reset() = synchronized(lock) {

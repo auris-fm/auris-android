@@ -8,6 +8,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import javax.inject.Inject
 import kotlin.math.abs
+import timber.log.Timber
 
 class VoicePlaybackIntentExecutor @Inject constructor(
     private val playbackSink: VoicePlaybackSink,
@@ -51,18 +52,33 @@ class VoicePlaybackIntentExecutor @Inject constructor(
 
             is VoiceIntent.CloudRoute -> {
                 val context = playbackContextProvider.current()
-                // The CAPTURED window identity travels with the request. Reading the CURRENT window
-                // here would let a fresh wake look like a continuation of the previous conversation,
-                // and would let a request captured before a successor wake act under the successor's.
-                val captured = gracePeriodSignal.capturedGeneration()
+                // The window identity is the one STAMPED ON THE INTENT when it was dispatched --
+                // not the current one read here. The executor runs later than the dispatch, so reading
+                // the live window would let a fresh wake look like a continuation of the previous
+                // conversation, and would let a request captured before a successor wake act under the
+                // successor's. The stamp is the captured origin; when a dispatch carries none, there is
+                // no window to claim and the sink falls back to the declared-live origin.
+                val captured = intent.windowGeneration
+                // A dispatch stamped with a window that is no longer current is SUPERSEDED and does
+                // not run at all. This belongs here rather than only in the sink: the sink's admission
+                // governs which CONVERSATION a turn joins, while this governs whether a superseded
+                // request may act on the successor's playback at all -- and a stale dispatch reaching
+                // the sink would still be a mutation made on behalf of a replaced user act.
+                if (captured != null && !gracePeriodSignal.isCurrent(captured)) {
+                    Timber.i("[Voice] superseded dispatch discarded (stamp=$captured)")
+                    return VoiceResponse.Silent
+                }
                 cloudRouteSink.routeToCloud(
                     intent.request,
                     intent.tier,
                     context,
-                    isLiveGraceTurn = gracePeriodSignal.isCurrent(captured) &&
+                    // A dispatch with no stamp has no window to claim, so it is not a continuation and
+                    // the sink falls back to the declared-live origin.
+                    isLiveGraceTurn = captured != null &&
+                        gracePeriodSignal.isCurrent(captured) &&
                         gracePeriodSignal.isActive.value,
                     capturedOrigin = captured,
-                    isWakeOriginated = gracePeriodSignal.isWakeOriginated(captured),
+                    isWakeOriginated = captured != null && gracePeriodSignal.isWakeOriginated(captured),
                 )
             }
 

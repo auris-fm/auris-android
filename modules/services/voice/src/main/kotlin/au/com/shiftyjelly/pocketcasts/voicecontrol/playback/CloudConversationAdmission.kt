@@ -41,6 +41,15 @@ class CloudConversationAdmission @Inject constructor() {
         //   the same window as the last admitted turn  -> it is current, so the turn may act
         //   a NEWER window                            -> it supersedes the old one and is adopted
         //
+        // A NEWER WINDOW RETIRES WHAT THE OLDER ONES WERE HOLDING, on EVERY path that admits a turn --
+        // not only the one the sink takes for an unstamped request. Normal stamped ASR preparation
+        // arrives HERE, and a request from a superseded window stops being retryable the moment a newer
+        // one is admitted: a retry is validated against its own window, so nothing will retry it.
+        if (origin > currentOrigin) {
+            prepared.filterValues { it.capturedOrigin != null && it.capturedOrigin != origin }
+                .keys.toList()
+                .forEach { prepared.remove(it) }
+        }
         // ADOPTION IS NOT A ONE-TIME EVENT. The earlier version adopted only the very first origin it
         // ever saw, so a valid request under a LATER window was refused as stale -- a successor wake's
         // first request was dropped. A higher origin is genuinely newer, and the caller has already

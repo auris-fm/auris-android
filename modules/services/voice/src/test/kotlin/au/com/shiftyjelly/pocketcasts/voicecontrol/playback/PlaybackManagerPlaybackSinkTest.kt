@@ -2,8 +2,15 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
 import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager
+import au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.setMain
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -18,6 +25,7 @@ import org.robolectric.RobolectricTestRunner
  * own arithmetic, and cannot fail when production stops resolving.
  */
 @RunWith(RobolectricTestRunner::class)
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class PlaybackManagerPlaybackSinkTest {
 
     private fun sink(playbackManager: PlaybackManager): PlaybackManagerPlaybackSink = PlaybackManagerPlaybackSink(
@@ -64,6 +72,89 @@ class PlaybackManagerPlaybackSinkTest {
             org.mockito.kotlin.any(),
             org.mockito.kotlin.anyOrNull(),
         )
+    }
+
+    @Test
+    fun `the REAL manager refuses a seek the player is RE-POINTED during`() = probeActualManagerReuse(reuse = true)
+
+    @Test
+    fun `the REAL manager seeks a target that stays on its episode`() = probeActualManagerReuse(reuse = false)
+
+    /**
+     * Executes the ACTUAL private manager seek against a substituted player whose `seekToTimeMs`
+     * suspends, then re-points that player at another episode WHILE THE SEEK IS IN FLIGHT.
+     *
+     * This is the only shape that can observe the defect: a monitor cannot span a suspension, so the
+     * check must happen where the change is visible -- after the suspending call returns. Every
+     * adapter-level fixture stubs the owner and therefore cannot see this at all.
+     *
+     * @reviewer's control, adopted; it failed here until the post-seek episode read was added.
+     */
+    private fun probeActualManagerReuse(reuse: Boolean) = runTest {
+        val manager = mock<PlaybackManager>()
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val proceed = kotlinx.coroutines.CompletableDeferred<Unit>()
+        var configured = "episode-A"
+        var actedOn: String? = null
+        val target = object : au.com.shiftyjelly.pocketcasts.repositories.playback.Player by mock() {
+            override val episodeUuid: String? get() = configured
+            override suspend fun seekToTimeMs(positionMs: Int) {
+                entered.complete(Unit)
+                proceed.await()
+                actedOn = configured
+            }
+        }
+        org.mockito.kotlin.whenever(manager.player).thenReturn(target)
+        org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenReturn(
+            au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+                uuid = "episode-A",
+                podcastUuid = "podcast-1",
+                publishedDate = java.util.Date(),
+            ),
+        )
+        org.mockito.kotlin.whenever(manager.playbackStateRelay)
+            .thenReturn(com.jakewharton.rxrelay2.BehaviorRelay.createDefault(PlaybackState()))
+        PlaybackManager::class.java.getDeclaredField("selectedPlayerLock")
+            .apply { isAccessible = true }
+            .set(manager, Any())
+        val method = PlaybackManager::class.java.declaredMethods
+            .single { it.name == "seekToTimeMsInternalIfEpisode" }
+            .apply { isAccessible = true }
+
+        kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
+        try {
+            val operation = async {
+                kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn<Boolean> { continuation ->
+                    method.invoke(manager, "episode-A", 100_000, continuation)
+                }
+            }
+            runCurrent()
+            assertTrue(
+                "the real manager must reach the captured player's suspending seek",
+                entered.isCompleted,
+            )
+            // THE RE-POINTING LANDS WHILE THE SEEK IS SUSPENDED: the in-flight observation.
+            if (reuse) configured = "episode-B"
+            proceed.complete(Unit)
+            runCurrent()
+            val accepted = operation.await()
+
+            if (reuse) {
+                assertFalse(
+                    "the manager must REFUSE a seek that ran against a player re-pointed to " +
+                        "another episode (actedOn=$actedOn)",
+                    accepted && actedOn == "episode-B",
+                )
+            } else {
+                assertTrue(
+                    "control: an unchanged target's seek runs and is accepted (actedOn=$actedOn)",
+                    accepted && actedOn == "episode-A",
+                )
+            }
+        } finally {
+            proceed.complete(Unit)
+            kotlinx.coroutines.Dispatchers.resetMain()
+        }
     }
 
     @Test

@@ -1434,12 +1434,24 @@ open class PlaybackManager @Inject constructor(
             // been pointed at a different episode in the meantime.
             target to playerEpisodeIncarnation
         }
-        // RE-CHECKED AT THE CALL. Holding the monitor across this suspension is impossible, so the
-        // exclusion is achieved by detecting the change rather than by preventing it: if the player has
-        // been loaded with another episode since the capture, this seek no longer describes the audio it
-        // would move.
+        // RE-CHECKED ON BOTH SIDES OF THE SUSPENDING CALL, and the AFTER check is the one that matters.
+        //
+        // `seekToTimeMs` SUSPENDS, so a reconfiguration can land while it is in flight -- which is exactly
+        // @reviewer's measured case: the seek is issued against the replaced player and only then does the
+        // episode change. A check BEFORE the call cannot see that, because at that moment nothing has
+        // happened yet. Holding the monitor across the suspension is impossible, so the exclusion comes
+        // from DETECTING the change: if the player was pointed at another episode while the seek was in
+        // flight, the seek has already acted on the wrong audio and this must NOT report success.
         if (playerEpisodeIncarnation != seekTarget.second) return false
         seekTarget.first.seekToTimeMs(positionMs)
+        // THE PLAYER'S OWN EPISODE IS THE OBSERVATION, because the player is REUSED: a reconfiguration
+        // changes what THIS INSTANCE addresses, and nothing else -- the counter above only tracks the
+        // loads that go through this manager, while a player can be pointed at another episode by any
+        // holder. Reading the instance after the suspending call is what actually detects it.
+        if (seekTarget.first.episodeUuid != episodeUuid || playerEpisodeIncarnation != seekTarget.second) {
+            Timber.w("[Playback] a seek was overtaken by an episode change; reporting refusal")
+            return false
+        }
         return true
     }
 

@@ -50,8 +50,10 @@ class VoicePlaybackIntentExecutor @Inject constructor(
      * The window-ended lifecycle, reachable by the owner that observes windows ending. A request is
      * retryable while ITS window lives, so a window ending for ANY reason retires what it holds.
      */
-    fun endWindow(endedGeneration: Long): List<String> = (cloudRouteSink as? au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSink)
-        ?.endWindow(endedGeneration) ?: emptyList()
+    // THROUGH THE INTERFACE, NOT A CAST. The safe-cast fell back to `emptyList()`, so a sink that did
+    // not implement the method would LOOK like it retired nothing -- a silent no-op reported as a
+    // successful retirement. A mandatory member cannot be omitted: the compiler refuses.
+    fun endWindow(endedGeneration: Long): List<String> = cloudRouteSink.endWindow(endedGeneration)
 
     /** The manager this executor installed its release on, so teardown can remove it. */
     private var boundDialogManager:
@@ -213,6 +215,11 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                             isFirstRequestOfWindow = isFirstRequestOfWindow,
                         ),
                     logicalRequestId = intent.logicalRequestId,
+                    // THE RETRY FLAG IS FORWARDED. Without it the sink cannot tell a retry from new
+                    // input, so a retry whose identity was retired between the executor's entry guards
+                    // and this preparation was silently MINTED AS A NEW REQUEST and sent -- the exact
+                    // defect the refusal exists to prevent.
+                    isRetry = intent.isRetry,
                 ) ?: return VoiceResponse.Silent
                 // DISPATCHED THROUGH THE ALREADY-PREPARED TURN, so the first attempt and a retry take
                 // the SAME path and the identity is the one fixed above rather than a second one minted
@@ -504,6 +511,14 @@ interface VoiceCloudRouteSink {
      * the interface, or a caller could reach a sink that silently ignores it.
      */
     fun forgetRetained(logicalRequestId: String)
+
+    /**
+     * Ends the window [endedGeneration], retiring what it held, and reports the retired identities.
+     *
+     * PART OF THE CONTRACT rather than a detail of one implementation -- the same reason as
+     * [forgetRetained]. [endedGeneration] is the window that ENDED, which is not the one now current.
+     */
+    fun endWindow(endedGeneration: Long): List<String>
 
     /** The turn retained for [logicalRequestId], so a caller can tell a retry from new input. */
     fun retainedTurnFor(

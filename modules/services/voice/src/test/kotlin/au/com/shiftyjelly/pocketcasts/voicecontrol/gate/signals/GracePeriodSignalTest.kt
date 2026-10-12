@@ -308,6 +308,51 @@ class GracePeriodSignalTest {
     }
 
     @Test
+    fun `a completion PARKED at the monitor cannot reopen a window privacy closed`() {
+        // @reviewer's parked-completion control, and @spec's requirement that the origin/liveness
+        // validation sit INSIDE the same windowLock transaction as the extension. When the check runs
+        // before the lock, a completion that passed it can be parked while a privacy close takes the
+        // lock, then resume and -- on the strength of the earlier check -- REOPEN LISTENING. The
+        // measured result was exactly that: listening reopened after privacy closed it.
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+
+        val completionEntered = java.util.concurrent.CountDownLatch(1)
+        val holdTheLock = java.util.concurrent.CountDownLatch(1)
+        val completionDone = java.util.concurrent.CountDownLatch(1)
+
+        // Hold the monitor from another thread, so a completion that takes it will PARK there.
+        val holder = Thread {
+            synchronized(signal.windowMonitorForTest()) {
+                completionEntered.countDown()
+                holdTheLock.await(3, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        }.apply { start() }
+        completionEntered.await(3, java.util.concurrent.TimeUnit.SECONDS)
+
+        val completion = Thread {
+            signal.onCommandRecognized(fromGeneration = window)
+            completionDone.countDown()
+        }.apply { start() }
+
+        // PRIVACY CLOSES while the completion is parked: it still needs the monitor, so it waits.
+        val privacy = Thread { signal.onAppBackgrounded() }.apply { start() }
+        privacy.join(3_000)
+
+        // Now release the monitor and let the parked completion resume.
+        holdTheLock.countDown()
+        completion.join(4_000)
+        holder.join(4_000)
+        assertTrue("the completion ran", completionDone.await(2, java.util.concurrent.TimeUnit.SECONDS))
+
+        assertFalse(
+            "a completion parked at the monitor must NOT reopen a window privacy closed",
+            signal.isActive.value,
+        )
+    }
+
+    @Test
     fun `a timer that lost ownership by REPLACEMENT cannot close its successor`() = runTest {
         // The generation check's own case. The cancel above stops a coroutine, but `armTimer` checks
         // ownership too, so a timer that reaches its body while a LATER generation is current must

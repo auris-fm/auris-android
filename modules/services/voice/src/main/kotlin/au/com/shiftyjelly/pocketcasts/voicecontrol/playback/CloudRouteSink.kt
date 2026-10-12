@@ -288,7 +288,7 @@ class CloudRouteSink internal constructor(
     override fun retainedTurnFor(logicalRequestId: String): CloudRouteTurn? = conversationAdmission.retained(logicalRequestId)
 
     /** Retires the turns belonging to [endedGeneration], reporting the identities retired. */
-    fun endWindow(endedGeneration: Long): List<String> = conversationAdmission.endWindow(endedGeneration)
+    override fun endWindow(endedGeneration: Long): List<String> = conversationAdmission.endWindow(endedGeneration)
 
     /**
      * Forgets [logicalRequestId]'s retained turn: no retry of it is coming.

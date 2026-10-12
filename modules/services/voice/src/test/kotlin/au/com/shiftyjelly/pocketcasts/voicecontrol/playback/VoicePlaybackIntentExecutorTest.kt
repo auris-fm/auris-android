@@ -501,6 +501,62 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `a retry retired BETWEEN the executor's guards and preparation is refused, not recreated`() = runTest {
+        // @reviewer's dispatch-seam control. The executor's entry guards run first and then the sink
+        // prepares; a retirement landing BETWEEN them used to be invisible, because the executor did not
+        // forward the retry flag -- so the sink saw a request it had never seen and MINTED A NEW ONE,
+        // sending a fresh conversation for a request the user meant to retry. The refusal exists, but a
+        // refusal that never receives the flag cannot fire.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+
+        // First attempt: prepares and retains under its logical identity.
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "prepare me",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = window,
+                logicalRequestId = "logical-seam",
+                isRetry = false,
+            ),
+        )
+        assertEquals("the first attempt prepared", 1, sinks.cloudRoute.preparedTurns.size)
+
+        // The retirement lands AT THE SEAM. The executor's guards are entry checks on a state read once:
+        // a retirement arriving after them but before preparation is exactly the gap, so the hook fires
+        // from the PREPARATION path where the second call's preparation begins.
+        sinks.cloudRoute.onPrepareSeam = { sinks.cloudRoute.forgetRetained("logical-seam") }
+        // Fires only on the RETRY: the first attempt legitimately prepares.
+        sinks.cloudRoute.forgetAfterFirstPrepare = "logical-seam"
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "prepare me",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = window,
+                logicalRequestId = "logical-seam",
+                isRetry = true,
+            ),
+        )
+
+        assertEquals(
+            "a retry retired at the seam must NOT be prepared afresh " +
+                "(prepared=${sinks.cloudRoute.preparedTurns.size})",
+            1,
+            sinks.cloudRoute.preparedTurns.size,
+        )
+        assertEquals(
+            "and nothing may be dispatched for it " +
+                "(dispatched=${sinks.cloudRoute.preparedDispatches.size})",
+            1,
+            sinks.cloudRoute.preparedDispatches.size,
+        )
+    }
+
+    @Test
     fun `a retry naming an UNKNOWN logical request is refused rather than treated as new input`() = runTest {
         // @spec's unknown-retry refusal: a retry whose identity was never prepared is not a retry of
         // anything. Treating it as new input would create a conversation for a request whose own
@@ -1265,7 +1321,25 @@ class VoicePlaybackIntentExecutorTest {
         }
 
         override fun forgetRetained(logicalRequestId: String) {
+            // ACTUALLY FORGET, not just report: a fake that only notified left the entry in its store,
+            // so a retry the production release had retired still resolved here -- the fake would have
+            // made the defect invisible.
+            retained.remove(logicalRequestId)
             onForget?.invoke(logicalRequestId)
+        }
+
+        /** Runs at the dispatch seam, between the executor's guards and preparation. */
+        var onPrepareSeam: (() -> Unit)? = null
+
+        /** Retires this logical request the first time a retry reaches preparation. */
+        var forgetAfterFirstPrepare: String? = null
+
+        /** The windows whose ending reached the sink, so a case can assert the dispatch was wired. */
+        val endedWindows = mutableListOf<Long>()
+
+        override fun endWindow(endedGeneration: Long): List<String> {
+            endedWindows += endedGeneration
+            return retained.keys.filter { it.isNotEmpty() }.also { retained.clear() }
         }
 
         override fun retainedTurnFor(
@@ -1283,10 +1357,21 @@ class VoicePlaybackIntentExecutorTest {
             logicalRequestId: String?,
             isRetry: Boolean,
         ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? {
+            onPrepareSeam?.invoke()
+            // RETIRE AT THE SEAM, once, on the retry: a retirement landing after the executor's guards
+            // have already read the store is what the refusal must still catch.
+            forgetAfterFirstPrepare?.let { id ->
+                forgetAfterFirstPrepare = null
+                forgetRetained(id)
+            }
             // Mirrors the production rule: a logical request that already has a turn reuses it, so the
             // fake cannot mask a retry by minting a fresh one.
             logicalRequestId?.let { id ->
-                preparedTurns.firstOrNull { it.request.endsWith("|$id") }?.let { return it }
+                // THE STORE IS THE `retained` MAP ALONE. Looking in `preparedTurns` as well made the
+                // fake's store a SECOND record that a retirement never cleared -- so a retired request
+                // still resolved here and the case could never observe the refusal. Production has one
+                // store; the fake now does too.
+                retained[id]?.let { return it }
                 // Mirrors the production rule: a RETRY that misses is refused rather than prepared,
                 // because preparing would resurrect a request that is no longer retryable.
                 if (isRetry) return null

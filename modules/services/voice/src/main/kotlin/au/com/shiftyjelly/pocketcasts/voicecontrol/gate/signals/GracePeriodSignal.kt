@@ -226,16 +226,33 @@ class GracePeriodSignal @Inject constructor() {
         // never resurrects a window a privacy event ended — including when a
         // later wake has opened a new one.
         if (fromGeneration != null) {
-            if (fromGeneration != generation || !_isActive.value) return
-            startOrReset()
-            // Restoring is a separate question from touching the window: a
-            // deliberate route earns the next dispatch, an escalation does not.
-            // The escalation marker is window state, so it moves under the same monitor.
-            if (restoresAllowance) synchronized(windowLock) { escalatedGeneration = -1L }
+            // VALIDATE AND EXTEND IN ONE TRANSACTION. Checking the origin and liveness BEFORE taking the
+            // lock let a completion that arrived while the window was still open be PARKED at the lock,
+            // then resume after a privacy close or a replacement and EXTEND THE WRONG WINDOW -- measured
+            // by @reviewer as listening reopening after privacy closed it. The check an earlier moment
+            // authorises is not authorisation at the moment of the act, so both happen under the monitor
+            // or the check does not constrain the act at all.
+            val armFor = synchronized(windowLock) {
+                if (fromGeneration != generation || !_isActive.value) return@synchronized null
+                _isActive.value = true
+                // Restoring is a separate question from touching the window: a deliberate route earns
+                // the next dispatch, an escalation does not.
+                if (restoresAllowance) escalatedGeneration = -1L
+                generation
+            } ?: return
+            // ARMED OUTSIDE the monitor: `armTimer` launches and reads the coroutine context, and a
+            // suspension point inside a critical section is the interleaving the lock exists to prevent.
+            // Arming takes the monitor itself and re-checks ownership, so a transition landing between
+            // the two steps cannot leave an unowned timer behind.
+            armTimerForLocked(armFor)
             return
         }
-        if (closedByPrivacy) return
-        openWindow()
+        // The privacy refusal and the open are one decision, so they take the monitor together: a
+        // privacy close landing between them would otherwise open a window the close had just ended.
+        synchronized(windowLock) {
+            if (closedByPrivacy) return@synchronized
+            openWindowLocked()
+        }
     }
 
     /**
@@ -298,6 +315,17 @@ class GracePeriodSignal @Inject constructor() {
 
     /** A new act opens a window and begins its generation. */
     private fun openWindow() {
+        val ending = synchronized(windowLock) { openWindowLocked() }
+        notifyIfEnded(ending)
+    }
+
+    /**
+     * [openWindow]'s body, for a caller already holding the monitor.
+     *
+     * Returns the generation that ENDED, which the caller reports OUTSIDE the monitor: a callback that
+     * runs other components' code inside the lock could deadlock against a component calling back in.
+     */
+    private fun openWindowLocked(): Long {
         // OPENING A WINDOW ENDS THE PREVIOUS ONE. A wake replaces the window in force, so whatever that
         // window was holding stops being retryable at THIS moment -- not when some later request happens
         // to be admitted. Without it, a replaced window whose successor never runs a request kept its
@@ -308,35 +336,52 @@ class GracePeriodSignal @Inject constructor() {
         // in would deadlock. The ENDED generation is READ under the monitor and the callback then runs
         // AFTER the counter has advanced -- the notification reports the window that ended, which is the
         // previous generation, not the one now current.
-        val ending = synchronized(windowLock) {
-            val previous = generation
-            generation += 1
-            // EACH WINDOW HAS ITS OWN ALLOWANCE, so opening one CLEARS the spent marker: otherwise a
-            // claim made under a previous window made every later window read as spent.
-            escalationUsed = false
-            escalatedGeneration = -1L
-            _isActive.value = true
-            timerJob?.cancel()
-            timerJob = armTimer(ownedGeneration = generation)
-            previous
-        }
-        if (ending != 0L) {
-            onWindowEnded?.invoke(ending)
+        val previous = generation
+        generation += 1
+        // EACH WINDOW HAS ITS OWN ALLOWANCE, so opening one CLEARS the spent marker: otherwise a claim
+        // made under a previous window made every later window read as spent.
+        escalationUsed = false
+        escalatedGeneration = -1L
+        _isActive.value = true
+        armTimerForLocked(ownedGeneration = generation)
+        return previous
+    }
+
+    /** Reports [ended] to the window-ended observer, unless no window ended. */
+    private fun notifyIfEnded(ended: Long) {
+        if (ended != 0L) onWindowEnded?.invoke(ended)
+    }
+
+    // Arms this window's timer, OWNED by [ownedGeneration].
+    //
+    // THE TIMER MUST KNOW WHICH WINDOW IT BELONGS TO. Reading the live generation at expiry would let a
+    // timer that was CANCELLED (because its window was extended or replaced) close its successor: by the
+    // time it fires, `generation` names a different window, and closing on that is closing the wrong one.
+    // The ownership is checked UNDER the monitor together with the close, so the check and the close are
+    // one step and a successor cannot slip between them.
+    //
+    // It also CLEARS `isActive` when it owns the window: an expired window is not open. The reset path
+    // relied on this too, and a version that only notified left an expired extension reading as open.
+
+    /**
+     * Arms the timer for [ownedGeneration] under the monitor.
+     *
+     * The launch itself happens outside it -- `armTimer` reads the coroutine context, which suspends --
+     * but the ASSIGNMENT takes the monitor and re-checks that the window is still [ownedGeneration], so a
+     * transition landing in between cannot leave a timer owned by a window that has already ended.
+     */
+    private fun armTimerForLocked(ownedGeneration: Long) {
+        val job = armTimer(ownedGeneration)
+        synchronized(windowLock) {
+            if (ownedGeneration == generation) {
+                timerJob?.cancel()
+                timerJob = job
+            } else {
+                job.cancel()
+            }
         }
     }
 
-    /**
-     * Arms this window's timer, OWNED by [ownedGeneration].
-     *
-     * THE TIMER MUST KNOW WHICH WINDOW IT BELONGS TO. Reading the live generation at expiry would let a
-     * timer that was CANCELLED (because its window was extended or replaced) close its successor: by the
-     * time it fires, `generation` names a different window, and closing on that is closing the wrong one.
-     * The ownership is checked UNDER the monitor together with the close, so the check and the close are
-     * one step and a successor cannot slip between them.
-     *
-     * It also CLEARS `isActive` when it owns the window: an expired window is not open. The reset path
-     * relied on this too, and a version that only notified left an expired extension reading as open.
-     */
     private fun armTimer(ownedGeneration: Long): Job = scope.launch {
         // THIS job, captured OUTSIDE the critical section: `currentCoroutineContext()` suspends, and a
         // suspension point inside a lock is the very interleaving the lock exists to prevent.

@@ -90,15 +90,22 @@ interface Player {
      * RETURNS THE PRE-ACTION POSITION, so the caller attributes history to the value the PLAYER saw at
      * its own mutation rather than to a read taken around the call. A null result is a refusal.
      *
-     * The default implementation performs that check and delegates, which is correct for a player whose
-     * `episodeUuid` reflects what it was loaded with. A player that can be re-pointed concurrently
-     * should override this to re-read the field immediately before its own mutation point.
+     * THE DEFAULT REFUSES. It cannot enforce the binding, so a player that wants this operation must
+     * override it -- `LocalPlayer` and `CastPlayer` both do, each deciding at its own mutation point and
+     * returning the position it saw there. A player that does not override makes the bound call
+     * UNAVAILABLE, which is what stops a direct caller reaching an unrestricted seek through the
+     * default.
      */
     suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Long? {
-        if (episodeUuid != expectedEpisodeUuid) return null
-        val before = getCurrentPositionMs().toLong()
-        seekToTimeMs(positionMs)
-        return before
+        // THE DEFAULT REFUSES RATHER THAN PRETENDING. It cannot enforce the binding -- it checks and then
+        // delegates, leaving the window this contract exists to close -- so returning a position here
+        // would report an enforcement that did not happen. An implementation that CAN enforce it
+        // overrides this; one that cannot makes the BOUND call unavailable.
+        //
+        // Refusing at the DEFAULT is what stops a direct caller from reaching an unrestricted seek
+        // through it, which the manager's guard alone cannot prevent: a caller that invokes the player
+        // operation without going through the manager is exactly the bypass @reviewer isolated.
+        error("seekToTimeMsIfEpisode requires an implementation that enforces the episode binding")
     }
 
     /**

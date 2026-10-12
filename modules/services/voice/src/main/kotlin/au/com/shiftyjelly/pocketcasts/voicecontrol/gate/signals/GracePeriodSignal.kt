@@ -5,6 +5,7 @@ import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -59,6 +60,21 @@ class GracePeriodSignal @Inject constructor() {
      */
     @Synchronized
     fun capturedGeneration(): Long = generation
+
+    /**
+     * Advances the window WITHOUT cancelling the outstanding timer.
+     *
+     * This exists so a case can put a timer in the position it must refuse from: still scheduled, no
+     * longer owning the window. Normal paths cancel the timer under the same monitor, so they never
+     * exercise the ownership check on its own -- and without a way to reach that state, the check has no
+     * case that can fail for it.
+     */
+    internal fun replaceWindowWithoutCancellingTimer() {
+        synchronized(windowLock) {
+            generation += 1
+            _isActive.value = true
+        }
+    }
 
     /**
      * Whether [captured] names the window that is live right now.
@@ -214,7 +230,8 @@ class GracePeriodSignal @Inject constructor() {
             startOrReset()
             // Restoring is a separate question from touching the window: a
             // deliberate route earns the next dispatch, an escalation does not.
-            if (restoresAllowance) escalatedGeneration = -1L
+            // The escalation marker is window state, so it moves under the same monitor.
+            if (restoresAllowance) synchronized(windowLock) { escalatedGeneration = -1L }
             return
         }
         if (closedByPrivacy) return
@@ -226,7 +243,11 @@ class GracePeriodSignal @Inject constructor() {
      * privacy close, since a fresh wake is a new user act.
      */
     fun onWakeWordDetected() {
-        closedByPrivacy = false
+        // THE MARKERS ARE WINDOW STATE TOO, so they move under the monitor like every other transition.
+        synchronized(windowLock) {
+            closedByPrivacy = false
+            wakeGeneration = generation + 1
+        }
         openWindow()
         // A FRESH WAKE BEGINS A NEW USER ACT, and therefore a new conversation: a question asked after
         // a wake is not a continuation of whatever was being discussed before it. The window it opens
@@ -296,11 +317,7 @@ class GracePeriodSignal @Inject constructor() {
             escalatedGeneration = -1L
             _isActive.value = true
             timerJob?.cancel()
-            timerJob = scope.launch {
-                delay(timeoutMs)
-                _isActive.value = false
-                notifyWindowEndedUnderLock()
-            }
+            timerJob = armTimer(ownedGeneration = generation)
             previous
         }
         if (ending != 0L) {
@@ -308,26 +325,42 @@ class GracePeriodSignal @Inject constructor() {
         }
     }
 
-    /** Fires the window-ended notification with the value read under the monitor. */
-    private fun notifyWindowEndedUnderLock() {
-        val ended = synchronized(windowLock) { generation }
+    /**
+     * Arms this window's timer, OWNED by [ownedGeneration].
+     *
+     * THE TIMER MUST KNOW WHICH WINDOW IT BELONGS TO. Reading the live generation at expiry would let a
+     * timer that was CANCELLED (because its window was extended or replaced) close its successor: by the
+     * time it fires, `generation` names a different window, and closing on that is closing the wrong one.
+     * The ownership is checked UNDER the monitor together with the close, so the check and the close are
+     * one step and a successor cannot slip between them.
+     *
+     * It also CLEARS `isActive` when it owns the window: an expired window is not open. The reset path
+     * relied on this too, and a version that only notified left an expired extension reading as open.
+     */
+    private fun armTimer(ownedGeneration: Long): Job = scope.launch {
+        // THIS job, captured OUTSIDE the critical section: `currentCoroutineContext()` suspends, and a
+        // suspension point inside a lock is the very interleaving the lock exists to prevent.
+        val thisTimer = currentCoroutineContext()[Job]
+        delay(timeoutMs)
+        val ended = synchronized(windowLock) {
+            if (ownedGeneration != generation) return@synchronized null
+            if (timerJob !== thisTimer) return@synchronized null
+            _isActive.value = false
+            ownedGeneration
+        } ?: return@launch
+        // DELIVERED OUTSIDE the monitor: a callback running other components' code inside the lock could
+        // deadlock against a component that calls back in.
         onWindowEnded?.invoke(ended)
     }
 
     private fun startOrReset() {
         // UNDER THE MONITOR: extending a window is a transition of the same state the claim reads, so it
-        // must not interleave with one.
+        // must not interleave with one. The timer is ARMED with this window's generation, so an expired
+        // extension closes the window it belongs to and cannot touch a successor.
         synchronized(windowLock) {
             _isActive.value = true
             timerJob?.cancel()
-            timerJob = scope.launch {
-                delay(timeoutMs)
-                // THE TIMEOUT ENDS THE WINDOW, so requests issued under it stop being retryable exactly
-                // as they do when a privacy close ends it. Without it, a request whose window simply
-                // expired kept its prepared turn for the life of the process -- the leak the lifecycle
-                // exists to prevent, reached by the most ordinary ending there is.
-                notifyWindowEndedUnderLock()
-            }
+            timerJob = armTimer(ownedGeneration = generation)
         }
     }
 

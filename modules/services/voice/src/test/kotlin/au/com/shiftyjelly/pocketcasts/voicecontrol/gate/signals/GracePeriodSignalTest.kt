@@ -12,6 +12,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class GracePeriodSignalTest {
 
     @get:Rule
@@ -284,6 +285,85 @@ class GracePeriodSignalTest {
             "backgrounding is the other privacy close and must advance it too",
             afterWake + 2,
             signal.privacyClosureCount(),
+        )
+    }
+
+    @Test
+    fun `an expired extension CLOSES its window rather than only reporting retirement`() = runTest {
+        // @reviewer's defect in my rework: the reset/extension timer notified retirement but no longer
+        // cleared `isActive`, so an expired extension left the window reading as OPEN -- the microphone
+        // would stay in Continuous mode with nothing behind it.
+        val signal = GracePeriodSignal(timeoutMs = 50L)
+        signal.onWakeWordDetected()
+        assertTrue("the window is open", signal.isActive.value)
+
+        // A COMMAND EXTENDS it, arming a fresh timer. That timer must still close on expiry.
+        signal.onCommandRecognized(fromGeneration = signal.capturedGeneration())
+        delay(120L)
+
+        assertFalse(
+            "an expired extension must leave the window CLOSED, not open",
+            signal.isActive.value,
+        )
+    }
+
+    @Test
+    fun `a timer that lost ownership by REPLACEMENT cannot close its successor`() = runTest {
+        // The generation check's own case. The cancel above stops a coroutine, but `armTimer` checks
+        // ownership too, so a timer that reaches its body while a LATER generation is current must
+        // still refuse. Here the successor is armed by a path that CANCELS NOTHING -- so the only thing
+        // standing between the old timer and the successor's state is the ownership check itself.
+        val retired = mutableListOf<Long>()
+        val signal = GracePeriodSignal(timeoutMs = 100L)
+        signal.onWindowEnded = { retired += it }
+        signal.onWakeWordDetected()
+        val first = signal.capturedGeneration()
+
+        delay(60L)
+        // REPLACE the window without cancelling the outstanding timer: the old timer is still scheduled
+        // to fire at its original deadline, and by then it owns nothing.
+        signal.replaceWindowWithoutCancellingTimer()
+        val second = signal.capturedGeneration()
+        assertTrue("the window advanced", second != first)
+        val retiredBefore = retired.toList()
+
+        delay(80L)
+        assertTrue(
+            "a timer whose window was REPLACED must not close the successor " +
+                "(retired=${retired.toList()} before=$retiredBefore)",
+            signal.isActive.value,
+        )
+        assertTrue("and it must not retire it", retired.toList() == retiredBefore)
+    }
+
+    @Test
+    fun `a cancelled old timer cannot close or retire its successor`() = runTest {
+        // The other timer defect: a timer read the LIVE generation at expiry, so one CANCELLED by a
+        // successor could close that successor when it finally fired.
+        val retired = mutableListOf<Long>()
+        val signal = GracePeriodSignal(timeoutMs = 100L)
+        signal.onWindowEnded = { retired += it }
+        signal.onWakeWordDetected()
+        val first = signal.capturedGeneration()
+
+        delay(60L)
+        // A SUCCESSOR opens before the first timer expires: the old timer is cancelled.
+        signal.onWakeWordDetected()
+        val second = signal.capturedGeneration()
+        assertTrue("the window advanced", second != first)
+        val retiredBefore = retired.toList()
+
+        // Let the OLD timer's original deadline pass. It must do nothing.
+        delay(80L)
+
+        assertTrue(
+            "the successor is still open after the old timer's deadline " +
+                "(retired=${retired.toList()} before=$retiredBefore)",
+            signal.isActive.value,
+        )
+        assertTrue(
+            "and the old timer did not retire its successor",
+            retired.toList() == retiredBefore,
         )
     }
 

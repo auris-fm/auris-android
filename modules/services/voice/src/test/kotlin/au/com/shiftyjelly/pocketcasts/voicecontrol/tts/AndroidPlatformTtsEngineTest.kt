@@ -386,109 +386,6 @@ class AndroidPlatformTtsEngineTest {
     }
 
     @Test
-    fun `an old render exiting after a successor is audibly playing must not stop the successor`() {
-        // @spec's successor-safety regression, and the one a generation-only fixture cannot catch:
-        // the successor here has REAL output running when the old render exits, so any stop of the
-        // shared field or engine shows up as the successor being silenced. The earlier fixture only
-        // incremented the generation, so a shared-field stop was invisible to it.
-        val (wired, fake) = engineWithFakeSynthesizer()
-        fake.onInitialized?.invoke(true)
-        fake.emitRealWav = true
-        wired.drainWaitMs = 0
-
-        val oldEnteredWrite = java.util.concurrent.CountDownLatch(1)
-        val releaseOldWrite = java.util.concurrent.CountDownLatch(1)
-        val writes = java.util.concurrent.atomic.AtomicInteger()
-        wired.writeToSink = { _, _, _, count ->
-            val n = writes.incrementAndGet()
-            when {
-                // The FIRST write is the old utterance's, and it blocks until the successor is
-                // audibly running -- the state the old render is in when it finally exits.
-                n == 1 -> {
-                    oldEnteredWrite.countDown()
-                    releaseOldWrite.await(5, java.util.concurrent.TimeUnit.SECONDS)
-                    // Accept HALF: the old reply's loop must return to its supersession check after
-                    // the unblock -- with a full accept it exits the loop, its superseded branch
-                    // never runs, and the case observes nothing (the survival of the shared-field
-                    // mutation was exactly this).
-                    count / 2
-                }
-
-                // The successor's writes pass through -- but its FIRST write accepts HALF, so the
-                // successor needs a second write to finish. Without that the whole successor clip
-                // lands in one write and "still writing after the old exit" has no degree of
-                // freedom (the fixture survived its own mutation for exactly that reason).
-                n == 2 -> count / 2
-
-                else -> count
-            }
-        }
-
-        val scope = CoroutineScope(Dispatchers.Default)
-        val oldJob = scope.launch {
-            try {
-                wired.speak("old reply", "en")
-            } catch (t: Throwable) { /* expected: superseded/cancelled */ }
-        }
-        // Complete the OLD utterance's synthesis so its playback (and write) begins.
-        val oldQueued = (0 until 50).any {
-            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.sleep(20)
-            fake.synthesizeCount > 0
-        }
-        assertTrue("the old utterance must reach synthesis", oldQueued)
-        fake.listener?.onDone(fake.lastUtteranceId)
-        assertTrue(
-            "the old reply must reach its write",
-            oldEnteredWrite.await(5, java.util.concurrent.TimeUnit.SECONDS),
-        )
-
-        // The successor claims the engine AND reaches its own output while the old write is blocked.
-        val newJob = scope.launch {
-            try {
-                wired.speak("new reply", "en")
-            } catch (t: Throwable) { /* expected: normal completion or cancellation */ }
-        }
-        val newQueued = (0 until 50).any {
-            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.sleep(20)
-            fake.synthesizeCount >= 2
-        }
-        assertTrue("the successor must reach synthesis", newQueued)
-        fake.listener?.onDone(fake.lastUtteranceId)
-        val successorWrote = (0 until 100).any {
-            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.sleep(20)
-            writes.get() >= 2
-        }
-        assertTrue("the successor must reach its own writes", successorWrote)
-        val stopsBeforeOldExit = fake.stopCalls
-
-        // NOW the old render exits and cleans up.
-        releaseOldWrite.countDown()
-        kotlinx.coroutines.runBlocking {
-            kotlinx.coroutines.withTimeoutOrNull(5_000) { oldJob.join() }
-        }
-
-        assertEquals(
-            "the old render's exit must not stop the successor's engine " +
-                "(stops before=$stopsBeforeOldExit after=${fake.stopCalls})",
-            stopsBeforeOldExit,
-            fake.stopCalls,
-        )
-        assertTrue(
-            "the successor must still be writing after the old render exited " +
-                "(writes=${writes.get()})",
-            writes.get() >= 3,
-        )
-        kotlinx.coroutines.runBlocking {
-            kotlinx.coroutines.withTimeoutOrNull(5_000) { newJob.join() }
-        }
-        scope.cancel()
-        wired.release()
-    }
-
-    @Test
     fun `a successor claiming during the old utterance's synthesis does not let the old playback adopt its generation`() {
         // @spec's ordering: the ownership token must be carried from the SYNTHESIS claim. If playback
         // re-read the global generation, an old utterance whose successor claimed during its own
@@ -555,89 +452,6 @@ class AndroidPlatformTtsEngineTest {
         assertFalse(
             "a superseded utterance that never wrote must not leave the playback flag set",
             wired.isPlayingSynthesizedAudio(),
-        )
-        wired.release()
-    }
-
-    @Test
-    fun `cancelling an old utterance after a successor owns the engine still stops the old blocked track`() {
-        // @reviewer's remaining gap: the watcher guarded the OWNED track stop on the generation still
-        // being current, so a cancellation landing after a successor took ownership left the old,
-        // blocked track playing -- the case cancellation most needs to interrupt. The owned track is
-        // stopped unconditionally; only the SHARED engine is guarded.
-        val (wired, fake) = engineWithFakeSynthesizer()
-        fake.onInitialized?.invoke(true)
-        fake.emitRealWav = true
-        wired.drainWaitMs = 0
-
-        val enteredWrite = java.util.concurrent.CountDownLatch(1)
-        val releaseWrite = java.util.concurrent.CountDownLatch(1)
-        val writes = java.util.concurrent.atomic.AtomicInteger()
-        wired.writeToSink = { _, _, _, count ->
-            if (writes.incrementAndGet() == 1) {
-                enteredWrite.countDown()
-                releaseWrite.await(5, java.util.concurrent.TimeUnit.SECONDS)
-                count / 2
-            } else {
-                count
-            }
-        }
-
-        val scope = CoroutineScope(Dispatchers.Default)
-        var oldFailure: Throwable? = null
-        val oldJob = scope.launch {
-            try {
-                wired.speak("old reply", "en")
-            } catch (t: Throwable) {
-                oldFailure = t
-            }
-        }
-        val queued = (0 until 50).any {
-            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.sleep(20)
-            fake.synthesizeCount > 0
-        }
-        assertTrue("the old utterance must reach synthesis", queued)
-        fake.listener?.onDone(fake.lastUtteranceId)
-        assertTrue(
-            "the old reply must reach its blocked write",
-            enteredWrite.await(5, java.util.concurrent.TimeUnit.SECONDS),
-        )
-
-        // A SUCCESSOR takes ownership FIRST, then the old utterance is cancelled.
-        wired.claimSynthesisForTest()
-        oldJob.cancel()
-        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(300) }
-
-        // The old track must have been stopped even though its generation is no longer current. The
-        // synthesizer must NOT be stopped, because the successor owns it now.
-        val stopsAtSuccessor = fake.stopCalls
-        val ownedTrackStops = wired.ownedTrackStopsForTest
-        releaseWrite.countDown()
-        kotlinx.coroutines.runBlocking {
-            kotlinx.coroutines.withTimeoutOrNull(5_000) { oldJob.join() }
-            kotlinx.coroutines.delay(100)
-        }
-        scope.cancel()
-
-        assertEquals(
-            "the successor's synthesizer must not be stopped by the old utterance's cancellation " +
-                "(stopCalls=$stopsAtSuccessor)",
-            0,
-            stopsAtSuccessor,
-        )
-        assertTrue(
-            "but the OLD utterance's own blocked track must have been stopped even though a " +
-                "successor owns the engine (ownedTrackStops=$ownedTrackStops)",
-            ownedTrackStops >= 1,
-        )
-        // @spec: the counter runs AFTER runCatching(stop), so on its own it is not evidence the stop
-        // SUCCEEDED. The owned track's own reported state is the direct measurement.
-        val ownedState = wired.ownedTrackPlaybackStateForTest()
-        assertTrue(
-            "the owned track must actually report a non-playing state, not merely have been asked " +
-                "to stop (state=$ownedState)",
-            ownedState == null || ownedState != android.media.AudioTrack.PLAYSTATE_PLAYING,
         )
         wired.release()
     }
@@ -720,6 +534,149 @@ class AndroidPlatformTtsEngineTest {
             writes.get(),
         )
         wired.release()
+    }
+
+    @Test
+    fun `reviewer old render exit preserves actual successor output`() {
+        val (wired, fake) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        fake.emitRealWav = true
+        wired.drainWaitMs = 0
+        val oldEntered = java.util.concurrent.CountDownLatch(1)
+        val newEntered = java.util.concurrent.CountDownLatch(1)
+        val oldRelease = java.util.concurrent.CountDownLatch(1)
+        val newRelease = java.util.concurrent.CountDownLatch(1)
+        val firstTrack = java.util.concurrent.atomic.AtomicReference<android.media.AudioTrack>()
+        val secondTrack = java.util.concurrent.atomic.AtomicReference<android.media.AudioTrack>()
+        wired.writeToSink = { track, _, _, count ->
+            if (firstTrack.compareAndSet(null, track)) {
+                oldEntered.countDown()
+                oldRelease.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                count / 2
+            } else {
+                secondTrack.set(track)
+                newEntered.countDown()
+                newRelease.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                count
+            }
+        }
+        val scope = CoroutineScope(Dispatchers.Default)
+        fun start(text: String, targetCount: Int): kotlinx.coroutines.Job {
+            val job = scope.launch {
+                try {
+                    wired.speak(text, "en")
+                } catch (_: Throwable) {}
+            }
+            assertTrue(
+                "synthesis must reach $targetCount",
+                (0 until 50).any {
+                    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                    Thread.sleep(20)
+                    fake.synthesizeCount >= targetCount
+                },
+            )
+            fake.listener?.onDone(fake.lastUtteranceId)
+            return job
+        }
+        val old = start("old", 1)
+        assertTrue("old write entered", oldEntered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        val successor = start("successor", 2)
+        assertTrue("successor write entered", newEntered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        val successorTrack = secondTrack.get()
+        assertTrue("outputs must be distinct tracks", successorTrack !== firstTrack.get())
+        assertEquals("successor must be playing before old exits", android.media.AudioTrack.PLAYSTATE_PLAYING, successorTrack.playState)
+        oldRelease.countDown()
+        val finished = runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(3000) {
+                old.join()
+                true
+            }
+        } == true
+        val afterOldExit = successorTrack.playState
+        val engineStops = fake.stopCalls
+        newRelease.countDown()
+        scope.cancel()
+        runBlocking { kotlinx.coroutines.withTimeoutOrNull(3000) { successor.join() } }
+        wired.release()
+        assertTrue("old render must finish", finished)
+        assertEquals("old exit must preserve actual successor track", android.media.AudioTrack.PLAYSTATE_PLAYING, afterOldExit)
+        assertEquals("old exit must preserve successor synthesizer", 0, engineStops)
+    }
+
+    @Test
+    fun `reviewer cancellation stops old blocked track and preserves actual successor`() {
+        val (wired, fake) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        fake.emitRealWav = true
+        wired.drainWaitMs = 0
+        val oldEntered = java.util.concurrent.CountDownLatch(1)
+        val newEntered = java.util.concurrent.CountDownLatch(1)
+        val oldRelease = java.util.concurrent.CountDownLatch(1)
+        val newRelease = java.util.concurrent.CountDownLatch(1)
+        val firstTrack = java.util.concurrent.atomic.AtomicReference<android.media.AudioTrack>()
+        val secondTrack = java.util.concurrent.atomic.AtomicReference<android.media.AudioTrack>()
+        wired.writeToSink = { track, _, _, count ->
+            if (firstTrack.compareAndSet(null, track)) {
+                oldEntered.countDown()
+                oldRelease.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                count / 2
+            } else {
+                secondTrack.set(track)
+                newEntered.countDown()
+                newRelease.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                count
+            }
+        }
+        val scope = CoroutineScope(Dispatchers.Default)
+        fun start(text: String, targetCount: Int): kotlinx.coroutines.Job {
+            val job = scope.launch {
+                try {
+                    wired.speak(text, "en")
+                } catch (_: Throwable) {}
+            }
+            assertTrue(
+                "synthesis must reach $targetCount",
+                (0 until 50).any {
+                    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                    Thread.sleep(20)
+                    fake.synthesizeCount >= targetCount
+                },
+            )
+            fake.listener?.onDone(fake.lastUtteranceId)
+            return job
+        }
+        val old = start("old", 1)
+        assertTrue("old write entered", oldEntered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        val successor = start("successor", 2)
+        assertTrue("successor write entered", newEntered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        val successorTrack = secondTrack.get()
+        assertTrue("outputs must be distinct tracks", successorTrack !== firstTrack.get())
+        assertEquals("successor must be playing before old exits", android.media.AudioTrack.PLAYSTATE_PLAYING, successorTrack.playState)
+        old.cancel()
+        Thread.sleep(300)
+        val oldStateBeforeUnblock = firstTrack.get().playState
+        val successorStateBeforeUnblock = successorTrack.playState
+        val stopCallsBeforeUnblock = fake.stopCalls
+        oldRelease.countDown()
+        val finished = runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(3000) {
+                old.join()
+                true
+            }
+        } == true
+        val afterOldExit = successorTrack.playState
+        val engineStops = fake.stopCalls
+        newRelease.countDown()
+        scope.cancel()
+        runBlocking { kotlinx.coroutines.withTimeoutOrNull(3000) { successor.join() } }
+        wired.release()
+        assertTrue("old render must finish", finished)
+        assertEquals("old local track must stop before blocked write returns", android.media.AudioTrack.PLAYSTATE_STOPPED, oldStateBeforeUnblock)
+        assertEquals("successor must keep playing before old unblock", android.media.AudioTrack.PLAYSTATE_PLAYING, successorStateBeforeUnblock)
+        assertEquals("old cancellation must preserve successor engine before unblock", 0, stopCallsBeforeUnblock)
+
+        assertEquals("old exit must preserve actual successor track", android.media.AudioTrack.PLAYSTATE_PLAYING, afterOldExit)
+        assertEquals("old exit must preserve successor synthesizer", 0, engineStops)
     }
 }
 

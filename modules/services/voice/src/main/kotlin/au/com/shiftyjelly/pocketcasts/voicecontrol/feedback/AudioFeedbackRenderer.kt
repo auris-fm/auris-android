@@ -51,12 +51,35 @@ class AudioFeedbackRenderer(
      */
     fun noteAudibleNow() = noteEmitted()
 
+    /**
+     * How many times the gate's attribution has been refreshed. Test visibility for the coverage
+     * contract: a cue longer than the heartbeat window needs more than its submission note.
+     */
+    private val emissionNotes = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** The attribution notes taken so far. See [emissionNotes]. */
+    fun emissionNotesForTest(): Int = emissionNotes.get()
+
     private fun noteEmitted() {
+        emissionNotes.incrementAndGet()
         _hasEmittedAudio.value = true
         _lastEmittedAtMs.value = SystemClock.elapsedRealtime()
     }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    /**
+     * Where the heartbeat and the earcon coverage run.
+     *
+     * Main by default, because this renderer is driven from the service's lifecycle and the gate's
+     * state is read on Main. A test may substitute a dispatcher it controls, which is the only way to
+     * observe a heartbeat deterministically -- real time plus a real dispatcher makes the assertion
+     * depend on scheduling rather than on the code.
+     */
+    var scopeDispatcherForTest: kotlinx.coroutines.CoroutineDispatcher? = null
+
+    /** The renderer's scope, created once so coverage is not orphaned by a later cancellation. */
+    private val scope: CoroutineScope by lazy {
+        CoroutineScope(SupervisorJob() + (scopeDispatcherForTest ?: Dispatchers.Main.immediate))
+    }
     private var currentJob: Job? = null
 
     /**
@@ -126,8 +149,39 @@ class AudioFeedbackRenderer(
     fun playEarcon(id: EarconId): Boolean {
         if (disposed) return false
         val played = earconPlayer.play(id)
-        if (played) noteEmitted()
+        if (played) {
+            noteEmitted()
+            // The cue has been ACCEPTED by the sink, which is not the same as its having finished
+            // sounding. A cue longer than the gate's attribution window would leave the microphone
+            // read as a foreign app part-way through our own cue -- the same failure the speak path
+            // covers with a heartbeat, and the reason this cannot rest on the submission note alone.
+            //
+            // The span is the clip's OWN duration, from the frames the sink accepted and the rate it
+            // accepted them at, so a shorter cue is not covered longer than it sounds and a longer one
+            // is not cut short by an assumed length.
+            val spanMs = earconPlayer.emittedDurationMs()
+            if (spanMs > EMISSION_HEARTBEAT_MS) {
+                coverEmission(spanMs)
+            }
+        }
         return played
+    }
+
+    /**
+     * Keeps the gate's attribution fresh for [spanMs] after an accepted cue.
+     *
+     * Runs on the renderer's own scope so a synchronous caller is not blocked, and is capped at the
+     * cue's own duration rather than an assumed constant.
+     */
+    private fun coverEmission(spanMs: Long) {
+        scope.launch {
+            var elapsed = 0L
+            while (elapsed < spanMs && !disposed) {
+                delay(EMISSION_HEARTBEAT_MS)
+                elapsed += EMISSION_HEARTBEAT_MS
+                noteEmitted()
+            }
+        }
     }
 
     /**

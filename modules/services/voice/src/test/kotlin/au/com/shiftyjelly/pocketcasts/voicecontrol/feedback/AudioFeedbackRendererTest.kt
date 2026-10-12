@@ -64,6 +64,66 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `a cue longer than the heartbeat window keeps the attribution fresh past its submission`() {
+        // The earcon/output-gate obligation: submission is not the end of the cue. A cue longer than
+        // the gate's attribution window would let the microphone read as a foreign app part-way
+        // through our own cue -- the same failure the speak path covers with a heartbeat.
+        //
+        // The cue here is three heartbeat windows long, so the submission note alone covers only its
+        // first window; anything observing the gate later than that needs the coverage.
+        val clock = java.util.concurrent.atomic.AtomicLong(0)
+        val notes = java.util.concurrent.atomic.AtomicInteger(0)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        // 3 x EMISSION_HEARTBEAT_MS (1_000 ms) at 16 kHz.
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
+
+        // A dispatcher the test controls, so the heartbeat's ticks are deterministic rather than
+        // dependent on real-time scheduling. Must be set before the renderer's scope is first used.
+        renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+        renderer.playEarcon(EarconId.WAKE_WORD)
+
+        // The submission note is taken synchronously, before any elapsed time.
+        val notesAtSubmission = 1
+        assertEquals(
+            "the cue's acceptance is reported at submission",
+            notesAtSubmission,
+            renderer.emissionNotesForTest(),
+        )
+        // The cue is still sounding well past the first window: the attribution must have been
+        // refreshed, which a submission-only note cannot do. The renderer's coverage runs on the Main
+        // dispatcher, so Robolectric's looper must be advanced for it to tick.
+        kotlinx.coroutines.runBlocking {
+            repeat(120) {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                kotlinx.coroutines.delay(20)
+            }
+        }
+        assertTrue(
+            "a cue longer than one window must keep the attribution fresh " +
+                "(notes=${renderer.emissionNotesForTest()} clock=${clock.get()})",
+            renderer.emissionNotesForTest() > notesAtSubmission,
+        )
+        renderer.release()
+    }
+
+    @Test
+    fun `a cue shorter than the heartbeat window needs no extra coverage`() {
+        // The control: the coverage is bounded by the cue's own duration, so a short cue is not
+        // covered for longer than it sounds.
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(200L)
+
+        renderer.playEarcon(EarconId.SUCCESS)
+
+        assertEquals(
+            "a 200 ms cue is covered by its single submission note",
+            1,
+            renderer.emissionNotesForTest(),
+        )
+        renderer.release()
+    }
+
+    @Test
     fun `an earcon the player refuses is not reported as emitted audio`() = runTest {
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(false)
 

@@ -144,6 +144,7 @@ class EarconPlayer(
             }
             lastPlayedId = id
             emittedFrames = offset
+            emittedRateHz = clip.sampleRateHz
             true
         } catch (e: Exception) {
             Timber.w(e, "[Earcon] play failed")
@@ -162,6 +163,23 @@ class EarconPlayer(
     @Volatile
     var emittedFrames: Int = 0
         private set
+
+    @Volatile
+    private var emittedRateHz: Int = 0
+
+    /**
+     * The duration of the cue the sink ACCEPTED, in milliseconds, from the frames accepted and the
+     * rate they were accepted at.
+     *
+     * This is how long the cue needs the gate's attribution to stay fresh -- not how long it has
+     * already sounded. Derived from the accepted count rather than the clip's nominal length, so a
+     * partial acceptance is covered only as far as the output actually took it.
+     */
+    fun emittedDurationMs(): Long {
+        val rate = emittedRateHz
+        if (rate <= 0) return 0L
+        return emittedFrames * 1_000L / rate
+    }
 
     /**
      * Frees this session's audio resources.

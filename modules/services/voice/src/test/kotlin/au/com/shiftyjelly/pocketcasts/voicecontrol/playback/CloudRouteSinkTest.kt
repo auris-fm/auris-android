@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
+import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteCapabilities
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteConversationEntry
@@ -47,6 +48,71 @@ class CloudRouteSinkTest {
         referencePositionMs = 1_230_000L,
         clientPositionMs = 50_000L,
     )
+
+    @Test
+    fun `the first turn CREATES a client-minted conversation and a later grace turn RESUMES it`() = runTest {
+        // @spec's admission contract: the CLIENT generates the handle, CREATE carries it, and a later
+        // turn inside the live grace window resumes the SAME conversation.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("first question", VoiceIntent.CloudTier.Premium, playbackContext)
+        val first = deps.routeTurns.last()
+
+        assertEquals(
+            "the first turn creates a conversation",
+            CloudConversationMode.Create,
+            first.conversationMode,
+        )
+        assertTrue(
+            "and carries the client-minted handle",
+            !first.conversationId.isNullOrBlank(),
+        )
+
+        // A later turn continuing the live grace window RESUMES the same conversation.
+        sink.routeToCloud(
+            "and another thing",
+            VoiceIntent.CloudTier.Premium,
+            playbackContext,
+            isLiveGraceTurn = true,
+        )
+        val second = deps.routeTurns.last()
+
+        assertEquals(
+            "a live grace turn resumes rather than creating",
+            CloudConversationMode.Resume,
+            second.conversationMode,
+        )
+        assertEquals(
+            "and the two turns SHARE one handle, which is what makes them one conversation",
+            first.conversationId,
+            second.conversationId,
+        )
+    }
+
+    @Test
+    fun `a later turn outside the grace window begins a new conversation`() = runTest {
+        // The control: RESUME is about continuing a live conversation, not about being the second
+        // turn. Without the grace window a new question starts a new conversation.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+
+        sink.routeToCloud("first question", VoiceIntent.CloudTier.Premium, playbackContext)
+        val first = deps.routeTurns.last()
+        sink.routeToCloud("an unrelated question", VoiceIntent.CloudTier.Premium, playbackContext)
+        val second = deps.routeTurns.last()
+
+        assertEquals(CloudConversationMode.Create, second.conversationMode)
+        assertTrue(
+            "a new conversation carries a DIFFERENT handle (first=${first.conversationId} " +
+                "second=${second.conversationId})",
+            first.conversationId != second.conversationId,
+        )
+    }
 
     @Test
     fun `a discovery turn after saved reference state carries no playback positions at all`() = runTest {

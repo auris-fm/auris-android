@@ -1376,18 +1376,51 @@ open class PlaybackManager @Inject constructor(
         // The player is the authority on where playback IS, and reading it here, under the same boundary
         // that decides and before the mutation is issued, is what makes the value a genuine
         // pre-action snapshot rather than a later observation of something that has already moved.
-        // CAPTURED BEFORE THE MUTATION AND AFTER THE BINDING IS ESTABLISHED. `getCurrentPositionMs`
-        // suspends, so it cannot be read inside the monitor -- but it is still a genuine PRE-action
-        // snapshot, because nothing has moved the player yet: the seek is issued below. The ORDER is
-        // what makes it pre-action, and the binding check above is what makes it the right episode's.
+        // THE SNAPSHOT IS TAKEN AT THE MUTATION, NOT BY THIS WRAPPER.
+        //
+        // Taking it here and then calling the seek leaves a SUSPENSION in between, so a replacement can
+        // land after the snapshot and before the decision -- and the position would then belong to a
+        // different episode than the one the operation was accepted for. A snapshot a wrapper takes
+        // before a later suspending decision is not the same thing as one captured by the mutation
+        // itself, and only the latter can be attributed to the accepted operation.
+        //
+        // `seekToTimeMsInternalIfEpisode` therefore RETURNS the position it saw when it decided, so the
+        // value and the acceptance are one observation.
+        val accepted = seekToTimeMsInternalIfEpisodeCapturing(episodeUuid, positionMs) ?: return null
+        return ScopedMutation(accepted.first, accepted.second)
+    }
+
+    /**
+     * [seekToTimeMsInternalIfEpisode], also reporting the PRE-ACTION POSITION it saw when it decided.
+     *
+     * THE SNAPSHOT AND THE DECISION ARE ONE OBSERVATION. A caller that reads the position before calling
+     * this leaves a suspension between the read and the decision, and a replacement landing in that gap
+     * would make the reported position belong to a different episode than the accepted operation. Reading
+     * it here, inside the same step that decides, is what ties the value to the acceptance.
+     *
+     * @return the accepted episode and its pre-action position, or null when refused.
+     */
+    private suspend fun seekToTimeMsInternalIfEpisodeCapturing(
+        episodeUuid: String,
+        positionMs: Int,
+    ): Pair<String, Int?>? {
+        val selected = getCurrentEpisode()
+        if (selected?.uuid != episodeUuid) return null
+        if (player == null) return null
+        withContext(Dispatchers.Main) {
+            playbackStateRelay.blockingFirst().let { playbackState ->
+                playbackStateRelay.accept(playbackState.copy(positionMs = positionMs, lastChangeFrom = LastChangeFrom.OnUserSeeking.value))
+            }
+        }
+        // THE POSITION AND THE BINDING ARE READ TOGETHER, immediately before the mutation.
         val target = synchronized(selectedPlayerLock) {
-            val selected = getCurrentEpisode()
-            if (selected?.uuid != episodeUuid) return null
+            val current = getCurrentEpisode()
+            if (current?.uuid != episodeUuid) return null
             player?.takeIf { it.episodeUuid == episodeUuid } ?: return null
         }
         val before = target.getCurrentPositionMs()
-        if (!seekToTimeMsInternalIfEpisode(episodeUuid, positionMs)) return null
-        return ScopedMutation(episodeUuid, before)
+        if (!target.seekToTimeMsIfEpisode(positionMs, episodeUuid)) return null
+        return episodeUuid to before
     }
 
     private suspend fun seekToTimeMsInternal(duration: Duration) {

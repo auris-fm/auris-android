@@ -121,6 +121,51 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `a cue observed CONSUMED is attributed, because completion IS measured rendering`() = runTest {
+        // @reviewer's measured case. The head had ALREADY passed every accepted frame when the first
+        // observation happened, so `completion()` reported Consumed immediately. The heartbeat returned
+        // on Consumed WITHOUT noting, so a cue that finished between observations was never attributed --
+        // treated as if completion proved nothing, when it is in fact the STRONGEST evidence of sounding.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(100))
+
+        assertTrue(
+            "a consumed cue must be attributed: the head passing it IS evidence it sounded",
+            renderer.hasEmittedAudio.value,
+        )
+    }
+
+    @Test
+    fun `a cue still QUEUED past its estimate is still observed until it sounds`() = runTest {
+        // @reviewer's second measured case, and the same defect in a different shape: the observation
+        // stopped when the cue's ESTIMATED duration passed, while the cue was still queued. The estimate
+        // is a bound on the WAIT, not a statement that the cue is over -- stopping at it ends the
+        // observation BEFORE the sound it is waiting for.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(6L)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(100))
+        assertFalse("a queued cue is not attributed yet", renderer.hasEmittedAudio.value)
+
+        // It sounds LATER, after the estimate had already passed.
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+
+        assertTrue(
+            "a queued cue that sounds after its estimate must still be attributed",
+            renderer.hasEmittedAudio.value,
+        )
+    }
+
+    @Test
     fun `a cue observed to be SOUNDING is reported as emitted audio`() = runTest {
         // The positive control, so the rule above is not satisfied by never attributing anything.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)

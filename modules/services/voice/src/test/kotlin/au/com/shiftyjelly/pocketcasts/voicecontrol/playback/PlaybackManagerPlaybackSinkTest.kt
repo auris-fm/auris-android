@@ -43,8 +43,17 @@ class PlaybackManagerPlaybackSinkTest {
             ),
         )
 
-        sink(manager).seekTo(positionSeconds = 100, episodeDurationSeconds = 1800, expectedEpisodeId = "episode-A")
+        val result = sink(manager).seekTo(
+            positionSeconds = 100,
+            episodeDurationSeconds = 1800,
+            expectedEpisodeId = "episode-A",
+        )
 
+        assertEquals(
+            "a seek bound to another episode is REFUSED, and the refusal is reported as one",
+            EpisodeOperationResult.Refused,
+            result,
+        )
         verify(manager, org.mockito.kotlin.never()).seekToTimeMsSuspend(
             org.mockito.kotlin.any(),
             org.mockito.kotlin.anyOrNull(),
@@ -64,11 +73,31 @@ class PlaybackManagerPlaybackSinkTest {
             ),
         )
 
-        sink(manager).seekTo(positionSeconds = 100, episodeDurationSeconds = 1800, expectedEpisodeId = "episode-A")
+        org.mockito.kotlin.whenever(manager.seekIfPlayingToTimeMs(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.anyOrNull()))
+            .thenReturn(true)
 
+        val result = sink(manager).seekTo(
+            positionSeconds = 100,
+            episodeDurationSeconds = 1800,
+            expectedEpisodeId = "episode-A",
+        )
+
+        // THE OWNING OPERATION IS WHAT MUST BE CALLED. `seekIfPlayingToTimeMs` re-reads the selection
+        // inside the operation, immediately before seeking, so it is the only place the check and the
+        // mutation are one step. A position-only `seekToTimeMsSuspend` here would mean the adapter had
+        // checked and then seeked separately -- the race this delegation exists to remove.
         val positionMs = argumentCaptor<Int>()
-        verify(manager).seekToTimeMsSuspend(positionMs.capture(), org.mockito.kotlin.anyOrNull())
+        verify(manager).seekIfPlayingToTimeMs(
+            org.mockito.kotlin.eq("episode-A"),
+            positionMs.capture(),
+            org.mockito.kotlin.anyOrNull(),
+        )
         assertEquals(100_000, positionMs.firstValue)
+        assertEquals(EpisodeOperationResult.Accepted, result)
+        verify(manager, org.mockito.kotlin.never()).seekToTimeMsSuspend(
+            org.mockito.kotlin.any(),
+            org.mockito.kotlin.anyOrNull(),
+        )
     }
 
     @Test

@@ -1227,6 +1227,19 @@ open class PlaybackManager @Inject constructor(
      */
     private val selectedPlayerLock = Any()
 
+    /**
+     * The outcome of an episode-scoped mutation, with the episode and pre-action position THE OWNER
+     * captured when it decided.
+     *
+     * The pre-position travels WITH the result rather than being re-read by the caller afterwards: a
+     * caller that reads live state once the operation was accepted reads whatever is selected NOW, and a
+     * later change would attribute the position to an episode the operation never touched.
+     */
+    data class ScopedMutation(
+        val episodeUuid: String,
+        val preActionPositionMs: Int?,
+    )
+
     // NOT YET PROTECTED BY [selectedPlayerLock]: `playNow`/`playNowSync`, which is the path that WRITES
     // the selected episode and reconfigures a reused player for it. The seek path validates the player's
     // OWN episode at its mutation, which is what makes a captured reference safe there; the write side
@@ -1311,6 +1324,27 @@ open class PlaybackManager @Inject constructor(
         }
         seekComplete?.invoke()
         return true
+    }
+
+    /**
+     * [seekIfPlayingToTimeMs] reporting the OWNER'S OWN pre-action position.
+     *
+     * The position is captured under the same boundary that decides the mutation, so it describes the
+     * episode the operation was accepted for rather than whatever a caller might read later.
+     */
+    suspend fun seekIfPlayingCapturing(
+        episodeUuid: String,
+        positionMs: Int,
+    ): ScopedMutation? {
+        if (getCurrentEpisode()?.uuid != episodeUuid) return null
+        cancelPendingChapterSeek()
+        val before = synchronized(selectedPlayerLock) {
+            val selected = getCurrentEpisode()
+            if (selected?.uuid != episodeUuid) return null
+            selected.playedUpToMs
+        }
+        if (!seekToTimeMsInternalIfEpisode(episodeUuid, positionMs)) return null
+        return ScopedMutation(episodeUuid, before)
     }
 
     private suspend fun seekToTimeMsInternal(duration: Duration) {
@@ -2632,7 +2666,16 @@ open class PlaybackManager @Inject constructor(
             }
             play(sourceView, posUpdatedOnPlayerReset)
         } else {
-            player?.load(episode.playedUpToMs)
+            // THE REUSED PLAYER IS POINTED AT THE NEWLY SELECTED EPISODE UNDER THE BOUNDARY. This is the
+            // write the seek path's episode check must be ordered against, and taking the lock for it is
+            // what makes that check meaningful -- a lock one side takes and the other does not excludes
+            // nothing.
+            //
+            // `load` SUSPENDS, so it is called after the boundary is released, exactly as the seek is.
+            // What the boundary establishes is which player is being reconfigured and that the selection
+            // did not change beneath the decision; the call itself then acts on that captured player.
+            val reconfigured = synchronized(selectedPlayerLock) { player }
+            reconfigured?.load(episode.playedUpToMs)
             onPlayerPaused()
         }
     }

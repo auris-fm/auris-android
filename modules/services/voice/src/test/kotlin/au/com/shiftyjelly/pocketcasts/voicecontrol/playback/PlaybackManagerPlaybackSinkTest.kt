@@ -39,8 +39,8 @@ class PlaybackManagerPlaybackSinkTest {
         // The OWNER's operation decides, so the mock must answer it: this case is about the adapter
         // consulting the owner, not about the owner's own behaviour.
         org.mockito.kotlin.whenever(
-            manager.seekIfPlayingToTimeMs(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.anyOrNull()),
-        ).thenReturn(false)
+            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()),
+        ).thenReturn(null)
         org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenReturn(
             au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
                 uuid = "episode-B",
@@ -75,24 +75,25 @@ class PlaybackManagerPlaybackSinkTest {
         // The operation must be refused, and it must NOT touch the replacement player: a seek that
         // reaches `player.seekToTimeMs` after the replacement has moved the player is exactly the
         // cross-episode mutation this boundary exists to prevent.
+        val replaced = java.util.concurrent.atomic.AtomicBoolean(false)
         val manager = mock<PlaybackManager>()
-        var consultations = 0
         org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenAnswer {
-            consultations++
             au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
-                // A on the reads taken BEFORE the owner's deciding step, B from then on.
-                uuid = if (consultations <= 1) "episode-A" else "episode-B",
+                uuid = if (replaced.get()) "episode-B" else "episode-A",
                 podcastUuid = "podcast-1",
                 publishedDate = java.util.Date(),
             )
         }
         org.mockito.kotlin.whenever(
-            manager.seekIfPlayingToTimeMs(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.anyOrNull()),
+            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()),
         ).thenAnswer {
-            // THE OWNER'S MUTATION, modelled at the step where it decides. The replacement has landed by
-            // now -- the consultations before this one are the reads taken earlier -- so the owner must
-            // report its REFUSAL here. Answering from the FIRST read would be the defect itself.
-            manager.getCurrentEpisode()?.uuid == "episode-A"
+            // THE REPLACEMENT LANDS AT THE OWNER'S DECIDING STEP. The owner is where the decision is
+            // made, so it is where the replacement must be observable; the payload it returns is the
+            // decision it actually reached.
+            replaced.set(true)
+            manager.getCurrentEpisode()
+                ?.takeIf { it.uuid == "episode-A" }
+                ?.let { PlaybackManager.ScopedMutation(it.uuid, it.playedUpToMs) }
         }
 
         val result = sink(manager).seekTo(
@@ -122,21 +123,28 @@ class PlaybackManagerPlaybackSinkTest {
         // where nothing can await in between. This drives that: the manager reports episode A on the
         // FIRST consultation and B on the SECOND, which is exactly a replacement landing during the
         // step, and the seek must then be refused.
-        var consultations = 0
+        // THE REPLACEMENT LANDS BEFORE THE OWNER DECIDES. The adapter may read the selection for its
+        // own early refusal; the OWNER'S ANSWER is what must observe the replacement, because the
+        // owner is where the deciding read happens.
+        val replaced = java.util.concurrent.atomic.AtomicBoolean(false)
         val manager = mock<PlaybackManager>()
         org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenAnswer {
-            consultations++
             au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
-                uuid = if (consultations == 1) "episode-A" else "episode-B",
+                uuid = if (replaced.get()) "episode-B" else "episode-A",
                 podcastUuid = "podcast-1",
                 publishedDate = java.util.Date(),
             )
         }
         org.mockito.kotlin.whenever(
-            manager.seekIfPlayingToTimeMs(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.anyOrNull()),
+            manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()),
         ).thenAnswer {
-            // Mirrors the owner: it decides from the CURRENT episode at the moment of the mutation.
-            manager.getCurrentEpisode()?.uuid == "episode-A"
+            // THE OWNER'S DECIDING STEP: the replacement has landed by now, so it observes B and
+            // refuses. Returning A's payload would be the defect itself -- an operation performed on
+            // an episode that is no longer selected.
+            replaced.set(true)
+            manager.getCurrentEpisode()
+                ?.takeIf { it.uuid == "episode-A" }
+                ?.let { PlaybackManager.ScopedMutation(it.uuid, it.playedUpToMs) }
         }
 
         val result = sink(manager).seekTo(
@@ -162,12 +170,12 @@ class PlaybackManagerPlaybackSinkTest {
         // The owner here answers on a delay, which is exactly the shape that used to be misreported: a
         // launch-and-return would answer false before this completed.
         val manager = mock<PlaybackManager>()
-        org.mockito.kotlin.whenever(manager.seekIfPlayingToTimeMs(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.anyOrNull()))
+        org.mockito.kotlin.whenever(manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()))
             .thenAnswer {
                 // A NON-SUSPENDING delay: the point is that the answer arrives AFTER the call returns,
                 // which is what a launch-and-read-a-flag cannot report.
                 Thread.sleep(50)
-                true
+                PlaybackManager.ScopedMutation("episode-A", 0)
             }
         org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenReturn(
             au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
@@ -204,8 +212,8 @@ class PlaybackManagerPlaybackSinkTest {
             ),
         )
 
-        org.mockito.kotlin.whenever(manager.seekIfPlayingToTimeMs(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.anyOrNull()))
-            .thenReturn(true)
+        org.mockito.kotlin.whenever(manager.seekIfPlayingCapturing(org.mockito.kotlin.any(), org.mockito.kotlin.any()))
+            .thenReturn(PlaybackManager.ScopedMutation("episode-A", 100_000))
 
         val result = sink(manager).seekTo(
             positionSeconds = 100,
@@ -218,10 +226,9 @@ class PlaybackManagerPlaybackSinkTest {
         // mutation are one step. A position-only `seekToTimeMsSuspend` here would mean the adapter had
         // checked and then seeked separately -- the race this delegation exists to remove.
         val positionMs = argumentCaptor<Int>()
-        verify(manager).seekIfPlayingToTimeMs(
+        verify(manager).seekIfPlayingCapturing(
             org.mockito.kotlin.eq("episode-A"),
             positionMs.capture(),
-            org.mockito.kotlin.anyOrNull(),
         )
         assertEquals(100_000, positionMs.firstValue)
         assertTrue("accepted, reporting the episode it was bound to", result is EpisodeOperationResult.Accepted)

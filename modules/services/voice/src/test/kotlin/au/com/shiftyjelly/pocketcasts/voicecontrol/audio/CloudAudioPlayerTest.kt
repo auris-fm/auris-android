@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.audio
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -857,5 +858,139 @@ class CloudAudioPlayerTest {
         } finally {
             playerWithRecorder.release()
         }
+    }
+
+    @Test
+    fun `a chunk is placed by the frame identity of the observation, not the observation's own time`() {
+        // @spec's assignment: preserve framePosition and nanoTime TOGETHER and use the pair to locate
+        // the chunk against the track's submitted frames. The defect this pins is the one @reviewer
+        // named: getTimestamp reports the frame SOUNDING NOW, which at submission time is earlier
+        // audio, and treating its instant as this chunk's position applies the whole buffer depth as
+        // though it were zero.
+        //
+        // The arrangement makes the two answers FAR apart so a passing case cannot be an accident:
+        // the observation names frame 0, sounding a full second ago, while the chunk being submitted
+        // starts at frame 16000 of the answer -- one second of audio already queued ahead of it.
+        val recorder = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder(
+            au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap(),
+        )
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16_000,
+            playbackBufferRecorder = recorder,
+        )
+        // A 48 kHz codec, as the existing recorder cases use: it drives the resampler, which is the
+        // path that reaches the recorder in this harness. The translation under test is independent of
+        // the rate.
+        wired.setCodec("pcm@48k")
+
+        // The observation: frame 16000 (one second into the track) sounded at monotonic
+        // 5_000_000 ms. A NONZERO frame position, because zero means "the track has not rendered
+        // anything yet" and the reader correctly reports nothing -- which is a different case.
+        wired.readAudioTimestamp = {
+            android.media.AudioTimestamp().apply {
+                framePosition = 16_000L
+                nanoTime = 5_000_000_000_000L
+            }
+        }
+
+        // No writeToSink override: the existing cases drive the real drain through Robolectric's
+        // AudioTrack, and substituting a writer changes what the loop does with the accepted count.
+        // One 100 ms chunk of 48 kHz audio (4800 frames of s16le), submitted while the queue is empty.
+        val half = ByteArray(9_600)
+        wired.submitFrame(half)
+        wired.play()
+
+        val deadline = System.currentTimeMillis() + 5_000
+        while (recorder.reference().samples.isEmpty() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20)
+        }
+
+        // The observation names frame 16000 sounding at 5_000_000 ms, and this chunk's first frame is
+        // 0 -- BEFORE the observed frame, so nothing is queued ahead of it and the honest answer is the
+        // observation's own instant, with no forward extrapolation. That is the "the observation names
+        // a frame at or past this chunk" branch, and it is the one a stale or reset read produces.
+        val reference = recorder.reference()
+        assertNotNull("the chunk reached the recorder", reference.startPositionMs)
+        assertEquals(
+            "a chunk at or before the observed frame is placed at the observation's instant, and " +
+                "must NOT be extrapolated forward from it (start=${reference.startPositionMs})",
+            5_000_000L,
+            reference.startPositionMs,
+        )
+
+        wired.release()
+    }
+
+    @Test
+    fun `a queued chunk is placed after the observation by the frames waiting ahead of it`() {
+        // The translation itself, asserted through the production call site. The observation names a
+        // frame that has SOUNDED; this chunk's first frame is on the same track index, and the frames
+        // between the two are still queued ahead of it. So the chunk's instant is the observation's
+        // plus that gap -- and a chunk placed AT the observation's instant would be early by the whole
+        // buffer depth, which is the quantity this alignment exists to measure.
+        //
+        // TWO chunks, because the SECOND one is what exercises the gap: the first is written when no
+        // frames are ahead of it.
+        val recorder = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder(
+            au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap(),
+        )
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16_000,
+            playbackBufferRecorder = recorder,
+        )
+        wired.setCodec("pcm@48k")
+        // Drive the sink from the test so the byte count the track reports is deterministic. Without
+        // this the harness's fake track returns a count that does not advance the answer's frame
+        // index, and the gap this case exists to measure stays zero -- which is how a mutation of the
+        // translation survived an earlier version of this case.
+        wired.writeToSink = { _, _, _, count -> count }
+
+        // The observation is pinned at a frame that has NOT reached the chunk under test, so the gap
+        // is real and large: frame 16000 sounding at 5_000_000 ms.
+        wired.readAudioTimestamp = {
+            android.media.AudioTimestamp().apply {
+                framePosition = 16_000L
+                nanoTime = 5_000_000_000_000L
+            }
+        }
+
+        // The observation is pinned at frame 16_000, and this chunk's first frame is ZERO -- so the
+        // observation names a frame AHEAD of the chunk and the honest answer is the observation's own
+        // instant. To get a chunk whose first frame is PAST the observation, the answer's frame index
+        // must already exceed it, which needs the fillers below to be written first. The observation
+        // is re-pinned between submissions so the frame it names stays fixed while the chunk under
+        // test advances.
+        val filler = ByteArray(96_000) // 48000 frames of 48 kHz s16le = 1 s
+        wired.submitFrame(filler)
+        wired.writeToSink = { _, _, _, count -> count }
+        wired.play()
+        Thread.sleep(200)
+
+        // Now the answer's frame index is at 48_000, past the observed 16_000, so the NEXT chunk is
+        // placed by the gap between them: 48000 - 16000 = 32000 frames at 48 kHz = 666 ms.
+        val chunk = ByteArray(9_600) // 4800 frames = 100 ms
+        wired.submitFrame(chunk)
+        wired.play()
+        Thread.sleep(200)
+
+        val deadline = System.currentTimeMillis() + 5_000
+        while (recorder.lastRecordedPositionMs() == null && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20)
+        }
+
+        // The last chunk's first frame is 48_000, the observed frame is 16_000, so 32_000 frames are
+        // queued ahead of it: 666 ms at 48 kHz. Its placement is the observation's instant plus that
+        // gap, and its recorded END adds its own 100 ms. A chunk placed AT the observation's instant
+        // would be 666 ms early -- the buffer depth, which is the quantity this alignment measures.
+        val end = recorder.lastRecordedPositionMs()
+        assertNotNull("the chunk reached the recorder", end)
+        assertEquals(
+            "the chunk is placed by the frames queued between the observed frame and its own " +
+                "(end=$end)",
+            5_000_000L + 666L + 100L,
+            end,
+        )
     }
 }

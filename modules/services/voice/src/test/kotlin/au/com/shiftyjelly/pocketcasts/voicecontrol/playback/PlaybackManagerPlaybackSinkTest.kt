@@ -93,6 +93,10 @@ class PlaybackManagerPlaybackSinkTest {
         val proceed = kotlinx.coroutines.CompletableDeferred<Unit>()
         var configured = "episode-A"
         val target = object : au.com.shiftyjelly.pocketcasts.repositories.playback.Player by mock() {
+            // THE SUBSTITUTED PLAYER IS A REAL ENFORCER, as LocalPlayer and CastPlayer are. Without this
+            // the manager refuses the bound call as unsupported and the case would test that refusal
+            // instead of the re-pointing it is about.
+            override val enforcesEpisodeBoundSeek: Boolean get() = true
             override val episodeUuid: String? get() = configured
             override suspend fun seekToTimeMs(positionMs: Int) {
                 entered.complete(Unit)
@@ -156,6 +160,54 @@ class PlaybackManagerPlaybackSinkTest {
         }
     }
 
+    @Test
+    fun `the REAL manager REFUSES a bound seek on a player that cannot enforce the binding`() = runTest {
+        // A player without the enforcement reports `enforcesEpisodeBoundSeek = false`, so the default
+        // check-then-delegate would carry the very gap the contract exists to close. The bound call must
+        // be UNAVAILABLE for it rather than FALLING BACK to an unrestricted seek -- which is what
+        // "refuse unsupported bound execution rather than fall back" means.
+        val manager = mock<PlaybackManager>()
+        var reached = false
+        val target = object : au.com.shiftyjelly.pocketcasts.repositories.playback.Player by mock() {
+            override val episodeUuid: String? get() = "episode-A"
+            override suspend fun seekToTimeMs(positionMs: Int) {
+                reached = true
+            }
+        }
+        org.mockito.kotlin.whenever(manager.player).thenReturn(target)
+        org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenReturn(
+            au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+                uuid = "episode-A",
+                podcastUuid = "podcast-1",
+                publishedDate = java.util.Date(),
+            ),
+        )
+        org.mockito.kotlin.whenever(manager.playbackStateRelay)
+            .thenReturn(com.jakewharton.rxrelay2.BehaviorRelay.createDefault(PlaybackState()))
+        PlaybackManager::class.java.getDeclaredField("selectedPlayerLock")
+            .apply { isAccessible = true }
+            .set(manager, Any())
+        val method = PlaybackManager::class.java.declaredMethods
+            .single { it.name == "seekToTimeMsInternalIfEpisode" }
+            .apply { isAccessible = true }
+
+        kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
+        try {
+            val accepted = kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn<Boolean> { continuation ->
+                method.invoke(manager, "episode-A", 100_000, continuation)
+            }
+            runCurrent()
+
+            assertFalse(
+                "an unsupported player must make the bound call UNAVAILABLE, not seek unrestricted",
+                accepted,
+            )
+            assertFalse("and no seek may be performed (reached=$reached)", reached)
+        } finally {
+            kotlinx.coroutines.Dispatchers.resetMain()
+        }
+    }
+
     /**
      * Executes the ACTUAL private manager seek against a substituted player whose `seekToTimeMs`
      * suspends, then re-points that player at another episode WHILE THE SEEK IS IN FLIGHT.
@@ -173,6 +225,10 @@ class PlaybackManagerPlaybackSinkTest {
         var configured = "episode-A"
         var actedOn: String? = null
         val target = object : au.com.shiftyjelly.pocketcasts.repositories.playback.Player by mock() {
+            // THE SUBSTITUTED PLAYER IS A REAL ENFORCER, as LocalPlayer and CastPlayer are. Without this
+            // the manager refuses the bound call as unsupported and the case would test that refusal
+            // instead of the re-pointing it is about.
+            override val enforcesEpisodeBoundSeek: Boolean get() = true
             override val episodeUuid: String? get() = configured
             override suspend fun seekToTimeMs(positionMs: Int) {
                 entered.complete(Unit)

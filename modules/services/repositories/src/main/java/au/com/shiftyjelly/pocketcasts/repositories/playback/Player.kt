@@ -96,6 +96,19 @@ interface Player {
         seekToTimeMs(positionMs)
         return true
     }
+
+    /**
+     * Whether this player can enforce [seekToTimeMsIfEpisode]'s binding itself.
+     *
+     * THE DEFAULT ABOVE IS A FALLBACK, NOT AN ENFORCEMENT. It checks and then delegates, so it carries the
+     * same check-then-act gap the contract exists to close -- it is correct only for an implementation
+     * whose `episodeUuid` cannot change while a seek is in flight. A player that can be RE-POINTED must
+     * report true here and override the operation, which is why [LocalPlayer] and [CastPlayer] both do.
+     *
+     * A BOUND CALLER CAN REFUSE AN UNSUPPORTED PLAYER rather than fall back to an unrestricted seek:
+     * `false` here means "do not rely on the default for a binding".
+     */
+    val enforcesEpisodeBoundSeek: Boolean get() = false
     suspend fun isPlaying(): Boolean
     suspend fun isBuffering(): Boolean
     suspend fun durationMs(): Int?

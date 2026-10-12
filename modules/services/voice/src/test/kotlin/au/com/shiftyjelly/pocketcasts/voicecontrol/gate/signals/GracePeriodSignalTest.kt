@@ -288,6 +288,41 @@ class GracePeriodSignalTest {
     }
 
     @Test
+    fun `a wake transition blocks on the same monitor the allowance claim holds`() {
+        // @reviewer's concurrent-transition case: `issueEscalation` alone being synchronized excludes
+        // NOTHING if the writers take a different lock. This holds the claim's monitor and runs a WAKE
+        // from another thread, so the wake must WAIT -- which is what makes the claim atomic against the
+        // transition that would change what it is claiming against.
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWakeWordDetected()
+        val claimed = java.util.concurrent.CountDownLatch(1)
+        val wakeDone = java.util.concurrent.CountDownLatch(1)
+
+        // Hold the monitor from another thread while the wake runs.
+        val holder = Thread {
+            synchronized(signal.windowMonitorForTest()) {
+                claimed.countDown()
+                Thread.sleep(400)
+            }
+        }.apply { start() }
+        claimed.await(2, java.util.concurrent.TimeUnit.SECONDS)
+
+        val wake = Thread {
+            signal.onWakeWordDetected()
+            wakeDone.countDown()
+        }.apply { start() }
+
+        // The wake must NOT have completed while the monitor is held.
+        val completedWhileHeld = wakeDone.await(150, java.util.concurrent.TimeUnit.MILLISECONDS)
+        wake.join(3_000)
+        holder.join(3_000)
+        assertTrue(
+            "a wake transition must block on the monitor the claim holds, not proceed beside it",
+            !completedWhileHeld,
+        )
+    }
+
+    @Test
     fun `a claim made under a superseded window does not spend the successor's allowance`() {
         // The property the engine case could not isolate: the ALLOWANCE belongs to the window, so a
         // claim made for an OLD window must not leave the NEW one reading as spent. A wake that arrives

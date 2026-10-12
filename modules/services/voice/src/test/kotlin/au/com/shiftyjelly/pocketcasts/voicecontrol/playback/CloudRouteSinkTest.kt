@@ -50,6 +50,102 @@ class CloudRouteSinkTest {
     )
 
     @Test
+    fun `a fresh wake begins a new conversation even though an earlier handle exists`() = runTest {
+        // @reviewer's executed finding: a fresh wake RESUMEd the previous conversation, which makes a
+        // new user act look like a continuation of whatever was being discussed before it.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(1)
+
+        // A turn captured under the FIRST window's wake: it creates.
+        sink.routeToCloud(
+            "what is this about",
+            VoiceIntent.CloudTier.Premium,
+            playbackContext,
+            capturedOrigin = 1,
+            isWakeOriginated = true,
+        )
+        val first = deps.routeTurns.last()
+        assertEquals(CloudConversationMode.Create, first.conversationMode)
+
+        // A second window, also opened by a wake, and INSIDE the live grace window -- so the only
+        // thing that can distinguish it from a continuation is the wake origin. Without that flag this
+        // input is exactly a resume, which is what makes the case able to fail on the flag.
+        deps.conversationAdmission.beginOrigin(2)
+        sink.routeToCloud(
+            "a completely new question",
+            VoiceIntent.CloudTier.Premium,
+            playbackContext,
+            isLiveGraceTurn = true,
+            capturedOrigin = 2,
+            isWakeOriginated = true,
+        )
+        val second = deps.routeTurns.last()
+        assertEquals(
+            "a fresh wake begins a new conversation",
+            CloudConversationMode.Create,
+            second.conversationMode,
+        )
+        assertTrue(
+            "with its own handle (first=${first.conversationId} second=${second.conversationId})",
+            first.conversationId != second.conversationId,
+        )
+    }
+
+    @Test
+    fun `a wake-free request in the same live window resumes, and a stale origin is refused`() = runTest {
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(7)
+
+        sink.routeToCloud(
+            "first",
+            VoiceIntent.CloudTier.Premium,
+            playbackContext,
+            capturedOrigin = 7,
+            isWakeOriginated = true,
+        )
+        val created = deps.routeTurns.last()
+
+        // A wake-FREE follow-up in the SAME window continues the conversation.
+        sink.routeToCloud(
+            "and another thing",
+            VoiceIntent.CloudTier.Premium,
+            playbackContext,
+            isLiveGraceTurn = true,
+            capturedOrigin = 7,
+            isWakeOriginated = false,
+        )
+        val resumed = deps.routeTurns.last()
+        assertEquals(CloudConversationMode.Resume, resumed.conversationMode)
+        assertEquals(
+            "the follow-up resumes the conversation the wake created",
+            created.conversationId,
+            resumed.conversationId,
+        )
+
+        // A STALE captured origin is refused outright, even though a newer window is live.
+        deps.conversationAdmission.beginOrigin(8)
+        val turnsBefore = deps.routeTurns.size
+        sink.routeToCloud(
+            "a request captured before the successor wake",
+            VoiceIntent.CloudTier.Premium,
+            playbackContext,
+            capturedOrigin = 7,
+            isWakeOriginated = false,
+        )
+        assertEquals(
+            "a superseded origin must not reach transport at all",
+            turnsBefore,
+            deps.routeTurns.size,
+        )
+    }
+
+    @Test
     fun `cloud frames carry NO local conversation history, asserted on the serialized frame`() = runTest {
         // @spec's requirement: the omission is asserted on the ACTUAL serialized cloud frame, with
         // local conversation memory POPULATED -- a case that left memory empty could not tell an
@@ -1966,6 +2062,9 @@ class CloudRouteSinkTest {
             override fun current(): PlaybackContext = PlaybackContext(clientPositionMs = clientPositionMs)
         }
 
+        /** The admission component the sink uses, so a case can declare its live window. */
+        val conversationAdmission = CloudConversationAdmission()
+
         fun sink(): CloudRouteSink = CloudRouteSink(
             resolveBaseUrl = { baseUrl },
             tokenProvider = object : CloudTokenProviding {
@@ -1976,6 +2075,7 @@ class CloudRouteSinkTest {
             playbackSink = playback,
             fingerprintTimingManager = fingerprintTimingManager,
             playbackContextProvider = playbackContextProvider,
+            conversationAdmission = conversationAdmission,
             cloudPlaybackContextState = cloudPlaybackContextState,
             analytics = analytics,
             routeInvoker = { turn: CloudRouteTurn ->

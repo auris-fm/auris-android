@@ -35,10 +35,13 @@ class CloudConversationAdmission @Inject constructor() {
      * @param isLiveGraceTurn true when this turn continues an answer still inside its grace window. A
      * live grace turn RESUMES; anything else begins a new conversation and CREATES.
      */
-    fun prepare(origin: Long, isLiveGraceTurn: Boolean): Prepared? = synchronized(lock) {
+    fun prepare(origin: Long, isLiveGraceTurn: Boolean, isWakeOriginated: Boolean): Prepared? = synchronized(lock) {
         if (origin != currentOrigin) return null
         val existing = handle
-        if (isLiveGraceTurn && existing != null) {
+        // A WAKE ORIGIN ALWAYS STARTS A CONVERSATION: a request captured under a wake is a new user
+        // act, so it creates even when an earlier handle exists. Only a wake-FREE request inside
+        // the same live window may resume.
+        if (!isWakeOriginated && isLiveGraceTurn && existing != null) {
             Prepared(existing, CloudConversationMode.Resume)
         } else {
             // A new conversation: the handle is minted HERE and remembered, so every later turn in it
@@ -60,6 +63,9 @@ class CloudConversationAdmission @Inject constructor() {
     }
 
     private var currentOrigin: Long = 0
+
+    /** The origin currently declared live. Exposed so a caller with no captured window can use it. */
+    fun currentOriginForTest(): Long = synchronized(lock) { currentOrigin }
 
     /** A prepared admission pair, ready to travel with its turn. */
     data class Prepared(val conversationId: String, val mode: CloudConversationMode)

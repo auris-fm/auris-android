@@ -282,7 +282,10 @@ class AndroidPlatformTtsEngine @Inject constructor(
             Timber.w("TTS: could not create AudioTrack")
             return@withContext
         }
-        activeTrack = track
+        // Published under the SAME lock that compares-and-clears it: a locked cleanup cannot protect
+        // against an unlocked successor write, so the publication and the clear must share one
+        // boundary or the successor can be published into a slot an older cleanup is about to null.
+        synthesisLock.withLock { activeTrack = track }
         // Cancellation watcher, owning THIS utterance's LOCAL track. `isActive` flips the moment the
         // job is cancelled -- a write blocked inside withContext(IO) cannot reach the loop's own
         // check, so the stop must be initiated from outside the blocked call. The generation guard
@@ -530,11 +533,18 @@ class AndroidPlatformTtsEngine @Inject constructor(
 
     override fun release() {
         released = true
-        activeTrack?.runCatching {
+        // Take the slot and empty it in ONE critical section, then act on the instance taken: reading
+        // the slot, stopping through it and nulling it separately leaves two windows in which a
+        // successor's publication is either acted on by this release or discarded by its clear.
+        val owned = synthesisLock.withLock {
+            val current = activeTrack
+            activeTrack = null
+            current
+        }
+        owned?.runCatching {
             stop()
             release()
         }
-        activeTrack = null
         tts?.stop()
         tts?.shutdown()
         tts = null

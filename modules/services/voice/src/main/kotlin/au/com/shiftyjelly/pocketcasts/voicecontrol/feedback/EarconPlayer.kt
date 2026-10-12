@@ -171,14 +171,58 @@ class EarconPlayer(
      * The duration of the cue the sink ACCEPTED, in milliseconds, from the frames accepted and the
      * rate they were accepted at.
      *
-     * This is how long the cue needs the gate's attribution to stay fresh -- not how long it has
-     * already sounded. Derived from the accepted count rather than the clip's nominal length, so a
-     * partial acceptance is covered only as far as the output actually took it.
+     * This is an estimate of QUEUED audio, NOT a completion signal: it says how much audio was handed
+     * over, not when it started sounding or when it finished. It is useful for bounding a coverage
+     * window; it must not be reported as completion. Completion is [completion], which reads the
+     * output.
      */
     fun emittedDurationMs(): Long {
         val rate = emittedRateHz
         if (rate <= 0) return 0L
         return emittedFrames * 1_000L / rate
+    }
+
+    /**
+     * The playback head of the cue's own track, in frames, or null when nothing is playing.
+     *
+     * Test seam, mirroring the cloud player's: the platform's `playbackHeadPosition` is the only
+     * authority on what has actually SOUNDED.
+     */
+    var readPlaybackHeadFrames: ((track: AudioTrack) -> Int?)? = null
+
+    /**
+     * Whether the cue has been observed to have played, or why it cannot be said.
+     *
+     * The distinction that matters for attribution: a cue's attribution must END when the output has
+     * consumed it, not when the estimated duration elapses, and a cue that is cancelled or fails ends
+     * its attribution immediately rather than being covered to its nominal length.
+     */
+    fun completion(): EarconCompletion {
+        val current = track ?: return EarconCompletion.Unknown
+        if (emittedFrames <= 0) return EarconCompletion.Unknown
+        val head = readPlaybackHeadFrames?.invoke(current)
+            ?: current.playbackHeadPosition
+        return if (head >= emittedFrames) EarconCompletion.Consumed else EarconCompletion.Playing
+    }
+
+    /** What the output has been observed to have done with the accepted cue. */
+    enum class EarconCompletion { Playing, Consumed, Unknown }
+
+    /**
+     * Stops the cue's output and clears the recorded acceptance, so attribution ends NOW rather than
+     * at an estimated duration.
+     *
+     * Called when the session ends or the cue is cancelled or superseded: the cue is not going to
+     * finish, and covering it for its nominal length would keep the gate attributing a sound the user
+     * can no longer hear.
+     */
+    fun stopNow() {
+        onPlayerThread {
+            track?.runCatching { stop() }
+            emittedFrames = 0
+            emittedRateHz = 0
+            lastPlayedId = null
+        }
     }
 
     /**

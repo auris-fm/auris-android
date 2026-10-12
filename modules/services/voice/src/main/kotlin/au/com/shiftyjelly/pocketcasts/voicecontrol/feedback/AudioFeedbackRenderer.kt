@@ -159,29 +159,51 @@ class AudioFeedbackRenderer(
             // The span is the clip's OWN duration, from the frames the sink accepted and the rate it
             // accepted them at, so a shorter cue is not covered longer than it sounds and a longer one
             // is not cut short by an assumed length.
-            val spanMs = earconPlayer.emittedDurationMs()
-            if (spanMs > EMISSION_HEARTBEAT_MS) {
-                coverEmission(spanMs)
-            }
+            coverEarconUntilConsumed()
         }
         return played
     }
 
     /**
-     * Keeps the gate's attribution fresh for [spanMs] after an accepted cue.
+     * Keeps the gate's attribution fresh until the cue is OBSERVED to have been consumed.
      *
-     * Runs on the renderer's own scope so a synchronous caller is not blocked, and is capped at the
-     * cue's own duration rather than an assumed constant.
+     * The estimated duration is a BOUND, not the ending condition: the loop ends when the output
+     * reports it has played the accepted frames, which also covers the queued delay before the cue
+     * starts sounding. It ends early on a cue that stops being consumable -- a failure, a stop, or a
+     * supersession clears the acceptance, so the loop exits instead of attributing audio the user can
+     * no longer hear.
+     *
+     * Runs on the renderer's own scope so a synchronous caller is not blocked.
      */
-    private fun coverEmission(spanMs: Long) {
+    private fun coverEarconUntilConsumed() {
         scope.launch {
+            // A cue that is never observed to progress must not be covered forever: the estimate
+            // bounds the wait, and the bound is only a ceiling.
+            val boundMs = earconPlayer.emittedDurationMs() + EMISSION_HEARTBEAT_MS * 4
             var elapsed = 0L
-            while (elapsed < spanMs && !disposed) {
+            while (!disposed && elapsed <= boundMs) {
                 delay(EMISSION_HEARTBEAT_MS)
                 elapsed += EMISSION_HEARTBEAT_MS
-                noteEmitted()
+                when (earconPlayer.completion()) {
+                    EarconPlayer.EarconCompletion.Consumed -> return@launch
+
+                    EarconPlayer.EarconCompletion.Unknown -> return@launch
+
+                    // Still playing: refresh the attribution so the gate knows the sound is ours.
+                    EarconPlayer.EarconCompletion.Playing -> noteEmitted()
+                }
             }
         }
+    }
+
+    /**
+     * Ends the earcon's attribution now: the cue stopped, failed, or the session ended.
+     *
+     * Deferred to the player so the acceptance it reports and the acceptance this reads are the same
+     * state, and attribution stops at the moment the sound does rather than at its estimate.
+     */
+    fun stopEarconNow() {
+        earconPlayer.stopNow()
     }
 
     /**
@@ -211,6 +233,10 @@ class AudioFeedbackRenderer(
      */
     fun endSession() {
         currentJob?.cancel()
+        // End the cue's attribution HERE rather than letting an estimate cover it: the session is
+        // stopping, so whatever the output was doing, the user is no longer hearing it and the gate
+        // must stop treating it as ours.
+        earconPlayer.stopNow()
         earconPlayer.release()
     }
 
@@ -240,6 +266,7 @@ class AudioFeedbackRenderer(
     fun release() {
         disposed = true
         scope.cancel()
+        earconPlayer.stopNow()
         earconPlayer.release()
         ttsEngine.release()
     }

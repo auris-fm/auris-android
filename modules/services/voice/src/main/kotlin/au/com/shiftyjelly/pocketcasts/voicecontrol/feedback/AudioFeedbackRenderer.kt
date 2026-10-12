@@ -189,13 +189,26 @@ class AudioFeedbackRenderer(
             // bounds the wait, and the bound is only a ceiling.
             val boundMs = earconPlayer.emittedDurationMs()
             var elapsed = 0L
-            // The bound is checked BEFORE sleeping, so the loop cannot overshoot the cue's own span by
-            // a whole heartbeat: a cue whose span has already elapsed must not emit another note.
-            while (!disposed && elapsed < boundMs) {
-                delay(EMISSION_HEARTBEAT_MS)
-                elapsed += EMISSION_HEARTBEAT_MS
-                // The sleep may have crossed the bound; do not emit for a cue that has no span left.
-                if (elapsed > boundMs && boundMs > 0) return@launch
+            // THE CUE IS OBSERVED AT LEAST ONCE, whatever its length. A cue SHORTER than the heartbeat
+            // (100 frames is about 6 ms) has a bound below one tick, so a loop that required the tick to
+            // fit inside the bound NEVER RAN -- and a cue that was never observed was never attributed,
+            // however audibly it sounded. The bound is a CEILING on how long to wait for the cue to
+            // finish, not a reason to skip looking.
+            // ONE OBSERVATION IS ALWAYS MADE, AND THE BOUND IS A SINGLE CEILING ON THE WHOLE WAIT.
+            //
+            // A cue SHORTER than the heartbeat (100 frames is about 6 ms) has a bound below one tick, so
+            // a loop that required a whole tick to fit inside the bound NEVER RAN -- and a cue never
+            // observed was never attributed, however audibly it sounded. So the wait is scaled to the
+            // cue: the first observation happens inside its span, and the loop then continues on the
+            // regular heartbeat only while the cue's own span has not been crossed.
+            val firstWaitMs = minOf(EMISSION_HEARTBEAT_MS, maxOf(boundMs, 1L))
+            var observed = false
+            // THE HEARTBEAT TICKS MUST FIT STRICTLY INSIDE THE SPAN; the FIRST wait is the exception,
+            // because a cue shorter than one tick has no room for any tick and must still be observed.
+            while (!disposed && (if (observed) elapsed + EMISSION_HEARTBEAT_MS < boundMs else true)) {
+                delay(if (observed) EMISSION_HEARTBEAT_MS else firstWaitMs)
+                elapsed += if (observed) EMISSION_HEARTBEAT_MS else firstWaitMs
+                observed = true
                 when (earconPlayer.completion()) {
                     EarconPlayer.EarconCompletion.Consumed -> return@launch
 

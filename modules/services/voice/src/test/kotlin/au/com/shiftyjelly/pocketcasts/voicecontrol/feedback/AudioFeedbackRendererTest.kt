@@ -80,6 +80,47 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `a cue SHORTER than the heartbeat is still observed and attributed`() = runTest {
+        // @spec's short-cue requirement, using @reviewer's 100-frame cue (about 6 ms at 16 kHz).
+        //
+        // A cue shorter than one heartbeat has a bound BELOW one tick, so a loop that required the tick
+        // to fit inside the bound NEVER RAN -- and a cue never observed was never attributed, however
+        // audibly it sounded. The bound is a CEILING on waiting, not a reason to skip looking.
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(6L)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+
+        renderer.playEarcon(EarconId.SUCCESS)
+        // Well past the cue's own span, because the point is that the observation happens at all.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_500))
+
+        assertTrue(
+            "a cue shorter than the heartbeat must still be observed and attributed " +
+                "(notes=${renderer.emissionNotesForTest()} boundMs=${earconPlayer.emittedDurationMs()})",
+            renderer.emissionNotesForTest() >= 1,
+        )
+    }
+
+    @Test
+    fun `a SHORT cue still QUEUED is not attributed`() = runTest {
+        // The same short cue, before it sounds: the first-frame distinction must hold here too, or the
+        // fix above would attribute every short cue on acceptance -- the submission note by another route.
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(6L)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+
+        renderer.playEarcon(EarconId.SUCCESS)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_500))
+
+        assertFalse(
+            "a short cue that has not begun sounding must not be attributed",
+            renderer.hasEmittedAudio.value,
+        )
+    }
+
+    @Test
     fun `a cue observed to be SOUNDING is reported as emitted audio`() = runTest {
         // The positive control, so the rule above is not satisfied by never attributing anything.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)

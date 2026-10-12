@@ -1239,6 +1239,13 @@ open class PlaybackManager @Inject constructor(
      * with the player and re-checks it AT THE CALL: if the player has been pointed at a different episode
      * in between, the captured incarnation is stale and the seek is refused. What cannot be excluded by
      * holding a lock across a suspension is refused by detecting that the world moved.
+     *
+     * IT IS NOT THE PRIMARY OBSERVATION, AND DELIBERATELY SO. Only some reconfiguration paths advance it
+     * (the paused-load branch does; the playing/queue-selection paths need not) -- so a seek that relied
+     * on this counter alone would miss a re-pointing made by a path that does not. The seek therefore
+     * reads THE PLAYER'S OWN `episodeUuid` after its suspending call, which detects re-pointing by ANY
+     * holder through ANY path, and treats this counter as a secondary signal. Anything that re-points a
+     * player without advancing the counter is still caught.
      */
     @Volatile
     private var playerEpisodeIncarnation: Long = 0L

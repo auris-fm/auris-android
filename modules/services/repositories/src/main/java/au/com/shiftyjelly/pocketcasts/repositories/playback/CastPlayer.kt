@@ -207,11 +207,12 @@ class CastPlayer(
                     .setResumeState(MediaSeekOptions.RESUME_STATE_UNCHANGED)
                     .build()
                 client.seek(seekOptions)
+                true
             } else {
                 val local = localEpisodeUuid ?: return@withContext false
+                // THE LOAD'S OWN RESULT IS THE ANSWER, rather than a silent success after a void call.
                 loadEpisode(local, positionMs, true)
             }
-            true
         }
     }
 
@@ -292,21 +293,30 @@ class CastPlayer(
         remoteMediaClient?.registerCallback(playPauseCallback)
     }
 
-    private fun loadEpisode(episodeUuid: String, currentPositionMs: Int, autoPlay: Boolean) {
+    /**
+     * Issues a cast load, reporting whether one was actually ISSUED.
+     *
+     * IT RETURNS A RESULT BECAUSE ITS ABSENCE WAS BEING READ AS SUCCESS. Every early `return` here is a
+     * refusal -- no episode, no podcast, no URL, an unsupported local file, no receiver -- and a caller
+     * that treats "returned" as "loaded" reports a load that never happened. That is the same
+     * "counting a non-event as delivered" defect as the unawaited seek.
+     */
+    private fun loadEpisode(episodeUuid: String, currentPositionMs: Int, autoPlay: Boolean): Boolean {
         if (episodeUuid == remoteEpisodeUuid && autoPlay) {
-            remoteMediaClient?.play()
-            return
+            val client = remoteMediaClient ?: return false
+            client.play()
+            return true
         }
         localEpisodeUuid = episodeUuid
         val episode = episode
         val podcast = podcast
         if (episode == null || podcast == null || episodeUuid != episode.uuid) {
-            return
+            return false
         }
-        val url = episodeLocation?.uri ?: return
+        val url = episodeLocation?.uri ?: return false
         if (episode is UserEpisode && (episode.serverStatus != UserEpisodeServerStatus.UPLOADED || episode.downloadUrl == null)) {
             onPlayerEvent(this, PlayerEvent.PlayerError("Unable to cast local file"))
-            return
+            return false
         }
         val mediaInfo = buildMediaInfo(url, episode, podcast)
         val loadOptions = MediaLoadOptions.Builder()
@@ -315,8 +325,11 @@ class CastPlayer(
             .setPlayPosition(currentPositionMs.toLong())
             .setCustomData(customData)
             .build()
-        remoteMediaClient?.load(mediaInfo, loadOptions)
-            ?.setResultCallback { addRemoteMediaListener() }
+        // THE RESULT IS AWAITED, AND ITS ABSENCE IS A REFUSAL. `load` returning null means no receiver
+        // accepted the request, so reporting true here would claim a load that was never issued.
+        val pending = remoteMediaClient?.load(mediaInfo, loadOptions) ?: return false
+        pending.setResultCallback { addRemoteMediaListener() }
+        return true
     }
 
     private fun buildMediaInfo(url: String, episode: BaseEpisode, podcast: Podcast): MediaInfo {

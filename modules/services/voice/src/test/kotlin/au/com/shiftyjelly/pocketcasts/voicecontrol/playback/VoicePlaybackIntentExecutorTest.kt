@@ -631,14 +631,22 @@ class VoicePlaybackIntentExecutorTest {
         /** Runs while the turn is in flight, to land a privacy event mid-turn. */
         var whileInFlight: (() -> Unit)? = null
 
+        /** The captured window identity each call carried, so a case can assert what was captured. */
+        val capturedOrigins = mutableListOf<Long?>()
+        val wakeOrigins = mutableListOf<Boolean>()
+
         override suspend fun routeToCloud(
             request: String,
             tier: VoiceIntent.CloudTier,
             context: PlaybackContext,
             isLiveGraceTurn: Boolean,
+            capturedOrigin: Long?,
+            isWakeOriginated: Boolean,
         ): VoiceResponse {
             calls += "routeToCloud:$request:${tier.name}"
             graceFlags += isLiveGraceTurn
+            capturedOrigins += capturedOrigin
+            wakeOrigins += isWakeOriginated
             whileInFlight?.invoke()
             return VoiceResponse.Silent
         }

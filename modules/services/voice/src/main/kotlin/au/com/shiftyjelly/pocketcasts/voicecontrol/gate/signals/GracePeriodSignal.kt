@@ -43,6 +43,37 @@ class GracePeriodSignal @Inject constructor() {
      */
     private var generation = 0L
 
+    /** The most recent generation opened BY A WAKE; a turn captured under it starts a conversation. */
+    private var wakeGeneration = 0L
+
+    /**
+     * The window's identity, for a caller that must CAPTURE it at registration and act on it later.
+     *
+     * A dialog request is prepared at one moment and executed at another; the window it belongs to is
+     * the one that was live when the REQUEST was registered, not whichever is live when it finally
+     * runs. Reading `isActive` at execution time cannot express that -- a fresh wake would look like a
+     * continuation of the previous conversation.
+     */
+    @Synchronized
+    fun capturedGeneration(): Long = generation
+
+    /**
+     * Whether [captured] names the window that is live right now.
+     *
+     * A request whose captured window is no longer current has been superseded, and must not act on
+     * the current one -- including when a newer window is open and active.
+     */
+    @Synchronized
+    fun isCurrent(captured: Long): Boolean = captured == generation
+
+    /**
+     * Whether [captured] names a window opened by a WAKE, so a turn under it begins a new conversation
+     * rather than continuing one. False once a later window has replaced it, which the caller checks
+     * with [isCurrent] first.
+     */
+    @Synchronized
+    fun isWakeOriginated(captured: Long): Boolean = captured == wakeGeneration
+
     /**
      * True once a privacy event has closed the window and no wake has opened a
      * new one. A close is final: neither a completion that lands afterwards nor
@@ -152,6 +183,11 @@ class GracePeriodSignal @Inject constructor() {
     fun onWakeWordDetected() {
         closedByPrivacy = false
         openWindow()
+        // A FRESH WAKE BEGINS A NEW USER ACT, and therefore a new conversation: a question asked after
+        // a wake is not a continuation of whatever was being discussed before it. The window it opens
+        // is marked as wake-originated, so a turn captured under it prepares CREATE even if an older
+        // conversation handle still exists.
+        wakeGeneration = generation
     }
 
     /**

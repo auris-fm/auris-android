@@ -51,13 +51,18 @@ class VoicePlaybackIntentExecutor @Inject constructor(
 
             is VoiceIntent.CloudRoute -> {
                 val context = playbackContextProvider.current()
-                // The grace window is what distinguishes a continuation from a new conversation, and
-                // the executor is where it is known.
+                // The CAPTURED window identity travels with the request. Reading the CURRENT window
+                // here would let a fresh wake look like a continuation of the previous conversation,
+                // and would let a request captured before a successor wake act under the successor's.
+                val captured = gracePeriodSignal.capturedGeneration()
                 cloudRouteSink.routeToCloud(
                     intent.request,
                     intent.tier,
                     context,
-                    isLiveGraceTurn = gracePeriodSignal.isActive.value,
+                    isLiveGraceTurn = gracePeriodSignal.isCurrent(captured) &&
+                        gracePeriodSignal.isActive.value,
+                    capturedOrigin = captured,
+                    isWakeOriginated = gracePeriodSignal.isWakeOriginated(captured),
                 )
             }
 
@@ -298,6 +303,10 @@ interface VoiceCloudRouteSink {
         // Defaults to a NEW conversation: a caller that does not say it continues a grace window is
         // starting one, and CREATE is the safe reading of silence.
         isLiveGraceTurn: Boolean = false,
+        /** The window this request was captured under; null when the caller captured none. */
+        capturedOrigin: Long? = null,
+        /** True when that window was opened by a wake, so the turn begins a conversation. */
+        isWakeOriginated: Boolean = false,
     ): VoiceResponse
 
     /**
@@ -311,7 +320,16 @@ interface VoiceCloudRouteSink {
         context: PlaybackContext,
         hint: CloudRouteHint,
         isLiveGraceTurn: Boolean = false,
-    ): VoiceResponse = routeToCloud(request, tier, context, isLiveGraceTurn)
+        capturedOrigin: Long? = null,
+        isWakeOriginated: Boolean = false,
+    ): VoiceResponse = routeToCloud(
+        request,
+        tier,
+        context,
+        isLiveGraceTurn,
+        capturedOrigin,
+        isWakeOriginated,
+    )
 }
 
 interface VoiceQueueSink {

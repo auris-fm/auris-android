@@ -179,7 +179,17 @@ class CloudRouteSink internal constructor(
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
         isLiveGraceTurn: Boolean,
-    ): VoiceResponse = routeTurn(request, tier, context, hint = null, isLiveGraceTurn = isLiveGraceTurn)
+        capturedOrigin: Long?,
+        isWakeOriginated: Boolean,
+    ): VoiceResponse = routeTurn(
+        request = request,
+        tier = tier,
+        context = context,
+        isLiveGraceTurn = isLiveGraceTurn,
+        capturedOrigin = capturedOrigin,
+        isWakeOriginated = isWakeOriginated,
+        hint = null,
+    )
 
     override suspend fun routeToCloudWithHint(
         request: String,
@@ -187,7 +197,17 @@ class CloudRouteSink internal constructor(
         context: PlaybackContext,
         hint: CloudRouteHint,
         isLiveGraceTurn: Boolean,
-    ): VoiceResponse = routeTurn(request, tier, context, isLiveGraceTurn, hint = hint)
+        capturedOrigin: Long?,
+        isWakeOriginated: Boolean,
+    ): VoiceResponse = routeTurn(
+        request = request,
+        tier = tier,
+        context = context,
+        isLiveGraceTurn = isLiveGraceTurn,
+        capturedOrigin = capturedOrigin,
+        isWakeOriginated = isWakeOriginated,
+        hint = hint,
+    )
 
     private suspend fun routeTurn(
         request: String,
@@ -196,6 +216,10 @@ class CloudRouteSink internal constructor(
         // True when this turn continues an answer still inside its grace window: it RESUMES rather
         // than creating a new conversation.
         isLiveGraceTurn: Boolean = false,
+        /** The window this request was CAPTURED under, or null when it was not captured. */
+        capturedOrigin: Long? = null,
+        /** True when the captured window was opened by a wake: the turn begins a conversation. */
+        isWakeOriginated: Boolean = false,
         hint: CloudRouteHint?,
     ): VoiceResponse {
         if (resolveBaseUrl().isBlank()) {
@@ -244,10 +268,12 @@ class CloudRouteSink internal constructor(
                 activeTurnId = myId
                 previousTurn
             }
-            // This turn is now the live origin. Declared where the turn is REGISTERED, so the origin
-            // and the registration cannot disagree -- a prepare that ran before registration would see
-            // a stale origin and discard itself.
-            conversationAdmission.beginOrigin(myId)
+            // The live origin is declared here ONLY when the caller supplied no captured window. With
+            // a captured origin, the window belongs to the DIALOG REQUEST's registration -- declaring
+            // the sink's own counter would overwrite it and make every captured request look stale.
+            if (capturedOrigin == null) {
+                conversationAdmission.beginOrigin(myId)
+            }
             if (previous != null && previous !== myJob) previous.cancel()
 
             val routeContext = buildRouteContext(context)
@@ -258,9 +284,15 @@ class CloudRouteSink internal constructor(
             // Prepared HERE, from this turn's captured origin -- not resolved at send time, where a
             // retry or a superseded origin would borrow whichever handle was then current. A turn whose
             // origin is no longer live is discarded rather than admitted against someone else's handle.
+            // The origin is the one the REQUEST was captured under, supplied by the caller that knows
+            // the dialog window -- NOT the sink's own turn counter, which increments per execution and
+            // therefore cannot express "this request belongs to the window it was registered in". A
+            // request with no captured window falls back to the declared-live origin.
+            val origin = capturedOrigin ?: conversationAdmission.currentOriginForTest()
             val admission = conversationAdmission.prepare(
-                origin = myId,
+                origin = origin,
                 isLiveGraceTurn = isLiveGraceTurn,
+                isWakeOriginated = isWakeOriginated,
             )
             if (admission == null) {
                 // Superseded while being prepared: nothing is sent, so no conversation is created on

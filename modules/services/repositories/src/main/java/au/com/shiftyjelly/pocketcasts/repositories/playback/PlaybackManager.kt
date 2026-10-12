@@ -1206,7 +1206,11 @@ open class PlaybackManager @Inject constructor(
             return false
         }
         if (forward) skipForwardSuspend(sourceView, jumpAmountSeconds) else skipBackwardSuspend(sourceView, jumpAmountSeconds)
-        return true
+        // THE ANSWER IS TAKEN AFTERWARDS, FROM WHAT THE PLAYER ACTUALLY DID. Reporting `true` here
+        // unconditionally made this function an early refusal and nothing more: the skip below suspends,
+        // and the episode-scoped mutation inside it may have refused by the time it ran. The player's own
+        // episode is the evidence -- if it no longer names [episodeUuid], the skip did not act on it.
+        return player?.episodeUuid == episodeUuid
     }
 
     /**
@@ -1355,7 +1359,10 @@ open class PlaybackManager @Inject constructor(
 
         statsManager.addTimeSavedSkipping((newPositionMs - currentTimeMs).toLong())
         if (newPositionMs < durationMs) {
-            seekToTimeMsInternal(newPositionMs)
+            // THE MUTATION RE-DECIDES, exactly as the seek path does: this call suspends, and an episode
+            // replacement can land in that suspension. Reporting whether it acted is what lets a bound
+            // skip be refused rather than performed on the replacement.
+            seekToTimeMsInternalIfEpisode(episode.uuid, newPositionMs)
         } else {
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Seek beyond end of episode so completing. ${episode.uuid}")
             onCompletion(episode.uuid)
@@ -1386,7 +1393,8 @@ open class PlaybackManager @Inject constructor(
         if (currentTimeMs < 0) return
 
         val newPositionMs = (currentTimeMs - jumpAmountMs).coerceAtLeast(0)
-        seekToTimeMsInternal(newPositionMs)
+        // Same rule: the episode check is the mutation's own step, not a read taken before a suspension.
+        seekToTimeMsInternalIfEpisode(episode.uuid, newPositionMs)
 
         trackPlaybackEvent(sourceView) { source, contentType ->
             PlaybackSkipBackEvent(

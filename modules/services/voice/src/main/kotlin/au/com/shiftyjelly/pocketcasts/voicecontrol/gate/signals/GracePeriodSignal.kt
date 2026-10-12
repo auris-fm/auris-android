@@ -176,6 +176,19 @@ class GracePeriodSignal @Inject constructor() {
     private val scope = CoroutineScope(Job() + Dispatchers.Main)
 
     /**
+     * THE WINDOW-OWNER MONITOR. Every transition and the allowance claim take it.
+     *
+     * `@Synchronized` on `issueEscalation` alone excludes NOTHING, because the writers -- wake/open,
+     * privacy close, timeout -- never took it: a reader and a writer on different locks is no
+     * synchronization at all. This is the one boundary all of them share, so a claim cannot interleave
+     * with the transition that changes what it is claiming against.
+     */
+    private val windowLock = Any()
+
+    // The monitor itself, so a test can hold it and observe whether a transition waits for it.
+    internal fun windowMonitorForTest(): Any = windowLock
+
+    /**
      * Called when a command is recognized — starts/resets the grace period.
      *
      * Refuses in two cases, and they live here rather than at each call site so
@@ -253,47 +266,66 @@ class GracePeriodSignal @Inject constructor() {
     // and its one utterance is the residual we accept knowingly; what this refuses is an utterance
     // arriving with no window at all.
 
-    @Synchronized
-    fun issueEscalation(origin: Long = generation): Long? {
-        if (origin != generation) return null
-        if (!_isActive.value || closedByPrivacy) return null
-        if (escalationUsed && escalatedGeneration == origin) return null
+    fun issueEscalation(origin: Long = generation): Long? = synchronized(windowLock) {
+        if (origin != generation) return@synchronized null
+        if (!_isActive.value || closedByPrivacy) return@synchronized null
+        if (escalationUsed && escalatedGeneration == origin) return@synchronized null
         escalationUsed = true
         escalatedGeneration = origin
-        return origin
+        origin
     }
 
     /** A new act opens a window and begins its generation. */
     private fun openWindow() {
         // OPENING A WINDOW ENDS THE PREVIOUS ONE. A wake replaces the window in force, so whatever that
         // window was holding stops being retryable at THIS moment -- not when some later request happens
-        // to be admitted. Without the notification here, a replaced window whose successor never runs a
-        // request kept its prepared turn indefinitely: the ordinary ending, reached by replacement.
-        val ending = generation
-        generation += 1
+        // to be admitted. Without it, a replaced window whose successor never runs a request kept its
+        // prepared turn indefinitely: the ordinary ending, reached by replacement.
+        //
+        // THE TRANSITION IS UNDER THE MONITOR AND THE CALLBACK IS NOT: a notification delivered while
+        // holding the lock would run other components' code inside it, and a component that calls back
+        // in would deadlock. The value is captured inside and delivered after.
+        val ending = synchronized(windowLock) {
+            val previous = generation
+            generation += 1
+            // EACH WINDOW HAS ITS OWN ALLOWANCE, so opening one CLEARS the spent marker: otherwise a
+            // claim made under a previous window made every later window read as spent.
+            escalationUsed = false
+            escalatedGeneration = -1L
+            _isActive.value = true
+            timerJob?.cancel()
+            timerJob = scope.launch {
+                delay(timeoutMs)
+                _isActive.value = false
+                notifyWindowEndedUnderLock()
+            }
+            previous
+        }
         if (ending != 0L) {
             onWindowEnded?.invoke(ending)
         }
-        // EACH WINDOW HAS ITS OWN ALLOWANCE, so opening one CLEARS the spent marker. Without this a
-        // claim made under a previous window made every later window read as spent: `escalationRefusal`
-        // compares `escalatedGeneration` with the CURRENT generation, which the reset is what makes
-        // meaningful. A stale claim must not disable the user's next act.
-        escalationUsed = false
-        escalatedGeneration = -1L
-        startOrReset()
+    }
+
+    /** Fires the window-ended notification with the value read under the monitor. */
+    private fun notifyWindowEndedUnderLock() {
+        val ended = synchronized(windowLock) { generation }
+        onWindowEnded?.invoke(ended)
     }
 
     private fun startOrReset() {
-        _isActive.value = true
-        timerJob?.cancel()
-        timerJob = scope.launch {
-            delay(timeoutMs)
-            _isActive.value = false
-            // THE TIMEOUT ENDS THE WINDOW, so requests issued under it stop being retryable exactly as
-            // they do when a privacy close ends it. Without this, a request whose window simply expired
-            // kept its prepared turn for the life of the process -- the leak the lifecycle exists to
-            // prevent, reached by the most ordinary ending there is.
-            notifyWindowEnded()
+        // UNDER THE MONITOR: extending a window is a transition of the same state the claim reads, so it
+        // must not interleave with one.
+        synchronized(windowLock) {
+            _isActive.value = true
+            timerJob?.cancel()
+            timerJob = scope.launch {
+                delay(timeoutMs)
+                // THE TIMEOUT ENDS THE WINDOW, so requests issued under it stop being retryable exactly
+                // as they do when a privacy close ends it. Without it, a request whose window simply
+                // expired kept its prepared turn for the life of the process -- the leak the lifecycle
+                // exists to prevent, reached by the most ordinary ending there is.
+                notifyWindowEndedUnderLock()
+            }
         }
     }
 
@@ -305,15 +337,6 @@ class GracePeriodSignal @Inject constructor() {
      */
     var onWindowEnded: ((generation: Long) -> Unit)? = null
 
-    private fun closeWindowAndNotify() {
-        _isActive.value = false
-        notifyWindowEnded()
-    }
-
-    private fun notifyWindowEnded() {
-        onWindowEnded?.invoke(generation)
-    }
-
     /** Called when audio route changes — immediately ends grace period. */
     fun onAudioRouteChanged() = closeByPrivacy()
 
@@ -321,9 +344,13 @@ class GracePeriodSignal @Inject constructor() {
     fun onAppBackgrounded() = closeByPrivacy()
 
     private fun closeByPrivacy() {
-        privacyClosures.incrementAndGet()
-        timerJob?.cancel()
-        closedByPrivacy = true
-        closeWindowAndNotify()
+        val ended = synchronized(windowLock) {
+            privacyClosures.incrementAndGet()
+            timerJob?.cancel()
+            closedByPrivacy = true
+            _isActive.value = false
+            generation
+        }
+        onWindowEnded?.invoke(ended)
     }
 }

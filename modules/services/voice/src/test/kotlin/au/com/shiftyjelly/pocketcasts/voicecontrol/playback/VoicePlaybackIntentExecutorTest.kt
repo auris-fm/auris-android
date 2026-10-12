@@ -1155,15 +1155,19 @@ class VoicePlaybackIntentExecutorTest {
             calls += "resume"
             return VoiceResponse.Silent
         }
-        override suspend fun skipForward(seconds: Int?): VoiceResponse {
+        override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): VoiceResponse {
             calls += "skipForward:$seconds"
             return VoiceResponse.Silent
         }
-        override suspend fun skipBackward(seconds: Int?): VoiceResponse {
+        override suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String?): VoiceResponse {
             calls += "skipBackward:$seconds"
             return VoiceResponse.Silent
         }
-        override suspend fun seekTo(positionSeconds: Int, episodeDurationSeconds: Int): VoiceResponse {
+        override suspend fun seekTo(
+            positionSeconds: Int,
+            episodeDurationSeconds: Int,
+            expectedEpisodeId: String?,
+        ): VoiceResponse {
             // Resolve the schema's signed semantics the same way production does, so a fake cannot
             // make a negative position pass by clamping it where the real sink resolves an offset.
             val resolved = if (positionSeconds < 0) {

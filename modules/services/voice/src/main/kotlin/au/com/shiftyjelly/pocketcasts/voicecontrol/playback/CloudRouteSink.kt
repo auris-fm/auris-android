@@ -878,13 +878,12 @@ class CloudRouteSink internal constructor(
         // which is now the other episode. A seek computed for A then lands in B at a position that means
         // nothing there, and an equivalent skip appends history to the wrong recording.
         //
-        // Read here, at execution, rather than captured at admission: the question is whether the player
-        // is STILL on the episode the turn is about, which only the current selection can answer. A turn
-        // with no episode has nothing to compare, so it is not refused on this ground -- its positions
-        // are already omitted for the same reason.
+        // THE EPISODE THE ACTION WAS PLANNED FOR travels WITH the mutation rather than being compared
+        // here. A check at this point cannot hold: the selection can change between it and the seek, and
+        // [turnMutex] only serializes THIS turn's operations -- it cannot exclude a change made anywhere
+        // else in the app. So the binding is passed down and validated by the owner of what is playing,
+        // as part of the same operation. Episode-independent operations pass null and are unaffected.
         val turnEpisodeId = plannedEpisodeId?.takeIf { it.isNotEmpty() }
-        val currentEpisodeId = playbackContextProvider.current().episodeId?.takeIf { it.isNotEmpty() }
-        if (turnEpisodeId != null && currentEpisodeId != turnEpisodeId) return false
 
         // Player-state changes are serialized with ownership: a superseded
         // turn must not seek/resume/pause the player its successor now owns.
@@ -911,7 +910,7 @@ class CloudRouteSink internal constructor(
                         // the episode end. Clamping it here would turn "seek back 30 s from the end"
                         // into "seek to the beginning", a different instruction.
                         capturePreActionPosition(positionSeconds * 1000L, turnState)
-                        playbackSink.seekTo(positionSeconds, episodeDurationSeconds())
+                        playbackSink.seekTo(positionSeconds, episodeDurationSeconds(), turnEpisodeId)
                         return@withLock true
                     }
                     // The reference branch is reached only when that form was supplied, so a null
@@ -919,13 +918,13 @@ class CloudRouteSink internal constructor(
                     if (referenceMs == null) return@withLock false
                     capturePreActionPosition(referenceMs, turnState)
                     // A reference target with no usable mapping is refused, not approximated.
-                    seekToReference(referenceMs)
+                    seekToReference(referenceMs, turnEpisodeId)
                 }
 
                 "play_quote" -> {
                     val referenceMs = params.referencePositionMs() ?: return@withLock false
                     capturePreActionPosition(referenceMs, turnState)
-                    if (!seekToReference(referenceMs)) return@withLock false
+                    if (!seekToReference(referenceMs, turnEpisodeId)) return@withLock false
                     // Cleared before the suspending call so the flag never
                     // outlives the player state it refers to. (Here a throw
                     // would make the finally resume, which is what this action
@@ -979,9 +978,9 @@ class CloudRouteSink internal constructor(
                     when {
                         delta != null && delta != 0 -> {
                             if (delta > 0) {
-                                playbackSink.skipForward(delta)
+                                playbackSink.skipForward(delta, turnEpisodeId)
                             } else {
-                                playbackSink.skipBackward(-delta)
+                                playbackSink.skipBackward(-delta, turnEpisodeId)
                             }
                             true
                         }
@@ -992,17 +991,17 @@ class CloudRouteSink internal constructor(
                         // configured skip interval here, and the sink's own comment says null means
                         // exactly that.
                         delta == null && direction == null -> {
-                            playbackSink.skipForward(null)
+                            playbackSink.skipForward(null, turnEpisodeId)
                             true
                         }
 
                         delta == null && direction == "backward" -> {
-                            playbackSink.skipBackward(null)
+                            playbackSink.skipBackward(null, turnEpisodeId)
                             true
                         }
 
                         delta == null && direction == "forward" -> {
-                            playbackSink.skipForward(null)
+                            playbackSink.skipForward(null, turnEpisodeId)
                             true
                         }
 
@@ -1061,12 +1060,12 @@ class CloudRouteSink internal constructor(
      *
      * @return true when the seek was performed, false when the mapping is unavailable.
      */
-    private suspend fun seekToReference(referenceMs: Long): Boolean {
+    private suspend fun seekToReference(referenceMs: Long, expectedEpisodeId: String?): Boolean {
         val referenceSeconds = referenceMs / 1000.0
         val playbackMs = fingerprintTimingManager.playbackTimeMs(referenceSeconds) ?: return false
         // The mapped result is sink time and non-negative by construction, so the signed-offset rule
         // does not apply; duration is passed for the call's own contract rather than used here.
-        playbackSink.seekTo((playbackMs / 1000).coerceAtLeast(0), episodeDurationSeconds())
+        playbackSink.seekTo((playbackMs / 1000).coerceAtLeast(0), episodeDurationSeconds(), expectedEpisodeId)
         return true
     }
 

@@ -950,7 +950,7 @@ class CloudRouteSink internal constructor(
                     // wanted anyway — the reorder is for uniformity, not safety.)
                     playerAutoPaused = false
                     pauseReserved = false
-                    playbackSink.resume()
+                    playbackSink.resume(turnEpisodeId)
                     true
                 }
 
@@ -992,7 +992,7 @@ class CloudRouteSink internal constructor(
                     // cannot leave the flag describing a state we failed to reach.
                     playerAutoPaused = false
                     pauseReserved = false
-                    playbackSink.resume()
+                    playbackSink.resume(turnEpisodeId)
                     true
                 }
 

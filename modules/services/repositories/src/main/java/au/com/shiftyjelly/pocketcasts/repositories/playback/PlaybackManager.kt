@@ -709,6 +709,25 @@ open class PlaybackManager @Inject constructor(
         }
     }
 
+    /**
+     * Resumes only while [episodeUuid] is still the selected episode, and reports whether it did.
+     *
+     * THE SAME OWNER BOUNDARY as the seek and skip paths. A resume is a player-state mutation, and a
+     * caller resuming on behalf of a turn about one recording must not start a replacement recording:
+     * the audio that starts would be something the user never asked for, under a request about a
+     * different episode.
+     */
+    suspend fun resumeIfPlaying(episodeUuid: String, sourceView: SourceView = SourceView.UNKNOWN): Boolean {
+        if (getCurrentEpisode()?.uuid != episodeUuid) return false
+        val accepted = synchronized(selectedPlayerLock) {
+            if (getCurrentEpisode()?.uuid != episodeUuid) return false
+            player?.takeIf { it.episodeUuid == episodeUuid }
+        } ?: return false
+        if (accepted.isPlaying()) return true
+        playQueueSuspend(sourceView = sourceView)
+        return true
+    }
+
     fun playNow(
         episode: BaseEpisode,
         forceStream: Boolean = false,
@@ -1230,13 +1249,18 @@ open class PlaybackManager @Inject constructor(
         if (getCurrentEpisode()?.uuid != episodeUuid) {
             return false
         }
+        // THE ORIGINAL EXPECTATION TRAVELS WITH THE CALL. This function already knows which episode the
+        // skip was planned for; letting the skip below RE-READ the queue would replace that expectation
+        // with whatever is selected by then -- so a replacement moving to B would let the skip proceed
+        // against B under A's intent, which is the substitution the binding exists to prevent.
+        //
         // THE SCOPED MUTATION'S OWN PAYLOAD IS THE ANSWER. Comparing the player's episode afterwards was
         // a second, weaker observation of the same fact: it reports what the player names NOW rather than
         // whether the skip acted, and a later replacement would flip it back to a false refusal.
         return if (forward) {
-            skipForwardSuspend(sourceView, jumpAmountSeconds)
+            skipForwardSuspend(sourceView, jumpAmountSeconds, expectedEpisodeUuid = episodeUuid)
         } else {
-            skipBackwardSuspend(sourceView, jumpAmountSeconds)
+            skipBackwardSuspend(sourceView, jumpAmountSeconds, expectedEpisodeUuid = episodeUuid)
         }
     }
 
@@ -1390,11 +1414,15 @@ open class PlaybackManager @Inject constructor(
     suspend fun skipForwardSuspend(
         sourceView: SourceView = SourceView.UNKNOWN,
         jumpAmountSeconds: Int? = null,
+        expectedEpisodeUuid: String? = null,
     ): Boolean {
         LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Skip forward tapped")
 
         cancelPendingChapterSeek()
         val episode = getCurrentEpisode() ?: return false
+        // A BOUND SKIP KEEPS ITS CALLER'S EXPECTATION. Reading the queue here would adopt whatever is
+        // selected now as the subject, which is exactly the substitution the binding prevents.
+        if (expectedEpisodeUuid != null && episode.uuid != expectedEpisodeUuid) return false
         val jumpAmountMs = (jumpAmountSeconds ?: settings.skipForwardInSecs.value) * 1000
 
         val currentTimeMs = getCurrentTimeMs(episode = episode)
@@ -1430,11 +1458,16 @@ open class PlaybackManager @Inject constructor(
         }
     }
 
-    suspend fun skipBackwardSuspend(sourceView: SourceView = SourceView.UNKNOWN, jumpAmountSeconds: Int? = null): Boolean {
+    suspend fun skipBackwardSuspend(
+        sourceView: SourceView = SourceView.UNKNOWN,
+        jumpAmountSeconds: Int? = null,
+        expectedEpisodeUuid: String? = null,
+    ): Boolean {
         LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Skip backward tapped")
 
         cancelPendingChapterSeek()
         val episode = getCurrentEpisode() ?: return false
+        if (expectedEpisodeUuid != null && episode.uuid != expectedEpisodeUuid) return false
 
         val jumpAmountMs = (jumpAmountSeconds ?: settings.skipBackInSecs.value) * 1000
         val currentTimeMs = getCurrentTimeMs(episode = episode)

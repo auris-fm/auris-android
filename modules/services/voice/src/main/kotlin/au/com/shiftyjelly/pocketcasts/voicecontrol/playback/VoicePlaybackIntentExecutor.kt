@@ -434,7 +434,16 @@ interface VoicePlaybackSink {
      * hold, and the turn's hold must not be exempted from that rule merely because it shares the tag.
      */
     suspend fun pauseAsHold(): VoiceResponse
-    suspend fun resume(): VoiceResponse
+
+    /**
+     * Resume, only while [expectedEpisodeId] is still the selected episode.
+     *
+     * Null means the caller has no episode-specific subject -- the standalone resume action is
+     * episode-INDEPENDENT -- while a quote's resume carries the recording it was played from, because
+     * resuming a replacement would start audio the user never asked for under a request about a
+     * different episode.
+     */
+    suspend fun resume(expectedEpisodeId: String? = null): VoiceResponse
     suspend fun skipForward(seconds: Int?, expectedEpisodeId: String? = null): EpisodeOperationResult
     suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String? = null): EpisodeOperationResult
 

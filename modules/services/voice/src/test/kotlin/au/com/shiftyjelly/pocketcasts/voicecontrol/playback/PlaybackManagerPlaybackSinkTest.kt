@@ -11,6 +11,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -214,6 +215,39 @@ class PlaybackManagerPlaybackSinkTest {
         } finally {
             kotlinx.coroutines.Dispatchers.resetMain()
         }
+    }
+
+    @Test
+    fun `the DEFAULT bound seek REFUSES rather than throwing or seeking unrestricted`() = runTest {
+        // @spec's direct-default control: "the direct default must return the declared refused outcome
+        // without throwing." A caller that reaches the default directly must get a REFUSAL it can act on,
+        // not a crash and not an unrestricted seek. The default cannot enforce the binding, so pretending
+        // otherwise -- by seeking anyway -- is the substitution the contract exists to prevent.
+        var reached = false
+        // NO OVERRIDE: this player uses Player's default `seekToTimeMsIfEpisode`. A plain Mockito mock
+        // returns null for the inherited DEFAULT (it is not abstract), so the call would never reach the
+        // implementation under test. CALLS_REAL_METHODS makes the default actually run while the abstract
+        // members stay stubbable.
+        val target = org.mockito.Mockito.mock(
+            au.com.shiftyjelly.pocketcasts.repositories.playback.Player::class.java,
+            org.mockito.Mockito.CALLS_REAL_METHODS,
+        )
+        org.mockito.kotlin.whenever(target.episodeUuid).thenReturn("episode-A")
+        org.mockito.kotlin.doAnswer<Unit> { reached = true }
+            .`when`(target).seekToTimeMs(org.mockito.kotlin.any())
+
+        val outcome = target.seekToTimeMsIfEpisode(positionMs = 100, expectedEpisodeUuid = "episode-A")
+
+        assertFalse(
+            "the default must report REFUSAL, because it cannot enforce the binding",
+            outcome.accepted,
+        )
+        assertFalse(
+            "and it must NOT fall through to an unrestricted seek (reached=$reached)",
+            reached,
+        )
+        // It returns an outcome rather than throwing: a fault is not something a caller can act on.
+        assertNull("and it reports no position, since nothing was performed", outcome.positionMs)
     }
 
     @Test

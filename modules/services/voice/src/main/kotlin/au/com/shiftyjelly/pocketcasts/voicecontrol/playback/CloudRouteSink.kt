@@ -243,11 +243,32 @@ class CloudRouteSink internal constructor(
             routeHint = hint,
             conversationId = admission.conversationId,
             conversationMode = admission.mode,
+            capturedOrigin = origin,
         )
     }
 
-    /** Dispatches an ALREADY PREPARED turn, unchanged. Used by a retry. */
-    suspend fun dispatchPrepared(turn: CloudRouteTurn): Flow<CloudRouteEvent> = openRoute(turn)
+    /**
+     * Dispatches an ALREADY PREPARED turn, through the SAME lifecycle a first dispatch takes.
+     *
+     * NOT a shortcut to the transport. A retry must re-validate its origin before touching transport or
+     * shared state, and must still register, hold the turn's place and clean up like any other turn --
+     * a raw transport call would send an invalidated turn and skip the ownership bookkeeping the rest
+     * of the engine depends on.
+     *
+     * Returns the response the normal path would, including the refusal when the retry's origin has
+     * been invalidated in the meantime.
+     */
+    suspend fun dispatchPrepared(prepared: CloudRouteTurn): VoiceResponse = routeTurn(
+        request = prepared.request,
+        tier = VoiceIntent.CloudTier.Premium,
+        context = PlaybackContext(),
+        hint = prepared.routeHint,
+        // The origin travels WITH the prepared turn, so a retry is validated against the window it was
+        // captured under rather than against whatever is current when it is finally retried.
+        capturedOrigin = prepared.capturedOrigin,
+        isWakeOriginated = false,
+        prepared = prepared,
+    )
 
     private suspend fun routeTurn(
         request: String,
@@ -261,6 +282,13 @@ class CloudRouteSink internal constructor(
         /** True when the captured window was opened by a wake: the turn begins a conversation. */
         isWakeOriginated: Boolean = false,
         hint: CloudRouteHint?,
+        /**
+         * An ALREADY PREPARED turn to dispatch instead of building one -- the retry path.
+         *
+         * Reusing it is the point: its request ID, handle and mode were fixed when it was prepared, so
+         * a retry sends the SAME logical request rather than minting a second conversation.
+         */
+        prepared: CloudRouteTurn? = null,
     ): VoiceResponse {
         if (resolveBaseUrl().isBlank()) {
             val soon = localizedTemplate(KEY_CLOUD_COMING_SOON)
@@ -328,8 +356,17 @@ class CloudRouteSink internal constructor(
             // the dialog window -- NOT the sink's own turn counter, which increments per execution and
             // therefore cannot express "this request belongs to the window it was registered in". A
             // request with no captured window falls back to the declared-live origin.
-            val origin = capturedOrigin ?: conversationAdmission.currentOriginForTest()
-            val admission = conversationAdmission.prepare(
+            // A RETRY re-validates the window its prepared turn belongs to -- it does not re-admit, so
+            // it cannot mint a second conversation, and it is still refused if that window has since
+            // been SUPERSEDED. A privacy close is the caller's half: the sink cannot observe the grace
+            // signal, so the executor refuses a closed window before dispatch, exactly as it does for a
+            // first attempt.
+            val origin = prepared?.capturedOrigin
+                ?: capturedOrigin
+                ?: conversationAdmission.currentOriginForTest()
+            val admission = prepared?.let { ready ->
+                conversationAdmission.validateForRetry(origin)
+            } ?: conversationAdmission.prepare(
                 origin = origin,
                 isLiveGraceTurn = isLiveGraceTurn,
                 isWakeOriginated = isWakeOriginated,
@@ -341,11 +378,12 @@ class CloudRouteSink internal constructor(
                 Timber.i("[CloudRoute] turn discarded: its origin was superseded before admission")
                 return VoiceResponse.Silent
             }
-            val turn = CloudRouteTurn(
+            val turn = prepared ?: CloudRouteTurn(
                 request = request,
                 context = routeContext,
                 conversationId = admission.conversationId,
                 conversationMode = admission.mode,
+                capturedOrigin = origin,
                 // Stable per logical turn; a transport retry reuses it, and the
                 // server rejects a repeat rather than re-executing (no auto-retry
                 // is attempted by this client).

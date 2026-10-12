@@ -51,6 +51,66 @@ class CloudRouteSinkTest {
     )
 
     @Test
+    fun `a retry whose window was superseded is refused, not dispatched`() = runTest {
+        // @reviewer's invalidation case: a prepared turn retried AFTER its window was superseded still
+        // reached transport. A retry must re-validate its own captured origin, so a superseded turn is
+        // refused exactly as a first dispatch of it would have been.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(1)
+
+        val prepared = sink.prepareTurn(
+            request = "prepared under window 1",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = playbackContext,
+            capturedOrigin = 1,
+            isWakeOriginated = true,
+        )!!
+        // A successor window opens BEFORE the retry.
+        deps.conversationAdmission.beginOrigin(2)
+
+        sink.dispatchPrepared(prepared)
+
+        assertEquals(
+            "a retry under a superseded window must not reach transport " +
+                "(turns=${deps.routeTurns.map { it.request }})",
+            0,
+            deps.routeTurns.size,
+        )
+    }
+
+    @Test
+    fun `a retry under a still-live window is dispatched with its identity intact`() = runTest {
+        // The positive control: the same retry with NO supersession must go through, and carry the
+        // identity it was prepared with -- otherwise the refusal above would be indistinguishable from
+        // a retry path that never dispatches at all.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(1)
+
+        val prepared = sink.prepareTurn(
+            request = "prepared under window 1",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = playbackContext,
+            capturedOrigin = 1,
+            isWakeOriginated = true,
+        )!!
+        sink.dispatchPrepared(prepared)
+
+        assertEquals(1, deps.routeTurns.size)
+        assertEquals("the same request ID", prepared.requestId, deps.routeTurns.single().requestId)
+        assertEquals(
+            "and the same conversation handle",
+            prepared.conversationId,
+            deps.routeTurns.single().conversationId,
+        )
+    }
+
+    @Test
     fun `every dispatched turn carries the conversation identity the Worker requires`() = runTest {
         // The staged Worker makes identity MANDATORY: a turn missing both fields is `invalid_request`.
         // Every path that dispatches must therefore carry the pair -- a turn without it is refused by
@@ -104,9 +164,10 @@ class CloudRouteSinkTest {
         )
         assertNotNull("the turn is prepared", prepared)
 
-        // Dispatch it twice, as a controller retry would.
-        sink.dispatchPrepared(prepared!!).collect { }
-        sink.dispatchPrepared(prepared).collect { }
+        // Dispatch it twice, as a controller retry would. A retry goes through the SAME lifecycle as a
+        // first dispatch -- it is not a shortcut to the transport.
+        sink.dispatchPrepared(prepared!!)
+        sink.dispatchPrepared(prepared)
 
         val turns = deps.routeTurns
         assertEquals("both attempts dispatched", 2, turns.size)

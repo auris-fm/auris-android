@@ -65,6 +65,22 @@ class CloudConversationAdmission @Inject constructor() {
         }
     }
 
+    /**
+     * Whether a RETRY under [origin] may proceed: the window must still be the current AND live one.
+     *
+     * A retry re-validates rather than re-admits. Re-admitting would mint a second conversation for the
+     * same logical request, and skipping validation altogether would let a turn whose window has since
+     * been superseded or closed still reach transport.
+     *
+     * Returns the admission the prepared turn already holds when the window is still valid, or null
+     * when it is not.
+     */
+    fun validateForRetry(origin: Long): Prepared? = synchronized(lock) {
+        if (origin != currentOrigin) return null
+        val existing = handle ?: return null
+        Prepared(existing, CloudConversationMode.Resume)
+    }
+
     /** Marks [origin] as the only live generation; older origins can no longer prepare a turn. */
     fun beginOrigin(origin: Long) = synchronized(lock) {
         currentOrigin = origin

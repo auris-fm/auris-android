@@ -283,10 +283,23 @@ class AndroidPlatformTtsEngine @Inject constructor(
         val watcher = if (playbackJob != null) {
             stopperScope.launch {
                 while (playbackJob.isActive) kotlinx.coroutines.delay(10L)
-                if (playbackJob.isCancelled && synthesisLock.withLock { synthesisGeneration == mine }) {
+                if (playbackJob.isCancelled) {
+                    // The LOCAL track is this utterance's own, so cancellation stops it
+                    // UNCONDITIONALLY -- guarding this on the generation would leave the old,
+                    // still-blocked track playing whenever a successor has already claimed
+                    // ownership, which is the case cancellation most needs to interrupt.
                     track.runCatching { stop() }
-                    tts?.runCatching { stop() }
+                    ownedTrackStopsForTest += 1
                     clearOwnedTrack(track)
+                    // The SHARED engine is stopped only while this utterance still owns it, and the
+                    // comparison happens INSIDE the same lock that stops it: checking first and
+                    // stopping after would let a successor claim the engine in between and be
+                    // silenced by the old utterance's cleanup.
+                    synthesisLock.withLock {
+                        if (synthesisGeneration == mine) {
+                            tts?.runCatching { stop() }
+                        }
+                    }
                 }
             }
         } else {
@@ -307,10 +320,15 @@ class AndroidPlatformTtsEngine @Inject constructor(
                     // replaced `activeTrack` already, and stopping the field would silence it. The
                     // shared engine is guarded by the generation for the same reason.
                     track.runCatching { stop() }
-                    if (synthesisLock.withLock { synthesisGeneration == mine }) {
-                        tts?.runCatching { stop() }
-                    }
+                    ownedTrackStopsForTest += 1
                     clearOwnedTrack(track)
+                    // Same in-lock comparison as the watcher: the check and the stop are one
+                    // critical section, so a successor cannot claim between them.
+                    synthesisLock.withLock {
+                        if (synthesisGeneration == mine) {
+                            tts?.runCatching { stop() }
+                        }
+                    }
                     return@withContext
                 }
                 val writer = writeToSink
@@ -370,7 +388,13 @@ class AndroidPlatformTtsEngine @Inject constructor(
         } finally {
             watcher?.cancel()
             stopperScope.cancel()
-            playbackActive = false
+            // Only the CURRENT utterance may clear the shared playback flag: an old render exiting
+            // while a successor is audibly playing must not report that nothing is playing.
+            synthesisLock.withLock {
+                if (synthesisGeneration == mine) {
+                    playbackActive = false
+                }
+            }
             // Clear the shared field only if it still points at THIS utterance's track: a successor
             // may have replaced it, and nulling the field would orphan the successor's stop path.
             clearOwnedTrack(track)
@@ -387,6 +411,15 @@ class AndroidPlatformTtsEngine @Inject constructor(
             }
         }
     }
+
+    /**
+     * How many times an utterance has stopped its OWN track. Test visibility for the ownership
+     * contract: the local stop must not be guarded by ownership, so a case can observe it happening
+     * after a successor has claimed the engine.
+     */
+    @Volatile
+    var ownedTrackStopsForTest: Int = 0
+        private set
 
     /** True while a synthesized utterance is playing, so a caller can observe playback in progress. */
     fun isPlayingSynthesizedAudio(): Boolean = playbackActive

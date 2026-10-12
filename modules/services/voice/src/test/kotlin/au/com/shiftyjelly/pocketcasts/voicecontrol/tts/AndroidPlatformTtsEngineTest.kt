@@ -554,6 +554,81 @@ class AndroidPlatformTtsEngineTest {
     }
 
     @Test
+    fun `cancelling an old utterance after a successor owns the engine still stops the old blocked track`() {
+        // @reviewer's remaining gap: the watcher guarded the OWNED track stop on the generation still
+        // being current, so a cancellation landing after a successor took ownership left the old,
+        // blocked track playing -- the case cancellation most needs to interrupt. The owned track is
+        // stopped unconditionally; only the SHARED engine is guarded.
+        val (wired, fake) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        fake.emitRealWav = true
+        wired.drainWaitMs = 0
+
+        val enteredWrite = java.util.concurrent.CountDownLatch(1)
+        val releaseWrite = java.util.concurrent.CountDownLatch(1)
+        val writes = java.util.concurrent.atomic.AtomicInteger()
+        wired.writeToSink = { _, _, _, count ->
+            if (writes.incrementAndGet() == 1) {
+                enteredWrite.countDown()
+                releaseWrite.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                count / 2
+            } else {
+                count
+            }
+        }
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        var oldFailure: Throwable? = null
+        val oldJob = scope.launch {
+            try {
+                wired.speak("old reply", "en")
+            } catch (t: Throwable) {
+                oldFailure = t
+            }
+        }
+        val queued = (0 until 50).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            fake.synthesizeCount > 0
+        }
+        assertTrue("the old utterance must reach synthesis", queued)
+        fake.listener?.onDone(fake.lastUtteranceId)
+        assertTrue(
+            "the old reply must reach its blocked write",
+            enteredWrite.await(5, java.util.concurrent.TimeUnit.SECONDS),
+        )
+
+        // A SUCCESSOR takes ownership FIRST, then the old utterance is cancelled.
+        wired.claimSynthesisForTest()
+        oldJob.cancel()
+        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(300) }
+
+        // The old track must have been stopped even though its generation is no longer current. The
+        // synthesizer must NOT be stopped, because the successor owns it now.
+        val stopsAtSuccessor = fake.stopCalls
+        val ownedTrackStops = wired.ownedTrackStopsForTest
+        releaseWrite.countDown()
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(5_000) { oldJob.join() }
+            kotlinx.coroutines.delay(100)
+        }
+        scope.cancel()
+
+        assertEquals(
+            "the successor's synthesizer must not be stopped by the old utterance's cancellation " +
+                "(stopCalls=$stopsAtSuccessor)",
+            0,
+            stopsAtSuccessor,
+        )
+        assertTrue(
+            "but the OLD utterance's own blocked track must have been stopped even though a " +
+                "successor owns the engine (ownedTrackStops=$ownedTrackStops)",
+            ownedTrackStops >= 1,
+        )
+        wired.release()
+    }
+
+    @Test
     fun `a superseded reply stops at the next write instead of continuing under the successor`() {
         // @spec's focused blocked-write regression for TTS:262. The seam blocks INSIDE the first
         // write -- the state a slow or contended output actually produces. While it is blocked, a

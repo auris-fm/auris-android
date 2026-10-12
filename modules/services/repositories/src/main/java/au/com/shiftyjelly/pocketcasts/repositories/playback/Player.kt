@@ -96,7 +96,7 @@ interface Player {
      * UNAVAILABLE, which is what stops a direct caller reaching an unrestricted seek through the
      * default.
      */
-    suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Long? {
+    suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): EpisodeSeekOutcome {
         // THE DEFAULT REFUSES RATHER THAN PRETENDING. It cannot enforce the binding -- it checks and then
         // delegates, leaving the window this contract exists to close -- so returning a position here
         // would report an enforcement that did not happen. An implementation that CAN enforce it
@@ -120,6 +120,24 @@ interface Player {
      * `false` here means "do not rely on the default for a binding".
      */
     val enforcesEpisodeBoundSeek: Boolean get() = false
+
+    /**
+     * The outcome of an episode-bound seek: WHETHER IT WAS ACCEPTED, and separately WHERE PLAYBACK WAS.
+     *
+     * THESE ARE TWO FACTS AND MUST NOT SHARE A NULL. A successful load of a new episode has NO pre-action
+     * position on the receiver -- the receiver is still on the old one -- but the load is ACCEPTED. A
+     * nullable position alone cannot express that, so treating null as refusal would reject an operation
+     * about to succeed, and treating null as acceptance would claim a provenance that does not exist.
+     *
+     * [positionMs] being null means UNAVAILABLE, which the history consumer must handle by recording
+     * nothing rather than by substituting a value.
+     */
+    data class EpisodeSeekOutcome(val accepted: Boolean, val positionMs: Long?) {
+        companion object {
+            val Refused = EpisodeSeekOutcome(accepted = false, positionMs = null)
+            fun accepted(positionMs: Long?) = EpisodeSeekOutcome(accepted = true, positionMs = positionMs)
+        }
+    }
     suspend fun isPlaying(): Boolean
     suspend fun isBuffering(): Boolean
     suspend fun durationMs(): Int?

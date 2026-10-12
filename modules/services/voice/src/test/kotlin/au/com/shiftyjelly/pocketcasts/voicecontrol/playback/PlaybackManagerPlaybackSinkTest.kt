@@ -103,12 +103,18 @@ class PlaybackManagerPlaybackSinkTest {
                 proceed.await()
             }
 
-            override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Long? {
+            override suspend fun seekToTimeMsIfEpisode(
+                positionMs: Int,
+                expectedEpisodeUuid: String,
+            ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome {
                 entered.complete(Unit)
                 proceed.await()
                 // The player's own mutation point: re-pointed means REFUSED, with no seek performed.
-                if (configured != expectedEpisodeUuid) return null
-                return 0L
+                if (configured != expectedEpisodeUuid) {
+                    return au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome.Refused
+                }
+                return au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome
+                    .accepted(0L)
             }
         }
         org.mockito.kotlin.whenever(manager.player).thenReturn(target)
@@ -156,6 +162,56 @@ class PlaybackManagerPlaybackSinkTest {
             // a leak whose symptom is nowhere near its cause.
             proceed.complete(Unit)
             runCurrent()
+            kotlinx.coroutines.Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `an ACCEPTED operation with an UNAVAILABLE position is still accepted`() = runTest {
+        // @spec's distinction, and the defect it caught in my previous version: a successful load of a new
+        // episode has NO pre-action position on the receiver -- the receiver is still on the old one --
+        // but the load is ACCEPTED. Deriving acceptance from the position's presence would REJECT an
+        // operation that is about to succeed. The two are separate facts.
+        val manager = mock<PlaybackManager>()
+        val target = object : au.com.shiftyjelly.pocketcasts.repositories.playback.Player by mock() {
+            override val enforcesEpisodeBoundSeek: Boolean get() = true
+            override val episodeUuid: String? get() = "episode-A"
+            override suspend fun seekToTimeMsIfEpisode(
+                positionMs: Int,
+                expectedEpisodeUuid: String,
+            ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome = au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome
+                .accepted(positionMs = null)
+        }
+        org.mockito.kotlin.whenever(manager.player).thenReturn(target)
+        org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenReturn(
+            au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+                uuid = "episode-A",
+                podcastUuid = "podcast-1",
+                publishedDate = java.util.Date(),
+            ),
+        )
+        org.mockito.kotlin.whenever(manager.playbackStateRelay)
+            .thenReturn(com.jakewharton.rxrelay2.BehaviorRelay.createDefault(PlaybackState()))
+        PlaybackManager::class.java.getDeclaredField("selectedPlayerLock")
+            .apply { isAccessible = true }
+            .set(manager, Any())
+        val method = PlaybackManager::class.java.declaredMethods
+            .single { it.name == "seekToTimeMsInternalIfEpisode" }
+            .apply { isAccessible = true }
+
+        kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
+        try {
+            val accepted = kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn<Boolean> { continuation ->
+                method.invoke(manager, "episode-A", 100_000, continuation)
+            }
+            runCurrent()
+
+            assertTrue(
+                "an ACCEPTED operation must be accepted even when its pre-action position is " +
+                    "UNAVAILABLE: absence of provenance is not refusal",
+                accepted,
+            )
+        } finally {
             kotlinx.coroutines.Dispatchers.resetMain()
         }
     }
@@ -236,16 +292,22 @@ class PlaybackManagerPlaybackSinkTest {
                 actedOn = configured
             }
 
-            override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Long? {
+            override suspend fun seekToTimeMsIfEpisode(
+                positionMs: Int,
+                expectedEpisodeUuid: String,
+            ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome {
                 // THE PLAYER'S OWN MUTATION POINT: it records the seek only while it still addresses the
                 // episode it was asked about, which is what makes a re-pointing REFUSED rather than
                 // merely detected after the damage. A non-null result is the acceptance AND the
                 // pre-action position the player saw at its own mutation.
                 entered.complete(Unit)
                 proceed.await()
-                if (configured != expectedEpisodeUuid) return null
+                if (configured != expectedEpisodeUuid) {
+                    return au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome.Refused
+                }
                 actedOn = configured
-                return 0L
+                return au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome
+                    .accepted(0L)
             }
         }
         org.mockito.kotlin.whenever(manager.player).thenReturn(target)

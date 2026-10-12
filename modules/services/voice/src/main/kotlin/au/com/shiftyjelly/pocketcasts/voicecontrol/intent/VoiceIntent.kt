@@ -131,6 +131,15 @@ sealed interface VoiceIntent {
          */
         val logicalRequestId: String? = null,
         /**
+         * Whether this dispatch is a RETRY of [logicalRequestId] rather than its first attempt.
+         *
+         * The identity alone cannot say: the first attempt and its retry name the SAME logical request,
+         * so an identity-only rule cannot tell "prepare this" from "reuse what I prepared". This flag
+         * is the explicit selection, and it is what makes an unknown retry refusable -- a retry naming a
+         * request never prepared is refused, while a first attempt naming one simply prepares it.
+         */
+        val isRetry: Boolean = false,
+        /**
          * Who issued this dispatch. Separate from [windowGeneration] on purpose:
          * the generation decides whether the window is touched at all, the
          * origin decides whether the window's allowance is restored. A
@@ -145,6 +154,14 @@ sealed interface VoiceIntent {
 
     enum class CloudTier { Free, Premium, Unknown }
 }
+
+/**
+ * Stamps [logicalRequestId] on a cloud turn intent, leaving other intents untouched.
+ *
+ * Only a cloud turn carries a logical identity: it is the one dispatch that is prepared once and may be
+ * retried, so it is the one whose identity a retry must reuse.
+ */
+fun VoiceIntent.withLogicalRequest(logicalRequestId: String): VoiceIntent = if (this is VoiceIntent.CloudRoute) copy(logicalRequestId = logicalRequestId) else this
 
 data class PlaybackContext(
     /** The episode being played, or null when nothing is playing -- discovery with no subject. */

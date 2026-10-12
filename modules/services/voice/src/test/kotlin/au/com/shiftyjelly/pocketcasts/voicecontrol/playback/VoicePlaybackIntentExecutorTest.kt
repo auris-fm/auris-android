@@ -411,6 +411,50 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `two same-text user acts a fresh wake apart both dispatch and both create`() = runTest {
+        // @reviewer's bound-path case, whose failure motivated the logical identity: two separate user
+        // acts saying the SAME words, each under its own wake. Each must dispatch, and each must be its
+        // own CREATE with its own request ID and handle -- neither an omission nor a shared turn.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "what time is it",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = signal.capturedGeneration(),
+            ),
+        )
+        signal.onWakeWordDetected()
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "what time is it",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = signal.capturedGeneration(),
+            ),
+        )
+
+        assertEquals(
+            "both user acts dispatched, not one (dispatched=" +
+                "${sinks.cloudRoute.preparedDispatches.map { it.requestId }})",
+            2,
+            sinks.cloudRoute.preparedDispatches.size,
+        )
+        assertNotEquals(
+            "distinct user acts need distinct request IDs",
+            sinks.cloudRoute.preparedDispatches[0].requestId,
+            sinks.cloudRoute.preparedDispatches[1].requestId,
+        )
+        assertNotEquals(
+            "and distinct conversations, since each is its own CREATE",
+            sinks.cloudRoute.preparedDispatches[0].conversationId,
+            sinks.cloudRoute.preparedDispatches[1].conversationId,
+        )
+    }
+
+    @Test
     fun `the logical identity is what matches, not the words`() = runTest {
         // THE DISCRIMINATING CASE for the retention key. A retry that names the SAME logical request
         // but words the request differently must reuse the prepared turn: the identity is what matches.

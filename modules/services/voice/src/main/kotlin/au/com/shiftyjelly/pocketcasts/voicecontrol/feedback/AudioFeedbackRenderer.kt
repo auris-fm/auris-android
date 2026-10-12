@@ -150,7 +150,11 @@ class AudioFeedbackRenderer(
         if (disposed) return false
         val played = earconPlayer.play(id)
         if (played) {
-            noteEmitted()
+            // NO UNCONDITIONAL ATTRIBUTION. `play` reporting true means the sink ACCEPTED the cue, which
+            // is not the same as its being audible: the cue may sit queued behind earlier audio, and the
+            // gate would then read the microphone as ours before our own cue began. Attribution is the
+            // heartbeat's job, and it fires only on OBSERVED progress past the cue's first frame.
+            // The coverage still starts here, because the queued delay is part of the span to cover.
             // The cue has been ACCEPTED by the sink, which is not the same as its having finished
             // sounding. A cue longer than the gate's attribution window would leave the microphone
             // read as a foreign app part-way through our own cue -- the same failure the speak path
@@ -197,7 +201,13 @@ class AudioFeedbackRenderer(
 
                     EarconPlayer.EarconCompletion.Unknown -> return@launch
 
-                    // Still playing: refresh the attribution so the gate knows the sound is ours.
+                    // STILL QUEUED: accepted and not yet sounding. It must NOT set the attribution --
+                    // an emitted sound is one the listener could hear, and this one has not started.
+                    // The loop keeps waiting, which is what makes the queued delay covered rather than
+                    // mistaken for silence.
+                    EarconPlayer.EarconCompletion.Queued -> Unit
+
+                    // Observed sounding: refresh the attribution so the gate knows the sound is ours.
                     EarconPlayer.EarconCompletion.Playing -> noteEmitted()
                 }
             }

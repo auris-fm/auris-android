@@ -315,11 +315,39 @@ class EarconPlayer(
         }
         // CUMULATIVE: the head counts every frame the track has ever played, so the comparison is
         // against the frontier this cue's accepted frames reach.
-        return if (head >= cueHeadTarget) EarconCompletion.Consumed else EarconCompletion.Playing
+        return when {
+            head >= cueHeadTarget -> EarconCompletion.Consumed
+
+            // SOUNDING IS OBSERVED PROGRESS, NOT ACCEPTANCE. The head standing at or before this cue's
+            // own first frame means the cue is still QUEUED -- accepted by the track and not yet
+            // audible. Reporting that as Playing attributes an emitted sound for a cue nobody has heard,
+            // and the gate then reads the microphone as ours before our cue has begun.
+            head > cueHeadOrigin -> EarconCompletion.Playing
+
+            else -> EarconCompletion.Queued
+        }
     }
 
     /** What the output has been observed to have done with the accepted cue. */
-    enum class EarconCompletion { Playing, Consumed, Unknown }
+    enum class EarconCompletion {
+        /**
+         * Accepted, and its frames have not begun sounding: still queued behind earlier audio.
+         *
+         * DISTINCT FROM [Playing] on purpose. Acceptance is the sink taking the frames; sounding is the
+         * track having progressed through this cue's first frame. Only the latter means the sound is
+         * audible, and only that may be attributed.
+         */
+        Queued,
+
+        /** Observed to be sounding: the track has progressed past this cue's first frame. */
+        Playing,
+
+        /** Observed to have played every accepted frame. */
+        Consumed,
+
+        /** Not observable: no track, no accepted frames, or the observer reported unavailable. */
+        Unknown,
+    }
 
     /**
      * Stops the cue's output and clears the recorded acceptance, so attribution ends NOW rather than

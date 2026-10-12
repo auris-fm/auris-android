@@ -281,10 +281,11 @@ class VoicePlaybackIntentExecutorTest {
         )
 
         assertEquals(
-            "only the successor reached transport " +
-                "(origins=${sinks.cloudRoute.capturedOrigins})",
+            "only the successor reached transport -- the stale dispatch was refused BEFORE preparing " +
+                "(prepared=${sinks.cloudRoute.preparedTurns.map { it.request }} " +
+                "dispatched=${sinks.cloudRoute.preparedDispatches.map { it.request }})",
             listOf("successor"),
-            sinks.cloudRoute.calls.map { it.substringAfter("routeToCloud:").substringBefore(":") },
+            sinks.cloudRoute.preparedDispatches.map { it.request },
         )
         assertEquals(
             "and the stale dispatch did not mutate the successor's playback",
@@ -360,6 +361,50 @@ class VoicePlaybackIntentExecutorTest {
         assertTrue(
             "so the dispatch does not reach transport (calls=${sinks.cloudRoute.calls})",
             sinks.cloudRoute.calls.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `a retry of the same utterance reuses the turn the first dispatch prepared`() = runTest {
+        // @spec's production-retention requirement: preparation and retention happen in the EXECUTOR,
+        // so the retry path is reachable without a caller populating the intent. A branch only a test
+        // can reach would leave retention unimplemented.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+
+        val intent = VoiceIntent.CloudRoute(
+            request = "a question worth retrying",
+            tier = VoiceIntent.CloudTier.Premium,
+            windowGeneration = window,
+        )
+
+        // First attempt: the executor prepares and retains.
+        executor.execute(intent)
+        assertEquals("one turn prepared", 1, sinks.cloudRoute.preparedTurns.size)
+
+        // RETRY of the same utterance, with NO prepared turn on the intent: the executor must find the
+        // one it retained.
+        executor.execute(intent)
+
+        assertEquals(
+            "the retry did NOT prepare a second turn (prepared=" +
+                "${sinks.cloudRoute.preparedTurns.map { it.requestId }})",
+            1,
+            sinks.cloudRoute.preparedTurns.size,
+        )
+        assertEquals("two attempts dispatched", 2, sinks.cloudRoute.preparedDispatches.size)
+        assertEquals(
+            "and both carried the SAME request ID",
+            sinks.cloudRoute.preparedDispatches[0].requestId,
+            sinks.cloudRoute.preparedDispatches[1].requestId,
+        )
+        assertEquals(
+            "and the same conversation handle",
+            sinks.cloudRoute.preparedDispatches[0].conversationId,
+            sinks.cloudRoute.preparedDispatches[1].conversationId,
         )
     }
 
@@ -452,7 +497,9 @@ class VoicePlaybackIntentExecutorTest {
 
         assertEquals(VoiceResponse.Silent, response)
         assertEquals(
-            listOf("routeToCloud:summarize this episode:Premium"),
+            "the turn is prepared once and dispatched through the retry path, so a first attempt and a " +
+                "retry take the same route",
+            listOf("prepareTurn:summarize this episode", "dispatchPrepared:summarize this episode"),
             sinks.cloudRoute.calls,
         )
     }
@@ -522,7 +569,10 @@ class VoicePlaybackIntentExecutorTest {
             signal.issueEscalation(),
         )
         assertEquals(
-            listOf("routeToCloud:what did the guests say about sleep and memory:Unknown"),
+            listOf(
+                "prepareTurn:what did the guests say about sleep and memory",
+                "dispatchPrepared:what did the guests say about sleep and memory",
+            ),
             sinks.cloudRoute.calls,
         )
     }
@@ -865,11 +915,45 @@ class VoicePlaybackIntentExecutorTest {
         /** The prepared turns a retry dispatched, so a case can assert identity was reused. */
         val preparedDispatches = mutableListOf<au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
 
+        /** The turns prepared on a first dispatch, so a case can assert identity was minted once. */
+        val preparedTurns = mutableListOf<au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
+
+        override suspend fun prepareTurn(
+            request: String,
+            tier: VoiceIntent.CloudTier,
+            context: PlaybackContext,
+            isLiveGraceTurn: Boolean,
+            capturedOrigin: Long?,
+            isWakeOriginated: Boolean,
+            hint: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint?,
+        ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn {
+            val prepared = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn(
+                request = request,
+                context = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext(),
+                requestId = "prepared-${preparedTurns.size + 1}",
+                conversationId = "handle-${preparedTurns.size + 1}",
+                conversationMode = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode.Create,
+                capturedOrigin = capturedOrigin,
+            )
+            preparedTurns += prepared
+            // Recorded at PREPARE time: production resolves the window and wake selection here, so a
+            // case asserts what the executor actually decided, not what a call site happened to pass.
+            graceFlags += isLiveGraceTurn
+            capturedOrigins += capturedOrigin
+            wakeOrigins += isWakeOriginated
+            calls += "prepareTurn:$request"
+            return prepared
+        }
+
         override suspend fun dispatchPrepared(
             prepared: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
         ): VoiceResponse {
             preparedDispatches += prepared
             calls += "dispatchPrepared:${prepared.request}"
+            // The hook belongs to the DISPATCH, which is where production now sends the turn: a case
+            // that landed an event "while in flight" through the old call site would silently land it
+            // nowhere, and the case would pass or fail for the wrong reason.
+            whileInFlight?.invoke()
             return VoiceResponse.Silent
         }
 
@@ -885,7 +969,6 @@ class VoicePlaybackIntentExecutorTest {
             graceFlags += isLiveGraceTurn
             capturedOrigins += capturedOrigin
             wakeOrigins += isWakeOriginated
-            whileInFlight?.invoke()
             return VoiceResponse.Silent
         }
     }

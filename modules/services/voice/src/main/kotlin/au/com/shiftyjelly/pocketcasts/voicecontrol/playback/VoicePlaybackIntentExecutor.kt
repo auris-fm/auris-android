@@ -31,6 +31,25 @@ class VoicePlaybackIntentExecutor @Inject constructor(
      */
     private val playbackManager: PlaybackManager,
 ) {
+    /**
+     * The turn last prepared for an utterance, so a RETRY of that utterance reuses it.
+     *
+     * Retention is what makes the retry path production-reachable: without it, preparation would be a
+     * branch only a test could exercise, and a real retry would prepare a SECOND turn -- minting a new
+     * request ID, and if its window had moved, a new conversation for a request that was already sent.
+     */
+    private val retainedLock = Any()
+    private var retained: Pair<String, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>? = null
+
+    private fun retainTurn(turn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn) {
+        synchronized(retainedLock) { retained = turn.request to turn }
+    }
+
+    /** The retained turn for [intent]'s utterance, when one was prepared and not yet used by a retry. */
+    private fun retainedTurn(intent: VoiceIntent.CloudRoute): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = synchronized(retainedLock) {
+        retained?.takeIf { it.first == intent.request }?.second
+    }
+
     suspend fun execute(intent: VoiceIntent): VoiceResponse {
         // Recorded *before* the action runs: the revision is what a cloud turn
         // compares at restore time, and a user's pause that has already reached
@@ -56,6 +75,11 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                 // origin decides which window it is validated against, so a retry whose window has since
                 // been superseded or closed is refused rather than adopting the current one.
                 val alreadyPrepared = intent.preparedTurn
+                    // NOT CARRIED BY THE INTENT: this dispatch is a RETRY of the request this executor
+                    // last prepared for the same utterance. The turn is retained here, which is what
+                    // makes the retry path reachable WITHOUT the caller having to populate the intent --
+                    // otherwise preparation and retention would be a branch only a test ever runs.
+                    ?: retainedTurn(intent)
                 if (alreadyPrepared != null) {
                     val captureForRetry = alreadyPrepared.capturedOrigin
                     // The privacy half is the executor's, as for a first attempt: the sink cannot
@@ -88,24 +112,28 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                 // continuation -- the flag was computed against a state this dispatch had just set.
                 val isFirstRequestOfWindow = captured != null &&
                     !gracePeriodSignal.hasPreparedRequest(captured)
-                val dispatched = cloudRouteSink.routeToCloud(
-                    intent.request,
-                    intent.tier,
-                    context,
-                    // A dispatch with no stamp has no window to claim, so it is not a continuation and
-                    // the sink falls back to the declared-live origin.
+                // PREPARED ONCE, RETAINED FOR A RETRY. Preparing here rather than at the call site is
+                // what makes the retry path a production path: the identity fixed at this moment is the
+                // identity a later retry must reuse.
+                val preparedTurn = cloudRouteSink.prepareTurn(
+                    request = intent.request,
+                    tier = intent.tier,
+                    context = context,
                     isLiveGraceTurn = captured != null &&
                         gracePeriodSignal.isCurrent(captured) &&
                         gracePeriodSignal.isActive.value,
                     capturedOrigin = captured,
-                    // PER REQUEST: the wake's OWN request begins the conversation; a later request in
-                    // the same window continues it, even though the window was opened by a wake.
                     isWakeOriginated = captured != null &&
                         gracePeriodSignal.isWakeOriginated(
                             captured,
                             isFirstRequestOfWindow = isFirstRequestOfWindow,
                         ),
-                )
+                ) ?: return VoiceResponse.Silent
+                retainTurn(preparedTurn)
+                // DISPATCHED THROUGH THE ALREADY-PREPARED TURN, so the first attempt and a retry take
+                // the SAME path and the identity is the one fixed above rather than a second one minted
+                // here.
+                val dispatched = cloudRouteSink.dispatchPrepared(preparedTurn)
                 // Noted after the dispatch: this window now has a request, so a LATER one continues
                 // rather than beginning.
                 captured?.let { gracePeriodSignal.notePreparedRequest(it) }
@@ -354,6 +382,22 @@ interface VoiceCloudRouteSink {
         /** True when that window was opened by a wake, so the turn begins a conversation. */
         isWakeOriginated: Boolean = false,
     ): VoiceResponse
+
+    /**
+     * Prepares a turn ONCE and returns it, for a caller that will retain it and may retry it.
+     *
+     * Returns null when the origin has been superseded, so nothing is sent on behalf of a turn that has
+     * already been replaced.
+     */
+    suspend fun prepareTurn(
+        request: String,
+        tier: VoiceIntent.CloudTier,
+        context: PlaybackContext,
+        isLiveGraceTurn: Boolean = false,
+        capturedOrigin: Long? = null,
+        isWakeOriginated: Boolean = false,
+        hint: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint? = null,
+    ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn?
 
     /**
      * Dispatches an ALREADY PREPARED turn -- the controller retry path.

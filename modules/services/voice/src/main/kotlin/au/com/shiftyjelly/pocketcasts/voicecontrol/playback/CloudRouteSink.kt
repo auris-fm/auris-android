@@ -228,14 +228,23 @@ class CloudRouteSink internal constructor(
         capturedOrigin: Long?,
         isWakeOriginated: Boolean,
         hint: CloudRouteHint?,
+        /** The logical request this turn belongs to, when the caller is preparing a retry. */
+        logicalRequestId: String?,
     ): CloudRouteTurn? {
+        // A RETRY REUSES ITS TURN rather than minting a new one. The caller names the logical request;
+        // if a turn already exists for it, this returns THAT turn unchanged, so its request ID, handle
+        // and mode are the ones the first attempt fixed. This is the sink's half of the retention the
+        // executor keeps, so a direct caller and the executor resolve a retry identically.
+        if (logicalRequestId != null) {
+            conversationAdmission.retained(logicalRequestId)?.let { return it }
+        }
         val origin = capturedOrigin ?: conversationAdmission.currentOriginForTest()
         val admission = conversationAdmission.prepare(
             origin = origin,
             isLiveGraceTurn = isLiveGraceTurn,
             isWakeOriginated = isWakeOriginated,
         ) ?: return null
-        return CloudRouteTurn(
+        val built = CloudRouteTurn(
             request = request,
             context = buildRouteContext(context),
             requestId = UUID.randomUUID().toString(),
@@ -245,6 +254,10 @@ class CloudRouteSink internal constructor(
             conversationMode = admission.mode,
             capturedOrigin = origin,
         )
+        if (logicalRequestId != null) {
+            conversationAdmission.retain(logicalRequestId, built)
+        }
+        return built
     }
 
     /**

@@ -31,50 +31,6 @@ class VoicePlaybackIntentExecutor @Inject constructor(
      */
     private val playbackManager: PlaybackManager,
 ) {
-    /**
-     * The turn last prepared for an utterance, so a RETRY of that utterance reuses it.
-     *
-     * Retention is what makes the retry path production-reachable: without it, preparation would be a
-     * branch only a test could exercise, and a real retry would prepare a SECOND turn -- minting a new
-     * request ID, and if its window had moved, a new conversation for a request that was already sent.
-     */
-    private val retainedLock = Any()
-
-    /**
-     * Prepared turns by LOGICAL request, so a retry finds its own.
-     *
-     * A MAP, not a single slot: one slot holds only the most recent turn, so preparing a second
-     * logical request OVERWROTE the first and a later retry of it found nothing -- creating a third
-     * wire request for a logical request that already had one. Each logical request keeps its turn
-     * until it is no longer retryable.
-     */
-    private val retained =
-        mutableMapOf<String, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
-
-    private fun retainTurn(
-        logicalRequestId: String?,
-        turn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
-    ) {
-        // Retained under the LOGICAL identity the caller supplied, so a later retry naming the same
-        // request finds it -- and an utterance that names none never does. Keying on the request TEXT
-        // would let two separate user acts that happen to say the same words share one turn.
-        val logical = logicalRequestId ?: return
-        synchronized(retainedLock) { retained[logical] = turn }
-    }
-
-    /**
-     * The retained turn for [intent]'s LOGICAL request, when one was prepared.
-     *
-     * Keyed by logical identity, NOT by the request text: identical words do not identify a retry, and
-     * two separate user acts can say the same thing. A retry names the logical request it repeats; an
-     * utterance that names none is a NEW act, so it prepares its own turn with its own request ID and
-     * its own CREATE-or-RESUME decision under its own origin.
-     */
-    private fun retainedTurn(intent: VoiceIntent.CloudRoute): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? {
-        val logical = intent.logicalRequestId ?: return null
-        return synchronized(retainedLock) { retained[logical] }
-    }
-
     suspend fun execute(intent: VoiceIntent): VoiceResponse {
         // Recorded *before* the action runs: the revision is what a cloud turn
         // compares at restore time, and a user's pause that has already reached
@@ -99,12 +55,11 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                 // newly prepared one, so a retry reuses its request ID, handle and mode. Its captured
                 // origin decides which window it is validated against, so a retry whose window has since
                 // been superseded or closed is refused rather than adopting the current one.
+                // The PREPARED TURN when the caller carries one; otherwise preparation itself
+                // resolves a retry, because the SINK retains turns by logical request and returns the
+                // existing one unchanged. Retention therefore lives in one place, and a direct sink
+                // caller and this executor cannot disagree about what a retry is.
                 val alreadyPrepared = intent.preparedTurn
-                    // NOT CARRIED BY THE INTENT: this dispatch is a RETRY of the request this executor
-                    // last prepared for the same utterance. The turn is retained here, which is what
-                    // makes the retry path reachable WITHOUT the caller having to populate the intent --
-                    // otherwise preparation and retention would be a branch only a test ever runs.
-                    ?: retainedTurn(intent)
                 if (alreadyPrepared != null) {
                     val captureForRetry = alreadyPrepared.capturedOrigin
                     // The privacy half is the executor's, as for a first attempt: the sink cannot
@@ -153,8 +108,8 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                             captured,
                             isFirstRequestOfWindow = isFirstRequestOfWindow,
                         ),
+                    logicalRequestId = intent.logicalRequestId,
                 ) ?: return VoiceResponse.Silent
-                retainTurn(intent.logicalRequestId, preparedTurn)
                 // DISPATCHED THROUGH THE ALREADY-PREPARED TURN, so the first attempt and a retry take
                 // the SAME path and the identity is the one fixed above rather than a second one minted
                 // here.
@@ -422,6 +377,8 @@ interface VoiceCloudRouteSink {
         capturedOrigin: Long? = null,
         isWakeOriginated: Boolean = false,
         hint: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint? = null,
+        /** The logical request this turn belongs to, for the retry path. */
+        logicalRequestId: String? = null,
     ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn?
 
     /**

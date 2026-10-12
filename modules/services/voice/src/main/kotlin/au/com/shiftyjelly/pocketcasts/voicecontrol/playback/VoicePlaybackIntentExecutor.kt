@@ -39,7 +39,17 @@ class VoicePlaybackIntentExecutor @Inject constructor(
      * request ID, and if its window had moved, a new conversation for a request that was already sent.
      */
     private val retainedLock = Any()
-    private var retained: Pair<String, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>? = null
+
+    /**
+     * Prepared turns by LOGICAL request, so a retry finds its own.
+     *
+     * A MAP, not a single slot: one slot holds only the most recent turn, so preparing a second
+     * logical request OVERWROTE the first and a later retry of it found nothing -- creating a third
+     * wire request for a logical request that already had one. Each logical request keeps its turn
+     * until it is no longer retryable.
+     */
+    private val retained =
+        mutableMapOf<String, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
 
     private fun retainTurn(
         logicalRequestId: String?,
@@ -49,7 +59,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         // request finds it -- and an utterance that names none never does. Keying on the request TEXT
         // would let two separate user acts that happen to say the same words share one turn.
         val logical = logicalRequestId ?: return
-        synchronized(retainedLock) { retained = logical to turn }
+        synchronized(retainedLock) { retained[logical] = turn }
     }
 
     /**
@@ -62,9 +72,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
      */
     private fun retainedTurn(intent: VoiceIntent.CloudRoute): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? {
         val logical = intent.logicalRequestId ?: return null
-        return synchronized(retainedLock) {
-            retained?.takeIf { it.first == logical }?.second
-        }
+        return synchronized(retainedLock) { retained[logical] }
     }
 
     suspend fun execute(intent: VoiceIntent): VoiceResponse {

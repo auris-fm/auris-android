@@ -455,6 +455,46 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `a retry of an EARLIER logical request still finds its own turn after a later one`() = runTest {
+        // @reviewer's retired-ID case: executing logical A, then B, then retrying A must reuse A's turn.
+        // With a single retention slot, B OVERWROTE A, so the retry of A found nothing and created a
+        // THIRD wire request for a logical request that already had one.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+
+        suspend fun dispatch(logical: String) = executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "question $logical",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = window,
+                logicalRequestId = logical,
+            ),
+        )
+
+        dispatch("A")
+        dispatch("B")
+        val preparedAfterAB = sinks.cloudRoute.preparedTurns.size
+        dispatch("A") // the retry of the EARLIER one
+
+        assertEquals(
+            "the retry of A did not prepare a third turn " +
+                "(prepared=${sinks.cloudRoute.preparedTurns.map { it.requestId }})",
+            preparedAfterAB,
+            sinks.cloudRoute.preparedTurns.size,
+        )
+        val dispatchedA = sinks.cloudRoute.preparedDispatches.filter { it.request == "question A" }
+        assertEquals("A was dispatched twice, once initially and once as a retry", 2, dispatchedA.size)
+        assertEquals(
+            "and both carried A's OWN request ID",
+            dispatchedA[0].requestId,
+            dispatchedA[1].requestId,
+        )
+    }
+
+    @Test
     fun `the logical identity is what matches, not the words`() = runTest {
         // THE DISCRIMINATING CASE for the retention key. A retry that names the SAME logical request
         // but words the request differently must reuse the prepared turn: the identity is what matches.

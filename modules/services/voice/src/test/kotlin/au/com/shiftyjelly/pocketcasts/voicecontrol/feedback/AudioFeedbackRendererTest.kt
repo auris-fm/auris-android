@@ -140,6 +140,43 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `a permanently QUEUED cue is observed for a BOUNDED time, not forever`() = runTest {
+        // @reviewer's measured defect in my policy implementation: my queued limit was computed as
+        // `2_000 + elapsed` EACH PASS, so it grew with the loop and could NEVER be reached -- a
+        // permanently queued cue was observed forever and the deadline was a formality, not a bound.
+        // The limit is ABSOLUTE from submission.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        // Well past the 2_000 ms queued limit.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(6_000))
+
+        // THE OBSERVATION MUST HAVE ENDED: a cue that never began sounding is given up on, and nothing
+        // is attributed, because nothing was observed to sound.
+        assertFalse(
+            "a cue that never began sounding must not be attributed",
+            renderer.hasEmittedAudio.value,
+        )
+        // THE OBSERVATION'S OWN LIFETIME IS THE OBSERVATION. A note count cannot show this -- a queued
+        // cue emits nothing either way, so a deadline that never expires looks identical to one that
+        // does. The job either ended at the bound or it is still running.
+        val atLimit = renderer.emissionNotesForTest()
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(4_000))
+        assertEquals(
+            "and the observation has ENDED rather than sliding (atLimit=$atLimit)",
+            atLimit,
+            renderer.emissionNotesForTest(),
+        )
+        assertFalse(
+            "the queued observation must have ENDED at its bound, not still be running",
+            renderer.coverageIsRunningForTest(),
+        )
+    }
+
+    @Test
     fun `a cue still QUEUED past its estimate is still observed until it sounds`() = runTest {
         // @reviewer's second measured case, and the same defect in a different shape: the observation
         // stopped when the cue's ESTIMATED duration passed, while the cue was still queued. The estimate

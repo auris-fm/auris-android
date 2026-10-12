@@ -172,6 +172,16 @@ class AudioFeedbackRenderer(
     private var earconCoverageJob: Job? = null
 
     /**
+     * Whether the coverage observation is STILL RUNNING, so a case can assert that a deadline BOUNDS it.
+     *
+     * A note count cannot show this: a queued cue emits no notes either way, so a deadline that never
+     * expires and one that does look identical from the count alone. The observation's OWN lifetime is
+     * the thing the bound is about -- and a deadline computed from `elapsed` each pass can never be
+     * reached, which only its lifetime reveals.
+     */
+    internal fun coverageIsRunningForTest(): Boolean = earconCoverageJob?.isActive == true
+
+    /**
      * Keeps the gate's attribution fresh until the cue is OBSERVED to have been consumed.
      *
      * The estimated duration is a BOUND, not the ending condition: the loop ends when the output
@@ -218,9 +228,15 @@ class AudioFeedbackRenderer(
             // DEADLINE EXPIRY IS AN UNKNOWN/STALLED OBSERVATION, not evidence the cue was consumed. These
             // are conservative observation limits, not claims about hardware completion.
             var stillQueued = true
+            // A FIXED DEADLINE, NOT ONE MEASURED FROM `elapsed` EACH PASS. `QUEUED_OBSERVATION_MS +
+            // elapsed` grows with the loop, so the limit can never be reached and a permanently queued
+            // cue is observed forever -- the deadline would be a formality rather than a bound. The
+            // queued limit is absolute from submission; the rendering limit is set ONCE, at the first
+            // measured rendering, and is likewise absolute from there.
+            val queuedDeadlineMs = QUEUED_OBSERVATION_MS
             var renderingDeadlineMs: Long? = null
             while (!disposed) {
-                val limit = renderingDeadlineMs ?: (QUEUED_OBSERVATION_MS + elapsed)
+                val limit = renderingDeadlineMs ?: queuedDeadlineMs
                 if (observed && elapsed + EMISSION_HEARTBEAT_MS > limit) return@launch
                 delay(if (observed) EMISSION_HEARTBEAT_MS else firstWaitMs)
                 elapsed += if (observed) EMISSION_HEARTBEAT_MS else firstWaitMs

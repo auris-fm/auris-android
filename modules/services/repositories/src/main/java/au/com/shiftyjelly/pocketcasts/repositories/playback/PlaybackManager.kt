@@ -719,12 +719,19 @@ open class PlaybackManager @Inject constructor(
      */
     suspend fun resumeIfPlaying(episodeUuid: String, sourceView: SourceView = SourceView.UNKNOWN): Boolean {
         if (getCurrentEpisode()?.uuid != episodeUuid) return false
+        // THE VALIDATED TARGET IS WHAT IS RESUMED. Calling the queue-level resume after capturing this
+        // target would act on LIVE queue/player state instead -- a different subject from the one just
+        // validated, which is the substitution the validation exists to prevent. The resume is issued
+        // against the player the check accepted.
         val accepted = synchronized(selectedPlayerLock) {
-            if (getCurrentEpisode()?.uuid != episodeUuid) return false
+            val selected = getCurrentEpisode()
+            if (selected?.uuid != episodeUuid) return false
             player?.takeIf { it.episodeUuid == episodeUuid }
         } ?: return false
         if (accepted.isPlaying()) return true
-        playQueueSuspend(sourceView = sourceView)
+        // The position comes from the ACCEPTED PLAYER, so the resume is issued against the same subject
+        // the boundary validated rather than against live state read afterwards.
+        accepted.play(accepted.getCurrentPositionMs())
         return true
     }
 
@@ -1353,9 +1360,15 @@ open class PlaybackManager @Inject constructor(
             if (selected?.uuid != episodeUuid) return false
             // THE PLAYER'S OWN EPISODE MUST MATCH TOO. A player is REUSED across episodes -- the same
             // instance is reconfigured for the next recording -- so a captured reference does not by
-            // itself establish WHICH episode it addresses. The queue naming the episode is not enough:
-            // the pointer can be reconfigured to another episode between the capture and the suspending
-            // seek, and that seek would then be applied to audio the caller never asked to move.
+            // itself establish WHICH episode it addresses, and the queue naming the episode says
+            // nothing about the instance.
+            //
+            // WHAT THIS ACTUALLY EXCLUDES, stated no more strongly than it holds: the check and the
+            // capture are one step, so a reconfiguration that takes [selectedPlayerLock] cannot land
+            // between them. It does NOT exclude reconfiguration that takes no lock -- the write side
+            // (`playNow`/`playNowSync`, below) still runs outside the boundary -- and it does not make
+            // the captured reference safe ACROSS the suspending seek that follows. My earlier wording
+            // claimed otherwise and this replaces it.
             val target = player
             if (target?.episodeUuid != episodeUuid) return false
             selected.playedUpToMs = positionMs

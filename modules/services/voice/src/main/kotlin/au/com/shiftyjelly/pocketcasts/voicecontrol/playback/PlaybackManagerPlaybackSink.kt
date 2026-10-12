@@ -82,15 +82,27 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         return VoiceResponse.Earcon(EarconId.SUCCESS)
     }
 
-    override suspend fun resume(expectedEpisodeId: String?): VoiceResponse {
+    override suspend fun resume(expectedEpisodeId: String?): EpisodeOperationResult {
         // THROUGH THE OWNER when the caller has an episode-specific subject. A quote's resume is about
         // the recording the quote came from, so it must not start a replacement.
         if (expectedEpisodeId != null) {
-            playbackManager.resumeIfPlaying(expectedEpisodeId, sourceView = SourceView.VOICE_COMMANDS)
-            return VoiceResponse.Silent
+            // THE REFUSAL PROPAGATES. Discarding this Boolean made a REFUSED resume indistinguishable
+            // from an accepted one, so the caller reported the action as performed. A resume that never
+            // happened must not be reported as one.
+            val before = playbackManager.getCurrentEpisode()
+                ?.takeIf { it.uuid == expectedEpisodeId }
+                ?.playedUpToMs
+                ?.toLong()
+            val accepted = playbackManager.resumeIfPlaying(expectedEpisodeId, sourceView = SourceView.VOICE_COMMANDS)
+            return if (accepted) {
+                EpisodeOperationResult.Accepted(expectedEpisodeId, before)
+            } else {
+                EpisodeOperationResult.Refused
+            }
         }
         playbackManager.playQueueSuspend(sourceView = SourceView.VOICE_COMMANDS)
-        return VoiceResponse.Silent
+        // Episode-independent: no episode-specific subject, so no provenance to report.
+        return EpisodeOperationResult.Accepted(episodeId = null, preActionPositionMs = null)
     }
 
     override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {

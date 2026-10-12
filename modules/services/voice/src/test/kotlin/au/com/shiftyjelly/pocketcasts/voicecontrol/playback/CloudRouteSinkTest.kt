@@ -2841,12 +2841,12 @@ class CloudRouteSinkTest {
             return VoiceResponse.Silent
         }
 
-        override suspend fun resume(expectedEpisodeId: String?): VoiceResponse {
+        override suspend fun resume(expectedEpisodeId: String?): EpisodeOperationResult {
             resumeStarted.complete(Unit)
             resumeGate?.await()
             calls += "resume"
             host?.playing = true
-            return VoiceResponse.Silent
+            return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
         }
 
         override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {

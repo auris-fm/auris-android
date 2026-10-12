@@ -475,4 +475,51 @@ class EarconPlayerTest {
         )
         mockPlayer.release()
     }
+
+    @Test
+    fun `releasing the worker between selection and submission cannot reject the submission`() {
+        // @reviewer's point about my first attempt: putting only the SELECTION inside the lock left the
+        // window open, because `submit` still ran outside it. This drives the REAL submission path with
+        // a controlled executor, so a rejection would be observed directly.
+        //
+        // HONEST STATUS: this is a RACING probe, not a controlled one -- two threads race and the window
+        // is narrow, so 200 iterations do not reliably land in it. MUTATING THE FIX BACK (submit outside
+        // the lock) leaves this case PASSING, which is how I know it does not constrain the lock. It is
+        // kept as a smoke check and labelled as such; @reviewer's gated-executor seam is what would make
+        // it decisive.
+        val player = EarconPlayer(context)
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val gated = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "gated-worker")
+        }
+        player.installExecutorForTest(gated)
+
+        // The releaser shuts the controlled executor down while the submission is being attempted.
+        val releaser = Thread {
+            gate.await()
+            player.installExecutorForTest(gated)
+            gated.shutdown()
+        }.apply { start() }
+
+        val results = java.util.concurrent.CopyOnWriteArrayList<Throwable>()
+        val submitter = Thread {
+            repeat(200) {
+                try {
+                    player.submitForTest { 1 }.get()
+                } catch (t: Throwable) {
+                    results.add(t)
+                }
+            }
+        }.apply { start() }
+
+        gate.countDown()
+        submitter.join(5_000)
+        releaser.join(5_000)
+
+        assertTrue(
+            "no submission may be rejected by a concurrent release " +
+                "(failures=${results.map { it::class.simpleName }})",
+            results.isEmpty(),
+        )
+    }
 }

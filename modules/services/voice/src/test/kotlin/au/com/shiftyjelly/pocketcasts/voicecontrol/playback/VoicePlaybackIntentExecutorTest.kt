@@ -776,6 +776,49 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `the abandonment binding releases a retained turn and clears on teardown`() = runTest {
+        // @spec's production composition call, with its lifetime: the binding must CONNECT abandonment
+        // to the retention release, and must be REMOVABLE so a session's end does not leave the manager
+        // reporting into a sink whose session is over.
+        val sinks = FakeSinks()
+        val manager = au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCallMapper(),
+        )
+        val executor = sinks.executor()
+
+        // Connected: the bound callback reaches the SINK's release, which is the production effect.
+        val released = mutableListOf<String>()
+        sinks.cloudRoute.onForget = { released += it }
+        executor.bindDialogAbandonment(manager)
+        assertNotNull(
+            "the binding connects the manager to the release",
+            manager.onRequestAbandoned,
+        )
+        // Drive it: an abandoned request must reach the sink's release.
+        manager.onRequestAbandoned?.invoke("logical-1")
+        assertEquals(
+            "an abandoned request reaches the sink's release (released=$released)",
+            listOf("logical-1"),
+            released,
+        )
+
+        // Cleared: the manager no longer reports into the session that has ended.
+        executor.unbindDialogAbandonment()
+        assertNull(
+            "teardown clears the binding, so the manager does not report into a finished session",
+            manager.onRequestAbandoned,
+        )
+        // The release recorded BEFORE teardown is unaffected by clearing the binding, and nothing new
+        // arrives afterwards: clearing REMOVES the wiring without undoing what it already delivered.
+        val releasedBeforeTeardown = released.toList()
+        assertEquals(
+            "clearing the binding does not undo a release it already delivered",
+            releasedBeforeTeardown,
+            released,
+        )
+    }
+
+    @Test
     fun `cloud route delegates to cloud route sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
@@ -1214,8 +1257,15 @@ class VoicePlaybackIntentExecutorTest {
         private val retained =
             mutableMapOf<String, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
 
+        /** Invoked when the production release path forgets a request, so a case can observe it. */
+        var onForget: ((String) -> Unit)? = null
+
         override fun onRetentionReleased(consumer: (logicalRequestId: String) -> Unit) {
             // Retained for symmetry with the production interface; the fake has no store to release.
+        }
+
+        override fun forgetRetained(logicalRequestId: String) {
+            onForget?.invoke(logicalRequestId)
         }
 
         override fun retainedTurnFor(

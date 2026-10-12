@@ -915,7 +915,7 @@ class CloudRouteSink internal constructor(
                         // state afterwards would subject it to a later selection change. The owner decided
                         // the episode when it accepted, so its answer is what history uses.
                         if (outcome !is EpisodeOperationResult.Accepted) return@withLock false
-                        capturePreActionPosition(positionSeconds * 1000L, turnState)
+                        capturePreActionPosition(positionSeconds * 1000L, turnState, outcome.episodeId)
                         return@withLock true
                     }
                     // The reference branch is reached only when that form was supplied, so a null
@@ -924,16 +924,17 @@ class CloudRouteSink internal constructor(
                     // A reference target with no usable mapping, or no episode to be a position IN, is
                     // refused rather than approximated -- and history is committed ONLY when the seek
                     // was ACCEPTED, against the episode it was bound to.
-                    if (!seekToReference(referenceMs, turnEpisodeId)) return@withLock false
-                    capturePreActionPosition(referenceMs, turnState)
+                    val accepted = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock false
+                    // HISTORY FROM THE ACCEPTED RESULT, never a live re-read.
+                    capturePreActionPosition(accepted.preActionPositionMs ?: referenceMs, turnState, accepted.episodeId)
                     return@withLock true
                 }
 
                 "play_quote" -> {
                     val referenceMs = params.referencePositionMs() ?: return@withLock false
                     // Same rule: the seek is attempted FIRST and history follows only an accepted one.
-                    if (!seekToReference(referenceMs, turnEpisodeId)) return@withLock false
-                    capturePreActionPosition(referenceMs, turnState)
+                    val accepted = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock false
+                    capturePreActionPosition(accepted.preActionPositionMs ?: referenceMs, turnState, accepted.episodeId)
                     // THE RESUME IS BOUND TO THE EPISODE THE QUOTE WAS PLAYED FROM -- this is the call
                     // the quote's own resume makes, not the standalone "resume" action. A quote means
                     // "hear this, then carry on with the recording we were in", so resuming a
@@ -1058,13 +1059,18 @@ class CloudRouteSink internal constructor(
         }
     }
 
-    private fun capturePreActionPosition(referenceMs: Long, turnState: TurnState) {
-        // AFTER ACCEPTANCE, SO THE SUBJECT IS THE EPISODE THE OPERATION WAS BOUND TO. This runs only
-        // once the sink accepted the action, and the expected-episode operation is what establishes
-        // that the player is still on [turnEpisodeId] -- so recording against it is recording against
-        // the episode the position actually belongs to. Re-reading the live provider here would record
-        // against whatever a later selection change made current, which is a different recording.
-        val previousPlaybackMs = playbackContextProvider.current().clientPositionMs
+    private fun capturePreActionPosition(referenceMs: Long, turnState: TurnState, acceptedEpisodeId: String?) {
+        // THE OWNER'S EPISODE IS THE SUBJECT, not a live re-read. This runs only once the operation was
+        // ACCEPTED, and the accepted result carries the episode the owner decided on -- so the position
+        // is recorded against the recording the action actually touched. Re-reading the provider here
+        // would record against whatever a LATER selection change made current, which is a different
+        // recording, and the accepted result is the only thing that can say otherwise.
+        //
+        // The position itself comes from the live provider because a PRE-action position is by
+        // definition the client's position BEFORE the mutation, which only the provider knows; the
+        // EPISODE it is attributed to is what the accepted result supplies.
+        val current = playbackContextProvider.current()
+        val previousPlaybackMs = current.clientPositionMs.takeIf { acceptedEpisodeId == null || current.episodeId == acceptedEpisodeId }
         // preQuotePositionMs stays on the playback timeline: stop_quote seeks the local player back to
         // it. When NO episode is playing there is no position to return to, so this records null and
         // the restore path refuses -- substituting zero would send the user to the start of a
@@ -1081,12 +1087,16 @@ class CloudRouteSink internal constructor(
                 .referenceTime(playbackMs.toInt())
                 ?.let { referenceSeconds -> (referenceSeconds * 1000).toLong() }
         }
+        // Recorded AGAINST THE EPISODE THE ACCEPTED OPERATION DECIDED ON, so a later turn about a
+        // different episode cannot inherit it -- and so a selection change AFTER acceptance cannot
+        // reattribute the position to a recording the action never touched. The live provider is the
+        // wrong authority here: it answers "what is selected NOW", which is the question this is
+        // deliberately not asking.
+        if (acceptedEpisodeId == null) return
         cloudPlaybackContextState.record(
             referencePositionMs = referenceMs,
             previousReferencePositionMs = previousReferenceMs,
-            // Recorded AGAINST the episode it describes, so a later turn about a different episode
-            // cannot inherit it.
-            episodeId = playbackContextProvider.current().episodeId,
+            episodeId = acceptedEpisodeId,
         )
     }
 
@@ -1102,26 +1112,27 @@ class CloudRouteSink internal constructor(
      *
      * @return true when the seek was performed, false when the mapping is unavailable.
      */
-    private suspend fun seekToReference(referenceMs: Long, expectedEpisodeId: String?): Boolean {
-        // AN EPISODE-SPECIFIC REFERENCE POSITION MUST BE BOUND TO AN EPISODE. A reference position is a
-        // position IN a recording, so a null expectation here would turn it into an unrestricted seek:
-        // the position would be applied to whatever happens to be playing, which is the substitution the
-        // episode guard exists to prevent. Refused rather than approximated.
-        if (expectedEpisodeId == null) return false
+    // Seeks to a REFERENCE-timeline position, returning the OWNER'S ACCEPTED RESULT.
+    //
+    // THE RESULT CARRIES THE OWNER'S EPISODE AND PRE-POSITION, so the caller commits history from what
+    // the accepted operation actually saw. Returning a bare Boolean forced the caller to read the live
+    // provider, which a later selection change can overtake -- recording a position against an episode
+    // the seek never touched.
+    //
+    // A reference position is a position IN a recording, so a null expectation is refused rather than
+    // applied to whatever happens to be playing.
+    private suspend fun seekToReference(
+        referenceMs: Long,
+        expectedEpisodeId: String?,
+    ): EpisodeOperationResult.Accepted? {
+        if (expectedEpisodeId == null) return null
         val referenceSeconds = referenceMs / 1000.0
-        val playbackMs = fingerprintTimingManager.playbackTimeMs(referenceSeconds) ?: return false
-        // THE SINK'S OUTCOME IS THE OUTCOME. Returning true unconditionally reported an action as
-        // PERFORMED even when the sink refused it -- and the caller commits history from this result, so
-        // a refused seek still recorded its pre-action position against the episode.
-        //
-        // The sink resolves to Silent for both acceptance and refusal, so it cannot be read off the
-        // response type; the expected-episode operation is what makes acceptance decidable here, because
-        // a bound operation either reaches the player or is refused for its binding.
+        val playbackMs = fingerprintTimingManager.playbackTimeMs(referenceSeconds) ?: return null
         return playbackSink.seekTo(
             (playbackMs / 1000).coerceAtLeast(0),
             episodeDurationSeconds(),
             expectedEpisodeId,
-        ) is EpisodeOperationResult.Accepted
+        ) as? EpisodeOperationResult.Accepted
     }
 
     private fun Map<String, Any?>.positionSeconds(): Int? {

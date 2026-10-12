@@ -164,6 +164,9 @@ class AudioFeedbackRenderer(
         return played
     }
 
+    /** The in-flight earcon coverage, so a session end can end it rather than let it run on. */
+    private var earconCoverageJob: Job? = null
+
     /**
      * Keeps the gate's attribution fresh until the cue is OBSERVED to have been consumed.
      *
@@ -176,14 +179,19 @@ class AudioFeedbackRenderer(
      * Runs on the renderer's own scope so a synchronous caller is not blocked.
      */
     private fun coverEarconUntilConsumed() {
-        scope.launch {
+        earconCoverageJob?.cancel()
+        earconCoverageJob = scope.launch {
             // A cue that is never observed to progress must not be covered forever: the estimate
             // bounds the wait, and the bound is only a ceiling.
-            val boundMs = earconPlayer.emittedDurationMs() + EMISSION_HEARTBEAT_MS * 4
+            val boundMs = earconPlayer.emittedDurationMs()
             var elapsed = 0L
-            while (!disposed && elapsed <= boundMs) {
+            // The bound is checked BEFORE sleeping, so the loop cannot overshoot the cue's own span by
+            // a whole heartbeat: a cue whose span has already elapsed must not emit another note.
+            while (!disposed && elapsed < boundMs) {
                 delay(EMISSION_HEARTBEAT_MS)
                 elapsed += EMISSION_HEARTBEAT_MS
+                // The sleep may have crossed the bound; do not emit for a cue that has no span left.
+                if (elapsed > boundMs && boundMs > 0) return@launch
                 when (earconPlayer.completion()) {
                     EarconPlayer.EarconCompletion.Consumed -> return@launch
 
@@ -236,6 +244,7 @@ class AudioFeedbackRenderer(
         // End the cue's attribution HERE rather than letting an estimate cover it: the session is
         // stopping, so whatever the output was doing, the user is no longer hearing it and the gate
         // must stop treating it as ours.
+        earconCoverageJob?.cancel()
         earconPlayer.stopNow()
         earconPlayer.release()
     }

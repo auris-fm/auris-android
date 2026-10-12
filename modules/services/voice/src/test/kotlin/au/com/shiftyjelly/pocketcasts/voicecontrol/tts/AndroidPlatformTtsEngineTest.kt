@@ -15,6 +15,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -681,6 +682,69 @@ class AndroidPlatformTtsEngineTest {
 
         assertEquals("old exit must preserve actual successor track", android.media.AudioTrack.PLAYSTATE_PLAYING, afterOldExit)
         assertEquals("old exit must preserve successor synthesizer", 0, engineStops)
+    }
+
+    @Test
+    fun `reviewer shared track publication respects ownership boundary`() {
+        val (wired, fake) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        fake.emitRealWav = true
+        wired.drainWaitMs = 0
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val oldTrack = java.util.concurrent.atomic.AtomicReference<android.media.AudioTrack>()
+        wired.writeToSink = { track, _, _, count ->
+            if (oldTrack.compareAndSet(null, track)) {
+                entered.countDown()
+                release.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                count / 2
+            } else {
+                count
+            }
+        }
+        val scope = CoroutineScope(Dispatchers.Default)
+        fun start(text: String, target: Int): kotlinx.coroutines.Job {
+            val job = scope.launch {
+                try {
+                    wired.speak(text, "en")
+                } catch (_: Throwable) {}
+            }
+            assertTrue(
+                "synthesis must claim first",
+                (0 until 50).any {
+                    org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                    Thread.sleep(20)
+                    fake.synthesizeCount >= target
+                },
+            )
+            return job
+        }
+        val old = start("old", 1)
+        fake.listener?.onDone(fake.lastUtteranceId)
+        assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        val successor = start("successor", 2)
+        val active = wired.javaClass.getDeclaredField("activeTrack")
+        active.isAccessible = true
+        var observed: android.media.AudioTrack? = null
+        wired.runSerialisedForTest {
+            assertSame("old owns the slot before successor resumes", oldTrack.get(), active.get(wired))
+            fake.listener?.onDone(fake.lastUtteranceId)
+            // Successor has already claimed its token; only publication is held by this boundary.
+            repeat(50) {
+                if (active.get(wired) === oldTrack.get()) Thread.sleep(10)
+            }
+            observed = active.get(wired) as android.media.AudioTrack?
+        }
+        release.countDown()
+        scope.cancel()
+        runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(3000) {
+                old.join()
+                successor.join()
+            }
+        }
+        wired.release()
+        assertSame("successor must not replace the shared slot while its cleanup lock is held", oldTrack.get(), observed)
     }
 }
 

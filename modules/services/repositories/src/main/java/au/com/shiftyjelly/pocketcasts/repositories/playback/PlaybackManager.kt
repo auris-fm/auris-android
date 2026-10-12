@@ -1269,6 +1269,13 @@ open class PlaybackManager @Inject constructor(
     data class ScopedMutation(
         val episodeUuid: String,
         val preActionPositionMs: Int?,
+        /**
+         * True when the operation was ISSUED and no outcome came back, so its EXECUTION IS UNKNOWN.
+         *
+         * Carried rather than collapsed: a caller that cannot distinguish "did not happen" from "may have
+         * happened" can repeat an operation the other side already performed.
+         */
+        val unknown: Boolean = false,
     )
 
     // NOT YET PROTECTED BY [selectedPlayerLock]: `playNow`/`playNowSync`, which is the path that WRITES
@@ -1386,8 +1393,7 @@ open class PlaybackManager @Inject constructor(
         //
         // `seekToTimeMsInternalIfEpisode` therefore RETURNS the position it saw when it decided, so the
         // value and the acceptance are one observation.
-        val accepted = seekToTimeMsInternalIfEpisodeCapturing(episodeUuid, positionMs) ?: return null
-        return ScopedMutation(accepted.first, accepted.second)
+        return seekToTimeMsInternalIfEpisodeCapturing(episodeUuid, positionMs)
     }
 
     /**
@@ -1398,12 +1404,13 @@ open class PlaybackManager @Inject constructor(
      * would make the reported position belong to a different episode than the accepted operation. Reading
      * it here, inside the same step that decides, is what ties the value to the acceptance.
      *
-     * @return the accepted episode and its pre-action position, or null when refused.
+     * @return the accepted episode and its pre-action position, an UNKNOWN result when the execution is
+     *   not knowable, or null when refused.
      */
     private suspend fun seekToTimeMsInternalIfEpisodeCapturing(
         episodeUuid: String,
         positionMs: Int,
-    ): Pair<String, Int?>? {
+    ): ScopedMutation? {
         val selected = getCurrentEpisode()
         if (selected?.uuid != episodeUuid) return null
         if (player == null) return null
@@ -1431,10 +1438,15 @@ open class PlaybackManager @Inject constructor(
             return null
         }
         val outcome = target.seekToTimeMsIfEpisode(positionMs, episodeUuid)
-        if (!outcome.accepted) return null
+        if (!outcome.accepted) {
+            // UNKNOWN IS NOT REFUSAL, and it is not "no result" either: the caller must be able to tell
+            // that the operation may have run. Refusing here would look like a retryable failure and
+            // could repeat an operation the receiver already performed.
+            return if (outcome.unknown) ScopedMutation(episodeUuid, null, unknown = true) else null
+        }
         // THE POSITION MAY BE ABSENT WHILE THE OPERATION IS ACCEPTED. It is carried as null so the
         // history consumer records nothing rather than substituting a value -- absence is not refusal.
-        return episodeUuid to outcome.positionMs?.toInt()
+        return ScopedMutation(episodeUuid, outcome.positionMs?.toInt())
     }
 
     private suspend fun seekToTimeMsInternal(duration: Duration) {

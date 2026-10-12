@@ -75,6 +75,22 @@ class PlaybackBufferRecorder @Inject constructor(
 
     private var tapJob: Job? = null
 
+    /**
+     * Whether the [sampleCount] newest retained samples are contiguous on the reported axis.
+     *
+     * A hole ceases to matter when the ring has overwritten the audio BEFORE it: from that point every
+     * retained sample lies on one side of it. The oldest retained position is the newest position minus
+     * the window's duration, so the hole still matters exactly while it begins after that.
+     *
+     * Caller holds [lock].
+     */
+    private fun windowIsContiguous(sampleCount: Int): Boolean {
+        val hole = holeThroughPositionMs ?: return true
+        val newest = lastPositionMs ?: return true
+        val oldest = newest - (sampleCount * 1_000L) / SAMPLE_RATE
+        return oldest >= hole
+    }
+
     /** Player-timeline position (ms) of the newest timestamped sample; null until one is written. */
     private var lastPositionMs: Long? = null
 
@@ -92,11 +108,13 @@ class PlaybackBufferRecorder @Inject constructor(
      * the filter could reject genuine user speech as bleed. A gap therefore removes the anchor: the
      * window keeps its samples for offset-based correlation and asserts nothing about when they sounded.
      *
-     * It is NOT restored by later contiguous audio. The retained samples still include the hole, so the
-     * span still does not describe them; recovering the anchor would require the hole to leave the
-     * buffer, which is not visible from here.
+     * IT IS A PROPERTY OF THE RETAINED RANGE, NOT A LATCH ON THE RECORDER. A hole is remembered by the
+     * POSITION at which it occurred, and forgotten once the ring has overwritten past it: from then on
+     * no retained sample was separated by that hole, so the window is contiguous again and the anchor is
+     * honest. A recorder-wide latch would keep the anchor suppressed forever after one dropped chunk,
+     * discarding a good alignment for the rest of the session.
      */
-    private var contiguous = true
+    private var holeThroughPositionMs: Long? = null
 
     /** The end of the newest tick on the reported axis, to compare against the next tick's start. */
     private var expectedNextPositionMs: Long? = null
@@ -140,9 +158,9 @@ class PlaybackBufferRecorder @Inject constructor(
      */
     fun retire() {
         synchronized(lock) {
-            // THE RETAINED SPAN IS REPLACED, so any hole it held is gone with it and the window is
-            // contiguous again for the tail that survives.
-            contiguous = true
+            // The retained span is replaced, so a hole OUTSIDE the surviving tail is gone with it. The
+            // hole's position is NOT cleared unconditionally: the tail keeps the newest samples, so a
+            // hole inside the tail still separates them and the window is still not contiguous.
             expectedNextPositionMs = null
             // Nothing was ever submitted: there is no tail to keep and no stale audio to retire.
             if (!filled && writePos == 0) return
@@ -375,7 +393,10 @@ class PlaybackBufferRecorder @Inject constructor(
                 // lock as the position update, so the gap and the position cannot be applied separately.
                 val expected = expectedNextPositionMs
                 if (expected != null && kotlin.math.abs(positionMs - expected) > CONTIGUITY_TOLERANCE_MS) {
-                    contiguous = false
+                    // Remember WHERE the hole is: it matters only while samples on BOTH sides of it are
+                    // still retained. The hole runs from the previous tick's end (where audio is
+                    // missing) up to this tick's start (where audio resumes).
+                    holeThroughPositionMs = maxOf(holeThroughPositionMs ?: 0L, positionMs)
                 }
                 // The position of the newest sample: the chunk's start plus its duration at 16 kHz.
                 lastPositionMs = positionMs + (pcm.size * 1_000L) / SAMPLE_RATE
@@ -449,7 +470,7 @@ class PlaybackBufferRecorder @Inject constructor(
             // Both report no position. Absent is the honest answer and the correlator falls back to
             // offset matching, whereas a media position would align confidently against a moment that
             // has nothing to do with when the audio was captured.
-            val anchored = positionAxis == PositionAxis.Monotonic && contiguous
+            val anchored = positionAxis == PositionAxis.Monotonic && windowIsContiguous(samples.size)
             val start = if (anchored) {
                 end?.let { it - (samples.size * 1_000L) / SAMPLE_RATE }
             } else {

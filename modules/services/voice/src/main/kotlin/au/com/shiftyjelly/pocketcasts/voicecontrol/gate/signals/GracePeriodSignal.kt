@@ -46,6 +46,9 @@ class GracePeriodSignal @Inject constructor() {
     /** The most recent generation opened BY A WAKE; a turn captured under it starts a conversation. */
     private var wakeGeneration = 0L
 
+    /** The generation whose first request has already been prepared, so later ones continue. */
+    private var requestPreparedForGeneration = -1L
+
     /**
      * The window's identity, for a caller that must CAPTURE it at registration and act on it later.
      *
@@ -64,15 +67,44 @@ class GracePeriodSignal @Inject constructor() {
      * the current one -- including when a newer window is open and active.
      */
     @Synchronized
-    fun isCurrent(captured: Long): Boolean = captured == generation
+    fun isCurrent(captured: Long): Boolean = // EQUAL GENERATION IS NOT ENOUGH: a window closed by a privacy event must reject even an origin
+        // that still matches numerically, because the whole point of that close is that nothing keeps
+        // listening after the app was backgrounded. Comparing numbers alone would admit a request whose
+        // window has been invalidated.
+        captured == generation && _isActive.value && !closedByPrivacy
 
     /**
-     * Whether [captured] names a window opened by a WAKE, so a turn under it begins a new conversation
-     * rather than continuing one. False once a later window has replaced it, which the caller checks
-     * with [isCurrent] first.
+     * Whether the request being prepared is the FIRST of its window, so it begins a conversation.
+     *
+     * PER REQUEST, not a property of the window: a window is opened by a wake, but the wake's own
+     * request is only the first one. A wake-free follow-up inside the same window is a CONTINUATION,
+     * and reading "this window was opened by a wake" for it would make every follow-up look like a
+     * fresh user act.
+     *
+     * [isFirstRequestOfWindow] is therefore what the caller passes, and this only checks that the
+     * window it belongs to is still the current one.
      */
     @Synchronized
-    fun isWakeOriginated(captured: Long): Boolean = captured == wakeGeneration
+    fun isWakeOriginated(captured: Long, isFirstRequestOfWindow: Boolean): Boolean = isFirstRequestOfWindow && captured == wakeGeneration
+
+    /**
+     * Whether [captured]'s window has ALREADY had a request prepared under it.
+     *
+     * The caller asks this to decide whether the request it is preparing is the first of the window:
+     * the first one begins a conversation, later ones continue it. Kept here rather than derived from
+     * `isActive`, because the window being open says nothing about whether anything has been sent in it.
+     */
+    @Synchronized
+    fun hasPreparedRequest(captured: Long): Boolean = requestPreparedForGeneration == captured
+
+    /**
+     * Records that a request has been prepared under [captured], so a later one knows it is a
+     * continuation rather than the wake's own request.
+     */
+    @Synchronized
+    fun notePreparedRequest(captured: Long) {
+        requestPreparedForGeneration = captured
+    }
 
     /**
      * True once a privacy event has closed the window and no wake has opened a

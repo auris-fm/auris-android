@@ -394,6 +394,11 @@ class VoiceAsrEngine @Inject constructor(
             listeningMode = currentMode,
             micExposure = micExposureProvider?.invoke() ?: MicExposure.Exposed,
         )
+        // CAPTURED BEFORE the recognition suspends. Recognition can take seconds, and a wake that
+        // arrives while it runs opens a NEW window: stamping the intent afterwards would attach it to
+        // the window that opened during the wait, so a request issued before a successor wake would
+        // act as though it belonged to the successor.
+        val windowAtRequest = gracePeriodSignal.capturedGeneration()
         val outcome = recognizer.recognize(input, ctx)
         val elapsedMs = System.currentTimeMillis() - t0
         val intent = outcome.intent
@@ -408,7 +413,7 @@ class VoiceAsrEngine @Inject constructor(
             )
             // A cloud turn outlives the window it was issued in, so it carries
             // that window's identity and cannot extend a later one.
-            handler(intent.stampedForWindow(gracePeriodSignal.currentGeneration))
+            handler(intent.stampedForWindow(windowAtRequest))
             return
         }
 

@@ -293,6 +293,77 @@ class VoicePlaybackIntentExecutorTest {
         )
     }
 
+    @Test
+    fun `a wake-free follow-up in the same window does not inherit the wake's flag`() = runTest {
+        // @spec's correction: the wake selection belongs to EACH REQUEST. The window is opened by a
+        // wake, but only the wake's own request begins a conversation; a follow-up in the same window
+        // continues it. Reading "this window was opened by a wake" for the follow-up made every
+        // follow-up look like a fresh user act.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "the wake's own question",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = window,
+            ),
+        )
+        assertTrue(
+            "the wake's OWN request begins the conversation",
+            sinks.cloudRoute.wakeOrigins.last(),
+        )
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "a follow-up in the same window",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = window,
+            ),
+        )
+        assertFalse(
+            "and a follow-up in that window must NOT be marked as a wake request " +
+                "(wakeOrigins=${sinks.cloudRoute.wakeOrigins})",
+            sinks.cloudRoute.wakeOrigins.last(),
+        )
+    }
+
+    @Test
+    fun `a privacy-closed window is not current even at a matching generation`() = runTest {
+        // @spec's third correction: currentness must reject a closed window, not just compare numbers.
+        // A privacy close means nothing keeps listening, so a request whose window was closed must not
+        // be admitted simply because its generation still matches.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+        signal.onAppBackgrounded() // the privacy close invalidates the window
+
+        assertFalse(
+            "a closed window must not read as current",
+            signal.isCurrent(window),
+        )
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "after backgrounding",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = window,
+            ),
+        )
+        assertTrue(
+            "so the dispatch does not reach transport (calls=${sinks.cloudRoute.calls})",
+            sinks.cloudRoute.calls.isEmpty(),
+        )
+    }
+
+    @Test
     fun `cloud route delegates to cloud route sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()

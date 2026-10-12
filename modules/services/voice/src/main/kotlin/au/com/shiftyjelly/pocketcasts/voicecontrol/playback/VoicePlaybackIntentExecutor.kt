@@ -68,7 +68,12 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                     Timber.i("[Voice] superseded dispatch discarded (stamp=$captured)")
                     return VoiceResponse.Silent
                 }
-                cloudRouteSink.routeToCloud(
+                // READ BEFORE NOTING: whether this is the window's first request decides whether it
+                // begins a conversation, and noting first made every dispatch see itself as a
+                // continuation -- the flag was computed against a state this dispatch had just set.
+                val isFirstRequestOfWindow = captured != null &&
+                    !gracePeriodSignal.hasPreparedRequest(captured)
+                val dispatched = cloudRouteSink.routeToCloud(
                     intent.request,
                     intent.tier,
                     context,
@@ -78,8 +83,18 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                         gracePeriodSignal.isCurrent(captured) &&
                         gracePeriodSignal.isActive.value,
                     capturedOrigin = captured,
-                    isWakeOriginated = captured != null && gracePeriodSignal.isWakeOriginated(captured),
+                    // PER REQUEST: the wake's OWN request begins the conversation; a later request in
+                    // the same window continues it, even though the window was opened by a wake.
+                    isWakeOriginated = captured != null &&
+                        gracePeriodSignal.isWakeOriginated(
+                            captured,
+                            isFirstRequestOfWindow = isFirstRequestOfWindow,
+                        ),
                 )
+                // Noted after the dispatch: this window now has a request, so a LATER one continues
+                // rather than beginning.
+                captured?.let { gracePeriodSignal.notePreparedRequest(it) }
+                dispatched
             }
 
             is VoiceIntent.Queue -> executeQueue(intent)

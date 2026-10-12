@@ -308,6 +308,71 @@ class CloudAudioPlayer(
         stop()
     }
 
+    /** Whether the output is observed to have consumed everything submitted to it. */
+    enum class Completion { Consumed, Unconsumed, Unknown }
+
+    /**
+     * Reads the track's playback head in TRACK frames, or null when it cannot be observed. Test seam
+     * mirrors [readAudioTimestamp]; the default is the platform's own head position.
+     */
+    var readPlaybackHeadFrames: ((track: AudioTrack) -> Long?)? = null
+
+    /** The frames handed to the current track so far. Exposed for tests that drive the head seam. */
+    fun trackFramesForTest(): Long = trackFrames
+
+    /**
+     * Drains the queued frames and then WAITS until the output is observed to have played them, per
+     * @spec's completion ruling: frames handed to the track are SUBMITTED, not played, and a turn is
+     * complete only when the playback head reaches what was written.
+     *
+     * Returns [Completion.Consumed] when the head reaches the submitted count before [timeoutMs];
+     * [Completion.Unconsumed] when the timeout expires first -- the audio was cut short, which the
+     * caller must not report as a normal completion; [Completion.Unknown] when the platform reports
+     * no head at all, so nothing was measured either way. In every case the queued frames are
+     * drained and playback is stopped before returning.
+     */
+    suspend fun drainAndAwaitCompletion(timeoutMs: Long = 10_000L): Completion {
+        if (released) return Completion.Unknown
+        val submittedAtSubmitTime = synchronized(frameBuffer) {
+            drainFrames()
+            trackFrames
+        }
+        // Whether ANY observation was made while waiting: this is the distinction between Unknown
+        // (the platform offered no head, so nothing was measured) and Unconsumed (the head reported
+        // but never arrived). It must be taken DURING the wait -- after stop() the track reports a
+        // zero head, which would misread as an observation.
+        var headWasObservable = false
+        val head: Long? = try {
+            kotlinx.coroutines.withTimeout(timeoutMs) {
+                while (true) {
+                    val t = audioTrack
+                    // An installed seam is AUTHORITATIVE: its null means "not observable" and must
+                    // not fall through to the real head, which would fabricate an observation the
+                    // test explicitly said does not exist.
+                    val observed: Long? = when {
+                        readPlaybackHeadFrames != null -> t?.let { readPlaybackHeadFrames!!.invoke(it) }
+                        t != null -> t.playbackHeadPosition.toLong()
+                        else -> null
+                    }
+                    if (observed != null) {
+                        headWasObservable = true
+                        if (observed >= submittedAtSubmitTime) break
+                    }
+                    kotlinx.coroutines.delay(20L)
+                }
+                submittedAtSubmitTime
+            }
+        } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+            null
+        }
+        stop()
+        return when {
+            head != null -> Completion.Consumed
+            headWasObservable -> Completion.Unconsumed
+            else -> Completion.Unknown
+        }
+    }
+
     /**
      * Stop playback and discard the frame buffer.
      *

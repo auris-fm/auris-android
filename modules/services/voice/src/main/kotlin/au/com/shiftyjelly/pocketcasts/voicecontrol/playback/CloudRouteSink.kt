@@ -379,9 +379,33 @@ class CloudRouteSink internal constructor(
                             playbackSink.restore()
                             ducked = false
                         }
-                        // Drain queued frames so the last audio lands, then stop.
+                        // Wait for the output to be OBSERVED to have played the submitted frames.
+                        // drainAndStop submitted the frames and stopped immediately -- submission is
+                        // not playback, and the tail still in the device buffer was cut off. Per the
+                        // completion ruling, the turn ends normally only when the playback head
+                        // reaches what was written; an unconsumed or unmeasurable result is recorded
+                        // on the local axis, like a refused write, without rewriting the server's
+                        // terminal outcome.
                         if (audioPlayed) {
-                            audioPlayer?.drainAndStop()
+                            val sink = audioPlayer
+                            val completion = sink?.let {
+                                try {
+                                    it.drainAndAwaitCompletion()
+                                } catch (c: kotlinx.coroutines.CancellationException) {
+                                    throw c
+                                } catch (e: Exception) {
+                                    Timber.w(e, "[CloudRoute] awaiting playback completion failed")
+                                    CloudAudioPlayer.Completion.Unknown
+                                }
+                            } ?: CloudAudioPlayer.Completion.Unknown
+                            if (completion != CloudAudioPlayer.Completion.Consumed) {
+                                Timber.w(
+                                    "[CloudRoute] playback ended %s (head unobserved or lagging)",
+                                    completion,
+                                )
+                                localPlaybackFailed = localPlaybackFailed ||
+                                    completion == CloudAudioPlayer.Completion.Unconsumed
+                            }
                         }
                         // Not redundant with the memory's own blank check: a
                         // blank answer is not an exchange, and record() would

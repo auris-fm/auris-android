@@ -625,6 +625,9 @@ class VoicePlaybackIntentExecutorTest {
     private class FakeCloudRouteSink : VoiceCloudRouteSink {
         val calls = mutableListOf<String>()
 
+        /** The grace flag each call carried, so a case can assert continuation versus creation. */
+        val graceFlags = mutableListOf<Boolean>()
+
         /** Runs while the turn is in flight, to land a privacy event mid-turn. */
         var whileInFlight: (() -> Unit)? = null
 
@@ -632,8 +635,10 @@ class VoicePlaybackIntentExecutorTest {
             request: String,
             tier: VoiceIntent.CloudTier,
             context: PlaybackContext,
+            isLiveGraceTurn: Boolean,
         ): VoiceResponse {
             calls += "routeToCloud:$request:${tier.name}"
+            graceFlags += isLiveGraceTurn
             whileInFlight?.invoke()
             return VoiceResponse.Silent
         }

@@ -51,7 +51,14 @@ class VoicePlaybackIntentExecutor @Inject constructor(
 
             is VoiceIntent.CloudRoute -> {
                 val context = playbackContextProvider.current()
-                cloudRouteSink.routeToCloud(intent.request, intent.tier, context)
+                // The grace window is what distinguishes a continuation from a new conversation, and
+                // the executor is where it is known.
+                cloudRouteSink.routeToCloud(
+                    intent.request,
+                    intent.tier,
+                    context,
+                    isLiveGraceTurn = gracePeriodSignal.isActive.value,
+                )
             }
 
             is VoiceIntent.Queue -> executeQueue(intent)
@@ -280,10 +287,17 @@ interface VoiceBookmarkSink {
 }
 
 interface VoiceCloudRouteSink {
+    /**
+     * @param isLiveGraceTurn true when this turn continues an answer still inside its grace window, so
+     * it RESUMES the conversation in progress; false when it begins a new one and CREATES.
+     */
     suspend fun routeToCloud(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
+        // Defaults to a NEW conversation: a caller that does not say it continues a grace window is
+        // starting one, and CREATE is the safe reading of silence.
+        isLiveGraceTurn: Boolean = false,
     ): VoiceResponse
 
     /**
@@ -296,7 +310,8 @@ interface VoiceCloudRouteSink {
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
         hint: CloudRouteHint,
-    ): VoiceResponse = routeToCloud(request, tier, context)
+        isLiveGraceTurn: Boolean = false,
+    ): VoiceResponse = routeToCloud(request, tier, context, isLiveGraceTurn)
 }
 
 interface VoiceQueueSink {

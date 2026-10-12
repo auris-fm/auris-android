@@ -42,6 +42,7 @@ class CloudRouteSink internal constructor(
     private val playbackSink: VoicePlaybackSink,
     private val fingerprintTimingManager: FingerprintTimingManager,
     private val playbackContextProvider: PlaybackContextProvider,
+    private val conversationAdmission: CloudConversationAdmission = CloudConversationAdmission(),
     private val cloudPlaybackContextState: CloudPlaybackContextState,
     private val analytics: CloudRouteAnalytics,
     private val routeInvoker: ((CloudRouteTurn) -> Flow<CloudRouteEvent>)?,
@@ -177,19 +178,24 @@ class CloudRouteSink internal constructor(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
-    ): VoiceResponse = routeTurn(request, tier, context, hint = null)
+        isLiveGraceTurn: Boolean,
+    ): VoiceResponse = routeTurn(request, tier, context, hint = null, isLiveGraceTurn = isLiveGraceTurn)
 
     override suspend fun routeToCloudWithHint(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
         hint: CloudRouteHint,
-    ): VoiceResponse = routeTurn(request, tier, context, hint = hint)
+        isLiveGraceTurn: Boolean,
+    ): VoiceResponse = routeTurn(request, tier, context, isLiveGraceTurn, hint = hint)
 
     private suspend fun routeTurn(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
+        // True when this turn continues an answer still inside its grace window: it RESUMES rather
+        // than creating a new conversation.
+        isLiveGraceTurn: Boolean = false,
         hint: CloudRouteHint?,
     ): VoiceResponse {
         if (resolveBaseUrl().isBlank()) {
@@ -238,6 +244,10 @@ class CloudRouteSink internal constructor(
                 activeTurnId = myId
                 previousTurn
             }
+            // This turn is now the live origin. Declared where the turn is REGISTERED, so the origin
+            // and the registration cannot disagree -- a prepare that ran before registration would see
+            // a stale origin and discard itself.
+            conversationAdmission.beginOrigin(myId)
             if (previous != null && previous !== myJob) previous.cancel()
 
             val routeContext = buildRouteContext(context)
@@ -245,9 +255,25 @@ class CloudRouteSink internal constructor(
             // must be attributed against it. It is a different identity from the local `myId` counter,
             // and it is read straight off the turn that was built so the two cannot drift.
             var myRequestId: String? = null
+            // Prepared HERE, from this turn's captured origin -- not resolved at send time, where a
+            // retry or a superseded origin would borrow whichever handle was then current. A turn whose
+            // origin is no longer live is discarded rather than admitted against someone else's handle.
+            val admission = conversationAdmission.prepare(
+                origin = myId,
+                isLiveGraceTurn = isLiveGraceTurn,
+            )
+            if (admission == null) {
+                // Superseded while being prepared: nothing is sent, so no conversation is created on
+                // behalf of a turn that has already been replaced. The refusal is the turn's outcome
+                // and is reported as one -- silence would read as a turn that produced no answer.
+                Timber.i("[CloudRoute] turn discarded: its origin was superseded before admission")
+                return VoiceResponse.Silent
+            }
             val turn = CloudRouteTurn(
                 request = request,
                 context = routeContext,
+                conversationId = admission.conversationId,
+                conversationMode = admission.mode,
                 // Stable per logical turn; a transport retry reuses it, and the
                 // server rejects a repeat rather than re-executing (no auto-retry
                 // is attempted by this client).

@@ -60,6 +60,17 @@ class GracePeriodSignal @Inject constructor() {
      */
     fun capturedGeneration(): Long = synchronized(windowLock) { generation }
 
+    /** The timer job, so a case can assert the pointer was preserved across a delayed arm. */
+    internal fun timerJobForTest(): Job? = synchronized(windowLock) { timerJob }
+
+    /**
+     * Invokes the protected arm for [ownedGeneration], as a delayed completion would.
+     *
+     * Exposed so a case can reach the assignment AFTER the caller has released the monitor -- which is
+     * the seam the liveness check exists for, and which no ordinary call can reproduce.
+     */
+    internal fun armTimerForLockedForTest(ownedGeneration: Long) = armTimerForLocked(ownedGeneration)
+
     /** The wake-originated generation, so a case can see what the marker names right now. */
     internal fun wakeOriginatedGenerationForTest(): Long = synchronized(windowLock) { wakeGeneration }
 
@@ -384,7 +395,15 @@ class GracePeriodSignal @Inject constructor() {
     private fun armTimerForLocked(ownedGeneration: Long) {
         val job = armTimer(ownedGeneration)
         synchronized(windowLock) {
-            if (ownedGeneration == generation) {
+            // OWNERSHIP IS GENERATION **AND** LIVENESS. Generation alone is not enough: a PRIVACY CLOSE
+            // preserves the generation -- it ends the window without advancing it -- so a completion that
+            // was valid when it started could still arm this window's timer AFTER the window was closed.
+            // The closed window then holds a live timer owned by nobody, and the timer reports an ENDING
+            // for a window that already ended: two endings for one window.
+            //
+            // The check runs here, in the protected assignment, because the caller releases windowLock
+            // before arming -- so this really is the last point at which ownership can be established.
+            if (ownedGeneration == generation && _isActive.value) {
                 timerJob?.cancel()
                 timerJob = job
             } else {

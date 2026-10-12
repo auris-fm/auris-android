@@ -671,4 +671,54 @@ class GracePeriodSignalTest {
         // this case constrains the origin check and NOT the reset. Saying which one it holds is the
         // point; a passing case with two candidate mechanisms proves neither by itself.
     }
+
+    @Test
+    fun `a delayed arm cannot take over a window that already ended`() = runTest {
+        // @reviewer's finding. `armTimerForLocked` checked GENERATION ownership only -- and a PRIVACY
+        // CLOSE PRESERVES THE GENERATION, because it ends the window without advancing it. So a
+        // completion that was valid when it started could still arm this window's timer AFTER the window
+        // was closed: the closed window holds a live timer owned by nobody, and that timer later reports
+        // an ENDING for a window that already ended -- TWO endings for one window.
+        //
+        // Ownership is generation AND liveness. The check lives in the protected assignment because the
+        // caller releases windowLock before arming, so that is the last point ownership can be settled.
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWakeWordDetected()
+        val closedWindow = signal.currentGeneration
+
+        signal.onAppBackgrounded()
+        assertFalse("the privacy close really ended activity", signal.isActive.value)
+
+        val before = signal.timerJobForTest()
+        // The delayed arm, arriving after the close.
+        signal.armTimerForLockedForTest(closedWindow)
+
+        assertTrue(
+            "a delayed arm for an ENDED window must not replace the current timer",
+            before === signal.timerJobForTest(),
+        )
+        assertFalse("and it must not reopen the window", signal.isActive.value)
+    }
+
+    @Test
+    fun `a delayed arm for a REPLACED window cannot take over its successor`() = runTest {
+        // The neighbouring property, so the liveness check cannot be satisfied by refusing everything:
+        // a REPLACED window DOES advance the generation, so the delayed arm must be refused for that
+        // reason and the successor's timer must survive.
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWakeWordDetected()
+        val replaced = signal.currentGeneration
+
+        signal.onWakeWordDetected()
+        assertTrue("replacement advanced ownership", replaced != signal.currentGeneration)
+
+        val before = signal.timerJobForTest()
+        signal.armTimerForLockedForTest(replaced)
+
+        assertTrue(
+            "a delayed arm for a REPLACED window must not replace its successor's timer",
+            before === signal.timerJobForTest(),
+        )
+        assertTrue("and the successor is still open", signal.isActive.value)
+    }
 }

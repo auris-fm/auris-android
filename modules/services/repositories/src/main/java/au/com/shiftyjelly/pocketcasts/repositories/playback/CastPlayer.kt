@@ -190,7 +190,7 @@ class CastPlayer(
 
     override val enforcesEpisodeBoundSeek: Boolean get() = true
 
-    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Boolean {
+    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Long? {
         // THE SAME CONTRACT AS LocalPlayer, enforced here because a cast player can be RE-POINTED by
         // `setEpisode` while a seek is in flight. Deciding inside this suspension, immediately before the
         // remote seek is issued, is what refuses a re-pointed receiver instead of moving another
@@ -208,6 +208,10 @@ class CastPlayer(
                     Timber.i("CastPlayer refused a seek: episode changed")
                     return@synchronized null
                 }
+                // THE PRE-ACTION POSITION IS READ AT THE MUTATION, inside the same exclusion boundary.
+                // A cast receiver reports its position synchronously, so this does not suspend and the
+                // lock holds across it.
+                val before = remoteMediaClient?.approximateStreamPosition ?: return@synchronized null
                 if (isMediaLoaded) {
                     // NO REMOTE CLIENT MEANS UNAVAILABLE, NOT ACCEPTED. `?.` followed by `true` reported a
                     // cast seek that reached no receiver as performed.
@@ -218,13 +222,13 @@ class CastPlayer(
                         .setResumeState(MediaSeekOptions.RESUME_STATE_UNCHANGED)
                         .build()
                     client.seek(seekOptions)
-                    true
+                    before
                 } else {
                     val local = localEpisodeUuid ?: return@synchronized null
                     // THE LOAD'S OWN RESULT IS THE ANSWER, rather than a silent success after a void call.
-                    loadEpisode(local, positionMs, true)
+                    if (loadEpisode(local, positionMs, true)) before else null
                 }
-            } ?: false
+            }
         }
     }
 

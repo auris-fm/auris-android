@@ -87,14 +87,18 @@ interface Player {
      * check before or after it can only OBSERVE that the player changed, by which point the seek it
      * issued has already run on the wrong audio. A returned false cannot undo a mutation.
      *
+     * RETURNS THE PRE-ACTION POSITION, so the caller attributes history to the value the PLAYER saw at
+     * its own mutation rather than to a read taken around the call. A null result is a refusal.
+     *
      * The default implementation performs that check and delegates, which is correct for a player whose
      * `episodeUuid` reflects what it was loaded with. A player that can be re-pointed concurrently
      * should override this to re-read the field immediately before its own mutation point.
      */
-    suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Boolean {
-        if (episodeUuid != expectedEpisodeUuid) return false
+    suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Long? {
+        if (episodeUuid != expectedEpisodeUuid) return null
+        val before = getCurrentPositionMs().toLong()
         seekToTimeMs(positionMs)
-        return true
+        return before
     }
 
     /**

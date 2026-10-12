@@ -1412,15 +1412,18 @@ open class PlaybackManager @Inject constructor(
                 playbackStateRelay.accept(playbackState.copy(positionMs = positionMs, lastChangeFrom = LastChangeFrom.OnUserSeeking.value))
             }
         }
-        // THE POSITION AND THE BINDING ARE READ TOGETHER, immediately before the mutation.
+        // THE PLAYER TAKES THE SNAPSHOT AT ITS OWN MUTATION. This wrapper does not read the position
+        // first: doing so would leave a suspension between the read and the decision, and a replacement
+        // landing in that gap would make the value belong to a different episode than the accepted
+        // operation. The player's bound operation returns the position IT saw when it decided, so the
+        // value and the acceptance are one observation.
         val target = synchronized(selectedPlayerLock) {
             val current = getCurrentEpisode()
             if (current?.uuid != episodeUuid) return null
             player?.takeIf { it.episodeUuid == episodeUuid } ?: return null
         }
-        val before = target.getCurrentPositionMs()
-        if (!target.seekToTimeMsIfEpisode(positionMs, episodeUuid)) return null
-        return episodeUuid to before
+        val before = target.seekToTimeMsIfEpisode(positionMs, episodeUuid) ?: return null
+        return episodeUuid to before.toInt()
     }
 
     private suspend fun seekToTimeMsInternal(duration: Duration) {
@@ -1536,8 +1539,8 @@ open class PlaybackManager @Inject constructor(
         }
         // THE PLAYER DECIDES AT ITS OWN MUTATION. This call carries the expectation INTO the player
         // operation, so a re-pointing that lands inside the seek's suspension is refused there rather
-        // than detected here afterwards.
-        return player.seekToTimeMsIfEpisode(positionMs, episodeUuid)
+        // than detected here afterwards. A non-null result is the acceptance AND the pre-action position.
+        return player.seekToTimeMsIfEpisode(positionMs, episodeUuid) != null
     }
 
     private suspend fun seekToTimeMsInternal(positionMs: Int) {

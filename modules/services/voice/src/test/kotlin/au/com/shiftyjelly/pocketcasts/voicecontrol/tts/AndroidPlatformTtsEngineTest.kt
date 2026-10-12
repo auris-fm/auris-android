@@ -593,12 +593,14 @@ class AndroidPlatformTtsEngineTest {
             }
         } == true
         val afterOldExit = successorTrack.playState
+        val flagAfterOldExit = wired.isPlayingSynthesizedAudio()
         val engineStops = fake.stopCalls
         newRelease.countDown()
         scope.cancel()
         runBlocking { kotlinx.coroutines.withTimeoutOrNull(3000) { successor.join() } }
         wired.release()
         assertTrue("old render must finish", finished)
+        assertTrue("old teardown must preserve successor flag", flagAfterOldExit)
         assertEquals("old exit must preserve actual successor track", android.media.AudioTrack.PLAYSTATE_PLAYING, afterOldExit)
         assertEquals("old exit must preserve successor synthesizer", 0, engineStops)
     }
@@ -665,12 +667,14 @@ class AndroidPlatformTtsEngineTest {
             }
         } == true
         val afterOldExit = successorTrack.playState
+        val flagAfterOldExit = wired.isPlayingSynthesizedAudio()
         val engineStops = fake.stopCalls
         newRelease.countDown()
         scope.cancel()
         runBlocking { kotlinx.coroutines.withTimeoutOrNull(3000) { successor.join() } }
         wired.release()
         assertTrue("old render must finish", finished)
+        assertTrue("old teardown must preserve successor flag", flagAfterOldExit)
         assertEquals("old local track must stop before blocked write returns", android.media.AudioTrack.PLAYSTATE_STOPPED, oldStateBeforeUnblock)
         assertEquals("successor must keep playing before old unblock", android.media.AudioTrack.PLAYSTATE_PLAYING, successorStateBeforeUnblock)
         assertEquals("old cancellation must preserve successor engine before unblock", 0, stopCallsBeforeUnblock)

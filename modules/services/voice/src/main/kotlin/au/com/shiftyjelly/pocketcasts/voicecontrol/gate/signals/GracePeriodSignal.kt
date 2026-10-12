@@ -265,7 +265,15 @@ class GracePeriodSignal @Inject constructor() {
 
     /** A new act opens a window and begins its generation. */
     private fun openWindow() {
+        // OPENING A WINDOW ENDS THE PREVIOUS ONE. A wake replaces the window in force, so whatever that
+        // window was holding stops being retryable at THIS moment -- not when some later request happens
+        // to be admitted. Without the notification here, a replaced window whose successor never runs a
+        // request kept its prepared turn indefinitely: the ordinary ending, reached by replacement.
+        val ending = generation
         generation += 1
+        if (ending != 0L) {
+            onWindowEnded?.invoke(ending)
+        }
         // EACH WINDOW HAS ITS OWN ALLOWANCE, so opening one CLEARS the spent marker. Without this a
         // claim made under a previous window made every later window read as spent: `escalationRefusal`
         // compares `escalatedGeneration` with the CURRENT generation, which the reset is what makes

@@ -496,6 +496,8 @@ class CloudAudioPlayer(
                     // counts the frames already handed to the track before this chunk, so it is this
                     // chunk's first frame. The translation between the two is the buffer depth, which
                     // is the quantity the observation alone cannot express.
+                    // 2 bytes per s16le sample, times the channel count, is the bytes-per-frame.
+                    val bytesPerFrame = 2L * (if (channelConfig == AudioFormat.CHANNEL_OUT_STEREO) 2 else 1)
                     val observation = renderedFrame(currentSampleRate)
                     val renderMs = observation?.let {
                         expectedInstantOfChunk(
@@ -508,6 +510,12 @@ class CloudAudioPlayer(
                     }
                     playbackBufferRecorder?.write(
                         pcm = referenceFloats,
+                        // The chunk's frame range on the track's index, recorded so a render
+                        // observation can later select THIS block -- or the block it truly names --
+                        // by frame identity rather than by extrapolated time. The rendered-block
+                        // mapping is built from these records; they retire with their samples.
+                        trackStartFrame = trackFrames,
+                        trackEndFrame = trackFrames + written.toLong() / bytesPerFrame,
                         // A rendered-frame observation when the platform reports one, else the
                         // producer's own placement -- the cumulative submitted count, from the chunks
                         // before this one (write() adds this chunk's own duration). The count is
@@ -524,9 +532,17 @@ class CloudAudioPlayer(
                     // The track's own frame count, advanced by the frames just written at the track's
                     // rate: one frame is one sample for the mono/stereo layouts used here, and the byte
                     // count is what the track received.
-                    // 2 bytes per s16le sample, times the channel count, is the bytes-per-frame.
-                    val bytesPerFrame = 2L * (if (channelConfig == AudioFormat.CHANNEL_OUT_STEREO) 2 else 1)
                     trackFrames += written.toLong() / bytesPerFrame
+                    // The observation is offered to the recorder only now, after the block it might
+                    // name is recorded. A matchable observation (frame at or before the write head)
+                    // drives the rendered-block mapping; an unmatched one is refused there.
+                    if (observation != null) {
+                        playbackBufferRecorder?.onRenderObservation(
+                            observation.framePosition,
+                            observation.nanoTime,
+                            currentSampleRate,
+                        )
+                    }
                     offset += written
                 }
                 if (audioWriteFailed) break
@@ -597,7 +613,7 @@ class CloudAudioPlayer(
         observation: RenderedFrame,
         firstFrameOfChunk: Long,
         sampleRateHz: Int,
-    ): Long {
+    ): Long? {
         if (sampleRateHz <= 0) return observation.nanoTime
         // Both sides are TRACK-relative, which is the reason the subtraction is meaningful:
         // framePosition is the track's own index, and firstFrameOfChunk is [trackFrames] -- the
@@ -607,10 +623,11 @@ class CloudAudioPlayer(
         // the sample-rate division below converts that difference to time.
         val framesAhead = firstFrameOfChunk - observation.framePosition
         // Zero or negative means the observation names this chunk's own frame or a later one. That is
-        // a track reset, a stale read, or an observation from a rebuilt track; the observation's own
-        // instant is then the most that can be said, and extrapolating backwards would place the chunk
-        // in the past on the strength of a reading that does not describe the current queue.
-        if (framesAhead <= 0) return observation.nanoTime
+        // a track reset, a stale read, or an observation from a rebuilt track. CLAMPING to the
+        // observation's own instant would place the chunk at a time derived from a reading that does
+        // not describe the current queue and present it as observed alignment, so the mapping reports
+        // UNAVAILABLE instead and the caller records no anchored position for the chunk.
+        if (framesAhead <= 0) return null
         return observation.nanoTime + framesAhead * 1_000L / sampleRateHz
     }
 

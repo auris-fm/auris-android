@@ -493,4 +493,97 @@ class PlaybackBufferRecorderTest {
             recorder.reference().startPositionMs,
         )
     }
+
+    @Test
+    fun `the observation's frame selects the retained block and the window ends at what has sounded`() {
+        // @spec's assignment: the actual rendered-block mapping. Two chunks on the track's index;
+        // the observation names a frame inside the SECOND, so only the FIRST has fully sounded and the
+        // window must end there -- later queued PCM is not rendered progress and must not stand for it.
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+
+        // Block 1: frames 0..4800, 1600 recorder samples (48k -> 16k).
+        recorder.write(
+            FloatArray(1_600),
+            positionMs = null,
+            axis = null,
+            trackStartFrame = 0L,
+            trackEndFrame = 4_800L,
+        )
+        // Block 2: frames 4800..9600, another 1600 samples.
+        recorder.write(
+            FloatArray(1_600),
+            positionMs = null,
+            axis = null,
+            trackStartFrame = 4_800L,
+            trackEndFrame = 9_600L,
+        )
+
+        // The observation: frame 8_000 sounded at 5_000_000 ms. Frame 8_000 is inside block 2, so
+        // block 2 has NOT fully sounded; the newest fully-rendered block is block 1 (end 4800).
+        recorder.onRenderObservation(frameOnTrack = 8_000L, timeMs = 5_000_000L, trackRateHz = 48_000)
+
+        val rendered = recorder.renderedReference()
+        assertNotNull("a fully rendered block exists", rendered)
+        // The window holds ONLY block 1's samples: block 2 is still queued.
+        assertEquals("queued PCM is excluded from rendered progress", 1_600, rendered!!.samples.size)
+        // Block 1's END sounded 3200 frames before the observed frame: 32000/48000 = 66.67 -> 66 ms.
+        val endMs = 5_000_000L - (8_000L - 4_800L) * 1_000L / 48_000L
+        val durationMs = rendered.samples.size * 1_000L / PlaybackBufferRecorder.SAMPLE_RATE
+        assertEquals(
+            "the block's end instant is the observation translated back across the frame difference",
+            endMs,
+            rendered.startPositionMs!! + durationMs,
+        )
+    }
+
+    @Test
+    fun `timing metadata retires with its samples`() {
+        // The per-window recovery condition: when the ring drops samples, the records naming them go
+        // too, so an old observation can no longer select a block whose audio is gone. Without this,
+        // a stale selection would anchor the remaining window at a start derived from samples that no
+        // longer exist.
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+
+        // A small block, then enough audio to push it out of the retention window.
+        recorder.write(
+            FloatArray(1_600),
+            positionMs = null,
+            axis = null,
+            trackStartFrame = 0L,
+            trackEndFrame = 4_800L,
+        )
+        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000)
+        assertNotNull("the block is selectable while retained", recorder.renderedReference())
+
+        // More than the ring's capacity, with no frame identity of its own (e.g. an untimed source).
+        recorder.write(FloatArray(PlaybackBufferRecorder.SAMPLE_RATE * 8))
+
+        assertNull(
+            "a retired block cannot anchor: its samples are gone and the observation names nothing " +
+                "retained",
+            recorder.renderedReference(),
+        )
+    }
+
+    @Test
+    fun `an observation naming a frame ahead of the write head is refused`() {
+        // A track reset or stale read produces an observation for audio that was never written here.
+        // Refusing it keeps the mapping unavailable rather than anchoring retained samples to a
+        // reading that does not describe them.
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+
+        recorder.write(
+            FloatArray(1_600),
+            positionMs = null,
+            axis = null,
+            trackStartFrame = 0L,
+            trackEndFrame = 4_800L,
+        )
+        recorder.onRenderObservation(frameOnTrack = 99_999L, timeMs = 5_000_000L, trackRateHz = 48_000)
+
+        assertNull(
+            "an observation ahead of the write head names nothing written here",
+            recorder.renderedReference(),
+        )
+    }
 }

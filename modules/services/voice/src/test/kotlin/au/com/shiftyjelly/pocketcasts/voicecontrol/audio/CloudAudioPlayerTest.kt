@@ -906,16 +906,21 @@ class CloudAudioPlayerTest {
             Thread.sleep(20)
         }
 
-        // The observation names frame 16000 sounding at 5_000_000 ms, and this chunk's first frame is
-        // 0 -- BEFORE the observed frame, so nothing is queued ahead of it and the honest answer is the
-        // observation's own instant, with no forward extrapolation. That is the "the observation names
-        // a frame at or past this chunk" branch, and it is the one a stale or reset read produces.
+        // REVERSED from its first version, which expected the chunk CLAMPED to the observation's own
+        // instant. @spec: a timestamp naming a different frame must not be clamped to the chunk's own
+        // instant and called observed alignment. This observation names frame 16000 -- a frame AT OR
+        // PAST the chunk under submission (a stale or reset read) -- so the mapping reports
+        // UNAVAILABLE and the chunk records no anchored position.
         val reference = recorder.reference()
-        assertNotNull("the chunk reached the recorder", reference.startPositionMs)
         assertEquals(
-            "a chunk at or before the observed frame is placed at the observation's instant, and " +
-                "must NOT be extrapolated forward from it (start=${reference.startPositionMs})",
-            5_000_000L,
+            "the PCM is still recorded: an unmatched observation changes WHETHER it can be placed, " +
+                "never WHAT is held",
+            1_600,
+            reference.samples.size,
+        )
+        assertNull(
+            "a stale observation (frame at or past the write head) must leave the chunk UNANCHORED " +
+                "rather than clamped to the observation's instant (start=${reference.startPositionMs})",
             reference.startPositionMs,
         )
 

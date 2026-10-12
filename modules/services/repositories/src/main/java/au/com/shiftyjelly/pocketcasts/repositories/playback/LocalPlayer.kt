@@ -189,6 +189,29 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
         }
     }
 
+    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Boolean {
+        // THE RE-CHECK IS INSIDE THE PLAYER'S OWN SUSPENSION WINDOW. `seekToTimeMs` above suspends on
+        // `Dispatchers.Main`, and `setEpisode` can re-point this player during that suspension -- so a
+        // check taken before the call, or after it returns, cannot prevent the seek it already issued.
+        // Deciding here, as the mutation is performed, is what makes a re-pointed player REFUSE rather
+        // than move audio belonging to another recording.
+        return withContext(Dispatchers.Main) {
+            if (episodeLocation?.episode?.uuid != expectedEpisodeUuid) {
+                LogBuffer.i(LogBuffer.TAG_PLAYBACK, "LocalPlayer refused a seek: episode changed")
+                return@withContext false
+            }
+            if (positionMs < 0) return@withContext false
+
+            LogBuffer.i(LogBuffer.TAG_PLAYBACK, "LocalPlayer seekToToTimeMs %.3f", positionMs / 1000f)
+            this@LocalPlayer.positionMs = positionMs
+            if (handleIsPrepared()) {
+                onSeekStart(positionMs)
+                handleSeekToTimeMs(positionMs)
+            }
+            true
+        }
+    }
+
     override fun setEpisode(episode: BaseEpisode, preferStream: Boolean) {
         episodeLocation = EpisodeLocation.create(episode, preferStream)
     }

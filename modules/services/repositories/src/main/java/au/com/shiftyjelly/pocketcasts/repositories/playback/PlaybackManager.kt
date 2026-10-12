@@ -1472,28 +1472,18 @@ open class PlaybackManager @Inject constructor(
     }
 
     /**
-     * Issues [positionMs]' seek on [player], re-checking that [player] still addresses [episodeUuid]
-     * before delegating and reporting whether it still did afterwards.
+     * Issues [positionMs]' seek on [player] ONLY while it still addresses [episodeUuid].
      *
-     * THIS IS DETECTION, NOT PREVENTION, AND THE DISTINCTION IS LOAD-BEARING. @reviewer's strengthened
-     * control re-points the player INSIDE `seekToTimeMs`' own suspension and asserts the replacement was
-     * never mutated; this method CANNOT satisfy that, because the mutation point is inside the player's
-     * call, not between the calls this method makes. A wrapper outside `seekToTimeMs` can observe that
-     * the player changed, but by then the seek it issued has already run.
-     *
-     * PREVENTION REQUIRES ONE OF:
-     *  (a) an expected-episode contract ON the player operation, so the player itself refuses at its own
-     *      mutation point -- `Player.seekToTimeMs(positionMs, expectedEpisodeUuid)`, refused inside; or
-     *  (b) excluding episode reconfiguration from the seek's whole window, which needs a serialization
-     *      mechanism the playback owner does not currently have.
-     * Neither is implemented. The returned `false` here reports a refusal the seek may already have
-     * caused, which is why the assignment stays OPEN.
+     * THE EXPECTATION TRAVELS INTO THE PLAYER, which is the only place early enough. A caller-side check
+     * -- before or after -- can merely OBSERVE that a REUSED player was re-pointed, and by then the seek
+     * it issued has already run on the wrong audio. `Player.seekToTimeMsIfEpisode` decides at the
+     * player's own mutating operation, where a re-pointing that lands inside the suspension is refused
+     * instead of performed.
      */
-    private suspend fun awaitPlayerSeek(player: Player, episodeUuid: String, positionMs: Int): Boolean {
-        if (player.episodeUuid != episodeUuid) return false
-        player.seekToTimeMs(positionMs)
-        return player.episodeUuid == episodeUuid
-    }
+    private suspend fun awaitPlayerSeek(player: Player, episodeUuid: String, positionMs: Int): Boolean = // THE PLAYER DECIDES AT ITS OWN MUTATION. This call carries the expectation INTO the player
+        // operation, so a re-pointing that lands inside the seek's suspension is refused there rather
+        // than detected here afterwards.
+        player.seekToTimeMsIfEpisode(positionMs, episodeUuid)
 
     private suspend fun seekToTimeMsInternal(positionMs: Int) {
         LogBuffer.i(LogBuffer.TAG_PLAYBACK, "PlaybackService seekToTimeMsInternal %.3f ", positionMs.toDouble() / 1000.0)

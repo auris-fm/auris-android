@@ -470,6 +470,19 @@ class VoiceAsrEngine @Inject constructor(
             // through the same handler a chosen `cloud_route` uses, so
             // superseded-turn cancellation and the auto-pause obligation apply.
             CloudEscalation.DISPATCH -> {
+                // THE ORIGIN IS THE ONE CAPTURED AT REGISTRATION, not the window that happens to be
+                // live now. Recognition can take seconds, and a wake arriving meanwhile opens a NEW
+                // window: escalating under that window would let OLD recognition consume its
+                // SUCCESSOR's allowance and dispatch under the successor's generation. A stale origin is
+                // rejected BEFORE the allowance is claimed, so it cannot spend it either.
+                if (!gracePeriodSignal.isCurrent(windowAtRequest)) {
+                    Timber.i(
+                        "[VoicePipeline] cloud escalation skipped: origin %d is no longer live",
+                        windowAtRequest,
+                    )
+                    audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+                    return
+                }
                 val issuedUnder = gracePeriodSignal.issueEscalation()
                 if (issuedUnder == null) {
                     // No open window, or this window's one dispatch is spent.
@@ -485,12 +498,14 @@ class VoiceAsrEngine @Inject constructor(
                     VoiceIntent.CloudRoute(
                         request = input.routerTranscript,
                         tier = VoiceIntent.CloudTier.Unknown,
-                        windowGeneration = issuedUnder,
+                        // STAMPED WITH THE CAPTURED ORIGIN, matching the window this recognition was
+                        // issued under -- the same value the chosen-route path uses.
+                        windowGeneration = windowAtRequest,
                         origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
-                        // A LOGICAL IDENTITY HERE TOO. This is the other ordinary cloud dispatch site,
-                        // and a request without an identity cannot be retried as the same request --
-                        // it would be admitted as a new user act instead.
-                        logicalRequestId = java.util.UUID.randomUUID().toString(),
+                        // THE REGISTERED IDENTITY, not a second one: this escalation belongs to the SAME
+                        // logical request as the recognition it follows, so a retry of that request
+                        // names one identity rather than two.
+                        logicalRequestId = logicalRequestId,
                     ),
                 )
             }

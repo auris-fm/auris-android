@@ -96,7 +96,26 @@ class EarconPlayer(
     }
 
     /** Runs [block] on the player's own thread and returns its result, so call order is preserved. */
-    private fun <T> onPlayerThread(block: () -> T): T = executorFor().submit(block).get()
+    private fun <T> onPlayerThread(block: () -> T): T {
+        // SUBMIT UNDER THE SAME LOCK THAT SHUTS THE EXECUTOR DOWN. `executorFor()` can hand back a
+        // service that `release()` shuts down before `submit` runs, and the submit is then REJECTED --
+        // a throw under contention, which is exactly what the serialisation exists to prevent. The
+        // window is between choosing the executor and using it.
+        val service = synchronized(executorLock) {
+            val existing = executor?.takeIf { !it.isShutdown }
+            if (existing != null) {
+                existing
+            } else {
+                java.util.concurrent.Executors
+                    .newSingleThreadExecutor { runnable ->
+                        Thread(runnable, WORKER_THREAD_NAME).apply { isDaemon = true }
+                            .also { workerForTest = it }
+                    }
+                    .also { executor = it }
+            }
+        }
+        return service.submit(block).get()
+    }
 
     init {
         clips = EarconId.entries.associateWithNotNull { id ->

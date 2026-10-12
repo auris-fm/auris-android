@@ -65,6 +65,12 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                 // existing one unchanged. Retention therefore lives in one place, and a direct sink
                 // caller and this executor cannot disagree about what a retry is.
                 //
+                // THE RETURNED TURN'S OWN ORIGIN IS WHAT MATTERS. A retained turn carries the origin it
+                // was prepared under, which may be OLDER than this dispatch's stamp -- so validating the
+                // INCOMING stamp would pass while the turn being sent belongs to a superseded window.
+                // The live-authority check therefore runs on the origin of the turn that will actually
+                // be dispatched.
+                //
                 // AN UNKNOWN RETRY IS REFUSED. A dispatch naming a logical request that was never
                 // prepared is not a retry of anything -- treating it as new input would silently create
                 // a conversation for a request whose own identity is unresolvable, which is the
@@ -80,11 +86,23 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                         return VoiceResponse.Silent
                     }
                 }
+                // A RETRY THAT THE SINK WILL RESOLVE is validated on the turn the sink HOLDS, before it
+                // is asked to dispatch it: the retained turn's origin is the one that decides, and it
+                // may be older than this dispatch's stamp.
+                val resolvedBySink = intent.logicalRequestId
+                    ?.takeIf { intent.isRetry }
+                    ?.let { retainedForLogical(it) }
+                val sinkResolvedOrigin = resolvedBySink?.capturedOrigin
+                if (sinkResolvedOrigin != null && !gracePeriodSignal.isCurrent(sinkResolvedOrigin)) {
+                    Timber.i("[Voice] superseded retry discarded (stamp=$sinkResolvedOrigin)")
+                    return VoiceResponse.Silent
+                }
                 val alreadyPrepared = intent.preparedTurn
                 if (alreadyPrepared != null) {
+                    // The TURN'S origin, not the dispatch's: after a successor window opens, a retry of
+                    // an older logical request still carries the older origin, and it is that turn
+                    // which must be refused. Checking the incoming stamp let the old turn through.
                     val captureForRetry = alreadyPrepared.capturedOrigin
-                    // The privacy half is the executor's, as for a first attempt: the sink cannot
-                    // observe the grace signal.
                     if (captureForRetry != null && !gracePeriodSignal.isCurrent(captureForRetry)) {
                         Timber.i("[Voice] superseded retry discarded (stamp=$captureForRetry)")
                         return VoiceResponse.Silent

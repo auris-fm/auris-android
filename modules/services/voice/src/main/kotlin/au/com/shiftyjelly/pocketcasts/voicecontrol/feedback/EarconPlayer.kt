@@ -202,6 +202,15 @@ class EarconPlayer(
                 val written = audioTrack.write(clip.samples, offset, clip.samples.size - offset)
                 if (written <= 0) {
                     Timber.w("[Earcon] AudioTrack.write returned $written")
+                    // THE FRAMES ALREADY ACCEPTED STILL COUNT. Returning here without folding `offset`
+                    // into the frontier forgets audio the track will really play, so the NEXT cue's
+                    // target excludes it and the head -- which does include it -- passes that target
+                    // early: the next cue reads Consumed while half of it is still sounding.
+                    //
+                    // The frontier is frames the track ACCEPTED, and a failed cue accepted `offset` of
+                    // them. The cue itself FAILED, which is reported to the caller, and that is a
+                    // separate fact from how much audio the track now owes.
+                    acceptedFramesTotal += offset
                     return false
                 }
                 clip.recordAccepted(offset, written, playbackBufferRecorder)

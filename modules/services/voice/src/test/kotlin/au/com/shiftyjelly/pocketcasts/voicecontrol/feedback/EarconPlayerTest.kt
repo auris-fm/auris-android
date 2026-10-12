@@ -477,6 +477,63 @@ class EarconPlayerTest {
     }
 
     @Test
+    fun `frames a FAILED cue already accepted still count against the next cue`() {
+        // @reviewer's partial-acceptance case. A cue can be accepted in part and then fail: the track
+        // takes some frames and the next write returns an error. Returning on that failure WITHOUT
+        // folding the accepted frames into the frontier forgets audio the track will really play, so the
+        // NEXT cue's target excludes it -- the head, which does include it, passes that target early and
+        // the next cue reads Consumed while half of it is still sounding.
+        //
+        // The two facts are separate: the cue FAILED (reported to the caller), and the track accepted
+        // some of its frames (what the frontier must record).
+        val mockPlayer = EarconPlayer(context)
+        val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
+        val clip = clipClass.declaredConstructors.single().apply { isAccessible = true }
+            .newInstance(mockPlayer, ShortArray(100), 16000)
+        @Suppress("UNCHECKED_CAST")
+        mockPlayer.javaClass.getDeclaredField("clips").apply { isAccessible = true }
+            .set(mockPlayer, mapOf(EarconId.WAKE_WORD to clip))
+
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16000)
+        // First cue: 50 of 100 frames accepted, then the write fails.
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenReturn(50, -1)
+        mockPlayer.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(mockPlayer, track)
+        var head = 0
+        mockPlayer.readPlaybackHeadFrames = { head }
+
+        assertFalse("the first cue is reported as FAILED", mockPlayer.play(EarconId.WAKE_WORD))
+
+        // Second cue: fully accepted.
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        assertTrue("the second cue is accepted", mockPlayer.play(EarconId.WAKE_WORD))
+
+        // The head reaches 100: the 50 the failed cue accepted, plus 50 of the new 100.
+        head = 100
+        val result = mockPlayer.completion()
+        mockPlayer.release()
+
+        assertEquals(
+            "only 50 of the second cue's frames have sounded, because the failed cue's accepted " +
+                "frames are ahead of them in the queue",
+            EarconPlayer.EarconCompletion.Playing,
+            result,
+        )
+    }
+
+    @Test
     fun `releasing the worker between selection and submission cannot reject the submission`() {
         // DETERMINISTIC, and it drives the PRODUCTION path. The earlier version was two racing threads
         // whose own comment admitted it passed with the fix mutated back: it could neither fail for the

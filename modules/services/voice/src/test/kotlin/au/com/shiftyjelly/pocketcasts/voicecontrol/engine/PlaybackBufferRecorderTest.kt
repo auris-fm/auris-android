@@ -67,6 +67,66 @@ class PlaybackBufferRecorderTest {
     }
 
     @Test
+    fun `contiguous rendered audio still anchors, so the gap guard cannot silently disable the anchor`() {
+        // THE GUARD MUST NOT BE ALWAYS-OFF. Removing a fabricated anchor is only correct if a real one
+        // survives: a window of genuinely adjacent rendered audio is exactly the case the anchor exists
+        // for, and a guard that disabled it always would pass the case above for the wrong reason.
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+
+        // Two ADJACENT blocks: 0..1000 ms then 1000..2000 ms, no hole between them.
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(16_000) { -0.5f }, positionMs = 1_000L, axis = PositionAxis.Monotonic)
+
+        val reference = recorder.reference()
+        // The window is contiguous, so its start is exactly end minus its duration -- and NOT null,
+        // which is what the gap guard would produce if it were always-on.
+        assertEquals(
+            "adjacent rendered audio must still offer its position: start = end - duration " +
+                "(start=${reference.startPositionMs} end=${reference.endPositionMs})",
+            reference.endPositionMs!! - (reference.samples.size * 1_000L) / reference.sampleRateHz,
+            reference.startPositionMs,
+        )
+        assertTrue(
+            "and an anchored window must actually report a start, not null",
+            reference.startPositionMs != null,
+        )
+    }
+
+    @Test
+    fun `a DROPPED chunk does not leave a window that claims a span it does not cover`() {
+        // @reviewer's finding, taken to the path where it actually bites. The tap's flow is DROP_OLDEST
+        // with 64 slots and this change made PlaybackBufferRecorder a second consumer, so `tryEmit` can
+        // silently discard the OLDEST chunk -- the collector's stream then has a HOLE nothing announces.
+        //
+        // The EPISODE path is already protected by a different guard: its axis is Media, which never
+        // anchors. The exposure is a MONOTONIC window -- rendered cloud audio -- because that axis DOES
+        // anchor, and `reference()` derives its start by subtracting the window's duration from the
+        // newest position. That arithmetic assumes the samples are CONTIGUOUS. Across a hole they are
+        // not, so the reported span covers a range whose middle is audio from a different moment: the
+        // correlator matches the microphone against samples that were never played together.
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+
+        // One second of rendered audio at t=0.
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic)
+        val afterFirst = recorder.lastRecordedPositionMs()
+
+        // The NEXT rendered block is 3 s later -- 2 s of audio was dropped by the tap and never reached
+        // this consumer. Nothing in the samples says so; the position jump is the only evidence.
+        recorder.write(FloatArray(16_000) { -0.5f }, positionMs = 3_000L, axis = PositionAxis.Monotonic)
+
+        val reference = recorder.reference()
+        assertTrue(
+            "a window that spans a DROPPED chunk must not offer a position: its samples were never " +
+                "adjacent, so the derived span describes audio that was never played together " +
+                "(start=${reference.startPositionMs} end=${reference.endPositionMs} " +
+                "afterFirst=$afterFirst)",
+            reference.startPositionMs == null,
+        )
+    }
+
+    @Test
     fun `conversion equals the reference mapping used by the existing tap consumer`() {
         val data = s16le(shortArrayOf(0, 32767, -32768))
         val floats = PlaybackBufferRecorder.chunkToFloats(chunk(data))

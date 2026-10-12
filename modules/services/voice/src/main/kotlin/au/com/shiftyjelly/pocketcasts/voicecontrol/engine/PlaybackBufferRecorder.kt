@@ -79,6 +79,29 @@ class PlaybackBufferRecorder @Inject constructor(
     private var lastPositionMs: Long? = null
 
     /**
+     * Whether the retained samples are still CONTIGUOUS on the reported axis.
+     *
+     * `reference()` derives the window's start by subtracting its duration from the newest position --
+     * arithmetic that is exact only while the samples are adjacent. A tick whose start does not meet the
+     * previous tick's end means audio between them never reached this recorder, and the tap's DROP_OLDEST
+     * overflow is the ordinary way that happens: `tryEmit` discards the OLDEST chunk silently, so the
+     * collector's stream has a hole nothing announces.
+     *
+     * Across such a hole the derived span covers a range whose middle is audio from a different moment,
+     * so the correlator would match the microphone against samples that were never played together and
+     * the filter could reject genuine user speech as bleed. A gap therefore removes the anchor: the
+     * window keeps its samples for offset-based correlation and asserts nothing about when they sounded.
+     *
+     * It is NOT restored by later contiguous audio. The retained samples still include the hole, so the
+     * span still does not describe them; recovering the anchor would require the hole to leave the
+     * buffer, which is not visible from here.
+     */
+    private var contiguous = true
+
+    /** The end of the newest tick on the reported axis, to compare against the next tick's start. */
+    private var expectedNextPositionMs: Long? = null
+
+    /**
      * Subscribes to the player's sink-submission tap so episode PCM is recorded once, as it is
      * accepted by the sink. Call once per capture session; the returned job is owned by [scope].
      *
@@ -117,6 +140,10 @@ class PlaybackBufferRecorder @Inject constructor(
      */
     fun retire() {
         synchronized(lock) {
+            // THE RETAINED SPAN IS REPLACED, so any hole it held is gone with it and the window is
+            // contiguous again for the tail that survives.
+            contiguous = true
+            expectedNextPositionMs = null
             // Nothing was ever submitted: there is no tail to keep and no stale audio to retire.
             if (!filled && writePos == 0) return
             val keep = minOf(DELAY_TAIL_SAMPLES, buffer.size, if (filled) buffer.size else writePos)
@@ -344,8 +371,15 @@ class PlaybackBufferRecorder @Inject constructor(
                 recordBlock(trackStartFrame, trackEndFrame, pcm.size, trackGeneration ?: 0L)
             }
             if (positionMs != null) {
+                // A TICK THAT DOES NOT MEET THE PREVIOUS ONE IS A HOLE. Checked HERE, under the same
+                // lock as the position update, so the gap and the position cannot be applied separately.
+                val expected = expectedNextPositionMs
+                if (expected != null && kotlin.math.abs(positionMs - expected) > CONTIGUITY_TOLERANCE_MS) {
+                    contiguous = false
+                }
                 // The position of the newest sample: the chunk's start plus its duration at 16 kHz.
                 lastPositionMs = positionMs + (pcm.size * 1_000L) / SAMPLE_RATE
+                expectedNextPositionMs = lastPositionMs
                 // WHICH CLOCK that number belongs to. A window holding two contributions from
                 // different axes has no single position, and subtracting across them yields a
                 // number that is neither a media position nor a time -- the difference between two
@@ -415,7 +449,7 @@ class PlaybackBufferRecorder @Inject constructor(
             // Both report no position. Absent is the honest answer and the correlator falls back to
             // offset matching, whereas a media position would align confidently against a moment that
             // has nothing to do with when the audio was captured.
-            val anchored = positionAxis == PositionAxis.Monotonic
+            val anchored = positionAxis == PositionAxis.Monotonic && contiguous
             val start = if (anchored) {
                 end?.let { it - (samples.size * 1_000L) / SAMPLE_RATE }
             } else {
@@ -460,6 +494,12 @@ class PlaybackBufferRecorder @Inject constructor(
     companion object {
         const val SAMPLE_RATE = 16000
         const val BUFFER_DURATION_SECONDS = 2
+
+        /**
+         * How far a tick's start may sit from the previous tick's end before the samples are treated as
+         * non-adjacent. Well below any real chunk gap and far above clock jitter.
+         */
+        private const val CONTIGUITY_TOLERANCE_MS = 20L
 
         /**
          * How much of the reference survives retirement. Matches the correlator's search window

@@ -103,6 +103,44 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a window ending by TIMEOUT or PRIVACY retires what it was holding, not only replacement`() = runTest {
+        // @spec's requirement: the owning window's replacement is ONE way a window ends. A privacy close
+        // and the timeout are the others, and a request whose window ended that way must stop being
+        // retryable too -- otherwise it kept its prepared turn for the life of the process, reached by
+        // the most ordinary ending there is.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(5)
+
+        sink.prepareTurn(
+            request = "a question in window five",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = playbackContext,
+            capturedOrigin = 5,
+            isWakeOriginated = true,
+            logicalRequestId = "in-window-5",
+        )
+        assertNotNull(
+            "the turn is retained while its window lives",
+            deps.conversationAdmission.retained("in-window-5"),
+        )
+
+        // THE WINDOW ENDS without being replaced by a newer one.
+        val retired = deps.conversationAdmission.endWindow(5)
+
+        assertTrue(
+            "ending the window retires what it held (retired=$retired)",
+            retired.contains("in-window-5"),
+        )
+        assertNull(
+            "and it is no longer retained",
+            deps.conversationAdmission.retained("in-window-5"),
+        )
+    }
+
+    @Test
     fun `a retry of an earlier logical request reuses its turn on the REAL sink path`() = runTest {
         // @reviewer's bounded case, on the production sink rather than a fake: the fake returns numbered
         // IDs and always a turn, so a case driving it cannot distinguish a real retry from a fresh

@@ -245,9 +245,13 @@ class EarconPlayerTest {
     @Test
     fun `a new track starts its own frontier and cannot inherit the previous one`() {
         // @reviewer's track-reset item: the frontier counts frames THIS track has accepted, so a new
-        // track must start it at zero. Carrying the previous total forward would make the first cue on
-        // the new track report Consumed immediately -- its head starts at zero while the boundary would
-        // already stand at the old track's total.
+        // track must start it at zero.
+        //
+        // THE DIRECTION MATTERS and my first description of it was WRONG: carrying the previous total
+        // forward does not report the new cue Consumed early -- it reports it PLAYING FOREVER. The
+        // boundary becomes old + new (200) while the new track's head can only reach its own accepted
+        // count (100), so Consumed is never reached and the cue never completes. @reviewer measured
+        // exactly that and corrected the rationale.
         val mockPlayer = EarconPlayer(context)
         val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
         val clip = clipClass.declaredConstructors.single().apply { isAccessible = true }
@@ -288,8 +292,7 @@ class EarconPlayerTest {
         assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
 
         assertEquals(
-            "a cue on a NEW track must not report Consumed before its own frames sound " +
-                "(head=0, frames just accepted)",
+            "a cue on a NEW track starts Playing, as any unfinshed cue does",
             EarconPlayer.EarconCompletion.Playing,
             mockPlayer.completion(),
         )

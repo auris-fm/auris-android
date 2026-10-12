@@ -998,4 +998,81 @@ class CloudAudioPlayerTest {
             end,
         )
     }
+
+    @Test
+    fun `completion is consumed when the playback head reaches what was submitted`() {
+        // @spec's ruling: frames handed to the track are SUBMITTED, not played. This case lets the
+        // head reach the submitted count, so the player must report the audio as actually consumed.
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16_000,
+        )
+        wired.setCodec("pcm@16k")
+        // The head tracks what was submitted: it reads the player's own submitted-frame count, so
+        // the poll loop's first observation already satisfies the completion condition.
+        wired.readPlaybackHeadFrames = { _ -> wired.trackFramesForTest() }
+        wired.submitFrame(ByteArray(3_200))
+        wired.writeToSink = { _, _, _, count -> count }
+        wired.play()
+
+        var result: CloudAudioPlayer.Completion? = null
+        kotlinx.coroutines.test.runTest { result = wired.drainAndAwaitCompletion(timeoutMs = 2_000) }
+
+        assertEquals(
+            "the head reached the submitted count, so the audio was consumed",
+            CloudAudioPlayer.Completion.Consumed,
+            result,
+        )
+        wired.release()
+    }
+
+    @Test
+    fun `completion is unconsumed when the head never reaches the submitted count`() {
+        // The timeout case: the head stays behind, so the audio was cut short. This must NOT be
+        // reported as a normal completion -- it is the exact failure the contract exists to surface.
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16_000,
+        )
+        wired.setCodec("pcm@16k")
+        wired.readPlaybackHeadFrames = { _ -> 0L }
+        wired.submitFrame(ByteArray(3_200))
+        wired.writeToSink = { _, _, _, count -> count }
+        wired.play()
+
+        var result: CloudAudioPlayer.Completion? = null
+        kotlinx.coroutines.test.runTest { result = wired.drainAndAwaitCompletion(timeoutMs = 100) }
+
+        assertEquals(
+            "a head that never arrives at the submitted count is UNCONSUMED, not complete",
+            CloudAudioPlayer.Completion.Unconsumed,
+            result,
+        )
+        wired.release()
+    }
+
+    @Test
+    fun `completion is unknown when the platform reports no playback head`() {
+        // Nothing was measured either way: the platform offered no head, so neither consumed nor
+        // unconsumed is an observation. Unknown keeps the report honest.
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16_000,
+        )
+        wired.setCodec("pcm@16k")
+        wired.readPlaybackHeadFrames = { _ -> null }
+        wired.submitFrame(ByteArray(3_200))
+        wired.writeToSink = { _, _, _, count -> count }
+        wired.play()
+
+        var result: CloudAudioPlayer.Completion? = null
+        kotlinx.coroutines.test.runTest { result = wired.drainAndAwaitCompletion(timeoutMs = 200) }
+
+        assertEquals(
+            "no observable head means UNKNOWN, not a claimed completion",
+            CloudAudioPlayer.Completion.Unknown,
+            result,
+        )
+        wired.release()
+    }
 }

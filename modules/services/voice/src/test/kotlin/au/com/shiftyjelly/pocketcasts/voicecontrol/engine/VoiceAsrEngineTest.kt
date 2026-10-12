@@ -842,6 +842,12 @@ class VoiceAsrEngineTest {
                 "(intents=${intents.map { (it as? VoiceIntent.CloudRoute)?.windowGeneration }})",
             intents.none { it is VoiceIntent.CloudRoute },
         )
+        // THE ALLOWANCE ITSELF IS PINNED AT THE SIGNAL, not here: driving it through the engine
+        // entangles it with the engine's own lifecycle, and in this fixture the window is already
+        // inactive by the time the assertion would run -- so `issueEscalation` returns null for a reason
+        // that has nothing to do with the claim. `GracePeriodSignalTest` asserts the property directly,
+        // where the window state is controlled: a claim for a superseded window is refused AND the
+        // successor's allowance survives it.
         engine.stop()
     }
 

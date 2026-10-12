@@ -286,4 +286,36 @@ class GracePeriodSignalTest {
             signal.privacyClosureCount(),
         )
     }
+
+    @Test
+    fun `a claim made under a superseded window does not spend the successor's allowance`() {
+        // The property the engine case could not isolate: the ALLOWANCE belongs to the window, so a
+        // claim made for an OLD window must not leave the NEW one reading as spent. A wake that arrives
+        // during recognition is the ordinary way this happens.
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWakeWordDetected()
+        val first = signal.capturedGeneration()
+
+        // Recognition is in flight under `first`; a successor wake opens a new window.
+        signal.onWakeWordDetected()
+        val second = signal.capturedGeneration()
+        assertTrue("the window advanced", second != first)
+
+        // The OLD request tries to claim. It belongs to a dead window, so it claims nothing...
+        assertNull(
+            "a claim for a superseded window is refused",
+            signal.issueEscalation(first),
+        )
+        // ...AND THE SUCCESSOR'S ALLOWANCE IS UNTOUCHED.
+        assertNotNull(
+            "the successor's allowance survives the refused claim",
+            signal.issueEscalation(second),
+        )
+        // COVERAGE NOTE, because two mechanisms overlap here and only one is pinned: mutating the
+        // window-open reset away leaves this case PASSING, since the ORIGIN CHECK already refuses the
+        // stale claim before it can spend anything. The reset is defensive -- it matters only for a
+        // claim that SUCCEEDED under an older window, which the origin check prevents by design -- so
+        // this case constrains the origin check and NOT the reset. Saying which one it holds is the
+        // point; a passing case with two candidate mechanisms proves neither by itself.
+    }
 }

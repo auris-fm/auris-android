@@ -238,30 +238,40 @@ class GracePeriodSignal @Inject constructor() {
     /** The window a dispatch issued now would belong to. */
     val currentGeneration: Long get() = generation
 
-    /**
-     * Issues the window's single escalation, returning the generation it was
-     * issued under, or null when it is refused.
-     *
-     * Refused when no window is open — an utterance with no act behind it has
-     * nothing to spend against — and when this generation has already spent its
-     * one dispatch.
-     *
-     * This does **not** constrain a false wake. A false wake is a wake
-     * detection, so it opens a window and its one utterance is the residual we
-     * accepted knowingly; what this refuses is an utterance arriving with no
-     * window at all.
-     */
-    fun issueEscalation(): Long? {
+    // Issues the window's single escalation, returning the generation it was issued under, or null
+    // when it is refused.
+    //
+    // Refused when no window is open -- an utterance with no act behind it has nothing to spend
+    // against -- and when this generation has already spent its one dispatch.
+    //
+    // THE CLAIM IS AGAINST THE REQUEST'S OWN WINDOW, not whichever is current. Recognition takes time,
+    // and a wake arriving meanwhile opens a new window: claiming against the current generation would
+    // let a request issued under the OLD window spend the SUCCESSOR's allowance, leaving the user's
+    // newer act unable to escalate at all. A request whose window is no longer live claims nothing.
+    //
+    // This does **not** constrain a false wake. A false wake is a wake detection, so it opens a window
+    // and its one utterance is the residual we accept knowingly; what this refuses is an utterance
+    // arriving with no window at all.
+
+    @Synchronized
+    fun issueEscalation(origin: Long = generation): Long? {
+        if (origin != generation) return null
         if (!_isActive.value || closedByPrivacy) return null
-        if (escalationUsed && escalatedGeneration == generation) return null
+        if (escalationUsed && escalatedGeneration == origin) return null
         escalationUsed = true
-        escalatedGeneration = generation
-        return generation
+        escalatedGeneration = origin
+        return origin
     }
 
     /** A new act opens a window and begins its generation. */
     private fun openWindow() {
         generation += 1
+        // EACH WINDOW HAS ITS OWN ALLOWANCE, so opening one CLEARS the spent marker. Without this a
+        // claim made under a previous window made every later window read as spent: `escalationRefusal`
+        // compares `escalatedGeneration` with the CURRENT generation, which the reset is what makes
+        // meaningful. A stale claim must not disable the user's next act.
+        escalationUsed = false
+        escalatedGeneration = -1L
         startOrReset()
     }
 

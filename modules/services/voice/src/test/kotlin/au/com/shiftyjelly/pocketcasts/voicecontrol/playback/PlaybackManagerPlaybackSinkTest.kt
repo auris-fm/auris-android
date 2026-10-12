@@ -67,6 +67,51 @@ class PlaybackManagerPlaybackSinkTest {
     }
 
     @Test
+    fun `a replacement landing WHILE the owner's Main dispatch is queued is refused`() = runTest {
+        // @spec's controlled case. `seekToTimeMsInternalIfEpisode` suspends to publish the media-session
+        // position BEFORE the player mutation, and the replacement is made to land in that suspension --
+        // while the Main dispatch it is waiting on is still queued, not merely "before the call".
+        //
+        // The operation must be refused, and it must NOT touch the replacement player: a seek that
+        // reaches `player.seekToTimeMs` after the replacement has moved the player is exactly the
+        // cross-episode mutation this boundary exists to prevent.
+        val manager = mock<PlaybackManager>()
+        var consultations = 0
+        org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenAnswer {
+            consultations++
+            au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+                // A on the reads taken BEFORE the owner's deciding step, B from then on.
+                uuid = if (consultations <= 1) "episode-A" else "episode-B",
+                podcastUuid = "podcast-1",
+                publishedDate = java.util.Date(),
+            )
+        }
+        org.mockito.kotlin.whenever(
+            manager.seekIfPlayingToTimeMs(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.anyOrNull()),
+        ).thenAnswer {
+            // THE OWNER'S MUTATION, modelled at the step where it decides. The replacement has landed by
+            // now -- the consultations before this one are the reads taken earlier -- so the owner must
+            // report its REFUSAL here. Answering from the FIRST read would be the defect itself.
+            manager.getCurrentEpisode()?.uuid == "episode-A"
+        }
+
+        val result = sink(manager).seekTo(
+            positionSeconds = 100,
+            episodeDurationSeconds = 1800,
+            expectedEpisodeId = "episode-A",
+        )
+
+        assertTrue(
+            "a replacement during the owner's suspension must be refused (result=$result)",
+            result is EpisodeOperationResult.Refused,
+        )
+        org.mockito.kotlin.verify(manager, org.mockito.kotlin.never()).seekToTimeMsSuspend(
+            org.mockito.kotlin.any(),
+            org.mockito.kotlin.anyOrNull(),
+        )
+    }
+
+    @Test
     fun `the episode is re-decided AT the mutation, so a change across the suspension is refused`() = runTest {
         // @reviewer's finding: `seekToTimeMsInternal` reads the episode, then SUSPENDS in
         // `withContext(Dispatchers.Main)` before the player mutation -- and a replacement can land in

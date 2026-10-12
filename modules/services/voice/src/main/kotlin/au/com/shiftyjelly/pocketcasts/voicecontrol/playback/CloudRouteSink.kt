@@ -969,6 +969,15 @@ class CloudRouteSink internal constructor(
                 }
 
                 "resume" -> {
+                    // THE EPISODE BINDING APPLIES TO RESUME TOO. A resume is a player-state mutation, and
+                    // a quote's "resume" means "carry on with the recording we were playing" -- resuming
+                    // a replacement episode would start audio the user never asked for, under a turn
+                    // about a different recording. Refused when the selection has moved.
+                    if (turnEpisodeId != null &&
+                        playbackContextProvider.current().episodeId != turnEpisodeId
+                    ) {
+                        return@withLock false
+                    }
                     // As at play_quote: cleared first for uniformity, so a throw
                     // cannot leave the flag describing a state we failed to reach.
                     playerAutoPaused = false

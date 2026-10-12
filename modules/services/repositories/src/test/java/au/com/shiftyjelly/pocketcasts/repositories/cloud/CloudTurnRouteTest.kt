@@ -176,6 +176,41 @@ class CloudTurnRouteTest {
     }
 
     @Test
+    fun `the encoder never writes client conversation history to a cloud frame`() = runTest {
+        // The owning spec forbids `context.recent_conversation` on cloud frames: the Worker owns cloud
+        // history. The context here DOES hold entries, so the case distinguishes an intentional
+        // omission from an empty one -- asserting the model alone would pass either way.
+        val transport = FakeTransport(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")))
+        val withHistory = CloudRouteTurn(
+            request = "and this one",
+            context = CloudRouteContext(
+                episodeId = "e-1",
+                clientPositionMs = 1_000L,
+                recentConversation = listOf(
+                    CloudRouteConversationEntry(
+                        role = CloudRouteConversationEntry.ROLE_USER,
+                        text = "what is this podcast about",
+                    ),
+                    CloudRouteConversationEntry(
+                        role = CloudRouteConversationEntry.ROLE_ASSISTANT,
+                        text = "it is about birds",
+                    ),
+                ),
+            ),
+            requestId = "req-history",
+        )
+
+        route(transport).route(withHistory).toList()
+
+        val json = CloudRouteJson.authenticateAdapter
+            .toJson(transport.frames.single() as CloudTurnFrame.Authenticate)
+        assertFalse(
+            "the serialized cloud frame must not carry recent_conversation (json=$json)",
+            json.contains("recent_conversation"),
+        )
+    }
+
+    @Test
     fun `a refused upgrade fails the turn terminally - there is no fallback`() = runTest {
         val transport = FakeTransport(
             listOf(CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = "")),

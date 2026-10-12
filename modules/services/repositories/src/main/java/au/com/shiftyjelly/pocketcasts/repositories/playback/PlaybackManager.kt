@@ -1223,12 +1223,14 @@ open class PlaybackManager @Inject constructor(
         if (getCurrentEpisode()?.uuid != episodeUuid) {
             return false
         }
-        if (forward) skipForwardSuspend(sourceView, jumpAmountSeconds) else skipBackwardSuspend(sourceView, jumpAmountSeconds)
-        // THE ANSWER IS TAKEN AFTERWARDS, FROM WHAT THE PLAYER ACTUALLY DID. Reporting `true` here
-        // unconditionally made this function an early refusal and nothing more: the skip below suspends,
-        // and the episode-scoped mutation inside it may have refused by the time it ran. The player's own
-        // episode is the evidence -- if it no longer names [episodeUuid], the skip did not act on it.
-        return player?.episodeUuid == episodeUuid
+        // THE SCOPED MUTATION'S OWN PAYLOAD IS THE ANSWER. Comparing the player's episode afterwards was
+        // a second, weaker observation of the same fact: it reports what the player names NOW rather than
+        // whether the skip acted, and a later replacement would flip it back to a false refusal.
+        return if (forward) {
+            skipForwardSuspend(sourceView, jumpAmountSeconds)
+        } else {
+            skipBackwardSuspend(sourceView, jumpAmountSeconds)
+        }
     }
 
     /**
@@ -1374,25 +1376,26 @@ open class PlaybackManager @Inject constructor(
     suspend fun skipForwardSuspend(
         sourceView: SourceView = SourceView.UNKNOWN,
         jumpAmountSeconds: Int? = null,
-    ) {
+    ): Boolean {
         LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Skip forward tapped")
 
         cancelPendingChapterSeek()
-        val episode = getCurrentEpisode() ?: return
+        val episode = getCurrentEpisode() ?: return false
         val jumpAmountMs = (jumpAmountSeconds ?: settings.skipForwardInSecs.value) * 1000
 
         val currentTimeMs = getCurrentTimeMs(episode = episode)
-        if (currentTimeMs < 0 || player?.episodeUuid != episode.uuid) return // Make sure the player hasn't changed episodes before using the current time to seek
+        if (currentTimeMs < 0 || player?.episodeUuid != episode.uuid) return false // Make sure the player hasn't changed episodes before using the current time to seek
 
         val newPositionMs = currentTimeMs + jumpAmountMs
         val durationMs = player?.durationMs() ?: Int.MAX_VALUE // If we don't have a duration, just let them skip
 
-        statsManager.addTimeSavedSkipping((newPositionMs - currentTimeMs).toLong())
         if (newPositionMs < durationMs) {
             // THE MUTATION RE-DECIDES, exactly as the seek path does: this call suspends, and an episode
-            // replacement can land in that suspension. Reporting whether it acted is what lets a bound
-            // skip be refused rather than performed on the replacement.
-            seekToTimeMsInternalIfEpisode(episode.uuid, newPositionMs)
+            // replacement can land in that suspension. Its OUTCOME decides, so the statistics are
+            // committed from it: a refused skip moved nothing, and recording time saved for it would
+            // publish a saving that never happened -- and against the replacement's episode.
+            if (!seekToTimeMsInternalIfEpisode(episode.uuid, newPositionMs)) return false
+            statsManager.addTimeSavedSkipping((newPositionMs - currentTimeMs).toLong())
         } else {
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Seek beyond end of episode so completing. ${episode.uuid}")
             onCompletion(episode.uuid)
@@ -1404,6 +1407,7 @@ open class PlaybackManager @Inject constructor(
                 contentType = contentType,
             )
         }
+        return true
     }
 
     fun skipBackward(sourceView: SourceView = SourceView.UNKNOWN, jumpAmountSeconds: Int? = null) {
@@ -1412,19 +1416,20 @@ open class PlaybackManager @Inject constructor(
         }
     }
 
-    suspend fun skipBackwardSuspend(sourceView: SourceView = SourceView.UNKNOWN, jumpAmountSeconds: Int? = null) {
+    suspend fun skipBackwardSuspend(sourceView: SourceView = SourceView.UNKNOWN, jumpAmountSeconds: Int? = null): Boolean {
         LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Skip backward tapped")
 
         cancelPendingChapterSeek()
-        val episode = getCurrentEpisode() ?: return
+        val episode = getCurrentEpisode() ?: return false
 
         val jumpAmountMs = (jumpAmountSeconds ?: settings.skipBackInSecs.value) * 1000
         val currentTimeMs = getCurrentTimeMs(episode = episode)
-        if (currentTimeMs < 0) return
+        if (currentTimeMs < 0) return false
 
         val newPositionMs = (currentTimeMs - jumpAmountMs).coerceAtLeast(0)
         // Same rule: the episode check is the mutation's own step, not a read taken before a suspension.
-        seekToTimeMsInternalIfEpisode(episode.uuid, newPositionMs)
+        // The outcome is what the caller needs: a refused skip is not a skip.
+        if (!seekToTimeMsInternalIfEpisode(episode.uuid, newPositionMs)) return false
 
         trackPlaybackEvent(sourceView) { source, contentType ->
             PlaybackSkipBackEvent(
@@ -1432,6 +1437,7 @@ open class PlaybackManager @Inject constructor(
                 contentType = contentType,
             )
         }
+        return true
     }
 
     fun skipToNextSelectedOrLastChapter() {

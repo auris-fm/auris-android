@@ -518,6 +518,38 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a REFUSED bound skip is not reported as a performed action`() = runTest {
+        // @spec's requirement: the scoped mutation's own payload decides, and statistics/history follow
+        // ACCEPTANCE. A refused skip moved nothing, so reporting it as performed would publish a skip
+        // that never happened -- and against the replacement episode.
+        val deps = TestDeps(
+            episodeId = "A",
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "skip_forward",
+                    params = mapOf("seconds" to 30),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // The player is on B, so the skip bound to A is refused.
+        deps.playback.currentEpisodeIdForTest = "B"
+        val sink = deps.sink()
+
+        sink.routeToCloud(
+            "about episode A",
+            VoiceIntent.CloudTier.Premium,
+            PlaybackContext(episodeId = "A", clientPositionMs = 0L),
+        )
+
+        assertTrue(
+            "a refused bound skip must not reach the player (calls=${deps.playback.calls})",
+            !deps.playback.calls.any { it.startsWith("skip") && !it.contains("Refused") },
+        )
+    }
+
+    @Test
     fun `an UNBOUND reference position is refused rather than applied to whatever is playing`() = runTest {
         // @spec's unbound case: a reference position is a position IN a recording, so with no episode to
         // be a position in there is nothing it can be a position in. A null expectation must not turn an

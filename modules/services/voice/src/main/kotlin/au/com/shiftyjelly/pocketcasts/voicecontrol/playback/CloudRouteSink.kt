@@ -934,6 +934,16 @@ class CloudRouteSink internal constructor(
                     // Same rule: the seek is attempted FIRST and history follows only an accepted one.
                     if (!seekToReference(referenceMs, turnEpisodeId)) return@withLock false
                     capturePreActionPosition(referenceMs, turnState)
+                    // THE RESUME IS BOUND TO THE EPISODE THE QUOTE WAS PLAYED FROM -- this is the call
+                    // the quote's own resume makes, not the standalone "resume" action. A quote means
+                    // "hear this, then carry on with the recording we were in", so resuming a
+                    // replacement episode would start audio the user never asked for, under a turn
+                    // about a different recording. Refused when the selection has moved.
+                    if (turnEpisodeId != null &&
+                        playbackContextProvider.current().episodeId != turnEpisodeId
+                    ) {
+                        return@withLock false
+                    }
                     // Cleared before the suspending call so the flag never
                     // outlives the player state it refers to. (Here a throw
                     // would make the finally resume, which is what this action

@@ -247,7 +247,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
     private suspend fun executePlayback(intent: VoiceIntent.Playback): VoiceResponse = when (intent) {
         VoiceIntent.Playback.Pause -> playbackSink.pause()
 
-        VoiceIntent.Playback.Resume -> playbackSink.resume()
+        VoiceIntent.Playback.Resume -> playbackSink.resume().asLocalResponse()
 
         is VoiceIntent.Playback.SeekRelative -> {
             // deltaSeconds in seconds; null means "no amount stated — sink
@@ -443,7 +443,7 @@ interface VoicePlaybackSink {
      * resuming a replacement would start audio the user never asked for under a request about a
      * different episode.
      */
-    suspend fun resume(expectedEpisodeId: String? = null): VoiceResponse
+    suspend fun resume(expectedEpisodeId: String? = null): EpisodeOperationResult
     suspend fun skipForward(seconds: Int?, expectedEpisodeId: String? = null): EpisodeOperationResult
     suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String? = null): EpisodeOperationResult
 

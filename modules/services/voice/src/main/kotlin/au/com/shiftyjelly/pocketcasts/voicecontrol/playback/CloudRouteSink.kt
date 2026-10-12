@@ -950,8 +950,10 @@ class CloudRouteSink internal constructor(
                     // wanted anyway — the reorder is for uniformity, not safety.)
                     playerAutoPaused = false
                     pauseReserved = false
-                    playbackSink.resume(turnEpisodeId)
-                    true
+                    // THE QUOTE'S RESUME OUTCOME IS ITS OWN ANSWER. Returning true unconditionally
+                    // made a refused resume a delivered action -- and a quote whose episode was
+                    // replaced must not be counted as played.
+                    playbackSink.resume(turnEpisodeId) is EpisodeOperationResult.Accepted
                 }
 
                 "stop_quote" -> {
@@ -992,8 +994,10 @@ class CloudRouteSink internal constructor(
                     // cannot leave the flag describing a state we failed to reach.
                     playerAutoPaused = false
                     pauseReserved = false
-                    playbackSink.resume(turnEpisodeId)
-                    true
+                    // Both the guard above and the sink's own binding decide, and the OUTCOME is what is
+                    // reported: returning true unconditionally made a refused resume a delivered
+                    // action, which is the same "counting a refusal as performed" defect as the seek.
+                    playbackSink.resume(turnEpisodeId) is EpisodeOperationResult.Accepted
                 }
 
                 "seek_relative" -> {

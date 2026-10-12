@@ -1151,9 +1151,9 @@ class VoicePlaybackIntentExecutorTest {
             onCall?.invoke("pause")
             return VoiceResponse.Earcon(EarconId.SUCCESS)
         }
-        override suspend fun resume(expectedEpisodeId: String?): VoiceResponse {
+        override suspend fun resume(expectedEpisodeId: String?): EpisodeOperationResult {
             calls += "resume"
-            return VoiceResponse.Silent
+            return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = null)
         }
         override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
             calls += "skipForward:$seconds"

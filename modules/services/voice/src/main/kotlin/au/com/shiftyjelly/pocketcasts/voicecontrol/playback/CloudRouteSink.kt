@@ -944,9 +944,17 @@ class CloudRouteSink internal constructor(
                 }
 
                 "stop_quote" -> {
+                    // THE RESTORE CARRIES ITS ORIGINAL EXPECTATION. The position to return to belongs to
+                    // the episode the quote was played FROM, so a selection change during the quote must
+                    // refuse the restore rather than seek the replacement episode back into a recording
+                    // the user was not listening to. The outcome is honoured, not assumed.
                     val restoreMs = turnState.preQuotePositionMs ?: return@withLock false
-                    playbackSink.seekTo(restoreMs.toInt() / 1000, episodeDurationSeconds())
-                    true
+                    val restored = playbackSink.seekTo(
+                        restoreMs.toInt() / 1000,
+                        episodeDurationSeconds(),
+                        turnEpisodeId,
+                    )
+                    restored == EpisodeOperationResult.Accepted
                 }
 
                 "pause" -> {
@@ -1027,6 +1035,11 @@ class CloudRouteSink internal constructor(
     }
 
     private fun capturePreActionPosition(referenceMs: Long, turnState: TurnState) {
+        // AFTER ACCEPTANCE, SO THE SUBJECT IS THE EPISODE THE OPERATION WAS BOUND TO. This runs only
+        // once the sink accepted the action, and the expected-episode operation is what establishes
+        // that the player is still on [turnEpisodeId] -- so recording against it is recording against
+        // the episode the position actually belongs to. Re-reading the live provider here would record
+        // against whatever a later selection change made current, which is a different recording.
         val previousPlaybackMs = playbackContextProvider.current().clientPositionMs
         // preQuotePositionMs stays on the playback timeline: stop_quote seeks the local player back to
         // it. When NO episode is playing there is no position to return to, so this records null and

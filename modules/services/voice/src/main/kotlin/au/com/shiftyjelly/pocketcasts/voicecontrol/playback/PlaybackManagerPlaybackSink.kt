@@ -91,12 +91,14 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         // SAME RULE AS seekTo: an episode-bound skip is refused when the player has moved to another
         // recording, because the skip's magnitude was chosen for the one it was planned against.
         if (expectedEpisodeId != null) {
-            if (playbackManager.getCurrentEpisode()?.uuid != expectedEpisodeId) {
-                Timber.i("[VoicePipeline] refused: skipForward planned for a different episode")
-                return EpisodeOperationResult.Refused
-            }
-            playbackManager.skipForwardSuspend(SourceView.VOICE_COMMANDS, seconds)
-            return EpisodeOperationResult.Accepted
+            // THROUGH THE OWNER, which re-reads the selection and performs the skip as one step.
+            val accepted = playbackManager.skipIfPlaying(
+                episodeUuid = expectedEpisodeId,
+                forward = true,
+                sourceView = SourceView.VOICE_COMMANDS,
+                jumpAmountSeconds = seconds,
+            )
+            return if (accepted) EpisodeOperationResult.Accepted else EpisodeOperationResult.Refused
         }
         playbackManager.skipForwardSuspend(SourceView.VOICE_COMMANDS, seconds)
         return EpisodeOperationResult.Accepted
@@ -106,12 +108,14 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         // SAME RULE AS seekTo: an episode-bound skip is refused when the player has moved to another
         // recording, because the skip's magnitude was chosen for the one it was planned against.
         if (expectedEpisodeId != null) {
-            if (playbackManager.getCurrentEpisode()?.uuid != expectedEpisodeId) {
-                Timber.i("[VoicePipeline] refused: skipBackward planned for a different episode")
-                return EpisodeOperationResult.Refused
-            }
-            playbackManager.skipBackwardSuspend(SourceView.VOICE_COMMANDS, seconds)
-            return EpisodeOperationResult.Accepted
+            // THROUGH THE OWNER, which re-reads the selection and performs the skip as one step.
+            val accepted = playbackManager.skipIfPlaying(
+                episodeUuid = expectedEpisodeId,
+                forward = false,
+                sourceView = SourceView.VOICE_COMMANDS,
+                jumpAmountSeconds = seconds,
+            )
+            return if (accepted) EpisodeOperationResult.Accepted else EpisodeOperationResult.Refused
         }
         playbackManager.skipBackwardSuspend(SourceView.VOICE_COMMANDS, seconds)
         return EpisodeOperationResult.Accepted

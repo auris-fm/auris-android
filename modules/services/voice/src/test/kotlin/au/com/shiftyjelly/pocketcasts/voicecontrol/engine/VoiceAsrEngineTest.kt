@@ -563,9 +563,18 @@ class VoiceAsrEngineTest {
                     // one; and marked as the fallback, which must not restore it.
                     windowGeneration = 1L,
                     origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
+                    // MINTED AT INPUT REGISTRATION: an ordinary cloud dispatch carries its own logical
+                    // identity, before the recognition suspends. Asserted separately below rather than
+                    // as a literal, since it is generated per dispatch.
+                    logicalRequestId = (intents.single() as VoiceIntent.CloudRoute).logicalRequestId,
                 ),
             ),
             intents,
+        )
+        assertTrue(
+            "an ordinary ASR cloud dispatch must carry a logical identity, so a retry of it can " +
+                "name the same request (id=${(intents.single() as VoiceIntent.CloudRoute).logicalRequestId})",
+            !(intents.single() as VoiceIntent.CloudRoute).logicalRequestId.isNullOrBlank(),
         )
         // Escalating is not an error, so no error tone: the answer (or the
         // cloud path's own failure tone) is what the user hears.

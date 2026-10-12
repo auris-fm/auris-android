@@ -273,6 +273,25 @@ class CloudRouteSink internal constructor(
      */
     override fun retainedTurnFor(logicalRequestId: String): CloudRouteTurn? = conversationAdmission.retained(logicalRequestId)
 
+    /**
+     * Forgets [logicalRequestId]'s retained turn: no retry of it is coming.
+     *
+     * The production binding for the dialog's abandonment callback. Without a binding, a prepared turn
+     * is held for the life of the process, and a later dispatch naming a finished request would be
+     * admitted as a retry of work that is done.
+     */
+    fun forgetRetained(logicalRequestId: String) {
+        conversationAdmission.forgetRetained(logicalRequestId)
+        retentionReleased?.invoke(logicalRequestId)
+    }
+
+    /** The consumer notified when a logical request stops being retryable. */
+    private var retentionReleased: ((logicalRequestId: String) -> Unit)? = null
+
+    override fun onRetentionReleased(consumer: (logicalRequestId: String) -> Unit) {
+        retentionReleased = consumer
+    }
+
     override suspend fun dispatchPrepared(prepared: CloudRouteTurn): VoiceResponse = routeTurn(
         request = prepared.request,
         tier = VoiceIntent.CloudTier.Premium,

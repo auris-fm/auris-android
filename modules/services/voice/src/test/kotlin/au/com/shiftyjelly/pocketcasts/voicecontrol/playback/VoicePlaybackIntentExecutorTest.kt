@@ -1214,6 +1214,10 @@ class VoicePlaybackIntentExecutorTest {
         private val retained =
             mutableMapOf<String, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
 
+        override fun onRetentionReleased(consumer: (logicalRequestId: String) -> Unit) {
+            // Retained for symmetry with the production interface; the fake has no store to release.
+        }
+
         override fun retainedTurnFor(
             logicalRequestId: String,
         ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = retained[logicalRequestId]

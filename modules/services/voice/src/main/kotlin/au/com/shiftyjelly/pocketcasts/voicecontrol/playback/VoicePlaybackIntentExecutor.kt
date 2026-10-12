@@ -36,6 +36,27 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         logicalRequestId: String,
     ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = cloudRouteSink.retainedTurnFor(logicalRequestId)
 
+    /**
+     * Connects a dialog manager's abandonment reports to this sink's retention release.
+     *
+     * CALLED AT COMPOSITION, not injected: making the manager a constructor dependency would close a
+     * cycle through the router, which already reaches the manager. One call, one direction.
+     */
+    fun bindDialogAbandonment(
+        dialogManager: au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager,
+    ) {
+        // ONE DIRECTION: the manager reports an abandoned or replaced request and the SINK forgets the
+        // turn retained for it. The sink is not made a dependency of the manager -- the router already
+        // reaches the manager, so that would close a cycle -- and the binding is installed here, at
+        // composition, where both are in hand.
+        dialogManager.onRequestAbandoned = { logical ->
+            runCatching {
+                (cloudRouteSink as? au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSink)
+                    ?.forgetRetained(logical)
+            }
+        }
+    }
+
     suspend fun execute(intent: VoiceIntent): VoiceResponse {
         // Recorded *before* the action runs: the revision is what a cloud turn
         // compares at restore time, and a user's pause that has already reached
@@ -419,6 +440,16 @@ interface VoiceCloudRouteSink {
         /** The logical request this turn belongs to, for the retry path. */
         logicalRequestId: String? = null,
     ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn?
+
+    /**
+     * Installs [consumer] as the release target for a logical request that is no longer retryable.
+     *
+     * INVERTED ON PURPOSE. Binding this as a constructor dependency would make the sink and the dialog
+     * manager depend on each other -- the router already reaches the manager -- and Dagger rejects the
+     * cycle. The owner registers its release here, so the connection is one-way and the graph stays
+     * acyclic.
+     */
+    fun onRetentionReleased(consumer: (logicalRequestId: String) -> Unit)
 
     /** The turn retained for [logicalRequestId], so a caller can tell a retry from new input. */
     fun retainedTurnFor(

@@ -202,16 +202,16 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
 
     override val enforcesEpisodeBoundSeek: Boolean get() = true
 
-    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Long? {
+    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Player.EpisodeSeekOutcome {
         return withContext(Dispatchers.Main) {
-            if (positionMs < 0) return@withContext null
+            if (positionMs < 0) return@withContext Player.EpisodeSeekOutcome.Refused
             // THE CHECK, THE PRE-ACTION SNAPSHOT AND THE MUTATION ARE ONE STEP, under the lock
             // `setEpisode` writes under. The position is read HERE, so it describes what the player was
             // at the moment it decided -- not what a caller read around the call.
             synchronized(episodeLock) {
                 if (episodeLocation?.episode?.uuid != expectedEpisodeUuid) {
                     LogBuffer.i(LogBuffer.TAG_PLAYBACK, "LocalPlayer refused a seek: episode changed")
-                    return@synchronized null
+                    return@synchronized Player.EpisodeSeekOutcome.Refused
                 }
                 // The NON-SUSPENDING inner form: the public one wraps in withContext, which a monitor cannot hold.
                 val before = handleCurrentPositionMs().toLong()
@@ -221,7 +221,8 @@ abstract class LocalPlayer(override val onPlayerEvent: (Player, PlayerEvent) -> 
                     onSeekStart(positionMs)
                     handleSeekToTimeMs(positionMs)
                 }
-                before
+                // ACCEPTED WITH ITS POSITION: the seek happened and the pre-action value is known.
+                Player.EpisodeSeekOutcome.accepted(before)
             }
         }
     }

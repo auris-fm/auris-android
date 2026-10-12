@@ -1430,8 +1430,11 @@ open class PlaybackManager @Inject constructor(
             Timber.w("[Playback] refused: player cannot enforce an episode-bound seek")
             return null
         }
-        val before = target.seekToTimeMsIfEpisode(positionMs, episodeUuid) ?: return null
-        return episodeUuid to before.toInt()
+        val outcome = target.seekToTimeMsIfEpisode(positionMs, episodeUuid)
+        if (!outcome.accepted) return null
+        // THE POSITION MAY BE ABSENT WHILE THE OPERATION IS ACCEPTED. It is carried as null so the
+        // history consumer records nothing rather than substituting a value -- absence is not refusal.
+        return episodeUuid to outcome.positionMs?.toInt()
     }
 
     private suspend fun seekToTimeMsInternal(duration: Duration) {
@@ -1548,7 +1551,7 @@ open class PlaybackManager @Inject constructor(
         // THE PLAYER DECIDES AT ITS OWN MUTATION. This call carries the expectation INTO the player
         // operation, so a re-pointing that lands inside the seek's suspension is refused there rather
         // than detected here afterwards. A non-null result is the acceptance AND the pre-action position.
-        return player.seekToTimeMsIfEpisode(positionMs, episodeUuid) != null
+        return player.seekToTimeMsIfEpisode(positionMs, episodeUuid).accepted
     }
 
     private suspend fun seekToTimeMsInternal(positionMs: Int) {

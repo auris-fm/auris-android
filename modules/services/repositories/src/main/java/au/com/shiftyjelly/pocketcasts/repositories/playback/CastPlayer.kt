@@ -190,7 +190,7 @@ class CastPlayer(
 
     override val enforcesEpisodeBoundSeek: Boolean get() = true
 
-    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Long? {
+    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Player.EpisodeSeekOutcome {
         // THE SAME CONTRACT AS LocalPlayer, enforced here because a cast player can be RE-POINTED by
         // `setEpisode` while a seek is in flight. Deciding inside this suspension, immediately before the
         // remote seek is issued, is what refuses a re-pointed receiver instead of moving another
@@ -206,7 +206,7 @@ class CastPlayer(
             synchronized(episodeLock) {
                 if (localEpisodeUuid != expectedEpisodeUuid) {
                     Timber.i("CastPlayer refused a seek: episode changed")
-                    return@synchronized null
+                    return@synchronized Player.EpisodeSeekOutcome.Refused
                 }
                 // THE RECEIVER'S OWN EPISODE MUST MATCH before its position can be called this
                 // operation's pre-action value. `approximateStreamPosition` describes whatever the
@@ -214,24 +214,35 @@ class CastPlayer(
                 // episode this client INTENDS to play. During a load they differ, so an unvalidated read
                 // would report the OLD recording's position as the provenance of an operation on the new
                 // one: the same substitution the binding exists to prevent, one layer down.
+                //
+                // AN UNAVAILABLE POSITION IS NOT A REFUSAL. This is provenance, not acceptance: a
+                // successful load of the new episode has no pre-action position on the receiver yet,
+                // because the receiver is still on the old one. Treating that as a refusal would reject
+                // an operation that is about to succeed -- the position is ABSENT, and the execution is
+                // still ACCEPTED. The two are separate facts and are reported separately.
                 val before = remoteMediaClient?.approximateStreamPosition
                     ?.takeIf { remoteEpisodeUuid != null && TextUtils.equals(remoteEpisodeUuid, expectedEpisodeUuid) }
-                    ?: return@synchronized null
                 if (isMediaLoaded) {
                     // NO REMOTE CLIENT MEANS UNAVAILABLE, NOT ACCEPTED. `?.` followed by `true` reported a
                     // cast seek that reached no receiver as performed.
-                    val client = remoteMediaClient ?: return@synchronized null
+                    val client = remoteMediaClient ?: return@synchronized Player.EpisodeSeekOutcome.Refused
                     val seekOptions = MediaSeekOptions.Builder()
                         .setPosition(positionMs.toLong())
                         .setCustomData(customData)
                         .setResumeState(MediaSeekOptions.RESUME_STATE_UNCHANGED)
                         .build()
                     client.seek(seekOptions)
-                    before
+                    // ACCEPTED. The position may be ABSENT (a load of the new episode has none yet),
+                    // which is provenance, not refusal.
+                    Player.EpisodeSeekOutcome.accepted(before)
                 } else {
-                    val local = localEpisodeUuid ?: return@synchronized null
+                    val local = localEpisodeUuid ?: return@synchronized Player.EpisodeSeekOutcome.Refused
                     // THE LOAD'S OWN RESULT IS THE ANSWER, rather than a silent success after a void call.
-                    if (loadEpisode(local, positionMs, true)) before else null
+                    if (loadEpisode(local, positionMs, true)) {
+                        Player.EpisodeSeekOutcome.accepted(before)
+                    } else {
+                        Player.EpisodeSeekOutcome.Refused
+                    }
                 }
             }
         }

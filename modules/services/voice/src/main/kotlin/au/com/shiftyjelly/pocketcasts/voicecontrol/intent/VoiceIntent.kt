@@ -122,6 +122,15 @@ sealed interface VoiceIntent {
          */
         val preparedTurn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = null,
         /**
+         * The LOGICAL request this dispatch belongs to, when it is a retry of one.
+         *
+         * IDENTICAL WORDS ARE NOT THE SAME REQUEST: two separate user acts can say the same thing, and
+         * each needs its own request ID and -- under its own origin -- its own CREATE or RESUME.
+         * Retention keys on this identity, so a retry finds its turn while a fresh utterance saying the
+         * same words prepares a new one.
+         */
+        val logicalRequestId: String? = null,
+        /**
          * Who issued this dispatch. Separate from [windowGeneration] on purpose:
          * the generation decides whether the window is touched at all, the
          * origin decides whether the window's allowance is restored. A

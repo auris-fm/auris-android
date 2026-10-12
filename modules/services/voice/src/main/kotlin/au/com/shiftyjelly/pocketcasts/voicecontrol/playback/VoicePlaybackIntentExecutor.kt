@@ -41,13 +41,30 @@ class VoicePlaybackIntentExecutor @Inject constructor(
     private val retainedLock = Any()
     private var retained: Pair<String, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>? = null
 
-    private fun retainTurn(turn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn) {
-        synchronized(retainedLock) { retained = turn.request to turn }
+    private fun retainTurn(
+        logicalRequestId: String?,
+        turn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
+    ) {
+        // Retained under the LOGICAL identity the caller supplied, so a later retry naming the same
+        // request finds it -- and an utterance that names none never does. Keying on the request TEXT
+        // would let two separate user acts that happen to say the same words share one turn.
+        val logical = logicalRequestId ?: return
+        synchronized(retainedLock) { retained = logical to turn }
     }
 
-    /** The retained turn for [intent]'s utterance, when one was prepared and not yet used by a retry. */
-    private fun retainedTurn(intent: VoiceIntent.CloudRoute): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = synchronized(retainedLock) {
-        retained?.takeIf { it.first == intent.request }?.second
+    /**
+     * The retained turn for [intent]'s LOGICAL request, when one was prepared.
+     *
+     * Keyed by logical identity, NOT by the request text: identical words do not identify a retry, and
+     * two separate user acts can say the same thing. A retry names the logical request it repeats; an
+     * utterance that names none is a NEW act, so it prepares its own turn with its own request ID and
+     * its own CREATE-or-RESUME decision under its own origin.
+     */
+    private fun retainedTurn(intent: VoiceIntent.CloudRoute): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? {
+        val logical = intent.logicalRequestId ?: return null
+        return synchronized(retainedLock) {
+            retained?.takeIf { it.first == logical }?.second
+        }
     }
 
     suspend fun execute(intent: VoiceIntent): VoiceResponse {
@@ -129,7 +146,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                             isFirstRequestOfWindow = isFirstRequestOfWindow,
                         ),
                 ) ?: return VoiceResponse.Silent
-                retainTurn(preparedTurn)
+                retainTurn(intent.logicalRequestId, preparedTurn)
                 // DISPATCHED THROUGH THE ALREADY-PREPARED TURN, so the first attempt and a retry take
                 // the SAME path and the identity is the one fixed above rather than a second one minted
                 // here.

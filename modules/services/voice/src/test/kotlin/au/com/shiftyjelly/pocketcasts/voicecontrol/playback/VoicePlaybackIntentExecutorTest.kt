@@ -9,6 +9,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -379,6 +380,7 @@ class VoicePlaybackIntentExecutorTest {
             request = "a question worth retrying",
             tier = VoiceIntent.CloudTier.Premium,
             windowGeneration = window,
+            logicalRequestId = "logical-1",
         )
 
         // First attempt: the executor prepares and retains.
@@ -405,6 +407,115 @@ class VoicePlaybackIntentExecutorTest {
             "and the same conversation handle",
             sinks.cloudRoute.preparedDispatches[0].conversationId,
             sinks.cloudRoute.preparedDispatches[1].conversationId,
+        )
+    }
+
+    @Test
+    fun `the logical identity is what matches, not the words`() = runTest {
+        // THE DISCRIMINATING CASE for the retention key. A retry that names the SAME logical request
+        // but words the request differently must reuse the prepared turn: the identity is what matches.
+        // Under a text key it would prepare a second turn -- which is the failure this case exists to
+        // separate from the same-text case, whose outcome a text key happens to reproduce.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "summarize this episode",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = window,
+                logicalRequestId = "logical-1",
+            ),
+        )
+        // The SAME logical request, worded differently.
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "could you summarise it",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = window,
+                logicalRequestId = "logical-1",
+            ),
+        )
+
+        assertEquals(
+            "the same logical request does not prepare twice, whatever words it is retried with " +
+                "(ids=${sinks.cloudRoute.preparedTurns.map { it.requestId }})",
+            1,
+            sinks.cloudRoute.preparedTurns.size,
+        )
+        assertEquals(
+            "and the retry reuses the request ID the first attempt fixed",
+            sinks.cloudRoute.preparedTurns.single().requestId,
+            sinks.cloudRoute.preparedDispatches.last().requestId,
+        )
+    }
+
+    @Test
+    fun `two distinct user acts saying the same words prepare separate requests`() = runTest {
+        // @spec's key correction: IDENTICAL WORDS ARE NOT THE SAME REQUEST. Two separate user acts can
+        // say the same thing, and each needs its own request ID and its own CREATE/RESUME decision
+        // under its own origin. Keying retention on the request text would have merged them.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "play the latest episode",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = signal.capturedGeneration(),
+                logicalRequestId = "act-1",
+            ),
+        )
+        // A NEW wake: a separate user act, saying the SAME words.
+        signal.onWakeWordDetected()
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "play the latest episode",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = signal.capturedGeneration(),
+                logicalRequestId = "act-2",
+            ),
+        )
+
+        assertEquals(
+            "each user act prepared its OWN turn (ids=${sinks.cloudRoute.preparedTurns.map { it.requestId }})",
+            2,
+            sinks.cloudRoute.preparedTurns.size,
+        )
+        assertNotEquals(
+            "with a distinct request ID",
+            sinks.cloudRoute.preparedTurns[0].requestId,
+            sinks.cloudRoute.preparedTurns[1].requestId,
+        )
+    }
+
+    @Test
+    fun `an utterance naming no logical request is a new act, not a retry`() = runTest {
+        // The control for the key: a dispatch that names NO logical request never finds a retained turn,
+        // so it prepares its own. Without this, retention keyed on anything would look correct.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+        signal.onWakeWordDetected()
+
+        val intent = VoiceIntent.CloudRoute(
+            request = "the same words twice",
+            tier = VoiceIntent.CloudTier.Premium,
+            windowGeneration = signal.capturedGeneration(),
+        )
+        executor.execute(intent)
+        executor.execute(intent)
+
+        assertEquals(
+            "with no logical identity each dispatch prepares its own turn " +
+                "(ids=${sinks.cloudRoute.preparedTurns.map { it.requestId }})",
+            2,
+            sinks.cloudRoute.preparedTurns.size,
         )
     }
 

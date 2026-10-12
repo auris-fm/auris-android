@@ -35,6 +35,11 @@ class PlaybackManagerPlaybackSinkTest {
         // A fake sink that models the refusal cannot fail when the PRODUCTION check is removed -- it
         // would only be testing its own copy -- which is exactly why this case lives here.
         val manager = mock<PlaybackManager>()
+        // The OWNER's operation decides, so the mock must answer it: this case is about the adapter
+        // consulting the owner, not about the owner's own behaviour.
+        org.mockito.kotlin.whenever(
+            manager.seekIfPlayingToTimeMs(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.anyOrNull()),
+        ).thenReturn(false)
         org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenReturn(
             au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
                 uuid = "episode-B",
@@ -57,6 +62,45 @@ class PlaybackManagerPlaybackSinkTest {
         verify(manager, org.mockito.kotlin.never()).seekToTimeMsSuspend(
             org.mockito.kotlin.any(),
             org.mockito.kotlin.anyOrNull(),
+        )
+    }
+
+    @Test
+    fun `the owner's answer is AWAITED, not read from a flag written inside a launch`() = runTest {
+        // @reviewer's source finding: `seekIfPlayingToTimeMs` used to SET A FLAG INSIDE A LAUNCHED
+        // COROUTINE and return it immediately -- so when dispatch queued the coroutine, the caller read
+        // the flag's INITIAL value and reported a REFUSAL for a seek that then performed. The outcome is
+        // the owner's decision, so the caller must WAIT for it.
+        //
+        // The owner here answers on a delay, which is exactly the shape that used to be misreported: a
+        // launch-and-return would answer false before this completed.
+        val manager = mock<PlaybackManager>()
+        org.mockito.kotlin.whenever(manager.seekIfPlayingToTimeMs(org.mockito.kotlin.any(), org.mockito.kotlin.any(), org.mockito.kotlin.anyOrNull()))
+            .thenAnswer {
+                // A NON-SUSPENDING delay: the point is that the answer arrives AFTER the call returns,
+                // which is what a launch-and-read-a-flag cannot report.
+                Thread.sleep(50)
+                true
+            }
+        org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenReturn(
+            au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+                uuid = "episode-A",
+                podcastUuid = "podcast-1",
+                publishedDate = java.util.Date(),
+            ),
+        )
+
+        val result = sink(manager).seekTo(
+            positionSeconds = 100,
+            episodeDurationSeconds = 1800,
+            expectedEpisodeId = "episode-A",
+        )
+
+        assertEquals(
+            "an operation the owner ACCEPTED must be reported as accepted, even though the owner " +
+                "answered asynchronously",
+            EpisodeOperationResult.Accepted,
+            result,
         )
     }
 

@@ -1189,25 +1189,62 @@ open class PlaybackManager @Inject constructor(
         seekComplete?.invoke()
     }
 
-    fun seekIfPlayingToTimeMs(episodeUuid: String, positionMs: Int, seekComplete: (() -> Unit)? = null): Boolean {
-        // double checking the episode uuid as this may change during the launch
+    /**
+     * Skips only while [episodeUuid] is still the selected episode, and reports whether it did.
+     *
+     * THE SAME OWNER BOUNDARY AS [seekIfPlayingToTimeMs]: the episode a skip's magnitude was chosen for
+     * is not necessarily the one playing by the time the skip runs, and only the owner can decide
+     * "which episode is selected" and "move it" as one step. A caller-side check leaves the window open.
+     */
+    suspend fun skipIfPlaying(
+        episodeUuid: String,
+        forward: Boolean,
+        sourceView: SourceView = SourceView.UNKNOWN,
+        jumpAmountSeconds: Int? = null,
+    ): Boolean {
         if (getCurrentEpisode()?.uuid != episodeUuid) {
             return false
         }
-        // THE ANSWER IS THE OWNER'S DECISION, MADE HERE rather than inferred by a caller from a response
-        // that says the same thing whether the seek happened or not. The second check is the one that
-        // matters: it runs INSIDE the launch, immediately before seeking, so a selection change landing
-        // between the first check and the seek is still caught -- the race no caller-side check can close.
-        var accepted = false
-        launch {
-            if (getCurrentEpisode()?.uuid == episodeUuid) {
-                accepted = true
-                cancelPendingChapterSeek()
-                seekToTimeMsInternal(positionMs)
-                seekComplete?.invoke()
-            }
+        if (forward) skipForwardSuspend(sourceView, jumpAmountSeconds) else skipBackwardSuspend(sourceView, jumpAmountSeconds)
+        return true
+    }
+
+    /**
+     * [seekIfPlayingToTimeMs] without a result, for a caller that does not need one.
+     *
+     * Kept separate rather than making every caller suspend: the episode-sync path applies a server
+     * position and has nothing to do with the outcome, and it does not run in a coroutine. The voice path
+     * is what needs the accepted/refused answer, so it takes the suspending form.
+     */
+    fun seekIfPlayingToTimeMsInBackground(episodeUuid: String, positionMs: Int, seekComplete: (() -> Unit)? = null) {
+        launch { seekIfPlayingToTimeMs(episodeUuid, positionMs, seekComplete) }
+    }
+
+    /**
+     * Seeks to [positionMs] ONLY if [episodeUuid] is still the selected episode, and reports whether it
+     * did.
+     *
+     * SUSPEND, NOT LAUNCH-AND-READ-A-FLAG. A flag written inside a launched coroutine cannot report the
+     * outcome to a caller that returns before that coroutine runs: when dispatch queues it, the caller
+     * reads the flag's initial value and reports a REFUSAL for a seek that then performs. The outcome is
+     * the owner's decision, so the caller must WAIT for it.
+     *
+     * The episode is re-read HERE, immediately before the mutation, on this call's own thread -- so a
+     * selection change that lands before the seek is caught by the same step that performs it.
+     */
+    suspend fun seekIfPlayingToTimeMs(
+        episodeUuid: String,
+        positionMs: Int,
+        seekComplete: (() -> Unit)? = null,
+    ): Boolean {
+        // The episode must be the one the position was computed for, checked at the mutation itself.
+        if (getCurrentEpisode()?.uuid != episodeUuid) {
+            return false
         }
-        return accepted
+        cancelPendingChapterSeek()
+        seekToTimeMsInternal(positionMs)
+        seekComplete?.invoke()
+        return true
     }
 
     private suspend fun seekToTimeMsInternal(duration: Duration) {

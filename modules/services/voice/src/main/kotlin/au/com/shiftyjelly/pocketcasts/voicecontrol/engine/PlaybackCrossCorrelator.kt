@@ -32,9 +32,22 @@ class PlaybackCrossCorrelator @Inject constructor() {
         // (minDelay..maxDelay) into the reference's coordinates and search that whole range. The
         // window is what defines bleed, so anchoring must not narrow it to a single offset: a
         // genuine echo at either end of 50..500 ms is still bleed and must be found.
-        val anchoredRange = anchoredOffsetRange(micAudio, reference, micPositionMs, sampleRate)
-        val offsetRange = anchoredRange
-            ?: (minDelay..maxDelay.coerceAtMost(playbackBuffer.size - micAudio.size))
+        // THREE DISTINCT OUTCOMES, and collapsing any two is a defect:
+        //   Unavailable  no usable timing -> search the default delay window (alignment unavailable,
+        //                so the position cannot rule anything out)
+        //   Empty        timing IS valid and the delay interval does not overlap the reference -> no
+        //                admissible candidate; NO BLEED without correlating a fabricated offset.
+        //                Matching an old waveform is not evidence of a temporally possible echo.
+        //   Available    candidates exist -> correlate them.
+        val candidate = candidateOffsets(micAudio, reference, micPositionMs, sampleRate)
+        val offsetRange = when (candidate) {
+            is CandidateRange.Unavailable ->
+                minDelay..maxDelay.coerceAtMost(playbackBuffer.size - micAudio.size)
+
+            is CandidateRange.Empty -> return false
+
+            is CandidateRange.Available -> candidate.offsets
+        }
 
         var maxCorrelation = 0.0
         for (offset in offsetRange) {
@@ -55,14 +68,20 @@ class PlaybackCrossCorrelator @Inject constructor() {
      * the candidate offsets are those whose player position lies in
      * `[micStart - maxDelay, micStart - minDelay]` relative to the reference's start.
      */
-    private fun anchoredOffsetRange(
+    private sealed interface CandidateRange {
+        data object Unavailable : CandidateRange
+        data object Empty : CandidateRange
+        data class Available(val offsets: IntRange) : CandidateRange
+    }
+
+    private fun candidateOffsets(
         micAudio: FloatArray,
         reference: PlaybackReference,
         micPositionMs: Long?,
         sampleRate: Int,
-    ): IntRange? {
-        val refStart = reference.startPositionMs ?: return null
-        val micStart = micPositionMs ?: return null
+    ): CandidateRange {
+        val refStart = reference.startPositionMs ?: return CandidateRange.Unavailable
+        val micStart = micPositionMs ?: return CandidateRange.Unavailable
 
         val minDelayMs = (MIN_DELAY_SECONDS * 1_000).toLong()
         val maxDelayMs = (MAX_DELAY_SECONDS * 1_000).toLong()
@@ -71,12 +90,22 @@ class PlaybackCrossCorrelator @Inject constructor() {
         fun offsetForDelay(delayMs: Long): Int = ((micStart - delayMs - refStart) * sampleRate / 1_000L).toInt()
 
         val maxOffset = (reference.samples.size - micAudio.size).coerceAtLeast(0)
-        val lower = offsetForDelay(maxDelayMs).coerceIn(0, maxOffset)
-        val upper = offsetForDelay(minDelayMs).coerceIn(0, maxOffset)
-        // The larger delay maps to the smaller offset; keep the range ordered and non-empty.
-        val start = minOf(lower, upper)
-        val end = maxOf(lower, upper)
-        return start..end
+        // The UNCLAMPED interval the trusted timing names.
+        val lowerRaw = offsetForDelay(maxDelayMs)
+        val upperRaw = offsetForDelay(minDelayMs)
+
+        // NO OVERLAP with the retained reference: the interval lies entirely before offset 0 or
+        // entirely past the last usable offset. The timing is VALID and it rules the reference out,
+        // so there is no admissible candidate. Clamping here is what turns an excluded reference into
+        // a searched one; and falling back to the default window would be equally wrong, because the
+        // timing is not unavailable -- it is decisive.
+        if (lowerRaw > maxOffset || upperRaw < 0) return CandidateRange.Empty
+
+        // Clamp edges that fall partially outside: a partially overlapping window still has the
+        // usable part of its range as candidates.
+        val start = minOf(lowerRaw, upperRaw).coerceIn(0, maxOffset)
+        val end = maxOf(lowerRaw, upperRaw).coerceIn(0, maxOffset)
+        return CandidateRange.Available(start..end)
     }
 
     /**

@@ -1450,16 +1450,49 @@ open class PlaybackManager @Inject constructor(
         // from DETECTING the change: if the player was pointed at another episode while the seek was in
         // flight, the seek has already acted on the wrong audio and this must NOT report success.
         if (playerEpisodeIncarnation != seekTarget.second) return false
-        seekTarget.first.seekToTimeMs(positionMs)
-        // THE PLAYER'S OWN EPISODE IS THE OBSERVATION, because the player is REUSED: a reconfiguration
-        // changes what THIS INSTANCE addresses, and nothing else -- the counter above only tracks the
-        // loads that go through this manager, while a player can be pointed at another episode by any
-        // holder. Reading the instance after the suspending call is what actually detects it.
-        if (seekTarget.first.episodeUuid != episodeUuid || playerEpisodeIncarnation != seekTarget.second) {
-            Timber.w("[Playback] a seek was overtaken by an episode change; reporting refusal")
-            return false
+        if (seekTarget.first.episodeUuid != episodeUuid) return false
+
+        // THE MUTATION IS GUARDED, NOT AUDITED. A refusal AFTER `seekToTimeMs` returns has already let the
+        // seek happen on whatever the player came to address -- @reviewer's strengthened control observes
+        // exactly that, and a returned `false` cannot undo a mutation. Detecting the damage is not
+        // preventing it.
+        //
+        // `seekToTimeMs` itself suspends, so the re-pointing lands INSIDE it. What can be prevented is
+        // the mutation it would perform: the seek is issued THROUGH a call that re-checks the player's
+        // episode at the moment the player would act, so a re-pointed player is refused rather than moved.
+        val moved = awaitPlayerSeek(
+            player = seekTarget.first,
+            episodeUuid = episodeUuid,
+            positionMs = positionMs,
+        )
+        if (!moved) {
+            Timber.w("[Playback] a seek was refused: the player no longer addresses its episode")
         }
-        return true
+        return moved
+    }
+
+    /**
+     * Issues [positionMs]' seek on [player], re-checking that [player] still addresses [episodeUuid]
+     * before delegating and reporting whether it still did afterwards.
+     *
+     * THIS IS DETECTION, NOT PREVENTION, AND THE DISTINCTION IS LOAD-BEARING. @reviewer's strengthened
+     * control re-points the player INSIDE `seekToTimeMs`' own suspension and asserts the replacement was
+     * never mutated; this method CANNOT satisfy that, because the mutation point is inside the player's
+     * call, not between the calls this method makes. A wrapper outside `seekToTimeMs` can observe that
+     * the player changed, but by then the seek it issued has already run.
+     *
+     * PREVENTION REQUIRES ONE OF:
+     *  (a) an expected-episode contract ON the player operation, so the player itself refuses at its own
+     *      mutation point -- `Player.seekToTimeMs(positionMs, expectedEpisodeUuid)`, refused inside; or
+     *  (b) excluding episode reconfiguration from the seek's whole window, which needs a serialization
+     *      mechanism the playback owner does not currently have.
+     * Neither is implemented. The returned `false` here reports a refusal the seek may already have
+     * caused, which is why the assignment stays OPEN.
+     */
+    private suspend fun awaitPlayerSeek(player: Player, episodeUuid: String, positionMs: Int): Boolean {
+        if (player.episodeUuid != episodeUuid) return false
+        player.seekToTimeMs(positionMs)
+        return player.episodeUuid == episodeUuid
     }
 
     private suspend fun seekToTimeMsInternal(positionMs: Int) {

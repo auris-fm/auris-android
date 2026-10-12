@@ -786,6 +786,65 @@ class VoiceAsrEngineTest {
     }
 
     @Test
+    fun `an escalation after a successor wake is refused and spends no allowance`() = runTest {
+        // @reviewer's suspension case: recognition begins in generation 1, a successor wake opens
+        // generation 2 WHILE it is suspended, and it then returns no intent. The escalation must be
+        // refused -- it belongs to a window that is no longer live, and dispatching under the successor
+        // would let old recognition spend the successor's allowance.
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWakeWordDetected()
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = false,
+                confidence = 0f,
+                completionSample = 4000,
+            ),
+        )
+
+        val intents = mutableListOf<VoiceIntent>()
+        val engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            // The successor wake lands WHILE recognition is suspended.
+            intentRecognizer = SuccessorWakeRecognizer(
+                reason = RouterStageDiagnostic.REASON_CLASSIFY_FAILED,
+            ) { signal.onWakeWordDetected() },
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = signal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+        engine.start(
+            backend = FakeAsrBackend("unclear question"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { intents += it },
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "an escalation from a superseded recognition must not dispatch " +
+                "(intents=${intents.map { (it as? VoiceIntent.CloudRoute)?.windowGeneration }})",
+            intents.none { it is VoiceIntent.CloudRoute },
+        )
+        engine.stop()
+    }
+
     fun `a router that cannot load its model says so and does not escalate`() = runTest {
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -1760,6 +1819,41 @@ class VoiceAsrEngineTest {
     }
 
     /** Reports a routing failure the way the router does: no intent, plus why. */
+    // A recognizer that opens a SUCCESSOR wake window while recognition is suspended, then reports no
+    // intent. Recognition takes real time, so this is the ordinary shape of a wake arriving during it --
+    // and the escalation that follows must not act under the new window.
+    private class SuccessorWakeRecognizer(
+        private val reason: String,
+        private val onSuspended: () -> Unit,
+    ) : VoiceRecognizer {
+        override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+
+        override suspend fun recognize(
+            input: IntentRoutingInput,
+            context: VoiceRecognitionContext,
+        ): VoiceRecognizeResult {
+            onSuspended()
+            return VoiceRecognizeResult(
+                intent = null,
+                diagnostic = RouterStageDiagnostic(
+                    modelRelease = null,
+                    quant = null,
+                    inputFormat = null,
+                    sourceLanguage = null,
+                    translationKind = "none",
+                    classifierLabel = null,
+                    finalOutcome = RouterStageDiagnostic.OUTCOME_NO_INTENT,
+                    failedStage = RouterStageDiagnostic.STAGE_MAPPER_DIALOG,
+                    reason = reason,
+                    stageLatencyMs = emptyMap(),
+                    totalLatencyMs = 5L,
+                ),
+            )
+        }
+
+        override fun release() = Unit
+    }
+
     private class FailingRecognizer(private val reason: String) : VoiceRecognizer {
         override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
 

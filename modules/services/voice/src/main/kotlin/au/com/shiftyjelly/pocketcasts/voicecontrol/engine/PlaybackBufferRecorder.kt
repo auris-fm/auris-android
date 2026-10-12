@@ -149,9 +149,12 @@ class PlaybackBufferRecorder @Inject constructor(
      * selecting it would place samples that no longer exist.
      */
     private class RetainedBlock(
+        val startAbsoluteSample: Long,
+        val endAbsoluteSample: Long,
         val startTrackFrame: Long,
         val endTrackFrame: Long,
-        val endAbsoluteSample: Long,
+        /** Which track incarnation this audio was written under. */
+        val trackGeneration: Long,
     )
 
     private val blocks = ArrayDeque<RetainedBlock>()
@@ -165,7 +168,14 @@ class PlaybackBufferRecorder @Inject constructor(
      * stale read), and accepting it would anchor retained samples to a reading that does not describe
      * them. Unmatched stays unavailable.
      */
-    private var renderObservation: Triple<Long, Long, Int>? = null
+    private data class RenderObservation(
+        val frameOnTrack: Long,
+        val timeMs: Long,
+        val trackRateHz: Int,
+        val trackGeneration: Long,
+    )
+
+    private var renderObservation: RenderObservation? = null
 
     /**
      * Records where a contribution sits on the track's frame index, alongside its samples.
@@ -173,10 +183,26 @@ class PlaybackBufferRecorder @Inject constructor(
      * Called by the render path for each chunk; the episode tap does not call it, because its
      * contributions have no track-frame identity to record.
      */
-    private fun recordBlock(startTrackFrame: Long, endTrackFrame: Long) {
-        // totalWritten was already advanced by write(); the block's end names that same position.
+    private fun recordBlock(
+        startTrackFrame: Long,
+        endTrackFrame: Long,
+        sampleCount: Int,
+        trackGeneration: Long,
+    ) {
+        // totalWritten was already advanced by write(); the block's end names that same position, and
+        // its start names the position before this contribution's samples. The SAMPLE range is what
+        // makes the rendered window exact: an untimed write interleaved between two timed blocks has
+        // no frame identity and must not be attributed to the later block's span.
         if (endTrackFrame > startTrackFrame) {
-            blocks.addLast(RetainedBlock(startTrackFrame, endTrackFrame, totalWritten))
+            blocks.addLast(
+                RetainedBlock(
+                    totalWritten - sampleCount,
+                    totalWritten,
+                    startTrackFrame,
+                    endTrackFrame,
+                    trackGeneration,
+                ),
+            )
         }
         // Retire block records whose samples the ring has already dropped. The retained count mirrors
         // snapshotLocked's sizing, so a record survives exactly as long as its audio does.
@@ -187,7 +213,9 @@ class PlaybackBufferRecorder @Inject constructor(
         }
         // An observation matched against records that have since retired is no longer matchable.
         val obs = renderObservation
-        if (obs != null && blocks.none { it.endTrackFrame <= obs.first }) {
+        // An observation belongs to one incarnation; a block from a LATER generation means the track
+        // was rebuilt and every older observation describes audio the current track never played.
+        if (obs != null && blocks.lastOrNull()?.trackGeneration != obs.trackGeneration) {
             renderObservation = null
         }
     }
@@ -201,12 +229,21 @@ class PlaybackBufferRecorder @Inject constructor(
      * the observation is refused and the previous one is cleared -- the mapping reports unavailable
      * rather than anchoring to a reading that does not describe the retained audio.
      */
-    fun onRenderObservation(frameOnTrack: Long, timeMs: Long, trackRateHz: Int) {
+    fun onRenderObservation(
+        frameOnTrack: Long,
+        timeMs: Long,
+        trackRateHz: Int,
+        trackGeneration: Long,
+    ) {
         synchronized(lock) {
+            // The observation is matched only against blocks of ITS OWN track incarnation: after a
+            // rebuild both indexes restart at zero, so an old-track frame number can agree with a
+            // new-track write head while the clocks behind them describe different audio.
+            val sameGeneration = blocks.lastOrNull()?.trackGeneration == trackGeneration
             val writeHeadFrame = blocks.lastOrNull()?.endTrackFrame ?: 0L
             renderObservation =
-                if (frameOnTrack in 1..writeHeadFrame && trackRateHz > 0) {
-                    Triple(frameOnTrack, timeMs, trackRateHz)
+                if (sameGeneration && frameOnTrack in 1..writeHeadFrame && trackRateHz > 0) {
+                    RenderObservation(frameOnTrack, timeMs, trackRateHz, trackGeneration)
                 } else {
                     null
                 }
@@ -232,12 +269,30 @@ class PlaybackBufferRecorder @Inject constructor(
     fun renderedReference(): PlaybackReference? {
         synchronized(lock) {
             val obs = renderObservation ?: return null
-            val (obsFrame, obsTimeMs, trackRateHz) = obs
-            val rendered = blocks.lastOrNull { it.endTrackFrame <= obsFrame } ?: return null
+            // Same rule here: only blocks of the CURRENT incarnation are selectable, so an old
+            // observation (already cleared by the rule above, but defensive for a same-call race)
+            // cannot select its own generation's block once a newer one exists.
+            val rendered = blocks.lastOrNull {
+                it.trackGeneration == obs.trackGeneration && it.endTrackFrame <= obs.frameOnTrack
+            } ?: return null
+            val obsFrame = obs.frameOnTrack
+            val obsTimeMs = obs.timeMs
+            val trackRateHz = obs.trackRateHz
             val retained = if (filled) buffer.size else writePos
             val oldestAlive = totalWritten - retained
             if (rendered.endAbsoluteSample <= oldestAlive) return null
-            val includedSamples = (rendered.endAbsoluteSample - oldestAlive).toInt()
+            // The window spans the CONTIGUOUS timed blocks ending at the selected one: walk back
+            // while each block's samples begin exactly where the previous one ended. An untimed
+            // write breaks the chain -- its samples have no placement and including them would mix
+            // unplaced audio into a window that claims a start instant -- so the window begins at
+            // the first block of the chain instead.
+            var startAbs = rendered.startAbsoluteSample
+            for (i in blocks.size - 2 downTo 0) {
+                val prior = blocks.elementAt(i)
+                if (prior.endAbsoluteSample == startAbs) startAbs = prior.startAbsoluteSample else break
+            }
+            val windowStart = maxOf(startAbs, oldestAlive)
+            val includedSamples = (rendered.endAbsoluteSample - windowStart).toInt()
             if (includedSamples <= 0) return null
             // The block's end frame sounded at the observation's instant minus the frames between it
             // and the observed frame. Frames-to-time uses the TRACK's rate: both quantities are on the
@@ -275,6 +330,7 @@ class PlaybackBufferRecorder @Inject constructor(
         axis: PositionAxis? = null,
         trackStartFrame: Long? = null,
         trackEndFrame: Long? = null,
+        trackGeneration: Long? = null,
     ) {
         val axisClaimed = axis != null
         synchronized(lock) {
@@ -285,7 +341,7 @@ class PlaybackBufferRecorder @Inject constructor(
                 if (writePos == 0) filled = true
             }
             if (trackStartFrame != null && trackEndFrame != null) {
-                recordBlock(trackStartFrame, trackEndFrame)
+                recordBlock(trackStartFrame, trackEndFrame, pcm.size, trackGeneration ?: 0L)
             }
             if (positionMs != null) {
                 // The position of the newest sample: the chunk's start plus its duration at 16 kHz.
@@ -367,6 +423,20 @@ class PlaybackBufferRecorder @Inject constructor(
             }
             return PlaybackReference(samples, SAMPLE_RATE, start)
         }
+    }
+
+    /**
+     * The retained window with NO position offered, for the fallback path when the rendered mapping
+     * cannot anchor.
+     *
+     * This exists because the fallback must not be [reference]: after observations retire,
+     * `reference()` can still report a monotonic anchor over the whole retained span -- including
+     * queued PCM -- which would let audio nobody has heard stand for rendered progress through the
+     * back door. The window here carries the same SAMPLES for offset-based correlation and asserts
+     * nothing about when they sounded.
+     */
+    fun window(): PlaybackReference = synchronized(lock) {
+        PlaybackReference(snapshotLocked(), SAMPLE_RATE, null)
     }
 
     fun snapshot(): FloatArray = synchronized(lock) { snapshotLocked() }

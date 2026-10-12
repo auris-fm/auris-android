@@ -520,7 +520,7 @@ class PlaybackBufferRecorderTest {
 
         // The observation: frame 8_000 sounded at 5_000_000 ms. Frame 8_000 is inside block 2, so
         // block 2 has NOT fully sounded; the newest fully-rendered block is block 1 (end 4800).
-        recorder.onRenderObservation(frameOnTrack = 8_000L, timeMs = 5_000_000L, trackRateHz = 48_000)
+        recorder.onRenderObservation(frameOnTrack = 8_000L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L)
 
         val rendered = recorder.renderedReference()
         assertNotNull("a fully rendered block exists", rendered)
@@ -552,7 +552,7 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
         )
-        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000)
+        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L)
         assertNotNull("the block is selectable while retained", recorder.renderedReference())
 
         // More than the ring's capacity, with no frame identity of its own (e.g. an untimed source).
@@ -579,11 +579,142 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
         )
-        recorder.onRenderObservation(frameOnTrack = 99_999L, timeMs = 5_000_000L, trackRateHz = 48_000)
+        recorder.onRenderObservation(frameOnTrack = 99_999L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L)
 
         assertNull(
             "an observation ahead of the write head names nothing written here",
             recorder.renderedReference(),
         )
+    }
+
+    @Test
+    fun `the mapping recovers once untimed audio has fully retired and timed samples follow`() {
+        // @spec's recovery condition: retiring one timed block and clearing its observation does not
+        // alone prove recovery. Here an UNTIMED contribution joins the window, fully retires, and a
+        // later coherent timed block is then selectable -- the mapping must anchor again, because the
+        // untimed audio no longer contaminates the retained span.
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+
+        recorder.write(
+            FloatArray(1_600),
+            positionMs = null,
+            axis = null,
+            trackStartFrame = 0L,
+            trackEndFrame = 4_800L,
+        )
+        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L)
+        assertNotNull("anchored before the untimed contribution", recorder.renderedReference())
+
+        // Untimed audio joins (no frame range, no observation change), then retires.
+        recorder.write(FloatArray(PlaybackBufferRecorder.SAMPLE_RATE * 8))
+
+        // A coherent timed block after the untimed audio has left the ring, and a FRESH observation
+        // for the new state -- the old observation (frame 4800) could not render the new block, and
+        // that refusal was correct. Recovery is: new timed samples plus a new observation anchor again.
+        recorder.write(
+            FloatArray(1_600),
+            positionMs = null,
+            axis = null,
+            trackStartFrame = 4_800L,
+            trackEndFrame = 9_600L,
+        )
+        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 5_200_000L, trackRateHz = 48_000, trackGeneration = 0L)
+
+        val rendered = recorder.renderedReference()
+        assertNotNull(
+            "the mapping anchors again once the untimed audio has retired " +
+                "(selected=${rendered != null})",
+            rendered,
+        )
+        assertEquals(
+            "and the window holds the newest coherent timed block's samples",
+            1_600,
+            rendered!!.samples.size,
+        )
+        assertEquals(
+            "anchored at the fresh observation's translation, not a stale one",
+            5_200_000L - rendered.samples.size * 1_000L / PlaybackBufferRecorder.SAMPLE_RATE,
+            rendered.startPositionMs,
+        )
+    }
+
+    @Test
+    fun `the fallback window never offers an anchor`() {
+        // @spec's check on the fallback path: when renderedReference() cannot anchor, the fallback
+        // must not restore an estimated or stale anchor through reference(). window() is what the
+        // production supplier falls back to, and its position is null by construction.
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        recorder.write(FloatArray(1_600), positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
+
+        val fallback = recorder.window()
+        assertEquals("the samples are the retained window", 1_600, fallback.samples.size)
+        assertNull(
+            "the fallback window carries samples, never a timing claim",
+            fallback.startPositionMs,
+        )
+    }
+
+    @Test
+    fun `an observation from a previous track incarnation never matches a new track's blocks`() {
+        // Finding B: after a rebuild both frame indexes restart at zero, so an old observation's
+        // frame number can agree with a new write head while describing different audio. Generation
+        // stamping is what keeps them apart -- the numbers agreeing is exactly the trap.
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+
+        recorder.write(
+            FloatArray(1_600),
+            positionMs = null,
+            axis = null,
+            trackStartFrame = 0L,
+            trackEndFrame = 4_800L,
+            trackGeneration = 0L,
+        )
+        recorder.onRenderObservation(
+            frameOnTrack = 4_800L,
+            timeMs = 5_000_000L,
+            trackRateHz = 48_000,
+            trackGeneration = 0L,
+        )
+        assertNotNull("anchored within the incarnation", recorder.renderedReference())
+
+        // Rebuild: a NEW track's block with the SAME frame range, under generation 1.
+        recorder.write(
+            FloatArray(1_600),
+            positionMs = null,
+            axis = null,
+            trackStartFrame = 0L,
+            trackEndFrame = 4_800L,
+            trackGeneration = 1L,
+        )
+
+        assertNull(
+            "the old observation must not select the new track's block, even at the same frame " +
+                "numbers",
+            recorder.renderedReference(),
+        )
+    }
+
+    @Test
+    fun `a fresh observation on the new incarnation anchors the new track's blocks`() {
+        // The control for the case above: generation checking must refuse stale-track observations
+        // without refusing observation entirely.
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+
+        recorder.write(
+            FloatArray(1_600),
+            positionMs = null,
+            axis = null,
+            trackStartFrame = 0L,
+            trackEndFrame = 4_800L,
+            trackGeneration = 1L,
+        )
+        recorder.onRenderObservation(
+            frameOnTrack = 4_800L,
+            timeMs = 5_000_000L,
+            trackRateHz = 48_000,
+            trackGeneration = 1L,
+        )
+
+        assertNotNull("a same-generation observation anchors", recorder.renderedReference())
     }
 }

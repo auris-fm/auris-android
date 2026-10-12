@@ -51,6 +51,21 @@ class VoicePlaybackIntentExecutor @Inject constructor(
             is VoiceIntent.Bookmark -> executeBookmark(intent)
 
             is VoiceIntent.CloudRoute -> {
+                // THE CONTROLLER RETRY PATH: a dispatch carrying a PREPARED turn sends that turn, not a
+                // newly prepared one, so a retry reuses its request ID, handle and mode. Its captured
+                // origin decides which window it is validated against, so a retry whose window has since
+                // been superseded or closed is refused rather than adopting the current one.
+                val alreadyPrepared = intent.preparedTurn
+                if (alreadyPrepared != null) {
+                    val captureForRetry = alreadyPrepared.capturedOrigin
+                    // The privacy half is the executor's, as for a first attempt: the sink cannot
+                    // observe the grace signal.
+                    if (captureForRetry != null && !gracePeriodSignal.isCurrent(captureForRetry)) {
+                        Timber.i("[Voice] superseded retry discarded (stamp=$captureForRetry)")
+                        return VoiceResponse.Silent
+                    }
+                    return cloudRouteSink.dispatchPrepared(alreadyPrepared)
+                }
                 val context = playbackContextProvider.current()
                 // The window identity is the one STAMPED ON THE INTENT when it was dispatched --
                 // not the current one read here. The executor runs later than the dispatch, so reading
@@ -338,6 +353,16 @@ interface VoiceCloudRouteSink {
         capturedOrigin: Long? = null,
         /** True when that window was opened by a wake, so the turn begins a conversation. */
         isWakeOriginated: Boolean = false,
+    ): VoiceResponse
+
+    /**
+     * Dispatches an ALREADY PREPARED turn -- the controller retry path.
+     *
+     * Through the SAME lifecycle as a first dispatch, so a retry registers, holds its place and cleans
+     * up like any other turn, and is re-validated against its own captured window.
+     */
+    suspend fun dispatchPrepared(
+        prepared: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
     ): VoiceResponse
 
     /**

@@ -258,7 +258,7 @@ class CloudRouteSink internal constructor(
      * Returns the response the normal path would, including the refusal when the retry's origin has
      * been invalidated in the meantime.
      */
-    suspend fun dispatchPrepared(prepared: CloudRouteTurn): VoiceResponse = routeTurn(
+    override suspend fun dispatchPrepared(prepared: CloudRouteTurn): VoiceResponse = routeTurn(
         request = prepared.request,
         tier = VoiceIntent.CloudTier.Premium,
         context = PlaybackContext(),
@@ -301,6 +301,31 @@ class CloudRouteSink internal constructor(
 
         val myJob = currentCoroutineContext()[Job]
         val myId = turnCounter.incrementAndGet()
+        // AUTHORITY IS RESOLVED BEFORE ANY SUCCESSOR-OWNED STATE CHANGES. Registration replaces the
+        // active turn and cancels its job, so validating afterwards would let a REJECTED retry cancel
+        // the successor it was rejected in favour of -- a refusal that still did damage. The refusal
+        // returns here, before the try block, so nothing has been registered, cancelled or held.
+        //
+        // A REJECTED RETRY TERMINATES and does not fall through to fresh preparation: preparing would
+        // mint a second conversation for a request that was already invalidated.
+        val originForAdmission = prepared?.capturedOrigin
+            ?: capturedOrigin
+            ?: conversationAdmission.currentOriginForTest()
+        val admitted = if (prepared != null) {
+            conversationAdmission.validateForRetry(originForAdmission) ?: run {
+                Timber.i("[CloudRoute] retry discarded: its origin is no longer valid")
+                return VoiceResponse.Silent
+            }
+        } else {
+            conversationAdmission.prepare(
+                origin = originForAdmission,
+                isLiveGraceTurn = isLiveGraceTurn,
+                isWakeOriginated = isWakeOriginated,
+            ) ?: run {
+                Timber.i("[CloudRoute] turn discarded: its origin was superseded before admission")
+                return VoiceResponse.Silent
+            }
+        }
         val turnState = TurnState()
         var tokenBuffer = ""
         var executedAction = false
@@ -356,28 +381,12 @@ class CloudRouteSink internal constructor(
             // the dialog window -- NOT the sink's own turn counter, which increments per execution and
             // therefore cannot express "this request belongs to the window it was registered in". A
             // request with no captured window falls back to the declared-live origin.
-            // A RETRY re-validates the window its prepared turn belongs to -- it does not re-admit, so
-            // it cannot mint a second conversation, and it is still refused if that window has since
-            // been SUPERSEDED. A privacy close is the caller's half: the sink cannot observe the grace
-            // signal, so the executor refuses a closed window before dispatch, exactly as it does for a
-            // first attempt.
+            // The admission was resolved BEFORE registration (see above), so a refusal has already
+            // returned without touching the active turn.
             val origin = prepared?.capturedOrigin
                 ?: capturedOrigin
                 ?: conversationAdmission.currentOriginForTest()
-            val admission = prepared?.let { ready ->
-                conversationAdmission.validateForRetry(origin)
-            } ?: conversationAdmission.prepare(
-                origin = origin,
-                isLiveGraceTurn = isLiveGraceTurn,
-                isWakeOriginated = isWakeOriginated,
-            )
-            if (admission == null) {
-                // Superseded while being prepared: nothing is sent, so no conversation is created on
-                // behalf of a turn that has already been replaced. The refusal is the turn's outcome
-                // and is reported as one -- silence would read as a turn that produced no answer.
-                Timber.i("[CloudRoute] turn discarded: its origin was superseded before admission")
-                return VoiceResponse.Silent
-            }
+            val admission = admitted
             val turn = prepared ?: CloudRouteTurn(
                 request = request,
                 context = routeContext,

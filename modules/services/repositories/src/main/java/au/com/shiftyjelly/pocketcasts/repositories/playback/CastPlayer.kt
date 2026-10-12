@@ -186,6 +186,32 @@ class CastPlayer(
         return true
     }
 
+    override suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): Boolean {
+        // THE SAME CONTRACT AS LocalPlayer, enforced here because a cast player can be RE-POINTED by
+        // `setEpisode` while a seek is in flight. Deciding inside this suspension, immediately before the
+        // remote seek is issued, is what refuses a re-pointed receiver instead of moving another
+        // recording -- a check outside this call could only observe that it had changed.
+        return withContext(Dispatchers.Main) {
+            if (episodeUuid != expectedEpisodeUuid) {
+                Timber.i("CastPlayer refused a seek: episode changed")
+                return@withContext false
+            }
+            if (isMediaLoaded) {
+                val seekOptions = MediaSeekOptions.Builder()
+                    .setPosition(positionMs.toLong())
+                    .setCustomData(customData)
+                    .setResumeState(MediaSeekOptions.RESUME_STATE_UNCHANGED)
+                    .build()
+                remoteMediaClient?.seek(seekOptions)
+            } else {
+                localEpisodeUuid?.let {
+                    loadEpisode(it, positionMs, true)
+                }
+            }
+            true
+        }
+    }
+
     override suspend fun seekToTimeMs(positionMs: Int) {
         withContext(Dispatchers.Main) {
             if (isMediaLoaded) {

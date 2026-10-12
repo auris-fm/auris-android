@@ -243,6 +243,66 @@ class EarconPlayerTest {
     }
 
     @Test
+    fun `a new track starts its own frontier and cannot inherit the previous one`() {
+        // @reviewer's track-reset item: the frontier counts frames THIS track has accepted, so a new
+        // track must start it at zero. Carrying the previous total forward would make the first cue on
+        // the new track report Consumed immediately -- its head starts at zero while the boundary would
+        // already stand at the old track's total.
+        val mockPlayer = EarconPlayer(context)
+        val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
+        val clip = clipClass.declaredConstructors.single().apply { isAccessible = true }
+            .newInstance(mockPlayer, ShortArray(100), 16000)
+        @Suppress("UNCHECKED_CAST")
+        mockPlayer.javaClass.getDeclaredField("clips").apply { isAccessible = true }
+            .set(mockPlayer, mapOf(EarconId.WAKE_WORD to clip))
+
+        fun installTrack(): () -> Unit {
+            val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+            org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16000)
+            org.mockito.Mockito.`when`(
+                track.write(
+                    org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                    org.mockito.ArgumentMatchers.anyInt(),
+                    org.mockito.ArgumentMatchers.anyInt(),
+                ),
+            ).thenAnswer { it.getArgument<Int>(2) }
+            mockPlayer.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(mockPlayer, track)
+            var head = 0
+            mockPlayer.readPlaybackHeadFrames = { head }
+            return { head++ }
+        }
+
+        // First track: a cue is accepted and consumed.
+        val advanceFirst = installTrack()
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+        repeat(100) { advanceFirst() }
+        assertEquals(
+            "the first cue is consumed on its own track",
+            EarconPlayer.EarconCompletion.Consumed,
+            mockPlayer.completion(),
+        )
+
+        // A NEW track, as a later session would create. Its head starts at zero.
+        mockPlayer.release()
+        val advanceSecond = installTrack()
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+
+        assertEquals(
+            "a cue on a NEW track must not report Consumed before its own frames sound " +
+                "(head=0, frames just accepted)",
+            EarconPlayer.EarconCompletion.Playing,
+            mockPlayer.completion(),
+        )
+        repeat(100) { advanceSecond() }
+        assertEquals(
+            "and it is Consumed once its own frames have",
+            EarconPlayer.EarconCompletion.Consumed,
+            mockPlayer.completion(),
+        )
+        mockPlayer.release()
+    }
+
+    @Test
     fun `a second cue cannot inherit the first cue's consumed head`() {
         // @reviewer's measured defect: the track's playback head is CUMULATIVE across cues, while
         // completion compared it against the cue's own frame COUNT. So a second cue read Consumed

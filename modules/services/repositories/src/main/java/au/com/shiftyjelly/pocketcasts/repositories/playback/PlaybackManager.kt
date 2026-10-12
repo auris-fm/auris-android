@@ -1525,10 +1525,20 @@ open class PlaybackManager @Inject constructor(
      * player's own mutating operation, where a re-pointing that lands inside the suspension is refused
      * instead of performed.
      */
-    private suspend fun awaitPlayerSeek(player: Player, episodeUuid: String, positionMs: Int): Boolean = // THE PLAYER DECIDES AT ITS OWN MUTATION. This call carries the expectation INTO the player
+    private suspend fun awaitPlayerSeek(player: Player, episodeUuid: String, positionMs: Int): Boolean {
+        // AN UNSUPPORTED PLAYER IS REFUSED, NOT DOWNGRADED. The default implementation checks and then
+        // delegates, which carries the very gap this contract exists to close; falling back to it would
+        // perform an unrestricted seek under a bound request. A player that cannot enforce the binding
+        // makes the bound call UNAVAILABLE.
+        if (!player.enforcesEpisodeBoundSeek) {
+            Timber.w("[Playback] refused: player cannot enforce an episode-bound seek")
+            return false
+        }
+        // THE PLAYER DECIDES AT ITS OWN MUTATION. This call carries the expectation INTO the player
         // operation, so a re-pointing that lands inside the seek's suspension is refused there rather
         // than detected here afterwards.
-        player.seekToTimeMsIfEpisode(positionMs, episodeUuid)
+        return player.seekToTimeMsIfEpisode(positionMs, episodeUuid)
+    }
 
     private suspend fun seekToTimeMsInternal(positionMs: Int) {
         LogBuffer.i(LogBuffer.TAG_PLAYBACK, "PlaybackService seekToTimeMsInternal %.3f ", positionMs.toDouble() / 1000.0)

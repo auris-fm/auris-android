@@ -120,6 +120,62 @@ class CloudTurnRouteTest {
     }
 
     @Test
+    fun `the admission pair is encoded together and omitted when either half is absent`() = runTest {
+        // @spec's admission contract: a turn carries the conversation it creates or resumes. The pair
+        // is written TOGETHER -- a mode without a handle, or a handle without a mode, is not a state
+        // the contract admits, so it must be omitted rather than half-sent.
+        val transport = FakeTransport(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")))
+        val firstTurn = CloudRouteTurn(
+            request = "start the conversation",
+            context = CloudRouteContext(),
+            requestId = "req-create",
+            conversationId = "conv-1",
+            conversationMode = CloudConversationMode.Create,
+        )
+
+        route(transport).route(firstTurn).toList()
+
+        val json = CloudRouteJson.authenticateAdapter
+            .toJson(transport.frames.single() as CloudTurnFrame.Authenticate)
+        assertTrue("the handle is on the wire (json=$json)", json.contains("\"conversation_id\":\"conv-1\""))
+        assertTrue("with its mode", json.contains("\"conversation_mode\":\"create\""))
+    }
+
+    @Test
+    fun `a resume turn carries the same handle with the resume mode`() = runTest {
+        val transport = FakeTransport(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")))
+        val laterTurn = CloudRouteTurn(
+            request = "and now this",
+            context = CloudRouteContext(),
+            requestId = "req-resume",
+            conversationId = "conv-1",
+            conversationMode = CloudConversationMode.Resume,
+        )
+
+        route(transport).route(laterTurn).toList()
+
+        val json = CloudRouteJson.authenticateAdapter
+            .toJson(transport.frames.single() as CloudTurnFrame.Authenticate)
+        assertTrue(
+            "the SAME handle is carried, so the two turns share one conversation (json=$json)",
+            json.contains("\"conversation_id\":\"conv-1\""),
+        )
+        assertTrue("with the resume mode", json.contains("\"conversation_mode\":\"resume\""))
+    }
+
+    @Test
+    fun `a turn with no conversation identity omits both fields`() = runTest {
+        val transport = FakeTransport(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")))
+
+        route(transport).route(turn).toList()
+
+        val json = CloudRouteJson.authenticateAdapter
+            .toJson(transport.frames.single() as CloudTurnFrame.Authenticate)
+        assertFalse("no conversation means no handle (json=$json)", json.contains("conversation_id"))
+        assertFalse("and no mode", json.contains("conversation_mode"))
+    }
+
+    @Test
     fun `a refused upgrade fails the turn terminally - there is no fallback`() = runTest {
         val transport = FakeTransport(
             listOf(CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = "")),

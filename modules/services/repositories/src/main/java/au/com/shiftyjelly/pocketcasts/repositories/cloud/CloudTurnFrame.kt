@@ -21,5 +21,9 @@ sealed interface CloudTurnFrame {
          * when absent.
          */
         val routeHint: CloudRouteHint? = null,
+        /** The conversation this turn creates or resumes; omitted when absent. */
+        val conversationId: String? = null,
+        /** `create` or `resume`; omitted when absent. */
+        val conversationMode: String? = null,
     ) : CloudTurnFrame
 }

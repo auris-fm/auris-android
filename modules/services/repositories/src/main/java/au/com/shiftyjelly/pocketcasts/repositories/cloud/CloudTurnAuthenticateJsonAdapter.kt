@@ -61,6 +61,15 @@ internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<Clou
             writer.name("route_hint")
             hintAdapter.toJson(writer, hint)
         }
+        // The conversation admission fields travel with the turn's own captured identity. Both are
+        // written or neither: a mode without a handle (or a handle without a mode) is not a state the
+        // contract admits, so it is omitted rather than half-sent.
+        val conversationId = value.conversationId
+        val conversationMode = value.conversationMode
+        if (conversationId != null && conversationMode != null) {
+            writer.name("conversation_id").value(conversationId)
+            writer.name("conversation_mode").value(conversationMode)
+        }
         writer.endObject()
     }
 

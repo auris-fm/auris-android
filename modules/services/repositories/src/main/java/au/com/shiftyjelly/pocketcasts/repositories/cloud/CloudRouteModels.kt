@@ -55,6 +55,19 @@ data class CloudRouteHint(
     val arguments: Map<String, Any?> = emptyMap(),
 )
 
+/**
+ * How a turn relates to the conversation it belongs to.
+ *
+ * The first turn of a conversation CREATES it; a later turn in the same live conversation RESUMES it.
+ * A retry of the same logical turn keeps its identity rather than creating a second conversation, and
+ * a turn whose origin has been superseded is discarded rather than admitted against a handle that now
+ * belongs to a successor.
+ */
+enum class CloudConversationMode(val wireValue: String) {
+    Create("create"),
+    Resume("resume"),
+}
+
 /** One logical turn: the utterance plus its turn-control fields. */
 data class CloudRouteTurn(
     val request: String,
@@ -62,6 +75,15 @@ data class CloudRouteTurn(
     val requestId: String,
     val capabilities: List<String> = emptyList(),
     val routeHint: CloudRouteHint? = null,
+    /**
+     * The conversation this turn belongs to, or null when the caller has not established one.
+     *
+     * Carried with the turn rather than derived from transport state, so a retry or a superseded
+     * origin cannot borrow whichever handle happens to be current when it is finally sent.
+     */
+    val conversationId: String? = null,
+    /** How this turn relates to [conversationId]. Null when there is no conversation to relate to. */
+    val conversationMode: CloudConversationMode? = null,
 )
 
 /** Capability names negotiated with the server (cloud-assistant.md). */

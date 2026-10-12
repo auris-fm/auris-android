@@ -113,6 +113,15 @@ sealed interface VoiceIntent {
          */
         val windowGeneration: Long? = null,
         /**
+         * An ALREADY PREPARED cloud turn this dispatch should send, for the controller retry path.
+         *
+         * When present the executor does NOT prepare a new request: it dispatches this one, so a retry
+         * reuses its request ID, conversation handle and mode. Its [CloudRouteTurn.capturedOrigin]
+         * decides which window the retry is validated against, which is why the retry refuses a window
+         * that has since been superseded or closed rather than adopting the current one.
+         */
+        val preparedTurn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = null,
+        /**
          * Who issued this dispatch. Separate from [windowGeneration] on purpose:
          * the generation decides whether the window is touched at all, the
          * origin decides whether the window's allowance is restored. A

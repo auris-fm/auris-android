@@ -364,6 +364,81 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `a dispatch carrying a prepared turn goes through the retry path, not fresh preparation`() = runTest {
+        // @reviewer's missing production caller: the executor must carry and dispatch a prepared
+        // turn, so a controller retry reuses its identity instead of preparing a new request.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+
+        val prepared = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn(
+            request = "prepared request",
+            context = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext(),
+            requestId = "request-id-1",
+            conversationId = "handle-1",
+            conversationMode = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode.Create,
+            capturedOrigin = window,
+        )
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "prepared request",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = window,
+                preparedTurn = prepared,
+            ),
+        )
+
+        assertEquals(
+            "the prepared turn was dispatched through the retry path (calls=${sinks.cloudRoute.calls})",
+            listOf(prepared),
+            sinks.cloudRoute.preparedDispatches,
+        )
+        assertTrue(
+            "and NOT re-prepared as a fresh request",
+            sinks.cloudRoute.calls.none { it.startsWith("routeToCloud:") },
+        )
+    }
+
+    @Test
+    fun `a prepared retry whose window was closed by privacy is refused before dispatch`() = runTest {
+        // The privacy half belongs to the caller: the sink cannot observe the grace signal, so the
+        // executor refuses a closed window for a retry exactly as it does for a first attempt.
+        val sinks = FakeSinks()
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
+        val executor = sinks.executor(signal)
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+
+        val prepared = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn(
+            request = "prepared request",
+            context = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext(),
+            requestId = "request-id-1",
+            conversationId = "handle-1",
+            conversationMode = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode.Create,
+            capturedOrigin = window,
+        )
+        signal.onAppBackgrounded() // the privacy close invalidates the window
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "prepared request",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = window,
+                preparedTurn = prepared,
+            ),
+        )
+
+        assertTrue(
+            "a retry under a closed window must not reach the sink " +
+                "(dispatches=${sinks.cloudRoute.preparedDispatches})",
+            sinks.cloudRoute.preparedDispatches.isEmpty(),
+        )
+    }
+
+    @Test
     fun `cloud route delegates to cloud route sink`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
@@ -786,6 +861,17 @@ class VoicePlaybackIntentExecutorTest {
         /** The captured window identity each call carried, so a case can assert what was captured. */
         val capturedOrigins = mutableListOf<Long?>()
         val wakeOrigins = mutableListOf<Boolean>()
+
+        /** The prepared turns a retry dispatched, so a case can assert identity was reused. */
+        val preparedDispatches = mutableListOf<au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
+
+        override suspend fun dispatchPrepared(
+            prepared: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
+        ): VoiceResponse {
+            preparedDispatches += prepared
+            calls += "dispatchPrepared:${prepared.request}"
+            return VoiceResponse.Silent
+        }
 
         override suspend fun routeToCloud(
             request: String,

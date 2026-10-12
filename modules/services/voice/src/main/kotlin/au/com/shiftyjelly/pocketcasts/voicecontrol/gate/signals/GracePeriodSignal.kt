@@ -60,6 +60,9 @@ class GracePeriodSignal @Inject constructor() {
      */
     fun capturedGeneration(): Long = synchronized(windowLock) { generation }
 
+    /** The wake-originated generation, so a case can see what the marker names right now. */
+    internal fun wakeOriginatedGenerationForTest(): Long = synchronized(windowLock) { wakeGeneration }
+
     /**
      * Advances the window WITHOUT cancelling the outstanding timer.
      *
@@ -250,10 +253,14 @@ class GracePeriodSignal @Inject constructor() {
         }
         // The privacy refusal and the open are one decision, so they take the monitor together: a
         // privacy close landing between them would otherwise open a window the close had just ended.
-        synchronized(windowLock) {
-            if (closedByPrivacy) return@synchronized
+        val ended = synchronized(windowLock) {
+            if (closedByPrivacy) return@synchronized null
             openWindowLocked()
         }
+        // THE REPLACED WINDOW IS REPORTED HERE TOO. This branch was discarding the return, so an
+        // unstamped command that REPLACED a window retired nothing -- the same "a replacement is an
+        // ending" rule as every other open, reached by the one path that ignored it.
+        ended?.let { notifyIfEnded(it) }
     }
 
     /**
@@ -261,17 +268,18 @@ class GracePeriodSignal @Inject constructor() {
      * privacy close, since a fresh wake is a new user act.
      */
     fun onWakeWordDetected() {
-        // THE MARKERS ARE WINDOW STATE TOO, so they move under the monitor like every other transition.
-        synchronized(windowLock) {
+        // ONE TRANSITION. The markers and the opening are the SAME act, so they must not be separable:
+        // setting them around `openWindow()` left a moment where the window was open with the previous
+        // marker, and a concurrent reader could observe it. A FRESH WAKE BEGINS A NEW USER ACT and
+        // therefore a new conversation -- the window it opens is marked wake-originated so a turn
+        // captured under it prepares CREATE even if an older conversation handle exists.
+        val ended = synchronized(windowLock) {
             closedByPrivacy = false
-            wakeGeneration = generation + 1
+            val previous = openWindowLocked()
+            wakeGeneration = generation
+            previous
         }
-        openWindow()
-        // A FRESH WAKE BEGINS A NEW USER ACT, and therefore a new conversation: a question asked after
-        // a wake is not a continuation of whatever was being discussed before it. The window it opens
-        // is marked as wake-originated, so a turn captured under it prepares CREATE even if an older
-        // conversation handle still exists.
-        synchronized(windowLock) { wakeGeneration = generation }
+        notifyIfEnded(ended)
     }
 
     /**

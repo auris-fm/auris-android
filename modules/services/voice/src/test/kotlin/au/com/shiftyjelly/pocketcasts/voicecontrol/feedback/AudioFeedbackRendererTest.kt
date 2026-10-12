@@ -74,8 +74,10 @@ class AudioFeedbackRendererTest {
         val clock = java.util.concurrent.atomic.AtomicLong(0)
         val notes = java.util.concurrent.atomic.AtomicInteger(0)
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
-        // 3 x EMISSION_HEARTBEAT_MS (1_000 ms) at 16 kHz.
         whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
+        // Still sounding for the whole observation: the attribution must keep being refreshed, and
+        // only an observed CONSUMPTION may end it.
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
         // A dispatcher the test controls, so the heartbeat's ticks are deterministic rather than
         // dependent on real-time scheduling. Must be set before the renderer's scope is first used.
@@ -112,12 +114,73 @@ class AudioFeedbackRendererTest {
         // covered for longer than it sounds.
         whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
         whenever(earconPlayer.emittedDurationMs()).thenReturn(200L)
+        // Consumed immediately: the cue is done, so the coverage ends at the submission note.
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
 
         renderer.playEarcon(EarconId.SUCCESS)
 
         assertEquals(
             "a 200 ms cue is covered by its single submission note",
             1,
+            renderer.emissionNotesForTest(),
+        )
+        renderer.release()
+    }
+
+    @Test
+    fun `attribution ends when the cue is OBSERVED consumed, not when the estimate elapses`() {
+        // @spec's distinction: the accepted-frame duration is an estimate of queued audio, not
+        // completion. The coverage must end on the OUTPUT's report, so a cue that finishes early
+        // stops being attributed early -- and one still sounding keeps the gate informed.
+        renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
+        // Still playing at first, then consumed.
+        var consumed = false
+        whenever(earconPlayer.completion()).thenAnswer {
+            if (consumed) EarconPlayer.EarconCompletion.Consumed else EarconPlayer.EarconCompletion.Playing
+        }
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(1_100) }
+        val notesWhilePlaying = renderer.emissionNotesForTest()
+        assertTrue("a sounding cue keeps the attribution fresh (notes=$notesWhilePlaying)", notesWhilePlaying > 1)
+
+        consumed = true
+        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(2_500) }
+        val notesAfterConsumption = renderer.emissionNotesForTest()
+        assertEquals(
+            "once consumed the attribution stops, so the note count no longer grows " +
+                "(whilePlaying=$notesWhilePlaying after=$notesAfterConsumption)",
+            notesWhilePlaying,
+            notesAfterConsumption,
+        )
+        renderer.release()
+    }
+
+    @Test
+    fun `attribution ends when the cue stops being consumable rather than covering its estimate`() {
+        // A cue that is stopped, cancelled or failed must end its attribution immediately: covering
+        // it to its nominal length would keep the gate treating a sound the user can no longer hear
+        // as ours. `Unknown` is that state -- the acceptance is gone.
+        renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
+        var stopped = false
+        whenever(earconPlayer.completion()).thenAnswer {
+            if (stopped) EarconPlayer.EarconCompletion.Unknown else EarconPlayer.EarconCompletion.Playing
+        }
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(1_100) }
+        val beforeStop = renderer.emissionNotesForTest()
+
+        stopped = true
+        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(2_500) }
+        assertEquals(
+            "a stop must end the attribution rather than let the estimate keep covering it " +
+                "(before=$beforeStop after=${renderer.emissionNotesForTest()})",
+            beforeStop,
             renderer.emissionNotesForTest(),
         )
         renderer.release()

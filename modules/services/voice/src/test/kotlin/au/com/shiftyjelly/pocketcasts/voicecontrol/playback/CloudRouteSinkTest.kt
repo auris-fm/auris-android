@@ -50,6 +50,58 @@ class CloudRouteSinkTest {
     )
 
     @Test
+    fun `a valid request under a LATER window is adopted, not refused as stale`() = runTest {
+        // @reviewer's measured defect: adoption happened only for the very first origin ever seen, so a
+        // successor wake's first request was dropped as stale. A HIGHER origin is genuinely newer; the
+        // caller has already established that its window is live, and only a lower (superseded) origin
+        // is the stale case.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
+        val sink = deps.sink()
+
+        // Window 1's first request.
+        sink.routeToCloud(
+            "first window",
+            VoiceIntent.CloudTier.Premium,
+            playbackContext,
+            capturedOrigin = 1,
+            isWakeOriginated = true,
+        )
+        assertEquals(1, deps.routeTurns.size)
+
+        // Window 2, a successor wake: its first request must ALSO be admitted.
+        sink.routeToCloud(
+            "successor window",
+            VoiceIntent.CloudTier.Premium,
+            playbackContext,
+            capturedOrigin = 2,
+            isWakeOriginated = true,
+        )
+        assertEquals(
+            "a request under a LATER live window must be adopted, not dropped " +
+                "(turns=${deps.routeTurns.size})",
+            2,
+            deps.routeTurns.size,
+        )
+        assertEquals(CloudConversationMode.Create, deps.routeTurns.last().conversationMode)
+
+        // And an origin BELOW the current one is still refused: that is the stale case.
+        sink.routeToCloud(
+            "an old window",
+            VoiceIntent.CloudTier.Premium,
+            playbackContext,
+            capturedOrigin = 1,
+            isWakeOriginated = false,
+        )
+        assertEquals(
+            "an explicitly older origin is still refused",
+            2,
+            deps.routeTurns.size,
+        )
+    }
+
+    @Test
     fun `saved episode A positions cannot follow episode B`() = runTest {
         // @reviewer's measured case: reference positions recorded while episode A played were sent when
         // episode B was asked about. A position is a position IN an episode, so it describes that

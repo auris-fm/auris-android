@@ -36,12 +36,18 @@ class CloudConversationAdmission @Inject constructor() {
      * live grace turn RESUMES; anything else begins a new conversation and CREATES.
      */
     fun prepare(origin: Long, isLiveGraceTurn: Boolean, isWakeOriginated: Boolean): Prepared? = synchronized(lock) {
-        // A turn is admitted only under the window that is CURRENT. The FIRST turn of a window
-        // declares its own captured origin current -- nothing else would admit it, and without this a
-        // live window that has simply not run a turn yet is indistinguishable from a superseded one.
-        if (requiresAdoption) {
+        // A turn is admitted only under a window that is LIVE. Two cases admit one:
+        //
+        //   the same window as the last admitted turn  -> it is current, so the turn may act
+        //   a NEWER window                            -> it supersedes the old one and is adopted
+        //
+        // ADOPTION IS NOT A ONE-TIME EVENT. The earlier version adopted only the very first origin it
+        // ever saw, so a valid request under a LATER window was refused as stale -- a successor wake's
+        // first request was dropped. A higher origin is genuinely newer, and the caller has already
+        // established that its window is live and open; only a LOWER (explicitly superseded) origin is
+        // refused, which is the stale case the check exists for.
+        if (origin > currentOrigin) {
             currentOrigin = origin
-            requiresAdoption = false
         }
         if (origin != currentOrigin) return null
         val existing = handle
@@ -62,14 +68,7 @@ class CloudConversationAdmission @Inject constructor() {
     /** Marks [origin] as the only live generation; older origins can no longer prepare a turn. */
     fun beginOrigin(origin: Long) = synchronized(lock) {
         currentOrigin = origin
-        requiresAdoption = false
     }
-
-    /**
-     * True until an origin has been declared or adopted: the first prepared turn adopts its own
-     * captured window, so a window that has not run a turn yet is not read as superseded.
-     */
-    private var requiresAdoption = true
 
     /** Forgets the conversation, so the next turn creates a new one. */
     fun reset() = synchronized(lock) {

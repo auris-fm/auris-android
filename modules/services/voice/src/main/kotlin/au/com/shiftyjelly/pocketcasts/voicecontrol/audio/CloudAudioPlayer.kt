@@ -101,6 +101,31 @@ class CloudAudioPlayer(
 
     /** Cumulative samples this player has submitted, used as the answer's playback position. */
     private var submittedSamples = 0L
+
+    /**
+     * Frames handed to the CURRENT track since it was created: the track's OWN frame index, in the
+     * track's frames.
+     *
+     * THIS IS NOT [submittedSamples] WHEN THE CODEC IS NOT 16 kHz. [submittedSamples] counts the
+     * RESAMPLED recorder-side samples, while `AudioTrack.getTimestamp().framePosition` counts the
+     * track's frames at the negotiated rate. At 48 kHz a one-second chunk is 48_000 track frames and
+     * 16_000 submitted samples, so subtracting one from the other is arithmetic across two scales and
+     * the result is not a duration. This counter is the track-side one, so the comparison is meaningful
+     * at any rate.
+     */
+    private var trackFrames = 0L
+
+    /**
+     * [submittedSamples] at the moment the CURRENT track was created.
+     *
+     * `AudioTrack.getTimestamp().framePosition` is the TRACK's own frame index, which restarts at zero
+     * for a new track, while [submittedSamples] counts the whole answer. A codec change rebuilds the
+     * track, so comparing the two directly would offset every later chunk by the frames already sent
+     * before the rebuild -- a jump of however long the answer had been running, in the one quantity the
+     * echo filter compares the capture instant against. Subtracting this base puts the observation and
+     * the chunk on the same index.
+     */
+    private var trackFrameBase = 0L
     private var released = false
     private var decodeCodec: MediaCodec? = null
     private var decodeBuffering = false
@@ -182,6 +207,14 @@ class CloudAudioPlayer(
     @Volatile
     private var audioWriteFailed = false
         private set
+
+    /**
+     * Reads the platform's `AudioTimestamp`, or null when it cannot report one. Defaults to the real
+     * `getTimestamp` call; a test substitutes a recorded observation so the frame-to-chunk translation
+     * can be exercised against a KNOWN sounding frame, which the device cannot be asked to produce on
+     * demand.
+     */
+    var readAudioTimestamp: ((track: AudioTrack) -> android.media.AudioTimestamp?)? = null
 
     /**
      * Submits one frame to the output and returns how many bytes the sink accepted (<= 0 for a
@@ -396,6 +429,8 @@ class CloudAudioPlayer(
             .build()
 
         audioTrack = track
+        // A new track's frame index starts at zero, so the track-side counter restarts with it.
+        trackFrames = 0L
     }
 
     private fun drainFrames() {
@@ -467,14 +502,28 @@ class CloudAudioPlayer(
                     //
                     // The PCM is still recorded either way -- an absent position changes WHEN the
                     // window can be placed, never WHAT it holds.
-                    val renderMs = renderClockMs(currentSampleRate)
+                    // The observation names WHICH frame is sounding and WHEN, and this chunk begins at
+                    // a later frame on the same index. `submittedSamples` is exactly that index: it
+                    // counts the frames already handed to the track before this chunk, so it is this
+                    // chunk's first frame. The translation between the two is the buffer depth, which
+                    // is the quantity the observation alone cannot express.
+                    val observation = renderedFrame(currentSampleRate)
+                    val renderMs = observation?.let {
+                        expectedInstantOfChunk(
+                            observation = it,
+                            // The chunk's first frame on the TRACK's index, which is what `framePosition`
+                            // is expressed in. Not `submittedSamples`, which is the recorder-side count.
+                            firstFrameOfChunk = trackFrames,
+                            sampleRateHz = currentSampleRate,
+                        )
+                    }
                     playbackBufferRecorder?.write(
                         pcm = referenceFloats,
-                        // A render observation when the platform reports one, else the producer's own
-                        // placement -- the cumulative submitted count, from the chunks before this one
-                        // (write() adds this chunk's own duration). The count is retained because it
-                        // is what makes the window's DURATION checkable and it is what a drifting
-                        // resample would break.
+                        // A rendered-frame observation when the platform reports one, else the
+                        // producer's own placement -- the cumulative submitted count, from the chunks
+                        // before this one (write() adds this chunk's own duration). The count is
+                        // retained because it is what makes the window's DURATION checkable and it is
+                        // what a drifting resample would break.
                         positionMs = renderMs ?: (submittedSamples * 1_000L) / currentSampleRate,
                         // The axis is claimed ONLY for the render observation. An unlabelled position
                         // says "producer placement", which is recorded but can never anchor a window
@@ -483,6 +532,12 @@ class CloudAudioPlayer(
                         axis = renderMs?.let { PositionAxis.Monotonic },
                     )
                     submittedSamples += floats.size
+                    // The track's own frame count, advanced by the frames just written at the track's
+                    // rate: one frame is one sample for the mono/stereo layouts used here, and the byte
+                    // count is what the track received.
+                    // 2 bytes per s16le sample, times the channel count, is the bytes-per-frame.
+                    val bytesPerFrame = 2L * (if (channelConfig == AudioFormat.CHANNEL_OUT_STEREO) 2 else 1)
+                    trackFrames += written.toLong() / bytesPerFrame
                     offset += written
                 }
                 if (audioWriteFailed) break
@@ -491,29 +546,81 @@ class CloudAudioPlayer(
     }
 
     /**
-     * The position of the audio now reaching the output, in milliseconds on `CLOCK_MONOTONIC`, or null
-     * when the platform cannot report one.
+     * An observation of the output, in the two quantities the platform reports TOGETHER, or null when
+     * the platform cannot report one.
      *
-     * `AudioTrack.getTimestamp` reports the frame position and the time that frame was rendered, on
-     * `TIMEBASE_MONOTONIC` -- the same clock domain as the capture observation. That is what makes the
-     * two sides comparable at all: the submitted count is a total of what was SENT and cannot be placed
-     * on a clock.
+     * `AudioTrack.getTimestamp` answers with a PAIR: a frame position and the monotonic instant that
+     * frame was rendered at. Keeping them together is the whole point, because `framePosition` is what
+     * identifies WHICH frame sounded, and the caller needs that identity to say something about a
+     * different frame -- the one it is submitting.
      *
-     * A platform that cannot report one stays unknown: returning the submitted count here would be a
+     * @property framePosition the track's own frame index (frames since the track started) of the frame
+     * that was sounding at [nanoTime].
+     * @property nanoTime the instant that frame sounded, in MILLISECONDS on `TIMEBASE_MONOTONIC` --
+     * the same clock domain as the capture observation, which is what makes the two sides comparable
+     * at all. The platform reports nanoseconds; the conversion happens where the value is read.
+     */
+    private data class RenderedFrame(val framePosition: Long, val nanoTime: Long)
+
+    /**
+     * Reads the output's rendered-frame observation, or null when the platform reports none.
+     *
+     * A platform that cannot report one stays unknown. Substituting the submitted count would be a
      * value this side never measured, presented as a rendered position -- the substitution the whole
      * alignment exists to avoid, and worse than an absent value because it aligns confidently against
      * the wrong instant.
      */
-    private fun renderClockMs(sampleRateHz: Int): Long? {
+    private fun renderedFrame(sampleRateHz: Int): RenderedFrame? {
         val track = audioTrack ?: return null
         if (sampleRateHz <= 0) return null
-        val timestamp = android.media.AudioTimestamp()
-        if (!track.getTimestamp(timestamp)) return null
-        // The timestamp is the instant the frame at `framePosition` was rendered, so it IS this chunk's
-        // position: the caller asks at the point of submission, and the answer describes output that is
-        // already sounding. A zero frame position means the track has not rendered anything yet.
+        val timestamp = readAudioTimestamp?.invoke(track) ?: android.media.AudioTimestamp().also {
+            if (!track.getTimestamp(it)) return null
+        }
+        // A zero frame position means the track has not rendered anything yet, so there is no frame to
+        // name and the observation says nothing.
         if (timestamp.framePosition <= 0) return null
-        return timestamp.nanoTime / 1_000_000L
+        // `nanoTime` is NANOSECONDS and the recorder's positions are MILLISECONDS. The division
+        // happens HERE, at the single point the platform value enters the class, so no caller has to
+        // remember which unit it is holding -- and so a caller cannot pair the two domains by accident.
+        return RenderedFrame(timestamp.framePosition, timestamp.nanoTime / 1_000_000L)
+    }
+
+    /**
+     * The monotonic instant THIS chunk's first sample will sound at, derived from an observation of a
+     * DIFFERENT frame, or null when nothing can be said.
+     *
+     * The distinction this exists to keep: an observation names the frame that is SOUNDING NOW, which
+     * at the moment of submission is audio from earlier chunks -- the new chunk is behind the buffer's
+     * depth. Treating the observation's time as this chunk's position is not a rounding difference; it
+     * is the whole buffer depth applied as though it were zero, and it lands on the one quantity the
+     * echo filter compares the capture instant against.
+     *
+     * So the translation is explicit. The observation names frame [RenderedFrame.framePosition] at
+     * [RenderedFrame.nanoTime]; the chunk being submitted starts at frame [firstFrameOfChunk] on the
+     * same index, because the track's frame index counts what has been handed to it. Frames between the
+     * two are still queued ahead of this chunk, so the chunk sounds that many frames later.
+     *
+     * This is an EXTRAPOLATION and is named as one: it says when the chunk is expected to sound given
+     * that the queue drains at the answer's rate, not that the chunk has sounded. Nothing here claims
+     * the chunk has rendered.
+     */
+    private fun expectedInstantOfChunk(
+        observation: RenderedFrame,
+        firstFrameOfChunk: Long,
+        sampleRateHz: Int,
+    ): Long {
+        if (sampleRateHz <= 0) return observation.nanoTime
+        // Both sides are TRACK-relative. The observation's framePosition is the track's own index and
+        // restarts at zero when the track is rebuilt; firstFrameOfChunk is the answer-wide count. Note
+        // that both are monotonic within one track, so a rate change doesn't break the identity --
+        // the frames index the track regardless of how long each one is.
+        val framesAhead = firstFrameOfChunk - observation.framePosition
+        // Zero or negative means the observation names this chunk's own frame or a later one. That is
+        // a track reset, a stale read, or an observation from a rebuilt track; the observation's own
+        // instant is then the most that can be said, and extrapolating backwards would place the chunk
+        // in the past on the strength of a reading that does not describe the current queue.
+        if (framesAhead <= 0) return observation.nanoTime
+        return observation.nanoTime + framesAhead * 1_000L / sampleRateHz
     }
 
     private fun decodeOpus(input: ByteArray): ByteArray {

@@ -136,10 +136,22 @@ interface Player {
      * [positionMs] being null means UNAVAILABLE, which the history consumer must handle by recording
      * nothing rather than by substituting a value.
      */
-    data class EpisodeSeekOutcome(val accepted: Boolean, val positionMs: Long?) {
+    data class EpisodeSeekOutcome(
+        val accepted: Boolean,
+        val positionMs: Long?,
+        /**
+         * True when the operation's EXECUTION IS UNKNOWN: it was issued, and no outcome came back.
+         *
+         * DISTINCT FROM REFUSAL. A refusal is a DECISION, and a caller may act on it; unknown means we do
+         * not know whether it ran, so retrying could REPEAT an operation the other side already performed.
+         * It must stay unknown through every caller rather than becoming a retryable-looking failure.
+         */
+        val unknown: Boolean = false,
+    ) {
         companion object {
             val Refused = EpisodeSeekOutcome(accepted = false, positionMs = null)
             fun accepted(positionMs: Long?) = EpisodeSeekOutcome(accepted = true, positionMs = positionMs)
+            fun unknown(positionMs: Long?) = EpisodeSeekOutcome(accepted = false, positionMs = positionMs, unknown = true)
         }
     }
     suspend fun isPlaying(): Boolean

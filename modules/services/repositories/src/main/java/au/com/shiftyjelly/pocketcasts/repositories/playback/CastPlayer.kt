@@ -247,9 +247,15 @@ class CastPlayer(
             is Issued.Pending -> {
                 // ISSUED IS NOT COMPLETED. Only the receiver's callback says whether it performed the
                 // request, so the outcome comes from there rather than from the send.
-                val performed = awaitCastResult(issued.pending)
-                if (performed) addRemoteMediaListener()
-                Player.EpisodeSeekOutcome(accepted = performed, positionMs = issued.positionMs)
+                val outcome = awaitCastResult(issued.pending)
+                if (outcome == CastRemoteOutcome.Accepted) addRemoteMediaListener()
+                // ACCEPTED ONLY WHEN THE RECEIVER SAID SO. A timeout or lost outcome is UNKNOWN, and it
+                // must not read as either success or a refusal a caller could retry into a repeat.
+                Player.EpisodeSeekOutcome(
+                    accepted = outcome == CastRemoteOutcome.Accepted,
+                    positionMs = issued.positionMs,
+                    unknown = outcome == CastRemoteOutcome.Unknown,
+                )
             }
         }
     }
@@ -375,15 +381,25 @@ class CastPlayer(
     // UNAVAILABLE, not success.
     private suspend fun awaitCastResult(
         pending: com.google.android.gms.common.api.PendingResult<com.google.android.gms.cast.framework.media.RemoteMediaClient.MediaChannelResult>,
-    ): Boolean = kotlinx.coroutines.withTimeoutOrNull(CAST_RESULT_TIMEOUT_MS) {
+    ): CastRemoteOutcome = kotlinx.coroutines.withTimeoutOrNull(CAST_RESULT_TIMEOUT_MS) {
         kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
             pending.setResultCallback { result ->
-                // The result carries a Status; success means the RECEIVER performed the request.
-                val succeeded = runCatching { result.status.isSuccess }.getOrDefault(false)
-                if (continuation.isActive) continuation.resumeWith(Result.success(succeeded))
+                // The result carries a Status; its success means the RECEIVER performed the request.
+                val outcome = runCatching {
+                    if (result.status.isSuccess) CastRemoteOutcome.Accepted else CastRemoteOutcome.Refused
+                }.getOrDefault(CastRemoteOutcome.Unknown)
+                if (continuation.isActive) continuation.resumeWith(Result.success(outcome))
             }
         }
-    } ?: false
+    } ?: CastRemoteOutcome.Unknown
+
+    // WHAT THE RECEIVER DID WITH AN ISSUED REQUEST.
+    //
+    // Unknown IS NOT Refused. A refusal is something the RECEIVER DECIDED, and a caller may act on it; a
+    // TIMEOUT or a lost outcome means WE DO NOT KNOW whether the request ran, and reporting that as a
+    // refusal would invite a retry that could REPEAT an operation the receiver already performed. Unknown
+    // execution stays unknown through every caller rather than becoming a retryable-looking failure.
+    private enum class CastRemoteOutcome { Accepted, Refused, Unknown }
 
     private fun loadEpisode(
         episodeUuid: String,

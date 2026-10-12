@@ -11,6 +11,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -165,6 +166,29 @@ class PlaybackManagerPlaybackSinkTest {
             runCurrent()
             kotlinx.coroutines.Dispatchers.resetMain()
         }
+    }
+
+    @Test
+    fun `an UNKNOWN execution is NOT a refusal, so a caller cannot retry it as one`() = runTest {
+        // @spec's distinction: "distinguish receiver refusal/failure from timeout or lost outcome...
+        // unknown execution remains unknown through manager, history and skip/quote callers; do not map
+        // it to a retryable refusal."
+        //
+        // A refusal is a DECISION a caller may act on. Unknown means we do not know whether the operation
+        // ran, and reporting that as a refusal invites a RETRY THAT REPEATS an operation already
+        // performed. The two must not collapse into one value.
+        val refused = au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome.Refused
+        val unknown = au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome
+            .unknown(positionMs = null)
+
+        assertFalse("unknown is not accepted", unknown.accepted)
+        assertTrue("unknown is flagged as unknown", unknown.unknown)
+        assertFalse("a plain refusal is NOT unknown", refused.unknown)
+        assertNotEquals(
+            "an unknown execution must be distinguishable from a refusal, or a caller would retry it",
+            refused,
+            unknown,
+        )
     }
 
     @Test

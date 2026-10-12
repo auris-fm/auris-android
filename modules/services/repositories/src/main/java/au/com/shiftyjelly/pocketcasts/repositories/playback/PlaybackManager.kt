@@ -1139,11 +1139,14 @@ open class PlaybackManager @Inject constructor(
         cancelUpdateTimer()
         cancelBufferUpdateTimer()
 
-        withContext(Dispatchers.Main) {
-            if (player != null) {
-                player?.stop()
-                player = null
-            }
+        // THE REPLACEMENT TAKES THE SAME BOUNDARY AS THE DECISION. A lock the decision holds is only
+        // worth holding if the writers take it too -- otherwise it excludes nothing while looking like it
+        // excludes everything. The SUSPENDING work stays outside: a suspension inside a monitor is the
+        // interleaving the monitor prevents, and the compiler refuses it.
+        val stopping = synchronized(selectedPlayerLock) { player }
+        stopping?.stop()
+        synchronized(selectedPlayerLock) {
+            if (player === stopping) player = null
         }
 
         playbackStateRelay.blockingFirst().let {
@@ -1182,6 +1185,21 @@ open class PlaybackManager @Inject constructor(
             seekToTimeMsSuspend(positionMs, seekComplete)
         }
     }
+
+    /**
+     * THE PLAYBACK-OWNER BOUNDARY for the selected episode and the player it addresses.
+     *
+     * A read taken immediately before a mutation is NOT sufficient on its own, because the selection is
+     * changed from a different execution context -- the IO path that loads a new episode -- which can run
+     * concurrently with a caller-context seek. "Adjacent" is not "atomic": between the read and the
+     * mutation another thread may replace what is selected.
+     *
+     * The decision and the mutation therefore SHARE this boundary, and so do the replacements that would
+     * invalidate the decision. It is a plain monitor rather than a coroutine mutex on purpose: the seek
+     * path must not suspend while holding it, so the check and the mutation stay one uninterrupted step
+     * and blocking work stays outside.
+     */
+    private val selectedPlayerLock = Any()
 
     suspend fun seekToTimeMsSuspend(positionMs: Int, seekComplete: (() -> Unit)? = null) {
         cancelPendingChapterSeek()
@@ -1286,12 +1304,24 @@ open class PlaybackManager @Inject constructor(
             }
         }
 
-        // THE DECIDING READ AND THE MUTATION ARE ONE STEP: no suspension lies between them, so a
-        // replacement cannot land in a gap that does not exist.
-        val selected = getCurrentEpisode()
-        if (selected?.uuid != episodeUuid) return false
-        selected.playedUpToMs = positionMs
-        player?.seekToTimeMs(positionMs)
+        // THE DECISION AND THE MUTATION SHARE THE PLAYBACK-OWNER BOUNDARY. Reading the selection
+        // immediately before the mutation is not enough on its own: the selection is replaced from a
+        // different execution context -- the IO path that loads a new episode -- which can run
+        // concurrently with this caller-context seek. Holding [selectedPlayerLock] across both makes the
+        // replacement wait, so the substitution this boundary exists to prevent cannot occur.
+        //
+        // `player.seekToTimeMs` SUSPENDS, and a suspension point inside a monitor would be the
+        // interleaving the monitor prevents -- so the player is CAPTURED under the boundary and the
+        // suspending call is issued after it is released. Capturing under the boundary is what makes the
+        // pair consistent: the episode decided on and the player addressed are read together, and a
+        // replacement cannot land between them.
+        val seekTarget = synchronized(selectedPlayerLock) {
+            val selected = getCurrentEpisode()
+            if (selected?.uuid != episodeUuid) return false
+            selected.playedUpToMs = positionMs
+            player
+        }
+        seekTarget?.seekToTimeMs(positionMs)
         return true
     }
 
@@ -1600,12 +1630,12 @@ open class PlaybackManager @Inject constructor(
 
     fun castReconnected() {
         launch(Dispatchers.Main) {
-            if (player != null) {
-                player?.stop()
-                player = null
+            val old = synchronized(selectedPlayerLock) { player }
+            old?.stop()
+            val fresh = playerManager.createCastPlayer(this@PlaybackManager::onPlayerEvent)
+            synchronized(selectedPlayerLock) {
+                player = fresh
             }
-
-            player = playerManager.createCastPlayer(this@PlaybackManager::onPlayerEvent)
             mediaSessionManager.installCastPlayer()
             (player as? CastPlayer)?.updateFromRemoteIfRequired()
             Timber.i("Cast reconnected. Creating media player of type CastPlayer")
@@ -2726,18 +2756,24 @@ open class PlaybackManager @Inject constructor(
         if (resettingPlayer) return
         resettingPlayer = true
 
+        val oldPlayer = synchronized(selectedPlayerLock) { player }
+        oldPlayer?.stop()
+        val castConnected = castManager.isConnected()
         withContext(Dispatchers.Main) {
-            player?.stop()
-            if (castManager.isConnected()) {
-                player = playerManager.createCastPlayer(this@PlaybackManager::onPlayerEvent)
-                mediaSessionManager.installCastPlayer()
-                Timber.i("Creating media player of type CastPlayer.")
-            } else {
-                player = playerManager.createSimplePlayer(this@PlaybackManager::onPlayerEvent)
-                // Start the service early so it's ready when we install the player later.
-                // The ExoPlayer doesn't exist yet — SimplePlayer creates it lazily in prepare().
-                mediaSessionManager.startServiceIfNeeded(application)
-                Timber.i("Creating media player of type SimplePlayer.")
+            // The third replacement site, taking the same boundary as the decision the seek path makes.
+            // Only the ASSIGNMENT is inside it; everything that suspends above is not.
+            synchronized(selectedPlayerLock) {
+                if (castConnected) {
+                    player = playerManager.createCastPlayer(this@PlaybackManager::onPlayerEvent)
+                    mediaSessionManager.installCastPlayer()
+                    Timber.i("Creating media player of type CastPlayer.")
+                } else {
+                    player = playerManager.createSimplePlayer(this@PlaybackManager::onPlayerEvent)
+                    // Start the service early so it's ready when we install the player later.
+                    // The ExoPlayer doesn't exist yet — SimplePlayer creates it lazily in prepare().
+                    mediaSessionManager.startServiceIfNeeded(application)
+                    Timber.i("Creating media player of type SimplePlayer.")
+                }
             }
         }
 

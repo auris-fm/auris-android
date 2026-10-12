@@ -83,7 +83,9 @@ class CastPlayer(
     override var isDownloading: Boolean = false
 
     override val episodeUuid: String?
-        get() = episode?.uuid
+        // READ UNDER THE SAME LOCK `setEpisode` WRITES UNDER. This is the property the bound seek decides
+        // on, and a plain field read could observe it mid-change.
+        get() = currentEpisodeUuidLocked()
 
     override val filePath: String? = null
 
@@ -192,7 +194,10 @@ class CastPlayer(
         // remote seek is issued, is what refuses a re-pointed receiver instead of moving another
         // recording -- a check outside this call could only observe that it had changed.
         return withContext(Dispatchers.Main) {
-            if (episodeUuid != expectedEpisodeUuid) {
+            // THE BINDING CHECK READS THROUGH THE SAME LOCK `setEpisode` WRITES UNDER, so a re-pointing
+            // cannot land between the check and the seek below. Reading `episodeUuid` directly would be a
+            // read of a field another thread may be changing -- the check-then-act window again.
+            if (currentEpisodeUuidLocked() != expectedEpisodeUuid) {
                 Timber.i("CastPlayer refused a seek: episode changed")
                 return@withContext false
             }
@@ -267,22 +272,33 @@ class CastPlayer(
         this.podcast = podcast
     }
 
+    /**
+     * Guards the episode fields against the bound seek's read.
+     *
+     * THE WRITE STAYS SYNCHRONOUS. Posting it to the main looper would DEFER it, so `setEpisode` would
+     * return before the player had actually been re-pointed -- and a caller that then relied on the new
+     * episode, or a seek that ran immediately after, would see the OLD one. A synchronous write under a
+     * lock the seek also takes gives both properties: the re-pointing is complete when this returns, and
+     * the seek's decision cannot interleave with it.
+     *
+     * A plain monitor rather than `Dispatchers.Main` because a lock cannot span a suspension, and the
+     * seek needs to read these fields at a point where it cannot suspend.
+     */
+    private val episodeLock = Any()
+
     override fun setEpisode(episode: BaseEpisode, preferStream: Boolean) {
-        // THE EPISODE FIELDS ARE WRITTEN ON THE SAME EXECUTION CONTEXT AS THE BOUND SEEK'S CHECK.
-        //
-        // `seekToTimeMsIfEpisode` decides inside `withContext(Dispatchers.Main)`. Writing these fields
-        // from another thread means the check and the re-pointing could interleave -- the seek reads an
-        // episode that is being changed underneath it, which is the same check-then-act window the bound
-        // operation exists to close. `Stream` is immutable and `EpisodeLocation.create` already computes
-        // what this needs, so the write is prepared here and PUBLISHED on Main.
         val prepared = EpisodeLocation.Stream(episode, episode.streamUrl, episode.isStreamUrlHls)
         val uuid = episode.uuid
-        android.os.Handler(android.os.Looper.getMainLooper()).post {
+        // THE WRITE IS COMPLETE WHEN THIS RETURNS, so a caller relying on the new episode sees it.
+        synchronized(episodeLock) {
             this.episodeLocation = prepared
             localEpisodeUuid = uuid
             buildCustomData()
         }
     }
+
+    /** The episode this player currently addresses, read without suspending. */
+    private fun currentEpisodeUuidLocked(): String? = synchronized(episodeLock) { localEpisodeUuid }
 
     private fun addRemoteMediaListener() {
         if (remoteListenerAdded) {

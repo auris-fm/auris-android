@@ -286,6 +286,12 @@ class EarconPlayer(
                 release()
             }
             track = null
+            // The frontier belongs to the track that was just released, so it must not outlive it: the
+            // NEXT track's head starts at zero, and carrying the old total forward would make its first
+            // cue report Consumed before any of its frames sounded.
+            acceptedFramesTotal = 0
+            cueHeadTarget = 0
+            cueHeadOrigin = 0
         }
         // Release the worker itself, last: the teardown above runs ON this thread, and the next session
         // creates a fresh one rather than finding a shut-down executor.
@@ -306,6 +312,10 @@ class EarconPlayer(
                 release()
             }
             track = null
+            // A replacement track's head starts at zero, exactly as a fresh one's does.
+            acceptedFramesTotal = 0
+            cueHeadTarget = 0
+            cueHeadOrigin = 0
         }
         val minBuffer = AudioTrack.getMinBufferSize(
             sampleRateHz,

@@ -483,7 +483,10 @@ class VoiceAsrEngine @Inject constructor(
                     audioFeedbackRenderer.playEarcon(EarconId.ERROR)
                     return
                 }
-                val issuedUnder = gracePeriodSignal.issueEscalation()
+                // CLAIMED AGAINST THE REQUEST'S OWN WINDOW. The liveness check above refuses a stale
+                // origin; this makes the CLAIM itself belong to that window, so a request that is about
+                // to be refused cannot spend the successor's allowance on its way out.
+                val issuedUnder = gracePeriodSignal.issueEscalation(windowAtRequest)
                 if (issuedUnder == null) {
                     // No open window, or this window's one dispatch is spent.
                     Timber.i(

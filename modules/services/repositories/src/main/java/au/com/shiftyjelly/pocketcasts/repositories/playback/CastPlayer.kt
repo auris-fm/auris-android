@@ -197,16 +197,19 @@ class CastPlayer(
                 return@withContext false
             }
             if (isMediaLoaded) {
+                // NO REMOTE CLIENT MEANS UNAVAILABLE, NOT ACCEPTED. The previous form used `?.` and then
+                // reported true regardless, so a cast seek that reached no receiver was reported as
+                // performed -- the same "counting a non-event as delivered" defect as elsewhere.
+                val client = remoteMediaClient ?: return@withContext false
                 val seekOptions = MediaSeekOptions.Builder()
                     .setPosition(positionMs.toLong())
                     .setCustomData(customData)
                     .setResumeState(MediaSeekOptions.RESUME_STATE_UNCHANGED)
                     .build()
-                remoteMediaClient?.seek(seekOptions)
+                client.seek(seekOptions)
             } else {
-                localEpisodeUuid?.let {
-                    loadEpisode(it, positionMs, true)
-                }
+                val local = localEpisodeUuid ?: return@withContext false
+                loadEpisode(local, positionMs, true)
             }
             true
         }
@@ -264,9 +267,20 @@ class CastPlayer(
     }
 
     override fun setEpisode(episode: BaseEpisode, preferStream: Boolean) {
-        this.episodeLocation = EpisodeLocation.Stream(episode, episode.streamUrl, episode.isStreamUrlHls)
-        localEpisodeUuid = episode.uuid
-        buildCustomData()
+        // THE EPISODE FIELDS ARE WRITTEN ON THE SAME EXECUTION CONTEXT AS THE BOUND SEEK'S CHECK.
+        //
+        // `seekToTimeMsIfEpisode` decides inside `withContext(Dispatchers.Main)`. Writing these fields
+        // from another thread means the check and the re-pointing could interleave -- the seek reads an
+        // episode that is being changed underneath it, which is the same check-then-act window the bound
+        // operation exists to close. `Stream` is immutable and `EpisodeLocation.create` already computes
+        // what this needs, so the write is prepared here and PUBLISHED on Main.
+        val prepared = EpisodeLocation.Stream(episode, episode.streamUrl, episode.isStreamUrlHls)
+        val uuid = episode.uuid
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            this.episodeLocation = prepared
+            localEpisodeUuid = uuid
+            buildCustomData()
+        }
     }
 
     private fun addRemoteMediaListener() {

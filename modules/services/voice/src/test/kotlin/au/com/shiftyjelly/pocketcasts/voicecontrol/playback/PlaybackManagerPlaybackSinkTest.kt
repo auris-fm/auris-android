@@ -146,7 +146,12 @@ class PlaybackManagerPlaybackSinkTest {
                 accepted,
             )
         } finally {
+            // COMPLETE THE GATE AND LET IT SETTLE BEFORE RESETTING MAIN. The seek is suspended on this
+            // gate; releasing it after  lets the coroutine resume on a dispatcher the test no
+            // longer owns, and the resulting failure surfaces as an UNCAUGHT exception in a LATER test --
+            // a leak whose symptom is nowhere near its cause.
             proceed.complete(Unit)
+            runCurrent()
             kotlinx.coroutines.Dispatchers.resetMain()
         }
     }
@@ -234,7 +239,12 @@ class PlaybackManagerPlaybackSinkTest {
                 )
             }
         } finally {
+            // COMPLETE THE GATE AND LET IT SETTLE BEFORE RESETTING MAIN. The seek is suspended on this
+            // gate; releasing it after  lets the coroutine resume on a dispatcher the test no
+            // longer owns, and the resulting failure surfaces as an UNCAUGHT exception in a LATER test --
+            // a leak whose symptom is nowhere near its cause.
             proceed.complete(Unit)
+            runCurrent()
             kotlinx.coroutines.Dispatchers.resetMain()
         }
     }

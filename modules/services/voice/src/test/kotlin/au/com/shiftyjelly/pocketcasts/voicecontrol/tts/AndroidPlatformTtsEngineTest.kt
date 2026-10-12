@@ -385,6 +385,109 @@ class AndroidPlatformTtsEngineTest {
     }
 
     @Test
+    fun `an old render exiting after a successor is audibly playing must not stop the successor`() {
+        // @spec's successor-safety regression, and the one a generation-only fixture cannot catch:
+        // the successor here has REAL output running when the old render exits, so any stop of the
+        // shared field or engine shows up as the successor being silenced. The earlier fixture only
+        // incremented the generation, so a shared-field stop was invisible to it.
+        val (wired, fake) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        fake.emitRealWav = true
+        wired.drainWaitMs = 0
+
+        val oldEnteredWrite = java.util.concurrent.CountDownLatch(1)
+        val releaseOldWrite = java.util.concurrent.CountDownLatch(1)
+        val writes = java.util.concurrent.atomic.AtomicInteger()
+        wired.writeToSink = { _, _, _, count ->
+            val n = writes.incrementAndGet()
+            when {
+                // The FIRST write is the old utterance's, and it blocks until the successor is
+                // audibly running -- the state the old render is in when it finally exits.
+                n == 1 -> {
+                    oldEnteredWrite.countDown()
+                    releaseOldWrite.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                    // Accept HALF: the old reply's loop must return to its supersession check after
+                    // the unblock -- with a full accept it exits the loop, its superseded branch
+                    // never runs, and the case observes nothing (the survival of the shared-field
+                    // mutation was exactly this).
+                    count / 2
+                }
+
+                // The successor's writes pass through -- but its FIRST write accepts HALF, so the
+                // successor needs a second write to finish. Without that the whole successor clip
+                // lands in one write and "still writing after the old exit" has no degree of
+                // freedom (the fixture survived its own mutation for exactly that reason).
+                n == 2 -> count / 2
+
+                else -> count
+            }
+        }
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        val oldJob = scope.launch {
+            try {
+                wired.speak("old reply", "en")
+            } catch (t: Throwable) { /* expected: superseded/cancelled */ }
+        }
+        // Complete the OLD utterance's synthesis so its playback (and write) begins.
+        val oldQueued = (0 until 50).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            fake.synthesizeCount > 0
+        }
+        assertTrue("the old utterance must reach synthesis", oldQueued)
+        fake.listener?.onDone(fake.lastUtteranceId)
+        assertTrue(
+            "the old reply must reach its write",
+            oldEnteredWrite.await(5, java.util.concurrent.TimeUnit.SECONDS),
+        )
+
+        // The successor claims the engine AND reaches its own output while the old write is blocked.
+        val newJob = scope.launch {
+            try {
+                wired.speak("new reply", "en")
+            } catch (t: Throwable) { /* expected: normal completion or cancellation */ }
+        }
+        val newQueued = (0 until 50).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            fake.synthesizeCount >= 2
+        }
+        assertTrue("the successor must reach synthesis", newQueued)
+        fake.listener?.onDone(fake.lastUtteranceId)
+        val successorWrote = (0 until 100).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            writes.get() >= 2
+        }
+        assertTrue("the successor must reach its own writes", successorWrote)
+        val stopsBeforeOldExit = fake.stopCalls
+
+        // NOW the old render exits and cleans up.
+        releaseOldWrite.countDown()
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(5_000) { oldJob.join() }
+        }
+
+        assertEquals(
+            "the old render's exit must not stop the successor's engine " +
+                "(stops before=$stopsBeforeOldExit after=${fake.stopCalls})",
+            stopsBeforeOldExit,
+            fake.stopCalls,
+        )
+        assertTrue(
+            "the successor must still be writing after the old render exited " +
+                "(writes=${writes.get()})",
+            writes.get() >= 3,
+        )
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(5_000) { newJob.join() }
+        }
+        scope.cancel()
+        wired.release()
+    }
+
+    @Test
     fun `a superseded reply stops at the next write instead of continuing under the successor`() {
         // @spec's focused blocked-write regression for TTS:262. The seam blocks INSIDE the first
         // write -- the state a slow or contended output actually produces. While it is blocked, a

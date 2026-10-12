@@ -203,14 +203,25 @@ class AudioFeedbackRenderer(
             // regular heartbeat only while the cue's own span has not been crossed.
             val firstWaitMs = minOf(EMISSION_HEARTBEAT_MS, maxOf(boundMs, 1L))
             var observed = false
-            // THE LOOP DOES NOT EXIT MERELY BECAUSE THE CUE'S NOMINAL SPAN HAS PASSED -- it exits when the
-            // cue is OBSERVED TO HAVE ENDED. A cue that is still QUEUED has not sounded yet, and stopping
-            // at its estimated duration would end the observation BEFORE the sound it is waiting for:
-            // "queued short cue rendered after its duration is still attributed" is exactly that case.
-            // The span is a bound on the WAIT, not a statement that the cue is over.
-            var stillQueued = false
+            // A BOUNDED OBSERVATION POLICY, INDEPENDENT OF THE PCM SPAN.
+            //
+            // The PCM duration is what the client SUBMITTED; it is not a claim about when hardware
+            // finishes, and it is wrong in both directions here -- a long-queued cue has a span far
+            // smaller than the sound still to come, and a cue that stopped early must not be covered past
+            // its end. So the observation is bounded by ITS OWN limits:
+            //
+            //   QUEUED     at most QUEUED_OBSERVATION_MS from submission; a cue that never begins
+            //              sounding must not be awaited forever.
+            //   RENDERING  after the FIRST measured rendering, at most max(QUEUED_OBSERVATION_MS,
+            //              accepted PCM duration + RENDERING_GRACE_MS) from that observation.
+            //
+            // DEADLINE EXPIRY IS AN UNKNOWN/STALLED OBSERVATION, not evidence the cue was consumed. These
+            // are conservative observation limits, not claims about hardware completion.
+            var stillQueued = true
+            var renderingDeadlineMs: Long? = null
             while (!disposed) {
-                if (observed && !stillQueued && elapsed + EMISSION_HEARTBEAT_MS >= boundMs) return@launch
+                val limit = renderingDeadlineMs ?: (QUEUED_OBSERVATION_MS + elapsed)
+                if (observed && elapsed + EMISSION_HEARTBEAT_MS > limit) return@launch
                 delay(if (observed) EMISSION_HEARTBEAT_MS else firstWaitMs)
                 elapsed += if (observed) EMISSION_HEARTBEAT_MS else firstWaitMs
                 observed = true
@@ -237,7 +248,12 @@ class AudioFeedbackRenderer(
 
                     // Observed sounding: refresh the attribution so the gate knows the sound is ours.
                     EarconPlayer.EarconCompletion.Playing -> {
-                        // Observed sounding, so the cue is no longer merely waiting.
+                        // Observed sounding, so the cue is no longer merely waiting -- and the observation
+                        // now runs to the POST-START limit, measured from THIS observation.
+                        if (stillQueued || renderingDeadlineMs == null) {
+                            renderingDeadlineMs = elapsed +
+                                maxOf(QUEUED_OBSERVATION_MS, boundMs + RENDERING_GRACE_MS)
+                        }
                         stillQueued = false
                         noteEmitted()
                     }
@@ -325,6 +341,12 @@ class AudioFeedbackRenderer(
     internal companion object {
         /** Shorter than the gate's attribution window, so a long reply never falls out of it. */
         private const val EMISSION_HEARTBEAT_MS = 1_000L
+
+        /** The most a QUEUED cue is observed from submission before the observation gives up. */
+        private const val QUEUED_OBSERVATION_MS = 2_000L
+
+        /** How much longer than the accepted PCM duration a RENDERING cue is observed. */
+        private const val RENDERING_GRACE_MS = 1_000L
 
         /**
          * One line describing what is about to be spoken, including the text itself, its length

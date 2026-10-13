@@ -1040,11 +1040,20 @@ class CloudRouteSink internal constructor(
                     // THE QUOTE'S RESUME OUTCOME IS ITS OWN ANSWER. Returning true unconditionally
                     // made a refused resume a delivered action -- and a quote whose episode was
                     // replaced must not be counted as played.
-                    if (playbackSink.resume(turnEpisodeId) is EpisodeOperationResult.Accepted) {
+                    //
+                    // BUT THE SEEK'S OUTCOME IS PART OF THE SAME ACTION. A quote is "seek, then
+                    // resume"; returning only the resume's outcome would DISCARD an unknown seek when
+                    // the resume happened to succeed -- reporting the whole action as confirmed while
+                    // half of it was never established. The two are MERGED so the weaker observation
+                    // survives.
+                    val resumeOutcome = if (
+                        playbackSink.resume(turnEpisodeId) is EpisodeOperationResult.Accepted
+                    ) {
                         ActionOutcome.Confirmed
                     } else {
                         ActionOutcome.None
                     }
+                    mergeActionOutcome(seekOutcome, resumeOutcome)
                 }
 
                 "stop_quote" -> {
@@ -1058,10 +1067,14 @@ class CloudRouteSink internal constructor(
                         episodeDurationSeconds(),
                         turnEpisodeId,
                     )
-                    if (restored is EpisodeOperationResult.Accepted) {
-                        ActionOutcome.Confirmed
-                    } else {
-                        ActionOutcome.None
+                    // UNKNOWN IS NOT None. Collapsing it here reported an attempt whose outcome was
+                    // never established as "nothing happened" -- the very reading a caller uses to
+                    // decide a retry is safe. A restore that was DISPATCHED and not observed maps to
+                    // Unknown.
+                    when (restored) {
+                        is EpisodeOperationResult.Accepted -> ActionOutcome.Confirmed
+                        is EpisodeOperationResult.Unknown -> ActionOutcome.Unknown
+                        is EpisodeOperationResult.Refused -> ActionOutcome.None
                     }
                 }
 
@@ -1116,23 +1129,15 @@ class CloudRouteSink internal constructor(
                     val direction = params["direction"] as? String
                     when {
                         delta != null && delta != 0 -> {
+                            // THE NESTED RESULT IS RETURNED, NOT DISCARDED. Ending this arm with a bare
+                            // `ActionOutcome.Confirmed` threw away what the skip actually reported, so
+                            // a REFUSED or UNKNOWN skip read as a confirmed one. `outcomeOf` maps all
+                            // three.
                             if (delta > 0) {
-                                if (playbackSink.skipForward(delta, turnEpisodeId) is EpisodeOperationResult.Accepted) {
-                                    ActionOutcome.Confirmed
-                                } else {
-                                    ActionOutcome.None
-                                }
+                                outcomeOf(playbackSink.skipForward(delta, turnEpisodeId))
                             } else {
-                                if (playbackSink.skipBackward(-delta, turnEpisodeId) is EpisodeOperationResult.Accepted) {
-                                    ActionOutcome.Confirmed
-                                } else {
-                                    ActionOutcome.None
-                                }
+                                outcomeOf(playbackSink.skipBackward(-delta, turnEpisodeId))
                             }
-                            // The nested branches already yield the typed outcome; this arm's value is
-                            // whichever they produced. A stated nonzero delta is CONFIRMED when the
-                            // sink accepted it.
-                            ActionOutcome.Confirmed
                         }
 
                         delta == 0 -> ActionOutcome.Confirmed
@@ -1141,27 +1146,15 @@ class CloudRouteSink internal constructor(
                         // configured skip interval here, and the sink's own comment says null means
                         // exactly that.
                         delta == null && direction == null -> {
-                            if (playbackSink.skipForward(null, turnEpisodeId) is EpisodeOperationResult.Accepted) {
-                                ActionOutcome.Confirmed
-                            } else {
-                                ActionOutcome.None
-                            }
+                            outcomeOf(playbackSink.skipForward(null, turnEpisodeId))
                         }
 
                         delta == null && direction == "backward" -> {
-                            if (playbackSink.skipBackward(null, turnEpisodeId) is EpisodeOperationResult.Accepted) {
-                                ActionOutcome.Confirmed
-                            } else {
-                                ActionOutcome.None
-                            }
+                            outcomeOf(playbackSink.skipBackward(null, turnEpisodeId))
                         }
 
                         delta == null && direction == "forward" -> {
-                            if (playbackSink.skipForward(null, turnEpisodeId) is EpisodeOperationResult.Accepted) {
-                                ActionOutcome.Confirmed
-                            } else {
-                                ActionOutcome.None
-                            }
+                            outcomeOf(playbackSink.skipForward(null, turnEpisodeId))
                         }
 
                         // An unstated amount with a stated unrecognised direction: refused rather
@@ -1362,13 +1355,19 @@ class CloudRouteSink internal constructor(
             Confirmed,
         }
 
-        /**
-         * Combines two action outcomes, keeping the STRONGEST evidence but never downgrading an observation.
-         *
-         * UNKNOWN IS NEVER REDUCED TO None: an attempted-but-unknowable action must not become "nothing
-         * happened" merely because a later action in the same turn did nothing. Nor is it upgraded to
-         * Confirmed: nothing observed it happening.
-         */
+        // Combines two action outcomes, keeping the STRONGEST evidence but never downgrading an observation.
+        //
+        // UNKNOWN IS NEVER REDUCED TO None: an attempted-but-unknowable action must not become "nothing
+        // happened" merely because a later action in the same turn did nothing. Nor is it upgraded to
+        // Confirmed: nothing observed it happening.
+
+        /** Maps an episode operation's three outcomes onto the turn's action outcome. */
+        internal fun outcomeOf(result: EpisodeOperationResult): ActionOutcome = when (result) {
+            is EpisodeOperationResult.Accepted -> ActionOutcome.Confirmed
+            is EpisodeOperationResult.Unknown -> ActionOutcome.Unknown
+            is EpisodeOperationResult.Refused -> ActionOutcome.None
+        }
+
         internal fun mergeActionOutcome(previous: ActionOutcome, next: ActionOutcome): ActionOutcome = when {
             previous == ActionOutcome.Confirmed || next == ActionOutcome.Confirmed -> ActionOutcome.Confirmed
             previous == ActionOutcome.Unknown || next == ActionOutcome.Unknown -> ActionOutcome.Unknown

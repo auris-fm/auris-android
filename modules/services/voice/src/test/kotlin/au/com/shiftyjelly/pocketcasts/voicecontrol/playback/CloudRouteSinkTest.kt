@@ -647,6 +647,50 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a skip that is UNKNOWN reports Unknown, not a confirmed or empty action`() = runTest {
+        // The skip path ended its arm with a bare `ActionOutcome.Confirmed`, DISCARDING whatever the sink
+        // reported -- so a refused or unknown skip read as a confirmed one. And every branch collapsed
+        // Unknown into None, reporting an attempted skip as "nothing happened".
+        suspend fun outcomeFor(result: EpisodeOperationResult): CloudRouteSink.Companion.ActionOutcome {
+            val deps = TestDeps(
+                cloudPlaybackContextState = CloudPlaybackContextState(),
+                episodeId = "episode-id",
+                events = flowOf(
+                    CloudRouteEvent.Action(
+                        tool = "playback",
+                        action = "seek_relative",
+                        params = mapOf("delta_seconds" to 30),
+                    ),
+                ),
+            )
+            deps.playback.skipOutcomeForTest = result
+            val sink = deps.sink()
+            sink.routeToCloud(
+                "skip",
+                VoiceIntent.CloudTier.Premium,
+                PlaybackContext(episodeId = "episode-id", clientPositionMs = 0L),
+            )
+            return sink.lastActionOutcome
+        }
+
+        assertEquals(
+            "an UNKNOWN skip must report Unknown, not Confirmed",
+            CloudRouteSink.Companion.ActionOutcome.Unknown,
+            outcomeFor(EpisodeOperationResult.Unknown("episode-id", 0L)),
+        )
+        assertEquals(
+            "a REFUSED skip must report None, not Confirmed",
+            CloudRouteSink.Companion.ActionOutcome.None,
+            outcomeFor(EpisodeOperationResult.Refused),
+        )
+        assertEquals(
+            "an ACCEPTED skip reports Confirmed",
+            CloudRouteSink.Companion.ActionOutcome.Confirmed,
+            outcomeFor(EpisodeOperationResult.Accepted("episode-id", 0L)),
+        )
+    }
+
+    @Test
     fun `an UNKNOWN outcome keeps the pre-action provenance while recording NO target`() = runTest {
         // @spec: "Preserve the owner's known value; Unknown concerns execution, not whether its
         // pre-action snapshot existed." The TARGET is suppressed because nothing established the player
@@ -3013,10 +3057,12 @@ class CloudRouteSinkTest {
         }
 
         override suspend fun skipForward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
+            skipOutcomeForTest?.let { return it }
             calls += "skipForward:$seconds"
             return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = preActionPositionMsForTest)
         }
         override suspend fun skipBackward(seconds: Int?, expectedEpisodeId: String?): EpisodeOperationResult {
+            skipOutcomeForTest?.let { return it }
             calls += "skipBackward:$seconds"
             return EpisodeOperationResult.Accepted(episodeId = expectedEpisodeId, preActionPositionMs = preActionPositionMsForTest)
         }
@@ -3056,6 +3102,9 @@ class CloudRouteSinkTest {
 
         /** Overrides the outcome a seek reports, so a case can drive accepted/refused/unknown. */
         var seekOutcomeForTest: EpisodeOperationResult? = null
+
+        /** Overrides the outcome a SKIP reports, on the same three-way contract. */
+        var skipOutcomeForTest: EpisodeOperationResult? = null
 
         // The PRE-ACTION POSITION the owner would report. The production manager snapshots this at its
         // mutation, so the fake supplies it here: a case that asserts history must not rely on the

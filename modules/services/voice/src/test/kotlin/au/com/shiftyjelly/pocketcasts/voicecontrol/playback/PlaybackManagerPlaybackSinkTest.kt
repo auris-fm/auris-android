@@ -122,13 +122,22 @@ class PlaybackManagerPlaybackSinkTest {
         fields.getDeclaredField("settings").apply { isAccessible = true }.set(manager, settings)
         fields.getDeclaredField("selectedPlayerLock").apply { isAccessible = true }.set(manager, Any())
 
-        // THE PUBLIC PATH: the sink adapter the production caller uses.
-        val result = sink(manager).skipForward(seconds = 30, expectedEpisodeId = "episode-A")
+        // THE MANAGER AWAITS Dispatchers.Main (PlaybackManager:1449) before its bound mutation, so the
+        // fixture must install one -- the same deterministic setup the real-manager probes above use.
+        // Without it this case HANGS on Robolectric's Main thread rather than failing, which is worse than
+        // a failure: it produces no evidence at all.
+        kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
+        try {
+            // THE PUBLIC PATH: the sink adapter the production caller uses.
+            val result = sink(manager).skipForward(seconds = 30, expectedEpisodeId = "episode-A")
 
-        assertTrue(
-            "the real owner's unknown skip must reach the caller as Unknown, not Refused",
-            result is EpisodeOperationResult.Unknown,
-        )
+            assertTrue(
+                "the real owner's unknown skip must reach the caller as Unknown, not Refused",
+                result is EpisodeOperationResult.Unknown,
+            )
+        } finally {
+            kotlinx.coroutines.Dispatchers.resetMain()
+        }
     }
 
     @Test

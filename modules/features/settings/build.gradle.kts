@@ -1,3 +1,11 @@
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.TaskAction
+
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.ksp)
@@ -14,6 +22,48 @@ android {
         buildConfig = true
         viewBinding = true
         compose = true
+    }
+}
+
+/**
+ * Writes the About page's build timestamp as a resource.
+ *
+ * The timestamp has to be produced when the task runs, not while the build script is configured: the
+ * configuration cache would freeze a value computed at configuration time and replay it, so every build
+ * would report the first timestamp it ever saw. A generated resource is used instead of a BuildConfig
+ * field for the same reason.
+ */
+abstract class GenerateBuildDateTask : DefaultTask() {
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
+
+    @TaskAction
+    fun generate() {
+        val valuesDir = outputDirectory.get().asFile.resolve("values")
+        valuesDir.mkdirs()
+        // The numeric offset is included so the wall-clock reading isn't ambiguous across timezones.
+        val buildDate = SimpleDateFormat("yyyy-MM-dd HH:mm Z", Locale.US).format(Date())
+        valuesDir.resolve("build_date.xml").writeText(
+            """
+            <?xml version="1.0" encoding="utf-8"?>
+            <resources>
+                <string name="build_date" translatable="false">$buildDate</string>
+            </resources>
+            """.trimIndent() + "\n",
+        )
+    }
+}
+
+val generateBuildDate = tasks.register<GenerateBuildDateTask>("generateBuildDate") {
+    // A build timestamp changes on every build by definition, so there is nothing for the up-to-date
+    // check or the build cache to reuse.
+    outputs.upToDateWhen { false }
+    outputs.cacheIf { false }
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.sources.res?.addGeneratedSourceDirectory(generateBuildDate, GenerateBuildDateTask::outputDirectory)
     }
 }
 

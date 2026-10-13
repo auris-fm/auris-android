@@ -217,6 +217,10 @@ abstract class VoiceControlModule {
             // foreign app and closes the microphone seconds after acknowledging a wake word.
             hasEmittedAudio = audioFeedbackRenderer.hasEmittedAudio,
             lastEmittedAtMs = audioFeedbackRenderer.lastEmittedAtMs,
+            // THE TYPED PER-CUE OBSERVATION REACHES ITS PRODUCTION CONSUMER HERE. Without this the
+            // renderer's verdict would have no reader in production, and an unresolved cue would keep
+            // being treated as ended on the strength of the bounded window alone.
+            lastCueObservation = audioFeedbackRenderer.lastCueObservation,
             scope = scope,
         )
 

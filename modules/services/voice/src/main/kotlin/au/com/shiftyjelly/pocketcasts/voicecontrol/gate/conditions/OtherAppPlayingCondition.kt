@@ -22,6 +22,13 @@ class OtherAppPlayingCondition(
     // ones making the sound. Without this the app reads its own acknowledgement as a foreign app.
     private val hasEmittedAudio: StateFlow<Boolean> = MutableStateFlow(false),
     private val lastEmittedAtMs: StateFlow<Long> = MutableStateFlow(0L),
+    // WHAT BECAME OF OUR LAST CUE, as the renderer could OBSERVE it.
+    //
+    // An observation whose deadline expired without establishing the cue's fate means we CANNOT say the
+    // sound has stopped -- so the self-emission window stays open rather than closing on an assumption
+    // nobody could check. Absent or observed-ended, the window behaves as it always did.
+    private val lastCueObservation: StateFlow<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer.CueObservation?> =
+        MutableStateFlow(null),
     private val nowMs: () -> Long = { SystemClock.elapsedRealtime() },
     private val transitionWindowMs: Long = 5_000,
     private val debounceMs: Long = 500,
@@ -106,6 +113,12 @@ class OtherAppPlayingCondition(
                 nowMs() - lastSelfEmittedMs
             },
             transitionWindowMs = transitionWindowMs,
+            // AN UNKNOWN OBSERVATION KEEPS THE SELF-EMISSION WINDOW OPEN. The deadline expiring did not
+            // establish that the cue stopped sounding, so treating it as ended would attribute audio we
+            // may still be making to a foreign app -- and cut the microphone mid-cue. This is the
+            // production consumer of the renderer's typed per-cue observation.
+            selfEmissionUnresolved = lastCueObservation.value ==
+                au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer.CueObservation.Unknown,
         )
     }
 
@@ -139,6 +152,7 @@ internal fun otherAppPlaying(
     msSinceHostPlaying: Long,
     msSinceSelfEmitted: Long,
     transitionWindowMs: Long,
+    selfEmissionUnresolved: Boolean = false,
 ): Boolean {
     if (!isMusicActive) return false
     val hostOwnsAudio = hostCurrentlyPlaying ||
@@ -146,6 +160,12 @@ internal fun otherAppPlaying(
         // Our own feedback is not a foreign app. Earcons ride the media stream and are 0.15-0.4s
         // long, so a 1 Hz poll can land inside one; without this term the app blocks its own gate
         // and stops listening in the middle of a session, having just played the acknowledgement.
-        (msSinceSelfEmitted >= 0 && msSinceSelfEmitted < transitionWindowMs)
+        (msSinceSelfEmitted >= 0 && msSinceSelfEmitted < transitionWindowMs) ||
+        // AN UNRESOLVED OBSERVATION HOLDS THE ATTRIBUTION OPEN. The window above is a BOUNDED guess
+        // about how long our own sound lasts; when the observation's deadline expired, that guess is no
+        // longer something we are entitled to make -- the cue may still be sounding. Reading expiry as
+        // "the sound stopped" would hand audio we may still be making to a foreign app, which is the
+        // mid-session self-block this whole term exists to prevent.
+        selfEmissionUnresolved
     return !hostOwnsAudio
 }

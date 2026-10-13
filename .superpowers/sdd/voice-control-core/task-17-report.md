@@ -78,3 +78,48 @@ DONE_WITH_CONCERNS
    in the implementation comment.
 4. Task 18 (full build/verify) is not run here; only the settings test, the voice gate/condition tests,
    and spotless were run.
+
+## Fix round 1: permission input tracks current state
+
+**Finding (verbatim):** `VoiceControlSettingsFragment.kt:79-82` — permission is read once during composition
+(`ContextCompat.checkSelfPermission`) and never re-read on resume. After `RECORD_AUDIO` is granted
+out-of-band and the user returns to this screen, nothing guarantees recomposition, so the top-precedence
+row can keep reading "Blocked: microphone permission required".
+
+**Ruling:** the permission input must track the current permission state, refreshed on resume. Cost if
+wrong: none.
+
+**Fix.** In `VoiceControlSettingsFragment.kt` the permission is now `var permissionGranted by remember {
+mutableStateOf(context.isRecordAudioGranted()) }`, refreshed from a `DisposableEffect(this)` +
+`LifecycleEventObserver` on `Lifecycle.Event.ON_RESUME`, with `lifecycle.removeObserver` in `onDispose`.
+This mirrors the existing battery-state pattern in `SettingsFragment.kt`. A small private
+`Context.isRecordAudioGranted()` helper holds the `ContextCompat.checkSelfPermission` call. The status
+mapping, its strings, and `voiceControlStatus` are unchanged. No other file changed.
+
+**Testing.** The refresh mechanism is a composable/lifecycle concern, not unit-testable without a Compose
+UI test; `voiceControlStatus` remains covered by `VoiceControlStatusTest` (the permission argument is the
+function's input). Exact manual check:
+
+1. Install the debug build and open Settings → Voice Control.
+2. Note the Status row reads "Blocked: microphone permission required" (permission not granted).
+3. Open the system app settings for the app, grant the Microphone permission, then press Back to return to
+   Voice Control (`ON_RESUME` fires).
+4. Without leaving the screen further, the Status row now reads a non-permission status (e.g. "Off" or
+   "Inactive: no playback or foreground context") rather than the permission-blocked text.
+
+**Commands and observed results** (fix round 1):
+
+| Command | Result |
+|---|---|
+| `./gradlew :modules:features:settings:testDebugUnitTest --tests VoiceControlStatusTest` | BUILD SUCCESSFUL; report `tests="19" skipped="0" failures="0" errors="0"` |
+| `./gradlew spotlessCheck` | BUILD SUCCESSFUL |
+| commit (runs spotless + gitleaks hooks) | `6974dd2b7` created |
+
+**Self-review.** `DisposableEffect(this)` keys on the fragment (the callback passed to
+`contentWithoutConsumedInsets` is a plain `@Composable () -> Unit`, so `this` is the `BaseFragment`),
+matching `SettingsFragment`. The observer is registered on the fragment's own `lifecycle` and removed in
+`onDispose`, so it does not leak. Reading the permission in the initial `mutableStateOf` preserves the
+first-frame value.
+
+**Concerns.** None new. The prior concerns (out-of-scope `ID` constants, `Unknown` conflict labelling) are
+unchanged and out of scope for this fix.

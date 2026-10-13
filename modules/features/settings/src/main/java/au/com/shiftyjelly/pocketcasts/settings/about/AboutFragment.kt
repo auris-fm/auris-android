@@ -266,6 +266,15 @@ private fun AboutPage(
                 )
             }
             item {
+                Text(
+                    text = stringResource(LR.string.settings_build_date, stringResource(R.string.build_date)),
+                    style = MaterialTheme.typography.body1,
+                    modifier = Modifier.padding(top = 4.dp),
+                    textAlign = TextAlign.Center,
+                    color = MaterialTheme.theme.colors.primaryText02,
+                )
+            }
+            item {
                 HorizontalDivider(
                     modifier = Modifier.padding(top = 56.dp, bottom = 8.dp),
                 )

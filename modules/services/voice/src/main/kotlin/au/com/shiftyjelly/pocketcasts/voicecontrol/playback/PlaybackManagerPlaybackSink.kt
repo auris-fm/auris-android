@@ -114,16 +114,24 @@ class PlaybackManagerPlaybackSink @Inject constructor(
                 ?.takeIf { it.uuid == expectedEpisodeId }
                 ?.playedUpToMs
                 ?.toLong()
-            val accepted = playbackManager.skipIfPlaying(
-                episodeUuid = expectedEpisodeId,
-                forward = true,
-                sourceView = SourceView.VOICE_COMMANDS,
-                jumpAmountSeconds = seconds,
-            )
-            return if (accepted) {
-                EpisodeOperationResult.Accepted(expectedEpisodeId, before)
-            } else {
-                EpisodeOperationResult.Refused
+            // THE OWNER'S TYPED OUTCOME IS HONOURED. A Boolean has no room for "issued without a
+            // returned outcome", so collapsing it here would report an unknowable skip as a REFUSAL --
+            // a retryable failure for an operation the receiver may already have performed.
+            return when (
+                playbackManager.skipIfPlaying(
+                    episodeUuid = expectedEpisodeId,
+                    forward = true,
+                    sourceView = SourceView.VOICE_COMMANDS,
+                    jumpAmountSeconds = seconds,
+                )
+            ) {
+                is PlaybackManager.SkipOutcome.Accepted ->
+                    EpisodeOperationResult.Accepted(expectedEpisodeId, before)
+
+                is PlaybackManager.SkipOutcome.Unknown ->
+                    EpisodeOperationResult.Unknown(expectedEpisodeId, before)
+
+                is PlaybackManager.SkipOutcome.Refused -> EpisodeOperationResult.Refused
             }
         }
         playbackManager.skipForwardSuspend(SourceView.VOICE_COMMANDS, seconds)
@@ -139,16 +147,24 @@ class PlaybackManagerPlaybackSink @Inject constructor(
                 ?.takeIf { it.uuid == expectedEpisodeId }
                 ?.playedUpToMs
                 ?.toLong()
-            val accepted = playbackManager.skipIfPlaying(
-                episodeUuid = expectedEpisodeId,
-                forward = false,
-                sourceView = SourceView.VOICE_COMMANDS,
-                jumpAmountSeconds = seconds,
-            )
-            return if (accepted) {
-                EpisodeOperationResult.Accepted(expectedEpisodeId, before)
-            } else {
-                EpisodeOperationResult.Refused
+            // THE OWNER'S TYPED OUTCOME IS HONOURED. A Boolean has no room for "issued without a
+            // returned outcome", so collapsing it here would report an unknowable skip as a REFUSAL --
+            // a retryable failure for an operation the receiver may already have performed.
+            return when (
+                playbackManager.skipIfPlaying(
+                    episodeUuid = expectedEpisodeId,
+                    forward = false,
+                    sourceView = SourceView.VOICE_COMMANDS,
+                    jumpAmountSeconds = seconds,
+                )
+            ) {
+                is PlaybackManager.SkipOutcome.Accepted ->
+                    EpisodeOperationResult.Accepted(expectedEpisodeId, before)
+
+                is PlaybackManager.SkipOutcome.Unknown ->
+                    EpisodeOperationResult.Unknown(expectedEpisodeId, before)
+
+                is PlaybackManager.SkipOutcome.Refused -> EpisodeOperationResult.Refused
             }
         }
         playbackManager.skipBackwardSuspend(SourceView.VOICE_COMMANDS, seconds)

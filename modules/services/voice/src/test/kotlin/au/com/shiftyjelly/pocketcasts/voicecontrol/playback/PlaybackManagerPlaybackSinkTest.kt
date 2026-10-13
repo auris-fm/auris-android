@@ -80,6 +80,61 @@ class PlaybackManagerPlaybackSinkTest {
     fun `the REAL manager refuses a seek the player is RE-POINTED during`() = probeActualManagerReuse(reuse = true)
 
     @Test
+    fun `an unknown owner skip is reported as Unknown, not refused`() = runTest {
+        // THE OWNER'S TYPED OUTCOME IS WHAT TRAVELS. The mock answers the owner operation with Unknown, so
+        // the case fails if the adapter collapses it into Refused -- which is what a Boolean owner result
+        // forced. A retryable refusal for an operation the receiver may already have performed invites a
+        // repeat.
+        val manager = mock<PlaybackManager>()
+        org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenReturn(
+            au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+                uuid = "episode-A",
+                podcastUuid = "podcast-1",
+                publishedDate = java.util.Date(),
+            ),
+        )
+        org.mockito.kotlin.whenever(
+            manager.skipIfPlaying(
+                org.mockito.kotlin.any(),
+                org.mockito.kotlin.any(),
+                org.mockito.kotlin.any(),
+                org.mockito.kotlin.anyOrNull(),
+            ),
+        ).thenReturn(PlaybackManager.SkipOutcome.Unknown)
+
+        val result = sink(manager).skipForward(seconds = 30, expectedEpisodeId = "episode-A")
+
+        assertTrue(
+            "an unknown skip must stay unknown rather than become a refusal",
+            result is EpisodeOperationResult.Unknown,
+        )
+    }
+
+    @Test
+    fun `an accepted owner skip is reported as accepted`() = runTest {
+        val manager = mock<PlaybackManager>()
+        org.mockito.kotlin.whenever(manager.getCurrentEpisode()).thenReturn(
+            au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+                uuid = "episode-A",
+                podcastUuid = "podcast-1",
+                publishedDate = java.util.Date(),
+            ),
+        )
+        org.mockito.kotlin.whenever(
+            manager.skipIfPlaying(
+                org.mockito.kotlin.any(),
+                org.mockito.kotlin.any(),
+                org.mockito.kotlin.any(),
+                org.mockito.kotlin.anyOrNull(),
+            ),
+        ).thenReturn(PlaybackManager.SkipOutcome.Accepted)
+
+        val result = sink(manager).skipForward(seconds = 30, expectedEpisodeId = "episode-A")
+
+        assertTrue(result is EpisodeOperationResult.Accepted)
+    }
+
+    @Test
     fun `the REAL manager seeks a target that stays on its episode`() = probeActualManagerReuse(reuse = false)
 
     @Test

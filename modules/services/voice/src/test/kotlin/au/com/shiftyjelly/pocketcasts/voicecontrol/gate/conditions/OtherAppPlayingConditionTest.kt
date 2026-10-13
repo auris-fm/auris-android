@@ -2,6 +2,7 @@
 
 package au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleGroup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import kotlinx.coroutines.delay
@@ -13,6 +14,39 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OtherAppPlayingConditionTest {
+
+    @Test
+    fun `an unresolved observation does NOT hold the attribution open forever`() {
+        // @reviewer's second finding: Unknown bypassed the window with NO TIME LIMIT, so after the cue
+        // ended every later active-music reading stayed attributed to us. A hold is a BOUND, not a state
+        // change of ownership.
+        var now = 0L
+        val observation = MutableStateFlow<AudioFeedbackRenderer.CueObservation?>(
+            AudioFeedbackRenderer.CueObservation.Unknown,
+        )
+        val condition = OtherAppPlayingCondition(
+            hostIsPlaying = MutableStateFlow(false),
+            hasEmittedAudio = MutableStateFlow(true),
+            lastEmittedAtMs = MutableStateFlow(0L),
+            lastCueObservation = observation,
+            nowMs = { now },
+            transitionWindowMs = 5_000,
+        )
+
+        // THE HOLD IS ACTIVE while the observation is fresh.
+        assertFalse(
+            "an unresolved observation holds our own audio open",
+            condition.otherAppPlaying(isMusicActive = true),
+        )
+
+        // LONG AFTER, the hold EXPIRES and foreign audio is a foreign app again -- otherwise the app
+        // would never listen again for the rest of the process.
+        now = 10 * 60_000L
+        assertTrue(
+            "the hold must EXPIRE: an unresolved cue cannot own all later audio indefinitely",
+            condition.otherAppPlaying(isMusicActive = true),
+        )
+    }
 
     @Test
     fun `an unresolved cue observation holds our own audio open past the window`() {

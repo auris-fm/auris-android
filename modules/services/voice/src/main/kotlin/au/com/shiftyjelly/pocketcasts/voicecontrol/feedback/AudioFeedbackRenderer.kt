@@ -415,6 +415,14 @@ class AudioFeedbackRenderer(
      */
     fun stopEarconNow() {
         earconPlayer.stopNow()
+        // RETIREMENT, NOT A TEST ACCESSOR. The observation's deadline is a bound on WAITING, not a claim
+        // about the cue; once the cue is stopped explicitly its fate IS established, and leaving the
+        // outstanding Unknown published would hold the gate's attribution open indefinitely -- every
+        // later active-music reading would be attributed to us after the cue had already stopped.
+        //
+        // OWNERSHIP IS CHECKED IN THE SAME STEP, so a stop issued for an OLD cue cannot retire the
+        // successor that has since taken over.
+        publishEndedIfOwning(currentObserver())
     }
 
     /**
@@ -447,10 +455,17 @@ class AudioFeedbackRenderer(
         // End the cue's attribution HERE rather than letting an estimate cover it: the session is
         // stopping, so whatever the output was doing, the user is no longer hearing it and the gate
         // must stop treating it as ours.
+        // THE SESSION'S END RETIRES ITS CUE. Cancelling the observer alone leaves whatever it last
+        // published standing, and after a session ends that verdict is about a cue nobody can hear any
+        // more -- an Unknown left published would attribute all later music to us.
+        publishEndedIfOwning(currentObserver())
         earconCoverageJob?.cancel()
         earconPlayer.stopNow()
         earconPlayer.release()
     }
+
+    /** The observer that currently speaks for the cue, read under the monitor that installs one. */
+    private fun currentObserver(): Job? = synchronized(coverageLock) { earconCoverageJob }
 
     /**
      * What an owner's lifecycle event should do to this renderer.

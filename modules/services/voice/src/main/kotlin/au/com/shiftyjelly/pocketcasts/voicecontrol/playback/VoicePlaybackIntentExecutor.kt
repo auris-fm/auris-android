@@ -103,6 +103,17 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         boundDialogManager = null
     }
 
+    /**
+     * The action outcome of the most recent cloud dispatch.
+     *
+     * Recorded at the dispatch site from the request-owned result, so a caller can distinguish a CONFIRMED
+     * action from one that was dispatched with an unknowable outcome -- which the feedback alone cannot
+     * express.
+     */
+    @Volatile
+    var lastActionOutcome: CloudRouteActionOutcome = CloudRouteActionOutcome.None
+        private set
+
     suspend fun execute(intent: VoiceIntent): VoiceResponse {
         // Recorded *before* the action runs: the revision is what a cloud turn
         // compares at restore time, and a user's pause that has already reached
@@ -174,7 +185,12 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                         Timber.i("[Voice] superseded retry discarded (stamp=$captureForRetry)")
                         return VoiceResponse.Silent
                     }
-                    return cloudRouteSink.dispatchPrepared(alreadyPrepared)
+                    // THE SAME CONSUMPTION AS THE OTHER DISPATCH SITE: feedback out, action outcome
+                    // recorded. A retry that returns only its feedback would hide an unknowable action
+                    // on exactly the path where the caller most needs to know whether it ran.
+                    val retried = cloudRouteSink.dispatchPrepared(alreadyPrepared)
+                    lastActionOutcome = retried.action
+                    return retried.feedback
                 }
                 val context = playbackContextProvider.current()
                 // The window identity is the one STAMPED ON THE INTENT when it was dispatched --
@@ -225,10 +241,15 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                 // the SAME path and the identity is the one fixed above rather than a second one minted
                 // here.
                 val dispatched = cloudRouteSink.dispatchPrepared(preparedTurn)
+                // THE REQUEST-OWNED RESULT IS CONSUMED HERE, at the production dispatch site. Its
+                // FEEDBACK is what the user hears; its ACTION OUTCOME is recorded so a caller can tell a
+                // confirmed action from one that was dispatched without a knowable outcome. Reading only
+                // the feedback would treat an unknowable execution as if nothing had happened.
+                lastActionOutcome = dispatched.action
                 // Noted after the dispatch: this window now has a request, so a LATER one continues
                 // rather than beginning.
                 captured?.let { gracePeriodSignal.notePreparedRequest(it) }
-                dispatched
+                dispatched.feedback
             }
 
             is VoiceIntent.Queue -> executeQueue(intent)
@@ -530,6 +551,36 @@ interface VoiceBookmarkSink {
     fun queryNearby(): VoiceResponse.Spoken
 }
 
+/**
+ * What a cloud turn produced, OWNED BY THE REQUEST THAT DISPATCHED IT.
+ *
+ * [feedback] is what the user should hear; [action] is what the turn's playback action ACHIEVED, which is
+ * a separate fact: a turn can produce feedback and still have dispatched an action whose outcome is
+ * unknown. A caller that only sees the feedback cannot tell those apart, and would treat an unknowable
+ * execution as if nothing had happened.
+ */
+data class CloudTurnResult(
+    val feedback: VoiceResponse,
+    val action: CloudRouteActionOutcome,
+)
+
+/**
+ * What the turn's playback action achieved, as far as the client could OBSERVE.
+ *
+ * Mirrors the sink's own three-valued outcome so it can travel OUT of the sink without the caller
+ * depending on a nested type.
+ */
+enum class CloudRouteActionOutcome {
+    /** No action was performed or attempted. */
+    None,
+
+    /** The action was ISSUED and its outcome could not be established. */
+    Unknown,
+
+    /** The action was CONFIRMED performed. */
+    Confirmed,
+}
+
 interface VoiceCloudRouteSink {
     /**
      * @param isLiveGraceTurn true when this turn continues an answer still inside its grace window, so
@@ -546,7 +597,7 @@ interface VoiceCloudRouteSink {
         capturedOrigin: Long? = null,
         /** True when that window was opened by a wake, so the turn begins a conversation. */
         isWakeOriginated: Boolean = false,
-    ): VoiceResponse
+    ): CloudTurnResult
 
     /**
      * Prepares a turn ONCE and returns it, for a caller that will retain it and may retry it.
@@ -607,7 +658,7 @@ interface VoiceCloudRouteSink {
      */
     suspend fun dispatchPrepared(
         prepared: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
-    ): VoiceResponse
+    ): CloudTurnResult
 
     /**
      * Typed-flow entry point (cloud-assistant.md `route_hint`): only a typed UI
@@ -622,7 +673,7 @@ interface VoiceCloudRouteSink {
         isLiveGraceTurn: Boolean = false,
         capturedOrigin: Long? = null,
         isWakeOriginated: Boolean = false,
-    ): VoiceResponse = routeToCloud(
+    ): CloudTurnResult = routeToCloud(
         request,
         tier,
         context,

@@ -896,6 +896,45 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `the executor records the action outcome the dispatch reported`() = runTest {
+        // The OUTCOME the sink reports is the only thing that decides what is recorded, so a case that
+        // passed while reading nothing would need the executor to invent a value -- which it cannot, as
+        // the fake's default is the opposite of what this asserts.
+        val sinks = FakeSinks()
+        sinks.cloudRoute.actionOutcome = CloudRouteActionOutcome.Unknown
+
+        val executor = sinks.executor()
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "summarize this episode",
+                tier = VoiceIntent.CloudTier.Premium,
+            ),
+        )
+
+        assertEquals(
+            "an unknown action outcome must survive the dispatch, not be collapsed into a settled one",
+            CloudRouteActionOutcome.Unknown,
+            executor.lastActionOutcome,
+        )
+    }
+
+    @Test
+    fun `a confirmed action is recorded as confirmed`() = runTest {
+        val sinks = FakeSinks()
+        sinks.cloudRoute.actionOutcome = CloudRouteActionOutcome.Confirmed
+
+        val executor = sinks.executor()
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "summarize this episode",
+                tier = VoiceIntent.CloudTier.Premium,
+            ),
+        )
+
+        assertEquals(CloudRouteActionOutcome.Confirmed, executor.lastActionOutcome)
+    }
+
+    @Test
     fun `a spoken pause is reported as a user command`() = runTest {
         val sinks = FakeSinks()
         val executor = sinks.executor()
@@ -1307,6 +1346,14 @@ class VoicePlaybackIntentExecutorTest {
         val capturedOrigins = mutableListOf<Long?>()
         val wakeOrigins = mutableListOf<Boolean>()
 
+        /**
+         * The action outcome the sink reports.
+         *
+         * Settable so a case can make the DISPATCHED outcome the only thing that decides what the
+         * executor records: a fixed value would let the recording pass while reading nothing.
+         */
+        var actionOutcome: CloudRouteActionOutcome = CloudRouteActionOutcome.Confirmed
+
         /** The prepared turns a retry dispatched, so a case can assert identity was reused. */
         val preparedDispatches = mutableListOf<au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
 
@@ -1403,14 +1450,19 @@ class VoicePlaybackIntentExecutorTest {
 
         override suspend fun dispatchPrepared(
             prepared: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
-        ): VoiceResponse {
+        ): CloudTurnResult {
             preparedDispatches += prepared
             calls += "dispatchPrepared:${prepared.request}"
             // The hook belongs to the DISPATCH, which is where production now sends the turn: a case
             // that landed an event "while in flight" through the old call site would silently land it
             // nowhere, and the case would pass or fail for the wrong reason.
             whileInFlight?.invoke()
-            return VoiceResponse.Silent
+            // The fake reports a CONFIRMED action, so a case exercising the executor's consumption sees
+            // a settled outcome rather than an accidental Unknown.
+            return CloudTurnResult(
+                feedback = VoiceResponse.Silent,
+                action = actionOutcome,
+            )
         }
 
         override suspend fun routeToCloud(
@@ -1420,12 +1472,15 @@ class VoicePlaybackIntentExecutorTest {
             isLiveGraceTurn: Boolean,
             capturedOrigin: Long?,
             isWakeOriginated: Boolean,
-        ): VoiceResponse {
+        ): CloudTurnResult {
             calls += "routeToCloud:$request:${tier.name}"
             graceFlags += isLiveGraceTurn
             capturedOrigins += capturedOrigin
             wakeOrigins += isWakeOriginated
-            return VoiceResponse.Silent
+            return CloudTurnResult(
+                feedback = VoiceResponse.Silent,
+                action = actionOutcome,
+            )
         }
     }
 

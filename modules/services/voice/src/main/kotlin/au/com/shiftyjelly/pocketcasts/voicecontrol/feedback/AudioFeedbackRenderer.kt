@@ -171,6 +171,9 @@ class AudioFeedbackRenderer(
     /** The in-flight earcon coverage, so a session end can end it rather than let it run on. */
     private var earconCoverageJob: Job? = null
 
+    /** Serializes ownership validation with an observation's publication. */
+    private val coverageLock = Any()
+
     /**
      * Whether the coverage observation is STILL RUNNING, so a case can assert that a deadline BOUNDS it.
      *
@@ -193,6 +196,24 @@ class AudioFeedbackRenderer(
     internal fun coverageExpiredUnknownForTest(): Boolean = coverageExpiredUnknown
 
     /**
+     * Publishes an observation ONLY while [observer] is still the cue's current observer.
+     *
+     * `coverageExpiredUnknown` is written by a NON-SUSPENDING assignment, so cancellation cannot protect
+     * it: an old observer resuming after a successor has published would overwrite the successor's
+     * result with its own. THE VALIDATION AND THE WRITE ARE ONE STEP, under the same monitor that
+     * installs a successor, so the two cannot interleave.
+     */
+    private fun publishObservationIfOwning(observer: Job?, write: () -> Unit) {
+        synchronized(coverageLock) {
+            if (observer == null || earconCoverageJob !== observer) return
+            write()
+        }
+    }
+
+    /** The deadline-expiry form of [publishObservationIfOwning]. */
+    private fun publishExpiryIfOwning(observer: Job?) = publishObservationIfOwning(observer) { coverageExpiredUnknown = true }
+
+    /**
      * Keeps the gate's attribution fresh until the cue is OBSERVED to have been consumed.
      *
      * The estimated duration is a BOUND, not the ending condition: the loop ends when the output
@@ -204,9 +225,26 @@ class AudioFeedbackRenderer(
      * Runs on the renderer's own scope so a synchronous caller is not blocked.
      */
     private fun coverEarconUntilConsumed() {
-        earconCoverageJob?.cancel()
-        coverageExpiredUnknown = false
-        earconCoverageJob = scope.launch {
+        // THE OBSERVER KNOWS ITS OWN CUE. `coverageExpiredUnknown` is a plain field written by a
+        // NON-SUSPENDING assignment after `completion()` returns, so cancellation alone cannot protect it:
+        // an OLD observer can resume after a SUCCESSOR has published its own result and overwrite it.
+        // Each observer therefore carries the job that owns it and validates ownership in the same step
+        // as the write -- if the current job is not this one, this observer no longer speaks for the cue.
+        // THE IDENTITY IS THE JOB ITSELF, CAPTURED BEFORE IT STARTS. Reading it from inside the
+        // coroutine would race the assignment below -- `launch` can begin before `earconCoverageJob` is
+        // set, so an inner capture would compare against `null` and return immediately, ending every
+        // observation before it ran. `CoroutineStart.LAZY` lets the identity be published first, and the
+        // coroutine is then started explicitly.
+        synchronized(coverageLock) {
+            earconCoverageJob?.cancel()
+            coverageExpiredUnknown = false
+        }
+        // A REFERENCE THE COROUTINE CAN READ FROM INSIDE ITS OWN INITIALIZER. Kotlin does not allow a
+        // `val` to be referenced within its own initialiser, and the observer needs its own job identity
+        // for the ownership check -- so the identity is published through a holder that is set before the
+        // observer ever runs.
+        val observerRef = kotlinx.coroutines.CompletableDeferred<Job>()
+        val observer = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             // A cue that is never observed to progress must not be covered forever: the estimate
             // bounds the wait, and the bound is only a ceiling.
             val boundMs = earconPlayer.emittedDurationMs()
@@ -257,7 +295,9 @@ class AudioFeedbackRenderer(
                 if (observed && remainingMs <= 0) {
                     // THE DEADLINE EXPIRED: the observation gives up WITHOUT having established the
                     // cue's fate, so the ending is UNKNOWN rather than a claim that it completed.
-                    coverageExpiredUnknown = true
+                    // OWNERSHIP AND THE WRITE ARE ONE STEP: a superseding observation has already
+                    // published its own result, and this one must not overwrite it.
+                    publishExpiryIfOwning(observerRef.await())
                     return@launch
                 }
                 val waitMs = if (!observed) {
@@ -275,8 +315,9 @@ class AudioFeedbackRenderer(
                     // Returning here without noting treated completion as if it proved nothing.
                     EarconPlayer.EarconCompletion.Consumed -> {
                         noteEmitted()
-                        // AN OBSERVED ENDING IS NOT AN EXPIRY: the cue's fate IS established.
-                        coverageExpiredUnknown = false
+                        // AN OBSERVED ENDING IS NOT AN EXPIRY: the cue's fate IS established -- and it
+                        // is only published if this observer still owns the cue.
+                        publishObservationIfOwning(observerRef.await()) { coverageExpiredUnknown = false }
                         return@launch
                     }
 
@@ -305,6 +346,11 @@ class AudioFeedbackRenderer(
                 }
             }
         }
+        synchronized(coverageLock) {
+            earconCoverageJob = observer
+            observerRef.complete(observer)
+        }
+        observer.start()
     }
 
     /**

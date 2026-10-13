@@ -387,6 +387,16 @@ class VoiceControlService : Service() {
                                     ListeningMode.WakeWord
                                 },
                             )
+                            // The engine owns the acquired stream from here: release() must not
+                            // close it. When the engine did not start (backend not ready, no
+                            // backend), the stream is still acquisition's to close.
+                            if (engineStarted) {
+                                routeAcquisition.handOffStream()
+                            } else {
+                                routeAcquisition.release()
+                            }
+                        } else {
+                            routeAcquisition.release()
                         }
                     }
 
@@ -422,11 +432,15 @@ class VoiceControlService : Service() {
     private fun stopEngine() {
         acquisitionJob?.cancel()
         acquisitionJob = null
+        // Stop the engine before releasing acquisition routing: the engine tears down the
+        // stream it owns in its own flow `finally`, and release() must never delete a live
+        // capture. After hand-off release() only undoes the acquired routing.
+        if (engineStarted) {
+            voiceAsrEngine.get().stop()
+            engineStarted = false
+            Timber.i("[VoicePipeline] engine stopped")
+        }
         routeAcquisition.release()
-        if (!engineStarted) return
-        voiceAsrEngine.get().stop()
-        engineStarted = false
-        Timber.i("[VoicePipeline] engine stopped")
     }
 
     private fun handleIntent(

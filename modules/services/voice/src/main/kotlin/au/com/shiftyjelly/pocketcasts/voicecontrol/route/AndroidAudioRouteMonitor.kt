@@ -75,22 +75,33 @@ class AndroidAudioRouteMonitor @Inject constructor(
             inputDeviceTypes: List<Int>,
             bluetoothScoActive: Boolean = false,
         ): AudioRoute {
-            val hasWiredOrBleOutput = outputDeviceTypes.any { it.isWiredOrBleHeadsetOutput() }
-            val hasWiredOrBleInput = inputDeviceTypes.any { it.isWiredOrBleHeadsetInput() }
+            val hasWiredInput = inputDeviceTypes.any { it == AudioDeviceInfo.TYPE_WIRED_HEADSET }
+            val hasBleInput = inputDeviceTypes.any { it.isBleHeadset() }
+            val hasWiredOutput = outputDeviceTypes.any { it.isWiredHeadsetOutput() }
+            val hasBleOutput = outputDeviceTypes.any { it.isBleHeadset() }
             val hasA2dp = outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
             val hasScoDevices = outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO } ||
                 inputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
 
             return when {
-                // Wired / BLE headsets don't need classic SCO.
-                hasWiredOrBleOutput || hasWiredOrBleInput ->
-                    AudioRoute.Headset(hasMicrophone = hasWiredOrBleInput)
+                // An external headset microphone is already selected — wired or BLE.
+                hasWiredInput || hasBleInput ->
+                    AudioRoute.Headset(hasMicrophone = true)
+
+                // A wired output with no wired microphone (headphones) exposes no mic and
+                // cannot be acquired; it stays NoMic.
+                hasWiredOutput -> AudioRoute.Headset(hasMicrophone = false)
+
+                // A BLE output whose microphone the session has not selected yet is an
+                // acquirable candidate: LE Audio selection (setCommunicationDevice) turns
+                // it into an Isolated headset. It must not collapse to NoMic.
+                hasBleOutput -> AudioRoute.BluetoothA2dpOnly
 
                 // Classic BT with a live SCO link — mic is on the headset.
                 (hasScoDevices || hasA2dp) && bluetoothScoActive ->
                     AudioRoute.Headset(hasMicrophone = true)
 
-                // A2DP (and/or enumerated-but-inactive SCO) — VoiceAsrEngine must open SCO
+                // A2DP (and/or enumerated-but-inactive SCO) — acquisition must open SCO
                 // before capture, otherwise Oboe binds the phone bottom mic.
                 hasA2dp || hasScoDevices -> AudioRoute.BluetoothA2dpOnly
 
@@ -100,14 +111,9 @@ class AndroidAudioRouteMonitor @Inject constructor(
             }
         }
 
-        private fun Int.isWiredOrBleHeadsetOutput(): Boolean {
+        private fun Int.isWiredHeadsetOutput(): Boolean {
             return this == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
-                this == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
-                isBleHeadset()
-        }
-
-        private fun Int.isWiredOrBleHeadsetInput(): Boolean {
-            return this == AudioDeviceInfo.TYPE_WIRED_HEADSET || isBleHeadset()
+                this == AudioDeviceInfo.TYPE_WIRED_HEADPHONES
         }
 
         private fun Int.isBleHeadset(): Boolean {

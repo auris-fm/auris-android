@@ -61,7 +61,10 @@ class AndroidRouteAcquisitionPlatform(
     override fun isBluetoothScoOn(): Boolean = audioManager.isBluetoothScoOn
 
     override fun setCommunicationDevice(deviceId: Int): Boolean {
-        val device = inputDevice(deviceId) ?: return false
+        // A BLE candidate is enumerated as an output device before its input is selected,
+        // and setCommunicationDevice accepts a BLE_HEADSET output. Only fall back to the
+        // full list after input lookup so classic input ids still resolve first.
+        val device = communicationDevice(deviceId) ?: return false
         return audioManager.setCommunicationDevice(device)
     }
 
@@ -85,7 +88,8 @@ class AndroidRouteAcquisitionPlatform(
         microphoneCapture.closeAcquiredStream()
     }
 
-    private fun inputDevice(deviceId: Int): AudioDeviceInfo? = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.id == deviceId }
+    private fun communicationDevice(deviceId: Int): AudioDeviceInfo? = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).firstOrNull { it.id == deviceId }
+        ?: allDevices().firstOrNull { it.id == deviceId }
 
     private fun allDevices(): Array<AudioDeviceInfo> = audioManager.getDevices(AudioManager.GET_DEVICES_ALL)
 }

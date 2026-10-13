@@ -345,4 +345,88 @@ class RouteAcquisitionTest {
         assertEquals(0, platform.startCalls)
         assertTrue("routing must be released", platform.scoCalls >= 1)
     }
+
+    // ── Stream ownership and release ────────────────────────────────────
+
+    @Test
+    fun `release without an acquisition attempt never closes the engine-owned stream`() = runTest {
+        // A wired or speaker route never opens a stream for acquisition, and the engine owns
+        // its own capture stream. release() must not delete a stream this component never opened.
+        val platform = FakePlatform()
+
+        RouteAcquisition(platform, timeoutMs = 1_000L, pollIntervalMs = 10L).release()
+
+        assertEquals(0, platform.closeCalls)
+        assertEquals(0, platform.interactions())
+    }
+
+    @Test
+    fun `release after the engine takes over the stream does not close it`() = runTest {
+        val platform = FakePlatform().apply {
+            scoOn = true
+            openedDeviceId = 12
+            deviceTypes[12] = AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+        }
+        val acquisition = acquisition(platform)
+
+        val result = acquisition.acquire(
+            BluetoothCandidate(deviceId = 12, transport = BluetoothTransport.ClassicSco),
+            gateAllows = { true },
+        )
+        assertEquals(AcquisitionResult.Acquired(12), result)
+
+        // The service hands the stream to the engine once capture starts.
+        acquisition.handOffStream()
+        acquisition.release()
+
+        // The engine owns the stream post-handoff; release only undoes routing.
+        assertEquals(0, platform.closeCalls)
+        assertTrue("routing must still be released", platform.scoCalls >= 1)
+    }
+
+    @Test
+    fun `release before the engine takes over closes the started stream`() = runTest {
+        // Acquisition succeeded (the stream is live) but the engine never started — for
+        // example the gate blocked after the stream opened. The stream is still this
+        // component's to close.
+        val platform = FakePlatform().apply {
+            scoOn = true
+            openedDeviceId = 14
+            deviceTypes[14] = AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+        }
+        val acquisition = acquisition(platform)
+
+        val result = acquisition.acquire(
+            BluetoothCandidate(deviceId = 14, transport = BluetoothTransport.ClassicSco),
+            gateAllows = { true },
+        )
+        assertEquals(AcquisitionResult.Acquired(14), result)
+
+        acquisition.release()
+
+        assertEquals(1, platform.closeCalls)
+        assertTrue("routing must still be released", platform.scoCalls >= 1)
+    }
+
+    @Test
+    fun `release after a failed acquisition still closes the opened stream`() = runTest {
+        val platform = FakePlatform().apply {
+            scoOn = true
+            openedDeviceId = 13
+            deviceTypes[13] = AudioDeviceInfo.TYPE_BUILTIN_MIC
+        }
+        val acquisition = acquisition(platform)
+
+        val result = acquisition.acquire(
+            BluetoothCandidate(deviceId = 13, transport = BluetoothTransport.ClassicSco),
+            gateAllows = { true },
+        )
+        assertEquals(AcquisitionResult.Failed(RouteAcquisition.REASON_FAILED), result)
+
+        // The failed attempt already closed it once ...
+        assertEquals(1, platform.closeCalls)
+        // ... and a second release must not touch it again.
+        acquisition.release()
+        assertEquals(1, platform.closeCalls)
+    }
 }

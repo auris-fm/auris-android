@@ -97,6 +97,12 @@ class RouteAcquisition(
     /** True once this attempt selected routing that [release] must undo. */
     private var routingAcquired = false
 
+    /** True when this attempt opened an input stream that it has not handed off yet. */
+    private var openedStream = false
+
+    /** True once the opened stream was started and so belongs to the capture engine. */
+    private var streamHandedOff = false
+
     suspend fun acquire(route: AudioRoute, gateAllows: () -> Boolean): AcquisitionResult {
         if (route !is AudioRoute.BluetoothA2dpOnly) return AcquisitionResult.NotNeeded
         val candidate = platform.bluetoothCandidates().firstOrNull()
@@ -137,13 +143,20 @@ class RouteAcquisition(
         // getDevices is never selection: only isBluetoothScoOn() / getCommunicationDevice()
         // reporting the candidate counts.
         val selection = withTimeoutOrNull(timeoutMs) {
-            while (true) {
-                if (!gateAllows()) return@withTimeoutOrNull Selection.GATE_LOST
-                if (isSelected(candidate)) return@withTimeoutOrNull Selection.SELECTED
-                delay(pollIntervalMs)
+            var outcome: Selection? = null
+            while (outcome == null) {
+                outcome = when {
+                    !gateAllows() -> Selection.GATE_LOST
+
+                    isSelected(candidate) -> Selection.SELECTED
+
+                    else -> {
+                        delay(pollIntervalMs)
+                        null
+                    }
+                }
             }
-            @Suppress("UNREACHABLE_CODE")
-            Selection.TIMEOUT
+            outcome
         } ?: Selection.TIMEOUT
 
         when (selection) {
@@ -162,6 +175,8 @@ class RouteAcquisition(
 
         // The opened stream is the final authority on which microphone was selected.
         val deviceId = platform.openInputStream()
+        openedStream = true
+        streamHandedOff = false
         if (deviceId < 0 || !isConfirmedExternalMicrophone(platform.deviceType(deviceId))) {
             release()
             Timber.w(
@@ -191,9 +206,27 @@ class RouteAcquisition(
         BluetoothTransport.LeAudio -> platform.communicationDeviceId() == candidate.deviceId
     }
 
-    /** Closes any opened stream and releases routing this acquisition actually acquired. Idempotent. */
+    /**
+     * Marks the stream opened by [acquire] as owned by the capture engine. After this,
+     * [release] must not close the stream — the engine tears it down itself, and closing it
+     * from here would delete its live capture. Releasing the acquired routing still happens.
+     */
+    fun handOffStream() {
+        if (openedStream) streamHandedOff = true
+    }
+
+    /**
+     * Releases routing this acquisition actually acquired and closes the input stream only
+     * while this component still owns it. Once the stream has been handed off (see
+     * [handOffStream]) the capture engine owns it and tears it down itself; touching it here
+     * would delete the engine's live capture. Idempotent.
+     */
     fun release() {
-        runCatching { platform.closeInputStream() }
+        if (openedStream && !streamHandedOff) {
+            runCatching { platform.closeInputStream() }
+        }
+        openedStream = false
+        streamHandedOff = false
         if (routingAcquired) {
             routingAcquired = false
             runCatching { platform.stopBluetoothSco() }

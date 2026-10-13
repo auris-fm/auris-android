@@ -133,4 +133,26 @@ class AndroidAudioRouteMonitorTest {
         )
         assertEquals(AudioRoute.Unknown, route)
     }
+
+    @Test
+    fun `ble headset output without a selected ble input is an acquirable candidate`() {
+        // A BLE headset that has connected output but whose microphone the session has
+        // not selected yet must be acquirable, not NoMic: LE Audio selection (setCommunicationDevice)
+        // is what turns it into an Isolated headset.
+        val route = AndroidAudioRouteMonitor.classifyRoute(
+            outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BLE_HEADSET),
+            inputDeviceTypes = emptyList(),
+        )
+        assertEquals(AudioRoute.BluetoothA2dpOnly, route)
+        assertEquals(MicExposure.Exposed, route.toMicExposure())
+    }
+
+    @Test
+    fun `ble headset output with a selected ble input is headset with mic`() {
+        val route = AndroidAudioRouteMonitor.classifyRoute(
+            outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BLE_HEADSET),
+            inputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BLE_HEADSET),
+        )
+        assertEquals(AudioRoute.Headset(hasMicrophone = true), route)
+    }
 }

@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.settings.voice
 
 import android.Manifest
+import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.LayoutInflater
@@ -11,8 +12,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
@@ -21,6 +26,8 @@ import androidx.compose.ui.tooling.preview.PreviewParameter
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import au.com.shiftyjelly.pocketcasts.compose.AppTheme
 import au.com.shiftyjelly.pocketcasts.compose.AppThemeWithBackground
@@ -55,6 +62,11 @@ class VoiceControlSettingsFragment : BaseFragment() {
 
     @Inject lateinit var listeningModePolicy: ListeningModePolicy
 
+    private fun Context.isRecordAudioGranted() = ContextCompat.checkSelfPermission(
+        this,
+        Manifest.permission.RECORD_AUDIO,
+    ) == PackageManager.PERMISSION_GRANTED
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -76,10 +88,18 @@ class VoiceControlSettingsFragment : BaseFragment() {
             val bottomInset = settings.bottomInset
                 .collectAsStateWithLifecycle(0)
 
-            val permissionGranted = ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.RECORD_AUDIO,
-            ) == PackageManager.PERMISSION_GRANTED
+            var permissionGranted by remember { mutableStateOf(context.isRecordAudioGranted()) }
+            DisposableEffect(this) {
+                val observer = LifecycleEventObserver { _, event ->
+                    if (event == Lifecycle.Event.ON_RESUME) {
+                        permissionGranted = context.isRecordAudioGranted()
+                    }
+                }
+                lifecycle.addObserver(observer)
+                onDispose {
+                    lifecycle.removeObserver(observer)
+                }
+            }
 
             VoiceControlSettingsPage(
                 enabled = !enabled,

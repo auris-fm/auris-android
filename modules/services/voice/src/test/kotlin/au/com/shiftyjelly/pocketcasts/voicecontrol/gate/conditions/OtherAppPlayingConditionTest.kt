@@ -16,6 +16,44 @@ import org.junit.Test
 class OtherAppPlayingConditionTest {
 
     @Test
+    fun `a successor's unresolved observation does not inherit the previous cue's timeout`() {
+        // @spec's specific check. Cue A is unresolved long enough to consume most of its hold; a SECOND
+        // cue then becomes unresolved. If the anchor were kept across cues, B would inherit A's elapsed
+        // time and expire almost immediately -- a hold that never actually covered B.
+        var now = 0L
+        val observation = MutableStateFlow<AudioFeedbackRenderer.CueObservation?>(
+            AudioFeedbackRenderer.CueObservation.Unknown,
+        )
+        val condition = OtherAppPlayingCondition(
+            hostIsPlaying = MutableStateFlow(false),
+            hasEmittedAudio = MutableStateFlow(true),
+            lastEmittedAtMs = MutableStateFlow(0L),
+            lastCueObservation = observation,
+            nowMs = { now },
+            transitionWindowMs = 5_000,
+        )
+
+        // CUE A: unresolved for most of the hold.
+        condition.otherAppPlaying(isMusicActive = true)
+        now = 25_000L
+        assertFalse(condition.otherAppPlaying(isMusicActive = true))
+
+        // CUE B TAKES OVER: the observation leaves Unknown and becomes Unknown again for the new cue.
+        observation.value = null
+        condition.otherAppPlaying(isMusicActive = true)
+        now = 26_000L
+        observation.value = AudioFeedbackRenderer.CueObservation.Unknown
+
+        // B MUST GET ITS OWN HOLD. Inheriting A's anchor would expire B at 5_000 ms of ITS OWN life --
+        // here at 30_000 -- even though B's observation is only 4_000 ms old.
+        now = 30_000L
+        assertFalse(
+            "the successor's hold must be measured from ITS OWN observation, not the previous cue's",
+            condition.otherAppPlaying(isMusicActive = true),
+        )
+    }
+
+    @Test
     fun `an unresolved observation does NOT hold the attribution open forever`() {
         // @reviewer's second finding: Unknown bypassed the window with NO TIME LIMIT, so after the cue
         // ended every later active-music reading stayed attributed to us. A hold is a BOUND, not a state

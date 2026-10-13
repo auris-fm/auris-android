@@ -5,6 +5,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteActionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsPlaybackIncompleteException
@@ -60,6 +61,66 @@ class VoiceControlServiceRenderTest {
     }
 
     private fun noopIntent(): VoiceIntent = VoiceIntent.Playback.Pause
+
+    private fun cloudIntent(): VoiceIntent = VoiceIntent.CloudRoute(
+        request = "summarize this episode",
+        tier = VoiceIntent.CloudTier.Premium,
+    )
+
+    @Test
+    fun `the production caller records the action outcome the executor reported`() = runTest {
+        // @spec's request-owned boundary: the outcome must have a PRODUCTION consumer whose DECISION is
+        // observable, not merely a value the executor stores. The executor's outcome is settable here, so
+        // it is the only thing that can decide what the service records.
+        val earconPlayer = mock(EarconPlayer::class.java)
+        val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
+        val service = VoiceControlService().apply {
+            audioFeedbackRenderer = renderer
+            voicePlaybackIntentExecutor = mock(VoicePlaybackIntentExecutor::class.java).also { executor ->
+                whenever(executor.execute(org.mockito.kotlin.any())).thenReturn(VoiceResponse.Silent)
+                whenever(executor.lastActionOutcome).thenReturn(CloudRouteActionOutcome.Unknown)
+            }
+        }
+        try {
+            service.renderWithFailureHandling(cloudIntent())
+
+            assertEquals(
+                "an UNKNOWN action outcome must survive to the production caller rather than being " +
+                    "reported as a delivered action",
+                CloudRouteActionOutcome.Unknown,
+                service.lastActionOutcome,
+            )
+        } finally {
+            renderer.release()
+        }
+    }
+
+    @Test
+    fun `a local intent does not inherit a cloud turn's action outcome`() = runTest {
+        // THE STALENESS CONTROL. A local intent has no cloud action, so an outcome left over from an
+        // earlier turn would be read as this turn's decision -- which is exactly how a value gets
+        // attributed to the wrong action.
+        val earconPlayer = mock(EarconPlayer::class.java)
+        val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
+        val service = VoiceControlService().apply {
+            audioFeedbackRenderer = renderer
+            voicePlaybackIntentExecutor = mock(VoicePlaybackIntentExecutor::class.java).also { executor ->
+                whenever(executor.execute(org.mockito.kotlin.any())).thenReturn(VoiceResponse.Silent)
+                whenever(executor.lastActionOutcome).thenReturn(CloudRouteActionOutcome.Unknown)
+            }
+        }
+        try {
+            service.renderWithFailureHandling(noopIntent())
+
+            assertEquals(
+                "a local turn reports no cloud action, however the previous turn ended",
+                CloudRouteActionOutcome.None,
+                service.lastActionOutcome,
+            )
+        } finally {
+            renderer.release()
+        }
+    }
 
     @Test
     fun `a delivery failure is handled inside the render rather than escaping it`() = runTest {

@@ -29,6 +29,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningModePolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.shouldPlayListeningStartCue
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteActionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.restoresAllowance
@@ -167,8 +168,12 @@ class VoiceControlService : Service() {
         // hears nothing for a command they did give -- and at the call site it also skips the
         // turn's grace cleanup, which runs after this returns. Feedback is the user-facing contract,
         // so the failure is turned into one here rather than propagated.
+        // THE REQUEST-OWNED ACTION OUTCOME IS CONSUMED HERE, at the production caller, and it CHANGES
+        // WHAT IS REPORTED. `execute` returns the FEEDBACK; the outcome is a separate fact about whether
+        // the action it dispatched actually ran. Reading only the feedback would let an action whose
+        // outcome could not be established pass as a delivered turn.
         val response = try {
-            voicePlaybackIntentExecutor.execute(intent)
+            voicePlaybackIntentExecutor.execute(intent).also { recordActionDecision(intent) }
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             // Cancellation is the caller withdrawing, not a failure to report: rethrow so structured
             // concurrency still unwinds instead of being swallowed into an earcon.
@@ -178,6 +183,32 @@ class VoiceControlService : Service() {
             VoiceResponse.Earcon(EarconId.ERROR)
         }
         audioFeedbackRenderer.render(response)
+    }
+
+    /**
+     * Publishes the decision the request-owned outcome implies, and holds the last one for callers.
+     *
+     * AN UNKNOWN OUTCOME IS NOT A DELIVERED ACTION. The turn's feedback may say everything went well
+     * while the action it dispatched was ISSUED without a returned outcome -- and a caller that could not
+     * tell those apart would treat an unknowable execution as a completed one. Recording the three values
+     * separately is what makes that distinction observable rather than a comment.
+     */
+    @Volatile
+    internal var lastActionOutcome: CloudRouteActionOutcome = CloudRouteActionOutcome.None
+        private set
+
+    private fun recordActionDecision(
+        intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
+    ) {
+        // ONLY A CLOUD TURN HAS ONE. A local intent has no cloud action, so leaving the previous turn's
+        // outcome standing would attribute one turn's action to another -- stale state read as this
+        // turn's decision.
+        lastActionOutcome = if (intent is au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent.CloudRoute) {
+            voicePlaybackIntentExecutor.lastActionOutcome
+        } else {
+            CloudRouteActionOutcome.None
+        }
+        Timber.i("[VoicePipeline] action outcome: $lastActionOutcome")
     }
 
     private fun startVoiceControl() {

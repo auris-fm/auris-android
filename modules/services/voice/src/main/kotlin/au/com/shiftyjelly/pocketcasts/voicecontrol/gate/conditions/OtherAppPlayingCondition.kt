@@ -97,6 +97,32 @@ class OtherAppPlayingCondition(
         return evaluate(hasOtherApp)
     }
 
+    /** How long an unresolved observation may hold the attribution open, past the deadline itself. */
+    private val unresolvedHoldMs: Long = UNRESOLVED_HOLD_MS
+    private var unresolvedSinceMs: Long = Long.MIN_VALUE
+    private var unresolvedSeen: Boolean = false
+
+    /**
+     * How long the current unresolved observation has been standing, or null if there is not one.
+     *
+     * MEASURED FROM WHEN THE OBSERVATION BECAME UNRESOLVED, not from when the app started: a bound
+     * anchored to the wrong instant either never expires or expires at once.
+     */
+    private fun unresolvedAgeMs(): Long? {
+        val unresolved = lastCueObservation.value ==
+            au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer.CueObservation.Unknown
+        if (!unresolved) {
+            unresolvedSeen = false
+            unresolvedSinceMs = Long.MIN_VALUE
+            return null
+        }
+        if (!unresolvedSeen) {
+            unresolvedSeen = true
+            unresolvedSinceMs = nowMs()
+        }
+        return nowMs() - unresolvedSinceMs
+    }
+
     /**
      * One place that assembles the attribution arguments, so the polled path and an on-demand
      * evaluation cannot disagree about them.
@@ -113,12 +139,16 @@ class OtherAppPlayingCondition(
                 nowMs() - lastSelfEmittedMs
             },
             transitionWindowMs = transitionWindowMs,
-            // AN UNKNOWN OBSERVATION KEEPS THE SELF-EMISSION WINDOW OPEN. The deadline expiring did not
-            // establish that the cue stopped sounding, so treating it as ended would attribute audio we
-            // may still be making to a foreign app -- and cut the microphone mid-cue. This is the
-            // production consumer of the renderer's typed per-cue observation.
-            selfEmissionUnresolved = lastCueObservation.value ==
-                au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer.CueObservation.Unknown,
+            // AN UNKNOWN OBSERVATION KEEPS THE SELF-EMISSION WINDOW OPEN -- BUT ONLY FOR AS LONG AS THE
+            // OBSERVATION ITSELF COULD HAVE BEEN WAITING. The deadline expiring did not establish that
+            // the cue stopped sounding, so treating it as ended immediately would attribute audio we may
+            // still be making to a foreign app.
+            //
+            // IT IS A BOUND, NOT A PERMANENT STATE. An unresolved cue is unresolved for a bounded time;
+            // keeping it open indefinitely would attribute EVERY LATER active-music reading to us, long
+            // after the cue or its session had ended -- the mirror of the failure it prevents, and the
+            // reason an explicit stop/session end retires the observation.
+            selfEmissionUnresolved = unresolvedAgeMs()?.let { it < UNRESOLVED_HOLD_MS } == true,
         )
     }
 
@@ -169,3 +199,11 @@ internal fun otherAppPlaying(
         selfEmissionUnresolved
     return !hostOwnsAudio
 }
+
+/**
+ * How long an unresolved cue observation may hold our own audio attributed to the host.
+ *
+ * Generous relative to the observation's own deadline, because it exists to cover the gap between the
+ * observation giving up and an explicit stop or session end retiring it -- not to bound the cue itself.
+ */
+internal const val UNRESOLVED_HOLD_MS: Long = 30_000

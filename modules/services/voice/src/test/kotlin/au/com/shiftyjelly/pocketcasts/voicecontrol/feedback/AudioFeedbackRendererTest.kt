@@ -176,6 +176,95 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `an old stop cannot retire a successor cue's observation`() = runTest {
+        // @spec: "an old stop must not retire a successor". The first cue's observation expires to
+        // Unknown; a SECOND cue then takes over and is observed Consumed. The first cue's retirement must
+        // not overwrite the successor's verdict -- otherwise a stale stop would re-open the gate's
+        // attribution on a cue that already finished, or hide one that is still sounding.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_100))
+        assertEquals(
+            AudioFeedbackRenderer.CueObservation.Unknown,
+            renderer.lastCueObservation.value,
+        )
+
+        // THE SUCCESSOR TAKES OVER and is observed consumed. Its OWN play must be accepted, or the
+        // observation never starts and the case would be about the missing acceptance rather than about
+        // the retirement it is asking about.
+        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(true)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        renderer.playEarcon(EarconId.LISTENING_START)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(100))
+        assertEquals(
+            "the successor's own verdict stands",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            renderer.lastCueObservation.value,
+        )
+
+        // THE STALE RETIREMENT FOR THE FIRST CUE ARRIVES LATE and must change nothing.
+        renderer.stopEarconNow()
+
+        // The stop path retires the CURRENT owner, which IS the successor, so the verdict becomes Ended --
+        // what must NOT happen is the OLD cue's Unknown being republished. Any value is acceptable except
+        // the successor's observation being replaced by a verdict about a cue nobody is observing.
+        assertNotEquals(
+            "a stale retirement must not resurrect the old cue's verdict",
+            AudioFeedbackRenderer.CueObservation.Unknown,
+            renderer.lastCueObservation.value,
+        )
+    }
+
+    @Test
+    fun `an explicit stop RETIRES the unresolved observation`() = runTest {
+        // @reviewer's expiry→actual-endSession reproduction, and @spec's retirement gap: the deadline
+        // establishes UNKNOWN, and then the production stop path must retire it -- a cue that has been
+        // stopped explicitly HAS a known fate, and leaving Unknown published would hold the gate's
+        // attribution open for every later music reading.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_100))
+        assertEquals(
+            "the deadline first establishes UNKNOWN",
+            AudioFeedbackRenderer.CueObservation.Unknown,
+            renderer.lastCueObservation.value,
+        )
+
+        renderer.stopEarconNow()
+
+        assertEquals(
+            "an explicit stop RETIRES the unresolved observation, because the cue now has a known fate",
+            AudioFeedbackRenderer.CueObservation.Ended,
+            renderer.lastCueObservation.value,
+        )
+    }
+
+    @Test
+    fun `a session end RETIRES the unresolved observation`() = runTest {
+        // The other production retirement path, reached from `stopVoiceControl()`.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_100))
+
+        renderer.endSession()
+
+        assertEquals(
+            "a session end retires the cue it ended: nobody can hear it any more",
+            AudioFeedbackRenderer.CueObservation.Ended,
+            renderer.lastCueObservation.value,
+        )
+    }
+
+    @Test
     fun `the observation WAITS OUT the remaining interval to its deadline`() = runTest {
         // @reviewer's measured case: the observer had ALREADY ENDED at 1_999 ms for a 2_000 ms limit,
         // because the loop refused any heartbeat that would overshoot and so gave up one tick EARLY --

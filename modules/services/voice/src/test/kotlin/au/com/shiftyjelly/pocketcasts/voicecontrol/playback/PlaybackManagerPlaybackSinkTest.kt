@@ -80,7 +80,29 @@ class PlaybackManagerPlaybackSinkTest {
     fun `the REAL manager refuses a seek the player is RE-POINTED during`() = probeActualManagerReuse(reuse = true)
 
     @Test
-    fun `the REAL owner skipIfPlaying reports Unknown through the public path`() = runTest {
+    fun `the REAL owner skipIfPlaying reports Unknown through the public path`() = probeRealManagerSkip(
+        au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome.unknown(0L),
+        expectUnknown = true,
+    )
+
+    @Test
+    fun `the REAL owner skip reports Accepted through the same public manager path`() = probeRealManagerSkip(
+        au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome.accepted(60_000L),
+        expectUnknown = false,
+    )
+
+    @Test
+    fun `the REAL owner skip reports Refused when the player refuses its bound mutation`() = probeRealManagerSkip(
+        au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome.Refused,
+        expectUnknown = false,
+        expectRefused = true,
+    )
+
+    private fun probeRealManagerSkip(
+        seekOutcome: au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome,
+        expectUnknown: Boolean,
+        expectRefused: Boolean = false,
+    ) = runTest {
         // @spec's remaining item: the ACTUAL owner's skip, through its PUBLIC entry point. The decision
         // was verified in isolation (172e220ff); this drives the real method and its callers.
         val manager = org.mockito.Mockito.mock(
@@ -95,8 +117,7 @@ class PlaybackManagerPlaybackSinkTest {
             override suspend fun seekToTimeMsIfEpisode(
                 positionMs: Int,
                 expectedEpisodeUuid: String,
-            ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome = au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome
-                .unknown(0L)
+            ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome = seekOutcome
         }
         val fields = PlaybackManager::class.java
         fields.getDeclaredField("_playerFlow").apply { isAccessible = true }.set(
@@ -121,6 +142,24 @@ class PlaybackManagerPlaybackSinkTest {
         org.mockito.kotlin.whenever(settings.skipForwardInSecs).thenReturn(skipForward)
         fields.getDeclaredField("settings").apply { isAccessible = true }.set(manager, settings)
         fields.getDeclaredField("selectedPlayerLock").apply { isAccessible = true }.set(manager, Any())
+        // The ACCEPTED branch records time saved, so the manager needs its statistics collaborator.
+        fields.getDeclaredField("statsManager").apply { isAccessible = true }.set(
+            manager,
+            org.mockito.kotlin.mock<au.com.shiftyjelly.pocketcasts.repositories.user.StatsManager>(),
+        )
+        // ACCEPTANCE REACHES FURTHER INTO THE MANAGER than refusal does, so its remaining state is
+        // supplied from the same field-reflective setup the seek probes use.
+        fields.getDeclaredField("eventHorizon").apply { isAccessible = true }.set(
+            manager,
+            org.mockito.kotlin.mock<com.automattic.eventhorizon.EventHorizon>(),
+        )
+        fields.getDeclaredField("settings").apply { isAccessible = true }.set(manager, settings)
+        fields.getDeclaredField("_streamVideoState").apply { isAccessible = true }.set(
+            manager,
+            kotlinx.coroutines.flow.MutableStateFlow(
+                au.com.shiftyjelly.pocketcasts.repositories.playback.StreamVideoState.NotVideo,
+            ),
+        )
 
         // THE MANAGER AWAITS Dispatchers.Main (PlaybackManager:1449) before its bound mutation, so the
         // fixture must install one -- the same deterministic setup the real-manager probes above use.
@@ -131,10 +170,25 @@ class PlaybackManagerPlaybackSinkTest {
             // THE PUBLIC PATH: the sink adapter the production caller uses.
             val result = sink(manager).skipForward(seconds = 30, expectedEpisodeId = "episode-A")
 
-            assertTrue(
-                "the real owner's unknown skip must reach the caller as Unknown, not Refused",
-                result is EpisodeOperationResult.Unknown,
-            )
+            // THE OUTCOME THE PLAYER GAVE IS THE ONLY THING THAT DECIDES WHICH BRANCH IS REACHED, so all
+            // three outcomes are exercised through the SAME real manager path rather than one of them
+            // plus adapter mocks.
+            when {
+                expectRefused -> assertTrue(
+                    "a player refusal reaches the caller as Refused",
+                    result is EpisodeOperationResult.Refused,
+                )
+
+                expectUnknown -> assertTrue(
+                    "the real owner's unknown skip must reach the caller as Unknown, not Refused",
+                    result is EpisodeOperationResult.Unknown,
+                )
+
+                else -> assertTrue(
+                    "an accepted bound skip reaches the caller as Accepted",
+                    result is EpisodeOperationResult.Accepted,
+                )
+            }
         } finally {
             kotlinx.coroutines.Dispatchers.resetMain()
         }

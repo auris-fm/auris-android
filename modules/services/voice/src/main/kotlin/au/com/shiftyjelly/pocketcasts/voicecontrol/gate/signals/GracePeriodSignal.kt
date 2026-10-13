@@ -407,7 +407,11 @@ class GracePeriodSignal @Inject constructor() {
                 timerJob?.cancel()
                 timerJob = job
             } else {
-                job.cancel()
+                // A REFUSED TIMER IS CANCELLED WITHOUT EVER RUNNING. Its coroutine is launched and then
+                // immediately cancelled, so its completion handler fires on the scope's dispatcher -- and
+                // an unobserved cancellation there surfaces as an exception in a LATER test, not this one.
+                // Cancelling the whole child chain makes the cancellation self-contained.
+                job.cancel(kotlinx.coroutines.CancellationException("window no longer owns this timer"))
             }
         }
     }

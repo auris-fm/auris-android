@@ -110,6 +110,15 @@ class RouteAcquisition(
     /** True once the opened stream was started and so belongs to the capture engine. */
     private var streamHandedOff = false
 
+    /**
+     * True when an acquisition has opened and confirmed a stream that has not been released.
+     * The route monitor is debounced, so immediately after acquisition the reported route may
+     * still be `BluetoothA2dpOnly`; the service uses this to recognise that the route is
+     * already eligible on the strength of the confirmed stream.
+     */
+    val hasConfirmedStream: Boolean
+        get() = openedStream
+
     /** The [AudioManager] mode that was active before classic acquisition changed it. */
     private var savedAudioMode: Int? = null
 
@@ -228,6 +237,37 @@ class RouteAcquisition(
      */
     fun handOffStream() {
         if (openedStream) streamHandedOff = true
+    }
+
+    /**
+     * Opens the input stream and starts it only when the device it selected is a wired, BLE,
+     * or `SCO` headset microphone. This is the confirmation every capture start goes through,
+     * not only acquisition: a wired, BLE, or already-active `SCO` route is classified
+     * `Isolated` directly and would otherwise open-and-start whatever Oboe picks — including
+     * the built-in microphone. `TYPE_BUILTIN_MIC`, `kUnspecified`, and unresolvable ids fail
+     * closed: the stream is closed and no capture starts.
+     *
+     * Reuses the stream an [Acquired] acquisition already opened and started.
+     */
+    fun confirmCaptureStream(): Boolean {
+        if (openedStream) return true
+        val deviceId = platform.openInputStream()
+        openedStream = true
+        streamHandedOff = false
+        if (deviceId < 0 || !isConfirmedExternalMicrophone(platform.deviceType(deviceId))) {
+            Timber.w(
+                "[RouteAcquisition] capture_start_refused: selected device=%d type=%s",
+                deviceId,
+                platform.deviceType(deviceId),
+            )
+            release()
+            return false
+        }
+        if (!platform.startInputStream()) {
+            release()
+            return false
+        }
+        return true
     }
 
     /**

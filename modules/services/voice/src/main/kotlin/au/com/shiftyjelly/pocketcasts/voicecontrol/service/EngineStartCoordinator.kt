@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -22,9 +23,22 @@ internal class EngineStartCoordinator {
 
     private val mutex = Mutex()
 
+    /**
+     * Monotonic counter bumped whenever a pending start must be abandoned (a gate loss, a stop).
+     * A caller captures it with [generation] before starting and re-checks it with [isCurrent]
+     * after every suspension, so a start that was invalidated while suspended cannot commit.
+     */
+    private val startGeneration = AtomicInteger(0)
+
     @Volatile
     var isStarted: Boolean = false
         private set
+
+    /** The generation to capture before a start attempt; validate it with [isCurrent]. */
+    fun generation(): Int = startGeneration.get()
+
+    /** True while [generation] has not been superseded by [invalidatePendingStart] or [onStopped]. */
+    fun isCurrent(generation: Int): Boolean = startGeneration.get() == generation
 
     /**
      * Runs [start] with the start lock held, unless the engine is already running, then runs
@@ -57,8 +71,18 @@ internal class EngineStartCoordinator {
         started
     }
 
-    /** Marks the engine stopped so a later [startIfNotRunning] may start it again. */
+    /**
+     * Abandons any start that is still suspended (there may be no running engine yet), so a
+     * gate loss cannot be followed by a stale start committing capture. Leaves [isStarted]
+     * untouched.
+     */
+    fun invalidatePendingStart() {
+        startGeneration.incrementAndGet()
+    }
+
+    /** Marks the engine stopped and abandons any pending start. */
     fun onStopped() {
+        startGeneration.incrementAndGet()
         isStarted = false
     }
 }

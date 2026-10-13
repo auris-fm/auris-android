@@ -66,6 +66,9 @@ class AndroidAudioRouteMonitor @Inject constructor(
             // SCO I/O devices are enumerated for AirPods even when the SCO link is off
             // (A2DP music path). Only treat BT as a live headset mic when SCO is actually on.
             bluetoothScoActive = audioManager.isBluetoothScoOn,
+            // For BLE, an enumerated input is not a selected one. getCommunicationDevice() is
+            // the selection; presence in getDevices(INPUTS) never counts on its own.
+            bleCommunicationDeviceSelected = audioManager.communicationDevice?.type == AudioDeviceInfo.TYPE_BLE_HEADSET,
         )
     }
 
@@ -74,28 +77,34 @@ class AndroidAudioRouteMonitor @Inject constructor(
             outputDeviceTypes: List<Int>,
             inputDeviceTypes: List<Int>,
             bluetoothScoActive: Boolean = false,
+            bleCommunicationDeviceSelected: Boolean = false,
         ): AudioRoute {
             val hasWiredInput = inputDeviceTypes.any { it == AudioDeviceInfo.TYPE_WIRED_HEADSET }
             val hasBleInput = inputDeviceTypes.any { it.isBleHeadset() }
             val hasWiredOutput = outputDeviceTypes.any { it.isWiredHeadsetOutput() }
             val hasBleOutput = outputDeviceTypes.any { it.isBleHeadset() }
+            val hasBleDevice = hasBleInput || hasBleOutput
             val hasA2dp = outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
             val hasScoDevices = outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO } ||
                 inputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
 
             return when {
-                // An external headset microphone is already selected — wired or BLE.
-                hasWiredInput || hasBleInput ->
+                // A wired input is auto-selected by the platform.
+                hasWiredInput -> AudioRoute.Headset(hasMicrophone = true)
+
+                // For BLE only getCommunicationDevice() proves selection; an enumerated input
+                // is not a selected one.
+                hasBleDevice && bleCommunicationDeviceSelected ->
                     AudioRoute.Headset(hasMicrophone = true)
 
                 // A wired output with no wired microphone (headphones) exposes no mic and
                 // cannot be acquired; it stays NoMic.
                 hasWiredOutput -> AudioRoute.Headset(hasMicrophone = false)
 
-                // A BLE output whose microphone the session has not selected yet is an
+                // A BLE device whose microphone the session has not selected yet is an
                 // acquirable candidate: LE Audio selection (setCommunicationDevice) turns
                 // it into an Isolated headset. It must not collapse to NoMic.
-                hasBleOutput -> AudioRoute.BluetoothA2dpOnly
+                hasBleDevice -> AudioRoute.BluetoothA2dpOnly
 
                 // Classic BT with a live SCO link — mic is on the headset.
                 (hasScoDevices || hasA2dp) && bluetoothScoActive ->

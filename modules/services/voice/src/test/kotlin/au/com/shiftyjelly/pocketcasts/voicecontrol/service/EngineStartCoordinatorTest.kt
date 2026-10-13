@@ -157,4 +157,59 @@ class EngineStartCoordinatorTest {
         assertTrue(again)
         assertEquals(1, engineStarts)
     }
+
+    /**
+     * The acquisition caller clears its own job before it suspends in `ensureReady()`, so a gate
+     * loss cannot cancel it. A generation captured before the attempt lets the start lambda
+     * re-check, after the suspension, whether the attempt is still wanted; an invalidated
+     * attempt must not commit capture.
+     */
+    @Test
+    fun `a gate loss during a suspended start invalidates the pending attempt`() = runTest {
+        val coordinator = EngineStartCoordinator()
+        var committed = false
+        val ready = CompletableDeferred<Unit>()
+
+        val job = launch {
+            val generation = coordinator.generation()
+            coordinator.startIfNotRunning {
+                ready.await() // stands in for backend.ensureReady()
+                if (!coordinator.isCurrent(generation)) return@startIfNotRunning false
+                committed = true
+                true
+            }
+        }
+
+        runCurrent()
+        // Gate loss while the start is suspended: the mode goes Off, but no engine is running
+        // yet, so only this invalidation can stop the pending start.
+        coordinator.invalidatePendingStart()
+        ready.complete(Unit)
+        advanceUntilIdle()
+        job.join()
+
+        assertFalse("a stale start must not commit capture", committed)
+        assertFalse("a stale start must not be recorded as running", coordinator.isStarted)
+    }
+
+    @Test
+    fun `invalidate only affects attempts that captured an older generation`() = runTest {
+        val coordinator = EngineStartCoordinator()
+
+        val stale = coordinator.generation()
+        coordinator.invalidatePendingStart()
+        val fresh = coordinator.generation()
+
+        assertFalse(coordinator.isCurrent(stale))
+        assertTrue(coordinator.isCurrent(fresh))
+
+        var committed = false
+        val started = coordinator.startIfNotRunning {
+            committed = coordinator.isCurrent(fresh)
+            committed
+        }
+        assertTrue(started)
+        assertTrue(committed)
+        assertTrue(coordinator.isStarted)
+    }
 }

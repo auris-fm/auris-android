@@ -502,4 +502,94 @@ class RouteAcquisitionTest {
         acquisition.release()
         assertEquals(1, platform.closeCalls)
     }
+
+    // ── Confirmation on every capture start ─────────────────────────────
+    //
+    // Acquisition is not the only path that opens the microphone: a wired, BLE, or
+    // already-active SCO route is classified Isolated and starts capture directly. Every
+    // start must still open the stream and confirm the selected device, because the route
+    // classification can be wrong (BLE enumeration is not selection). The opened stream is
+    // the authority, and an unconfirmed one fails closed.
+
+    @Test
+    fun `a normal capture start confirms and starts an external wired microphone`() = runTest {
+        val platform = FakePlatform().apply {
+            openedDeviceId = 21
+            deviceTypes[21] = AudioDeviceInfo.TYPE_WIRED_HEADSET
+        }
+        val acquisition = acquisition(platform)
+
+        assertTrue(acquisition.confirmCaptureStream())
+
+        assertEquals(1, platform.openCalls)
+        assertEquals(1, platform.startCalls)
+        assertEquals(0, platform.closeCalls)
+    }
+
+    @Test
+    fun `a normal capture start refuses a built-in microphone stream`() = runTest {
+        val platform = FakePlatform().apply {
+            openedDeviceId = 7
+            deviceTypes[7] = AudioDeviceInfo.TYPE_BUILTIN_MIC
+        }
+        val acquisition = acquisition(platform)
+
+        assertFalse("capture must fail closed on the built-in microphone", acquisition.confirmCaptureStream())
+
+        assertEquals(1, platform.openCalls)
+        assertEquals(0, platform.startCalls)
+        assertEquals("the unconfirmed stream must be closed", 1, platform.closeCalls)
+    }
+
+    @Test
+    fun `a normal capture start refuses an unspecified or unresolvable stream device`() = runTest {
+        val unspecified = FakePlatform().apply { openedDeviceId = 0 }
+        assertFalse(acquisition(unspecified).confirmCaptureStream())
+        assertEquals(0, unspecified.startCalls)
+        assertEquals(1, unspecified.closeCalls)
+
+        val unresolvable = FakePlatform().apply { openedDeviceId = 99 }
+        assertFalse(acquisition(unresolvable).confirmCaptureStream())
+        assertEquals(0, unresolvable.startCalls)
+        assertEquals(1, unresolvable.closeCalls)
+    }
+
+    @Test
+    fun `a capture start reuses the stream acquisition already opened and started`() = runTest {
+        val platform = FakePlatform().apply {
+            scoOn = true
+            openedDeviceId = 24
+            deviceTypes[24] = AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+        }
+        val acquisition = acquisition(platform)
+
+        assertFalse("nothing is opened before the attempt", acquisition.hasConfirmedStream)
+        val result = acquisition.acquire(
+            BluetoothCandidate(deviceId = 24, transport = BluetoothTransport.ClassicSco),
+            gateAllows = { true },
+        )
+        assertEquals(AcquisitionResult.Acquired(24), result)
+        assertTrue("acquisition confirmed and started a stream", acquisition.hasConfirmedStream)
+
+        // The service confirms before starting the engine. The confirmed, already-started
+        // stream must be reused, not reopened.
+        assertTrue(acquisition.confirmCaptureStream())
+        assertEquals(1, platform.openCalls)
+        assertEquals(1, platform.startCalls)
+        assertEquals(0, platform.closeCalls)
+    }
+
+    @Test
+    fun `a normal capture start that was never confirmed leaves nothing to release`() = runTest {
+        val platform = FakePlatform().apply {
+            openedDeviceId = 7
+            deviceTypes[7] = AudioDeviceInfo.TYPE_BUILTIN_MIC
+        }
+        val acquisition = acquisition(platform)
+
+        assertFalse(acquisition.confirmCaptureStream())
+        // confirmCaptureStream already closed the stream; a following release must be a no-op.
+        acquisition.release()
+        assertEquals(1, platform.closeCalls)
+    }
 }

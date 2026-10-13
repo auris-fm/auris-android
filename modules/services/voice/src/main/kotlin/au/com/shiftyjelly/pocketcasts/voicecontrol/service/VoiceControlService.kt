@@ -164,6 +164,12 @@ class VoiceControlService : Service() {
                     }
                     when (mode) {
                         ListeningMode.Off -> {
+                            // A gate loss, route change, or Off can arrive while a start is
+                            // still suspended in ensureReady(); the acquisition caller clears
+                            // its own job before that suspension, so nothing else can cancel
+                            // it. Bumping the generation makes the pending start abandon
+                            // itself instead of committing capture.
+                            engineStart.invalidatePendingStart()
                             if (engineStart.isStarted) {
                                 // Active capture was ongoing, now stopping
                                 val gateState = gate.state.value
@@ -317,58 +323,99 @@ class VoiceControlService : Service() {
      * skips it. Returns true when the engine is running afterwards.
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    private suspend fun startEngine(mode: ListeningMode): Boolean = engineStart.startIfNotRunning(
-        start = {
-            val backend = asrBackendSelector.select()
-            if (backend == null) {
-                Timber.w(
-                    "[VoicePipeline] ASR locale unsupported — refusing to start engine",
+    private suspend fun startEngine(mode: ListeningMode): Boolean {
+        // Captured before the attempt: validated after ensureReady() so a start that was
+        // invalidated while suspended (gate loss, stop) does not commit.
+        val generation = engineStart.generation()
+        return engineStart.startIfNotRunning(
+            start = {
+                val backend = asrBackendSelector.select()
+                if (backend == null) {
+                    Timber.w(
+                        "[VoicePipeline] ASR locale unsupported — refusing to start engine",
+                    )
+                    return@startIfNotRunning false
+                }
+
+                // Prepare the model before telling the user we are listening. The engine also checks
+                // this (it refuses to run a pipeline that would only ever return empty results), but
+                // by then the listening earcon and notification have already gone out, leaving the
+                // user told "listening" with a microphone that never opens.
+                if (backend.ensureReady().isFailure) {
+                    Timber.e("[VoicePipeline] engine not started: ASR backend not ready")
+                    return@startIfNotRunning false
+                }
+
+                // Eligibility is re-checked after the only suspension in this path. The mode-flow
+                // collector can run while the acquisition start is suspended here, and a start
+                // committed after the gate went Off would open a microphone the user is no
+                // longer eligible to have open.
+                if (!engineStart.isCurrent(generation)) {
+                    Timber.i("[VoicePipeline] engine not started: start was invalidated")
+                    return@startIfNotRunning false
+                }
+                if (!gate.state.value.allowed) {
+                    Timber.i("[VoicePipeline] engine not started: gate no longer allows capture")
+                    return@startIfNotRunning false
+                }
+                // Route eligibility. An Isolated route is directly eligible; a candidate route
+                // is eligible once acquisition has opened and confirmed its stream, because the
+                // (debounced) route monitor can still report BluetoothA2dpOnly at this point.
+                // The opened stream is confirmed below, so anything else fails closed there.
+                if (audioRouteMonitor.route.value.toMicExposure() != MicExposure.Isolated &&
+                    !routeAcquisition.hasConfirmedStream
+                ) {
+                    Timber.i("[VoicePipeline] engine not started: route is not an isolated headset")
+                    return@startIfNotRunning false
+                }
+
+                // Every capture start confirms the device the stream selected, not only
+                // acquisition. The route classification can be wrong (an enumerated BLE input
+                // is not a selected one), and native start must never open-and-start an
+                // unconfirmed stream: the opened stream is the authority. Fails closed.
+                if (!routeAcquisition.confirmCaptureStream()) {
+                    Timber.e("[VoicePipeline] engine not started: selected device is not an external microphone")
+                    return@startIfNotRunning false
+                }
+
+                try {
+                    voiceAsrEngine.get().start(
+                        backend = backend,
+                        audioRoute = audioRouteMonitor.route.value,
+                        listeningMode = mode,
+                        playbackBufferProvider = playbackBufferRecorder::snapshot,
+                        micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
+                        onIntent = { intent -> handleIntent(intent) },
+                    )
+                } catch (e: Exception) {
+                    // The engine did not take the stream; it is still ours to close.
+                    routeAcquisition.release()
+                    Timber.e(e, "[VoicePipeline] engine start failed")
+                    return@startIfNotRunning false
+                }
+                // The engine owns the confirmed stream from here; release() must not close it.
+                routeAcquisition.handOffStream()
+                true
+            },
+            // Post-start side effects run only after the coordinator has recorded the engine as
+            // started. They must not be able to un-set it: acquireCandidate hands the acquired
+            // stream to the engine based on this result, and a false would close a live stream.
+            onStarted = {
+                // Only when the microphone opens where the user cannot see it: the decision is
+                // shouldPlayListeningStartCue in ListeningModePolicy. The predicate it calls is
+                // covered in ListeningModePolicyTest.
+                if (shouldPlayListeningStartCue(mode, gate.state.value.rules)) {
+                    audioFeedbackRenderer.playEarcon(EarconId.LISTENING_START)
+                }
+
+                val notification = notificationManager.createListeningNotification(
+                    wakeWordRequired = mode == ListeningMode.WakeWord,
                 )
-                return@startIfNotRunning false
-            }
-
-            // Prepare the model before telling the user we are listening. The engine also checks
-            // this (it refuses to run a pipeline that would only ever return empty results), but
-            // by then the listening earcon and notification have already gone out, leaving the
-            // user told "listening" with a microphone that never opens.
-            if (backend.ensureReady().isFailure) {
-                Timber.e("[VoicePipeline] engine not started: ASR backend not ready")
-                return@startIfNotRunning false
-            }
-
-            try {
-                voiceAsrEngine.get().start(
-                    backend = backend,
-                    audioRoute = audioRouteMonitor.route.value,
-                    listeningMode = mode,
-                    playbackBufferProvider = playbackBufferRecorder::snapshot,
-                    micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
-                    onIntent = { intent -> handleIntent(intent) },
-                )
-            } catch (e: Exception) {
-                Timber.e(e, "[VoicePipeline] engine start failed")
-                return@startIfNotRunning false
-            }
-            true
-        },
-        // Post-start side effects run only after the coordinator has recorded the engine as
-        // started. They must not be able to un-set it: acquireCandidate hands the acquired
-        // stream to the engine based on this result, and a false would close a live stream.
-        onStarted = {
-            // Only when the microphone opens where the user cannot see it: the decision is
-            // shouldPlayListeningStartCue in ListeningModePolicy. The predicate it calls is
-            // covered in ListeningModePolicyTest.
-            if (shouldPlayListeningStartCue(mode, gate.state.value.rules)) {
-                audioFeedbackRenderer.playEarcon(EarconId.LISTENING_START)
-            }
-
-            val notification = notificationManager.createListeningNotification(
-                wakeWordRequired = mode == ListeningMode.WakeWord,
-            )
-            notificationManager.notify(notification)
-            Timber.i("[VoicePipeline] engine started mode=%s", mode)
-        },
-    )
+                notificationManager.notify(notification)
+                Timber.i("[VoicePipeline] engine started mode=%s", mode)
+            },
+        )
+    }
 
     /**
      * Acquires an external Bluetooth microphone for a candidate route, then starts capture.
@@ -389,24 +436,22 @@ class VoiceControlService : Service() {
                 acquisitionJob = null
                 when (result) {
                     is AcquisitionResult.Acquired -> {
-                        if (gate.state.value.allowed) {
+                        val started = if (gate.state.value.allowed) {
                             @Suppress("MissingPermission") // permission checked in hasRequiredPermissions()
-                            val started = startEngine(
+                            startEngine(
                                 if (gracePeriodSignal.isActive.value) {
                                     ListeningMode.Continuous
                                 } else {
                                     ListeningMode.WakeWord
                                 },
                             )
-                            // The engine owns the acquired stream from here: release() must not
-                            // close it. When the engine did not start (backend not ready, no
-                            // backend), the stream is still acquisition's to close.
-                            if (started) {
-                                routeAcquisition.handOffStream()
-                            } else {
-                                routeAcquisition.release()
-                            }
                         } else {
+                            false
+                        }
+                        // startEngine hands the stream to the engine on success and closes it on
+                        // its own failures. This release covers the gate-lost case before the
+                        // start, and is idempotent for the rest.
+                        if (!started) {
                             routeAcquisition.release()
                         }
                     }

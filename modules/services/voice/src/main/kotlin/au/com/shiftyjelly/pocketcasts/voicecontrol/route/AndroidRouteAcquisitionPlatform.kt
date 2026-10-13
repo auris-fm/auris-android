@@ -22,30 +22,12 @@ class AndroidRouteAcquisitionPlatform(
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
     @Suppress("DEPRECATION") // isBluetoothScoOn deprecated in API 34; distinguishes inactive SCO
-    override fun bluetoothCandidates(): List<BluetoothCandidate> {
-        val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-        val inputs = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
-        val candidates = mutableListOf<BluetoothCandidate>()
-
-        // Classic A2DP (or enumerated-but-inactive SCO) while SCO is off: the headset's
-        // HFP/SCO microphone must be selected.
-        if (!audioManager.isBluetoothScoOn) {
-            val classic = outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
-                ?: (outputs + inputs).firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
-            if (classic != null) {
-                candidates += BluetoothCandidate(classic.id, BluetoothTransport.ClassicSco)
-            }
-        }
-
-        // A BLE headset output with no BLE input selected yet: LE Audio selection is needed.
-        val bleOutput = outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLE_HEADSET }
-        val bleInput = inputs.any { it.type == AudioDeviceInfo.TYPE_BLE_HEADSET }
-        if (bleOutput != null && !bleInput) {
-            candidates += BluetoothCandidate(bleOutput.id, BluetoothTransport.LeAudio)
-        }
-
-        return candidates
-    }
+    override fun bluetoothCandidates(): List<BluetoothCandidate> = selectBluetoothCandidates(
+        outputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).map { it.toDescriptor() },
+        inputDevices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS).map { it.toDescriptor() },
+        bluetoothScoActive = audioManager.isBluetoothScoOn,
+        bleCommunicationDeviceSelected = audioManager.communicationDevice?.type == AudioDeviceInfo.TYPE_BLE_HEADSET,
+    )
 
     @Suppress("DEPRECATION") // startBluetoothSco + stopBluetoothSco deprecated in API 33; no replacement
     override fun startBluetoothSco() {
@@ -98,4 +80,45 @@ class AndroidRouteAcquisitionPlatform(
         ?: allDevices().firstOrNull { it.id == deviceId }
 
     private fun allDevices(): Array<AudioDeviceInfo> = audioManager.getDevices(AudioManager.GET_DEVICES_ALL)
+}
+
+/** A minimal device projection so candidate selection can be unit tested without Android. */
+internal data class AudioDeviceDescriptor(val id: Int, val type: Int)
+
+private fun AudioDeviceInfo.toDescriptor(): AudioDeviceDescriptor = AudioDeviceDescriptor(id, type)
+
+/**
+ * Bluetooth devices that are connected but whose microphone is not selected.
+ *
+ * Presence in `getDevices(GET_DEVICES_INPUTS)` proves selection for classic SCO only when the
+ * link is up, and never for BLE: `getCommunicationDevice()` is the BLE selection. An
+ * enumerated-but-unselected BLE input is still a candidate so acquisition can run.
+ */
+internal fun selectBluetoothCandidates(
+    outputDevices: List<AudioDeviceDescriptor>,
+    inputDevices: List<AudioDeviceDescriptor>,
+    bluetoothScoActive: Boolean,
+    bleCommunicationDeviceSelected: Boolean,
+): List<BluetoothCandidate> {
+    val candidates = mutableListOf<BluetoothCandidate>()
+
+    // Classic A2DP (or enumerated-but-inactive SCO) while SCO is off: the headset's
+    // HFP/SCO microphone must be selected.
+    if (!bluetoothScoActive) {
+        val classic = outputDevices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
+            ?: (outputDevices + inputDevices).firstOrNull { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+        if (classic != null) {
+            candidates += BluetoothCandidate(classic.id, BluetoothTransport.ClassicSco)
+        }
+    }
+
+    // A BLE device whose communication device is not selected yet needs LE Audio selection,
+    // whether its input is enumerated or not. Prefer the output id, which
+    // setCommunicationDevice() accepts for a BLE headset.
+    val bleDevice = (outputDevices + inputDevices).firstOrNull { it.type == AudioDeviceInfo.TYPE_BLE_HEADSET }
+    if (bleDevice != null && !bleCommunicationDeviceSelected) {
+        candidates += BluetoothCandidate(bleDevice.id, BluetoothTransport.LeAudio)
+    }
+
+    return candidates
 }

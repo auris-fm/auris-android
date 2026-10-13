@@ -43,20 +43,12 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartCap
 
     std::lock_guard<std::mutex> lock(gCaptureMutex);
 
-    // Reuse a stream opened by acquisition (nativeOpenInputCapture) so the device it
-    // selected — already confirmed against the route — is the one that captures.
-    if (gCapture == nullptr) {
-        auto* capture = new OboeAudioCapture();
-        if (!capture->open()) {
-            delete capture;
-            return JNI_FALSE;
-        }
-        gCapture = capture;
-    }
-
-    if (!gCapture->isActive() && !gCapture->start()) {
-        delete gCapture;
-        gCapture = nullptr;
+    // The stream must already have been opened and started by the Kotlin confirmation path
+    // (nativeOpenInputCapture -> device id confirmed external -> nativeStartInputStream).
+    // Opening or starting here would bypass that confirmation and let capture begin on an
+    // unconfirmed device, so this native entry point only attaches VAD to a confirmed,
+    // already-running stream and fails closed otherwise.
+    if (gCapture == nullptr || !gCapture->isActive()) {
         return JNI_FALSE;
     }
 

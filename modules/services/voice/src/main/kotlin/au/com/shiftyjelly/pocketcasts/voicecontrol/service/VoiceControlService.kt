@@ -189,18 +189,6 @@ class VoiceControlService : Service() {
         audioFeedbackRenderer.render(response)
     }
 
-    /**
-     * Whether the turn may be treated as having delivered what it claimed.
-     *
-     * AN UNKNOWN OUTCOME IS NOT A DELIVERED ACTION. The feedback may say everything went well while the
-     * action it dispatched was ISSUED without a returned outcome. Treating that as delivered is the
-     * claim nobody could make; treating it as a plain failure would invite a repeat of something that
-     * may already have happened. So it is neither: the turn is NOT counted as a completed command -- it
-     * does not earn the privileges a recognized command grants -- and the user is told the request could
-     * not be completed, which is the honest report of "we do not know".
-     */
-    internal fun isDeliveredTurn(outcome: CloudRouteActionOutcome): Boolean = outcome != CloudRouteActionOutcome.Unknown
-
     private fun startVoiceControl() {
         if (engineStart.isStarted) {
             Timber.i("Voice control already started")
@@ -793,17 +781,11 @@ class VoiceControlService : Service() {
             // slot, and the reader could not tell whose outcome it was.
             val turnOutcome = VoicePlaybackIntentExecutor.TurnOutcome()
             renderWithFailureHandling(intent, turnOutcome)
-            // THE TURN'S DELIVERY DECISION DECIDES RECOGNITION, which is the behaviour the request-owned
-            // outcome exists to drive. A command whose action outcome could not be established has not
-            // been shown to have done anything, so it must not earn the privileges a recognized command
-            // grants -- extending the listening window and clearing the escalation penalty. Claiming that
-            // for an unverified action is the success-nobody-observed the three-valued outcome prevents.
-            if (isDeliveredTurn(turnOutcome.action)) {
-                gracePeriodSignal.onCommandRecognized(
-                    fromGeneration = intent.windowGenerationOf(),
-                    restoresAllowance = intent.restoresAllowance(),
-                )
-            } else {
+            // RECOGNITION IS THE EXECUTOR'S DECISION, made where it acts, using the same request-owned
+            // outcome. A second guard here would be a copy of the rule -- and a copy can drift from the
+            // one that actually grants the privileges. What this caller observes is the decision, not a
+            // restatement of it.
+            if (!voicePlaybackIntentExecutor.capabilityOf(intent, turnOutcome).allowsRecognition) {
                 Timber.i("[VoicePipeline] turn not recognized: its action outcome is unknown")
             }
         }

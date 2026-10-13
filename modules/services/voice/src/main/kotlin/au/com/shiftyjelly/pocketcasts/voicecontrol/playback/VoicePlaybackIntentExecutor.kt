@@ -259,11 +259,43 @@ class VoicePlaybackIntentExecutor @Inject constructor(
 
             is VoiceIntent.StatsQuery -> executeStatsQuery(intent)
         }
-        gracePeriodSignal.onCommandRecognized(
-            fromGeneration = intent.windowGenerationOf(),
-            restoresAllowance = intent.restoresAllowance(),
-        )
+        // THE OUTCOME GUARD BELONGS HERE, at the site that recognizes -- not only at a later caller.
+        // Recognizing unconditionally here meant a turn whose action outcome could not be established
+        // still earned the recognized-command privileges before any caller could check, so a guard added
+        // downstream was defeated by this call. ONE RULE, AT THE SITE THAT ACTS.
+        if (capabilityOf(intent, outcome).allowsRecognition) {
+            gracePeriodSignal.onCommandRecognized(
+                fromGeneration = intent.windowGenerationOf(),
+                restoresAllowance = intent.restoresAllowance(),
+            )
+        }
         return response
+    }
+
+    /**
+     * What this turn's outcome permits, decided in ONE place for every caller.
+     *
+     * AN UNKNOWN CLOUD ACTION IS NOT A RECOGNIZED COMMAND. The turn dispatched an action whose outcome
+     * could not be established, so it has not been shown to have done anything and must not earn the
+     * window extension or the escalation reset that recognition grants. A local intent carries no cloud
+     * action at all, so it is unaffected.
+     */
+    internal fun capabilityOf(
+        intent: VoiceIntent,
+        outcome: TurnOutcome,
+    ): TurnCapability = when {
+        intent !is VoiceIntent.CloudRoute -> TurnCapability.Recognized
+        outcome.action == CloudRouteActionOutcome.Unknown -> TurnCapability.Unverified
+        else -> TurnCapability.Recognized
+    }
+
+    /** What a completed turn is allowed to claim. */
+    enum class TurnCapability(val allowsRecognition: Boolean) {
+        /** The turn may be treated as a recognized command. */
+        Recognized(allowsRecognition = true),
+
+        /** The action's outcome could not be established, so the turn claims nothing. */
+        Unverified(allowsRecognition = false),
     }
 
     private suspend fun executePlayback(intent: VoiceIntent.Playback): VoiceResponse = when (intent) {

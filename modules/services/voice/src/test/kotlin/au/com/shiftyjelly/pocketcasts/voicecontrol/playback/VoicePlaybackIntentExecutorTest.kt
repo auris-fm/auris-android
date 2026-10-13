@@ -1569,4 +1569,66 @@ class VoicePlaybackIntentExecutorTest {
         override fun newEpisodes(timeframe: String?): VoiceResponse.Spoken = VoiceResponse.Spoken("new")
         override fun timeSinceLastListen(): VoiceResponse.Spoken = VoiceResponse.Spoken("last")
     }
+
+    @Test
+    fun `an Unknown cloud outcome does not renew the window budget at the RECOGNIZING site`() = runTest {
+        // @reviewer's finding: the EXECUTOR recognized unconditionally, BEFORE any caller could check --
+        // so a guard added downstream was defeated by this very call. The guard belongs where the act is.
+        val sinks = FakeSinks()
+        sinks.cloudRoute.actionOutcome = CloudRouteActionOutcome.Unknown
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+        signal.issueEscalation()
+        assertEquals(
+            "the probe needs a spent escalation",
+            "allowance spent in this window",
+            signal.escalationRefusal(),
+        )
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "summarize this episode",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = window,
+            ),
+        )
+
+        // THE SPENT ESCALATION STAYS SPENT: recognition would have cleared it. An unknown action outcome
+        // must not earn that, because the turn has not been shown to have done anything.
+        assertEquals(
+            "an unverified action must not renew the budget it did not earn",
+            "allowance spent in this window",
+            signal.escalationRefusal(),
+        )
+    }
+
+    @Test
+    fun `a Confirmed cloud outcome DOES renew the window budget`() = runTest {
+        // THE CONTROL, so the case is decided by the OUTCOME rather than by recognition never happening.
+        val sinks = FakeSinks()
+        sinks.cloudRoute.actionOutcome = CloudRouteActionOutcome.Confirmed
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
+        val executor = sinks.executor(signal)
+
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+        signal.issueEscalation()
+
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "summarize this episode",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = window,
+            ),
+        )
+
+        assertEquals(
+            "a confirmed action is a recognized command and renews the budget",
+            "available",
+            signal.escalationRefusal(),
+        )
+    }
 }

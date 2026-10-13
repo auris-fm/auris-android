@@ -161,6 +161,10 @@ class VoiceControlService : Service() {
      */
     internal suspend fun renderWithFailureHandling(
         intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
+        // THE REQUEST-OWNED OUTCOME, supplied by the caller that dispatched this turn. The value belongs
+        // to the REQUEST: a field on the executor would be shared between turns, and a later reader could
+        // not tell whose outcome it was.
+        turnOutcome: VoicePlaybackIntentExecutor.TurnOutcome = VoicePlaybackIntentExecutor.TurnOutcome(),
     ) {
         VoiceControlServiceWiring.attachPlaybackFailureHandling(audioFeedbackRenderer)
         // The transport can throw: its channel closes with a cause when a terminal event is refused,
@@ -173,7 +177,7 @@ class VoiceControlService : Service() {
         // the action it dispatched actually ran. Reading only the feedback would let an action whose
         // outcome could not be established pass as a delivered turn.
         val response = try {
-            voicePlaybackIntentExecutor.execute(intent)
+            voicePlaybackIntentExecutor.execute(intent, turnOutcome)
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             // Cancellation is the caller withdrawing, not a failure to report: rethrow so structured
             // concurrency still unwinds instead of being swallowed into an earcon.
@@ -184,23 +188,6 @@ class VoiceControlService : Service() {
         }
         audioFeedbackRenderer.render(response)
     }
-
-    /**
-     * The decision the request-owned action outcome implies for THIS turn.
-     *
-     * Read it, do not store it: a slot nobody consults is the same non-implementation as an API with no
-     * caller. The decision is whether the turn may be treated as DELIVERED, and it is what the caller
-     * acts on -- see [actionOutcomeFor].
-     */
-    internal fun actionOutcomeFor(
-        intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
-    ): CloudRouteActionOutcome = // ONLY A CLOUD TURN HAS ONE. A local intent has no cloud action, so reading a previous turn's
-        // outcome would attribute one turn's action to another.
-        if (intent is au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent.CloudRoute) {
-            voicePlaybackIntentExecutor.lastActionOutcome
-        } else {
-            CloudRouteActionOutcome.None
-        }
 
     /**
      * Whether the turn may be treated as having delivered what it claimed.
@@ -801,13 +788,17 @@ class VoiceControlService : Service() {
             // below is that `renderWithFailureHandling` RETHROWS cancellation rather than converting it,
             // which it does at its own boundary; adding a second handler here would put that decision in
             // two places without changing any outcome.
-            renderWithFailureHandling(intent)
+            // THE CALLER MINTS THE OUTCOME IT WILL READ, so the value belongs to THIS turn rather than
+            // to the executor object. A field on the executor is shared: two turns would race for one
+            // slot, and the reader could not tell whose outcome it was.
+            val turnOutcome = VoicePlaybackIntentExecutor.TurnOutcome()
+            renderWithFailureHandling(intent, turnOutcome)
             // THE TURN'S DELIVERY DECISION DECIDES RECOGNITION, which is the behaviour the request-owned
             // outcome exists to drive. A command whose action outcome could not be established has not
             // been shown to have done anything, so it must not earn the privileges a recognized command
             // grants -- extending the listening window and clearing the escalation penalty. Claiming that
             // for an unverified action is the success-nobody-observed the three-valued outcome prevents.
-            if (isDeliveredTurn(actionOutcomeFor(intent))) {
+            if (isDeliveredTurn(turnOutcome.action)) {
                 gracePeriodSignal.onCommandRecognized(
                     fromGeneration = intent.windowGenerationOf(),
                     restoresAllowance = intent.restoresAllowance(),

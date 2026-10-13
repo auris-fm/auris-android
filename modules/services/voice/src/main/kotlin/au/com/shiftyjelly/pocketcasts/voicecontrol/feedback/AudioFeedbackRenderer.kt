@@ -253,19 +253,26 @@ class AudioFeedbackRenderer(
      * the flag; publishing them separately would let one be updated and the other not, which is the
      * disagreement a single write prevents.
      */
-    private fun publishCueObservation(observation: CueObservation) {
+    private fun publishCueObservation(cueId: Long, observation: CueObservation) {
         coverageExpiredUnknown = observation == CueObservation.Unknown
         _lastCueObservation.value = PublishedObservation(
-            cueId = cueCounter.incrementAndGet(),
+            // THE CUE'S OWN IDENTITY, allocated once when the cue was admitted. Allocating here instead
+            // would give ONE cue a new id for every verdict it publishes -- and a consumer comparing ids
+            // would read its own cue's change of verdict as a DIFFERENT cue, discarding the elapsed time
+            // it should keep. An identity is a property of the cue, not of the publication.
+            cueId = cueId,
             observation = observation,
-            // THE RENDERER'S OWN INSTANT. The consumer cannot reconstruct it, and measuring from
-            // whenever the consumer first noticed would make the bound depend on its polling schedule.
+            // THE PUBLICATION TIMESTAMP IS per-observation, unlike the identity: each verdict is a
+            // separate event and the consumer measures its own hold from the verdict it is acting on.
             publishedAtMs = SystemClock.elapsedRealtime(),
         )
     }
 
     /** Distinguishes one cue's verdict from the next cue's, so a consumer cannot conflate them. */
     private val cueCounter = java.util.concurrent.atomic.AtomicLong(0)
+
+    /** The identity of the cue currently being observed, allocated when it was admitted. */
+    private var currentCueId: Long = 0L
 
     /**
      * Publishes an observation ONLY while [observer] is still the cue's current observer.
@@ -283,13 +290,13 @@ class AudioFeedbackRenderer(
     }
 
     /** The deadline-expiry form of [publishObservationIfOwning]. */
-    private fun publishExpiryIfOwning(observer: Job?) = publishObservationIfOwning(observer) { publishCueObservation(CueObservation.Unknown) }
+    private fun publishExpiryIfOwning(observer: Job?) = publishObservationIfOwning(observer) { publishCueObservation(currentCueId, CueObservation.Unknown) }
 
     /** The observed-completion form: the cue's fate IS established. */
-    private fun publishConsumedIfOwning(observer: Job?) = publishObservationIfOwning(observer) { publishCueObservation(CueObservation.Consumed) }
+    private fun publishConsumedIfOwning(observer: Job?) = publishObservationIfOwning(observer) { publishCueObservation(currentCueId, CueObservation.Consumed) }
 
     /** The deliberately-ended form: attribution was stopped at the moment the sound stopped. */
-    private fun publishEndedIfOwning(observer: Job?) = publishObservationIfOwning(observer) { publishCueObservation(CueObservation.Ended) }
+    private fun publishEndedIfOwning(observer: Job?) = publishObservationIfOwning(observer) { publishCueObservation(currentCueId, CueObservation.Ended) }
 
     /**
      * Keeps the gate's attribution fresh until the cue is OBSERVED to have been consumed.
@@ -319,6 +326,9 @@ class AudioFeedbackRenderer(
             // cue ended; it is the absence of any observation yet -- the typed value is cleared too, so a
             // consumer cannot read the PREVIOUS cue's result as this one's.
             coverageExpiredUnknown = false
+            // THE NEW CUE'S IDENTITY IS ALLOCATED AT ADMISSION, so every verdict this cue publishes
+            // carries the SAME id and a consumer can tell "my cue changed" from "a different cue".
+            currentCueId = cueCounter.incrementAndGet()
             _lastCueObservation.value = null
         }
         // A REFERENCE THE COROUTINE CAN READ FROM INSIDE ITS OWN INITIALIZER. Kotlin does not allow a

@@ -904,17 +904,20 @@ class VoicePlaybackIntentExecutorTest {
         sinks.cloudRoute.actionOutcome = CloudRouteActionOutcome.Unknown
 
         val executor = sinks.executor()
+        // THE REQUEST OWNS THE OUTCOME, so the case mints what the caller would mint and reads THAT.
+        val outcome = VoicePlaybackIntentExecutor.TurnOutcome()
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "summarize this episode",
                 tier = VoiceIntent.CloudTier.Premium,
             ),
+            outcome,
         )
 
         assertEquals(
             "an unknown action outcome must survive the dispatch, not be collapsed into a settled one",
             CloudRouteActionOutcome.Unknown,
-            executor.lastActionOutcome,
+            outcome.action,
         )
     }
 
@@ -924,14 +927,16 @@ class VoicePlaybackIntentExecutorTest {
         sinks.cloudRoute.actionOutcome = CloudRouteActionOutcome.Confirmed
 
         val executor = sinks.executor()
+        val outcome = VoicePlaybackIntentExecutor.TurnOutcome()
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "summarize this episode",
                 tier = VoiceIntent.CloudTier.Premium,
             ),
+            outcome,
         )
 
-        assertEquals(CloudRouteActionOutcome.Confirmed, executor.lastActionOutcome)
+        assertEquals(CloudRouteActionOutcome.Confirmed, outcome.action)
     }
 
     @Test

@@ -1341,6 +1341,20 @@ open class PlaybackManager @Inject constructor(
     }
 
     /**
+     * The DECISION a skip's scoped mutation implies, in ONE place for both directions.
+     *
+     * [ScopedMutation] is nullable and carries `unknown`, and those are THREE outcomes, not two: a `null`
+     * is the owner's REFUSAL, an accepted mutation is a confirmed skip, and an accepted mutation with
+     * `unknown` set was ISSUED without a returned outcome. A Boolean collapsed the last two, which is how
+     * an unknowable skip came to be reported as a retryable refusal.
+     *
+     * Extracted so the mapping is exercised directly rather than through a manager whose collaborators
+     * cannot be assembled in a plain unit test -- the DECISION is what production runs, so testing it
+     * here is testing the real thing.
+     */
+    private fun skipOutcomeOf(mutation: ScopedMutation?): SkipOutcome = skipOutcomeOfMutation(refused = mutation == null, unknown = mutation?.unknown == true)
+
+    /**
      * [seekIfPlayingToTimeMs] without a result, for a caller that does not need one.
      *
      * Kept separate rather than making every caller suspend: the episode-sync path applies a server
@@ -1660,8 +1674,12 @@ open class PlaybackManager @Inject constructor(
         val durationMs = player?.durationMs() ?: Int.MAX_VALUE
         if (newPositionMs < durationMs) {
             val mutation = seekToTimeMsInternalIfEpisodeCapturing(episode.uuid, newPositionMs)
-                ?: return SkipOutcome.Refused
-            if (mutation.unknown) return SkipOutcome.Unknown
+            // THE MUTATION'S OWN PAYLOAD DECIDES, through ONE mapping shared with the backward path so the
+            // two cannot drift. `null` is the owner's refusal (a different episode is selected, or the
+            // player cannot enforce the binding); an absent outcome is Unknown, NOT a refusal, because
+            // the operation was ISSUED and may already have run.
+            val outcome = skipOutcomeOf(mutation)
+            if (outcome != SkipOutcome.Accepted) return outcome
             statsManager.addTimeSavedSkipping((newPositionMs - currentTimeMs).toLong())
         } else {
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Seek beyond end of episode so completing. ${episode.uuid}")
@@ -1686,8 +1704,8 @@ open class PlaybackManager @Inject constructor(
         if (currentTimeMs < 0) return SkipOutcome.Refused
         val newPositionMs = (currentTimeMs - jumpAmountMs).coerceAtLeast(0)
         val mutation = seekToTimeMsInternalIfEpisodeCapturing(episode.uuid, newPositionMs)
-            ?: return SkipOutcome.Refused
-        if (mutation.unknown) return SkipOutcome.Unknown
+        val outcome = skipOutcomeOf(mutation)
+        if (outcome != SkipOutcome.Accepted) return outcome
         trackPlaybackEvent(sourceView) { source, contentType ->
             PlaybackSkipBackEvent(source = source.analyticsValue, contentType = contentType)
         }
@@ -3633,4 +3651,26 @@ internal fun cacheNetworkConstraint(warnOnMeteredNetwork: Boolean): NetworkType 
     NetworkType.UNMETERED
 } else {
     NetworkType.CONNECTED
+}
+
+/**
+ * The DECISION a skip's scoped mutation implies, in ONE place for both directions.
+ *
+ * The mutation is nullable and carries `unknown`, and those are THREE outcomes, not two: a missing
+ * mutation is the owner's REFUSAL, an accepted one is a confirmed skip, and an accepted one with
+ * `unknown` set was ISSUED without a returned outcome. A Boolean collapsed the last two, which is how an
+ * unknowable skip came to be reported as a retryable refusal -- an outcome that looks safely retryable
+ * for an operation the receiver may already have performed.
+ *
+ * TOP-LEVEL AND PURE, so the decision production runs is exercisable directly: the manager takes 28
+ * injected collaborators, which a plain unit test cannot assemble, and a decision reachable only through
+ * that construction is a decision nothing verifies.
+ */
+internal fun skipOutcomeOfMutation(
+    refused: Boolean,
+    unknown: Boolean,
+): PlaybackManager.SkipOutcome = when {
+    refused -> PlaybackManager.SkipOutcome.Refused
+    unknown -> PlaybackManager.SkipOutcome.Unknown
+    else -> PlaybackManager.SkipOutcome.Accepted
 }

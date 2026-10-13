@@ -27,7 +27,7 @@ class OtherAppPlayingCondition(
     // An observation whose deadline expired without establishing the cue's fate means we CANNOT say the
     // sound has stopped -- so the self-emission window stays open rather than closing on an assumption
     // nobody could check. Absent or observed-ended, the window behaves as it always did.
-    private val lastCueObservation: StateFlow<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer.CueObservation?> =
+    private val lastCueObservation: StateFlow<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer.PublishedObservation?> =
         MutableStateFlow(null),
     private val nowMs: () -> Long = { SystemClock.elapsedRealtime() },
     private val transitionWindowMs: Long = 5_000,
@@ -97,30 +97,26 @@ class OtherAppPlayingCondition(
         return evaluate(hasOtherApp)
     }
 
-    /** How long an unresolved observation may hold the attribution open, past the deadline itself. */
-    private val unresolvedHoldMs: Long = UNRESOLVED_HOLD_MS
-    private var unresolvedSinceMs: Long = Long.MIN_VALUE
-    private var unresolvedSeen: Boolean = false
-
     /**
-     * How long the current unresolved observation has been standing, or null if there is not one.
+     * Whether an unresolved observation is still within its hold.
      *
-     * MEASURED FROM WHEN THE OBSERVATION BECAME UNRESOLVED, not from when the app started: a bound
-     * anchored to the wrong instant either never expires or expires at once.
+     * MEASURED FROM THE RENDERER'S OWN PUBLICATION INSTANT, and keyed to the CUE that published it. The
+     * two facts come from the published value, never from this consumer: anchoring to the first poll
+     * would measure this consumer's schedule instead of the cue's age, and keying on the value alone
+     * would let a successor that went straight to Unknown inherit its predecessor's elapsed time.
+     *
+     * A DIFFERENT CUE IS A DIFFERENT CUE even if the verdict is the same, so the identity -- not the
+     * verdict -- decides whether the elapsed time carries over.
      */
-    private fun unresolvedAgeMs(): Long? {
-        val unresolved = lastCueObservation.value ==
+    private fun unresolvedWithinHold(): Boolean {
+        val published = lastCueObservation.value
+            ?: return false
+        if (published.observation !=
             au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer.CueObservation.Unknown
-        if (!unresolved) {
-            unresolvedSeen = false
-            unresolvedSinceMs = Long.MIN_VALUE
-            return null
+        ) {
+            return false
         }
-        if (!unresolvedSeen) {
-            unresolvedSeen = true
-            unresolvedSinceMs = nowMs()
-        }
-        return nowMs() - unresolvedSinceMs
+        return nowMs() - published.publishedAtMs < UNRESOLVED_HOLD_MS
     }
 
     /**
@@ -148,7 +144,7 @@ class OtherAppPlayingCondition(
             // keeping it open indefinitely would attribute EVERY LATER active-music reading to us, long
             // after the cue or its session had ended -- the mirror of the failure it prevents, and the
             // reason an explicit stop/session end retires the observation.
-            selfEmissionUnresolved = unresolvedAgeMs()?.let { it < UNRESOLVED_HOLD_MS } == true,
+            selfEmissionUnresolved = unresolvedWithinHold(),
         )
     }
 

@@ -213,8 +213,27 @@ class AudioFeedbackRenderer(
      * Exposed as a StateFlow, not a plain field: the consumer EVALUATES asynchronously from the
      * publication, so a value read once at construction would be the value at that moment forever.
      */
-    private val _lastCueObservation = kotlinx.coroutines.flow.MutableStateFlow<CueObservation?>(null)
-    val lastCueObservation: kotlinx.coroutines.flow.StateFlow<CueObservation?> = _lastCueObservation
+    private val _lastCueObservation = kotlinx.coroutines.flow.MutableStateFlow<PublishedObservation?>(null)
+    val lastCueObservation: kotlinx.coroutines.flow.StateFlow<PublishedObservation?> = _lastCueObservation
+
+    /**
+     * A published verdict WITH the cue it is about and the instant it was published.
+     *
+     * ALL THREE TRAVEL TOGETHER, because the consumer needs each of them and can derive none:
+     *
+     *  - [cueId] makes a verdict attributable to ONE cue. Without it a successor's verdict is
+     *    indistinguishable from its predecessor's, so a consumer that missed the intermediate clear
+     *    would apply the old cue's elapsed time to the new one.
+     *  - [publishedAtMs] is the RENDERER'S instant, not the consumer's first sight of it. A bound
+     *    anchored to when the consumer happened to poll starts later for a cue published earlier, and
+     *    would measure the consumer's schedule rather than the cue's age.
+     *  - [observation] is the verdict itself.
+     */
+    data class PublishedObservation(
+        val cueId: Long,
+        val observation: CueObservation,
+        val publishedAtMs: Long,
+    )
 
     /**
      * Whether the last observation ended because its DEADLINE expired without an observed ending.
@@ -236,8 +255,17 @@ class AudioFeedbackRenderer(
      */
     private fun publishCueObservation(observation: CueObservation) {
         coverageExpiredUnknown = observation == CueObservation.Unknown
-        _lastCueObservation.value = observation
+        _lastCueObservation.value = PublishedObservation(
+            cueId = cueCounter.incrementAndGet(),
+            observation = observation,
+            // THE RENDERER'S OWN INSTANT. The consumer cannot reconstruct it, and measuring from
+            // whenever the consumer first noticed would make the bound depend on its polling schedule.
+            publishedAtMs = SystemClock.elapsedRealtime(),
+        )
     }
+
+    /** Distinguishes one cue's verdict from the next cue's, so a consumer cannot conflate them. */
+    private val cueCounter = java.util.concurrent.atomic.AtomicLong(0)
 
     /**
      * Publishes an observation ONLY while [observer] is still the cue's current observer.
@@ -414,6 +442,15 @@ class AudioFeedbackRenderer(
      * state, and attribution stops at the moment the sound does rather than at its estimate.
      */
     fun stopEarconNow() {
+        // THE STOPPED CUE'S OWNER IS CAPTURED BEFORE THE STOP, not after it. `stopNow` is a call into the
+        // player and a REPLACEMENT CAN LAND DURING IT; reading the owner afterwards would retire whatever
+        // succeeded, applying this stop's verdict to a cue this stop never touched. The claim and the
+        // write therefore concern the SAME cue.
+        val stoppedOwner = currentObserver()
+        // THE INTERLEAVING SEAM. A case must be able to land the replacement INSIDE this call -- the only
+        // instant where capturing before versus after differs. A seam that runs the hook around the call
+        // instead of within it would not exercise the window it exists for.
+        duringStopForTest?.invoke()
         earconPlayer.stopNow()
         // RETIREMENT, NOT A TEST ACCESSOR. The observation's deadline is a bound on WAITING, not a claim
         // about the cue; once the cue is stopped explicitly its fate IS established, and leaving the
@@ -422,7 +459,7 @@ class AudioFeedbackRenderer(
         //
         // OWNERSHIP IS CHECKED IN THE SAME STEP, so a stop issued for an OLD cue cannot retire the
         // successor that has since taken over.
-        publishEndedIfOwning(currentObserver())
+        publishEndedIfOwning(stoppedOwner)
     }
 
     /**
@@ -463,6 +500,14 @@ class AudioFeedbackRenderer(
         earconPlayer.stopNow()
         earconPlayer.release()
     }
+
+    /**
+     * Runs INSIDE `stopEarconNow`, after the owner is captured and before the player is stopped.
+     *
+     * Test visibility for the one window where "capture before" and "capture after" differ. Null in
+     * production, so the seam costs a null check and changes no behaviour.
+     */
+    internal var duringStopForTest: (() -> Unit)? = null
 
     /** The observer that currently speaks for the cue, read under the monitor that installs one. */
     private fun currentObserver(): Job? = synchronized(coverageLock) { earconCoverageJob }

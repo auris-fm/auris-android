@@ -1248,8 +1248,13 @@ class CloudRouteSink internal constructor(
         // provenance -- what the client knew before the attempt -- but records no target, because
         // nothing established that the player reached it. Recording it would claim an observation
         // nobody made, which is @reviewer's measured e201 defect.
-        // The caller passes null when the target was not observed, and this returns without recording.
-        val target = targetReferenceMs ?: return
+        // The caller passes null when the TARGET was not observed -- but that suppresses only the
+        // TARGET, not the PRE-ACTION provenance. Returning here would ALSO skip `preQuotePositionMs`,
+        // discarding a value the owner had already captured: the same "unknown concerns execution, not
+        // whether the snapshot existed" distinction the manager now honours.
+        // THE FLAG GATES THE TARGET ITSELF. Keeping `recordTarget` as a parameter but never consulting
+        // it made it decorative: the target was recorded for an Unknown outcome exactly as before.
+        val target = targetReferenceMs.takeIf { recordTarget }
         val previousPlaybackMs = preActionPositionMs
         // preQuotePositionMs stays on the playback timeline: stop_quote seeks the local player back to
         // it. When NO episode is playing there is no position to return to, so this records null and
@@ -1272,7 +1277,10 @@ class CloudRouteSink internal constructor(
         // reattribute the position to a recording the action never touched. The live provider is the
         // wrong authority here: it answers "what is selected NOW", which is the question this is
         // deliberately not asking.
-        if (acceptedEpisodeId == null) return
+        // THE TARGET IS RECORDED ONLY WHEN IT WAS OBSERVED. The provenance above is already committed
+        // (preQuotePositionMs) because it describes what the client knew BEFORE the attempt; the TARGET
+        // is not, because nothing established the player reached it.
+        if (acceptedEpisodeId == null || target == null) return
         cloudPlaybackContextState.record(
             // THE REQUESTED TARGET, not the pre-action position. These are two different quantities:
             // this is the reference-timeline position the action ASKED for, while `previousPlaybackMs`

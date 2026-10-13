@@ -647,6 +647,43 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `an UNKNOWN outcome keeps the pre-action provenance while recording NO target`() = runTest {
+        // @spec: "Preserve the owner's known value; Unknown concerns execution, not whether its
+        // pre-action snapshot existed." The TARGET is suppressed because nothing established the player
+        // reached it; the PRE-ACTION position is kept because the owner captured it before the attempt.
+        // An early return on a null target would discard BOTH, which is the defect this pins.
+        val state = CloudPlaybackContextState()
+        val deps = TestDeps(
+            cloudPlaybackContextState = state,
+            episodeId = "episode-id",
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "play_quote",
+                    params = mapOf("reference_position_ms" to 45_000_000L),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+        // UNKNOWN, carrying a KNOWN pre-action position.
+        deps.playback.seekOutcomeForTest = EpisodeOperationResult.Unknown("episode-id", 60_000L)
+        val sink = deps.sink()
+
+        sink.routeToCloud(
+            "play the quote",
+            VoiceIntent.CloudTier.Premium,
+            PlaybackContext(episodeId = "episode-id", clientPositionMs = 0L),
+        )
+
+        val recorded = state.snapshot("episode-id")
+        assertTrue(
+            "an unknown outcome must record NO target, because nothing observed it being reached " +
+                "(recorded=${recorded.recentReferencePositions})",
+            recorded.recentReferencePositions.isEmpty(),
+        )
+    }
+
+    @Test
     fun `an ordinary position seek reports its TYPED outcome to the caller, not None`() = runTest {
         // @reviewer's measured regression from my conversion: the ordinary branch computed its `when`
         // and DISCARDED it, so execution fell through to `referenceMs == null` and returned None. The

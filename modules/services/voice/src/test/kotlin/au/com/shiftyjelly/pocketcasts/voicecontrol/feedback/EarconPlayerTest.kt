@@ -646,4 +646,55 @@ class EarconPlayerTest {
         mockPlayer.stopAdmissionNow(secondAdmission)
         org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).stop()
     }
+
+    @Test
+    fun `stopping a track discards its frontier AND releases it`() {
+        // @spec/@reviewer 5c7c5e76: discard must be complete in ONE step. Nulling the reference after
+        // `stop()` alone left the resource unreleased -- nothing could release it later, the only
+        // reference was gone -- and left the cumulative frontier standing, so the next cue on a fresh
+        // track (head at zero) still had its target counting the retired track's frames.
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val mockPlayer = EarconPlayer(context)
+        val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
+        val clip = clipClass.declaredConstructors.single().apply { isAccessible = true }
+            .newInstance(mockPlayer, ShortArray(100), 16000)
+        @Suppress("UNCHECKED_CAST")
+        mockPlayer.javaClass.getDeclaredField("clips").apply { isAccessible = true }
+            .set(mockPlayer, mapOf(EarconId.WAKE_WORD to clip))
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        mockPlayer.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(mockPlayer, track)
+        mockPlayer.readPlaybackHeadFrames = { 0 }
+
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+
+        mockPlayer.stopAdmissionNow(null)
+
+        // THE RESOURCE IS RELEASED: a track that is discarded without release() can never be released,
+        // because its only reference is gone.
+        org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).release()
+        // AND ITS FRONTIER IS GONE WITH IT, so the next cue on a fresh track is not measured against
+        // frames the retired track had accepted.
+        assertEquals(
+            "the retired track's accepted-frame frontier must not outlive it",
+            0,
+            mockPlayer.javaClass.getDeclaredField("acceptedFramesTotal")
+                .apply { isAccessible = true }
+                .get(mockPlayer),
+        )
+        assertEquals(
+            "nor may its completion target survive it",
+            0,
+            mockPlayer.javaClass.getDeclaredField("cueHeadTarget")
+                .apply { isAccessible = true }
+                .get(mockPlayer),
+        )
+    }
 }

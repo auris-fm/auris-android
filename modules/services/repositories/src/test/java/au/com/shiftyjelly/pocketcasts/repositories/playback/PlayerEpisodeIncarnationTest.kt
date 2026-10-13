@@ -36,6 +36,40 @@ class PlayerEpisodeIncarnationTest {
     }
 
     @Test
+    fun `an issued skip with no returned outcome is Unknown, not a refusal`() {
+        // @spec's 8147c3b11 contract on the REAL decision production runs. A skip whose scoped mutation
+        // was ACCEPTED but carries no outcome was ISSUED and may already have run; reporting it as a
+        // refusal looks like a retryable failure and invites a REPEAT of an operation the receiver
+        // already performed.
+        //
+        // Called directly: the manager takes 28 injected collaborators, which a plain unit test cannot
+        // assemble, and a decision reachable only through that construction is a decision nothing checks.
+        assertEquals(
+            "an accepted mutation with NO outcome is UNKNOWN",
+            PlaybackManager.SkipOutcome.Unknown,
+            skipOutcomeOfMutation(refused = false, unknown = true),
+        )
+        // THE CONTROLS, so the case is decided by the mutation and not by the function always answering
+        // one value.
+        assertEquals(
+            "the owner's own refusal is REFUSED",
+            PlaybackManager.SkipOutcome.Refused,
+            skipOutcomeOfMutation(refused = true, unknown = false),
+        )
+        assertEquals(
+            "an accepted, resolved mutation is ACCEPTED",
+            PlaybackManager.SkipOutcome.Accepted,
+            skipOutcomeOfMutation(refused = false, unknown = false),
+        )
+        // A refusal is a decision, not an unknown: the two must not be interchangeable.
+        assertNotEquals(
+            "a refusal must not be reported as an unknown",
+            PlaybackManager.SkipOutcome.Refused,
+            skipOutcomeOfMutation(refused = false, unknown = true),
+        )
+    }
+
+    @Test
     fun `an incarnation is stable when nothing re-points the player`() {
         // The positive control: the counter must not move on its own, or every seek would be refused.
         val incarnation = 0L

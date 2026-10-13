@@ -1,7 +1,9 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import timber.log.Timber
 
 /**
  * Single-flight guard for starting the ASR engine.
@@ -25,14 +27,33 @@ internal class EngineStartCoordinator {
         private set
 
     /**
-     * Runs [start] with the start lock held, unless the engine is already running. Returns true
-     * when the engine is running afterwards, false when [start] reported failure. When another
-     * caller is already starting the engine, this waits for it and then reports its outcome.
+     * Runs [start] with the start lock held, unless the engine is already running, then runs
+     * [onStarted] once. Returns true when the engine is running afterwards, false when [start]
+     * reported failure. When another caller is already starting the engine, this waits for it and
+     * then reports its outcome.
+     *
+     * [onStarted] runs *after* the started state is recorded, so a throw from a post-start side
+     * effect (the listening earcon, the foreground notification) cannot un-set it or make this
+     * call report failure. The caller uses the result to decide between handing an acquired stream
+     * to the engine and releasing it; a failure here must never release a stream the engine
+     * already owns.
      */
-    suspend fun startIfNotRunning(start: suspend () -> Boolean): Boolean = mutex.withLock {
+    suspend fun startIfNotRunning(
+        onStarted: suspend () -> Unit = {},
+        start: suspend () -> Boolean,
+    ): Boolean = mutex.withLock {
         if (isStarted) return@withLock true
         val started = start()
-        if (started) isStarted = true
+        if (started) {
+            isStarted = true
+            try {
+                onStarted()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Timber.e(e, "[VoicePipeline] post-start side effect failed")
+            }
+        }
         started
     }
 

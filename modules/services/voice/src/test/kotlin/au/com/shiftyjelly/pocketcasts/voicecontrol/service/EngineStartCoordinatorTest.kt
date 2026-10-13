@@ -115,4 +115,46 @@ class EngineStartCoordinatorTest {
         }
         assertEquals(2, invocations)
     }
+
+    /**
+     * The engine attaches the acquired stream inside `VoiceAsrEngine.start`; the earcon and the
+     * listening notification are side effects that run afterwards. A throw from one of them must
+     * not make the start report failure: `VoiceControlService.acquireCandidate` reads this result
+     * to decide between handing the acquired stream to the engine and releasing it, and a false
+     * result would close a stream the engine already owns (and, because the coordinator would not
+     * be marked started, let the next mode emission start a second engine).
+     */
+    @Test
+    fun `a post-start side effect failure does not un-start the engine`() = runTest {
+        val coordinator = EngineStartCoordinator()
+        var engineStarts = 0
+        var sideEffectRan = false
+
+        val result = coordinator.startIfNotRunning(
+            start = {
+                engineStarts++
+                true
+            },
+            onStarted = {
+                sideEffectRan = true
+                throw IllegalStateException("earcon/notification failed")
+            },
+        )
+
+        assertTrue("a side-effect failure must not be reported as a failed start", result)
+        assertTrue("the engine must remain marked started", coordinator.isStarted)
+        assertTrue(sideEffectRan)
+        assertEquals(1, engineStarts)
+
+        // A second caller must still see a running engine, not start a second one.
+        val again = coordinator.startIfNotRunning(
+            start = {
+                engineStarts++
+                true
+            },
+            onStarted = {},
+        )
+        assertTrue(again)
+        assertEquals(1, engineStarts)
+    }
 }

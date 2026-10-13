@@ -317,38 +317,47 @@ class VoiceControlService : Service() {
      * skips it. Returns true when the engine is running afterwards.
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    private suspend fun startEngine(mode: ListeningMode): Boolean = engineStart.startIfNotRunning {
-        val backend = asrBackendSelector.select()
-        if (backend == null) {
-            Timber.w(
-                "[VoicePipeline] ASR locale unsupported — refusing to start engine",
-            )
-            return@startIfNotRunning false
-        }
+    private suspend fun startEngine(mode: ListeningMode): Boolean = engineStart.startIfNotRunning(
+        start = {
+            val backend = asrBackendSelector.select()
+            if (backend == null) {
+                Timber.w(
+                    "[VoicePipeline] ASR locale unsupported — refusing to start engine",
+                )
+                return@startIfNotRunning false
+            }
 
-        // Prepare the model before telling the user we are listening. The engine also checks
-        // this (it refuses to run a pipeline that would only ever return empty results), but
-        // by then the listening earcon and notification have already gone out, leaving the
-        // user told "listening" with a microphone that never opens.
-        if (backend.ensureReady().isFailure) {
-            Timber.e("[VoicePipeline] engine not started: ASR backend not ready")
-            return@startIfNotRunning false
-        }
+            // Prepare the model before telling the user we are listening. The engine also checks
+            // this (it refuses to run a pipeline that would only ever return empty results), but
+            // by then the listening earcon and notification have already gone out, leaving the
+            // user told "listening" with a microphone that never opens.
+            if (backend.ensureReady().isFailure) {
+                Timber.e("[VoicePipeline] engine not started: ASR backend not ready")
+                return@startIfNotRunning false
+            }
 
-        try {
-            voiceAsrEngine.get().start(
-                backend = backend,
-                audioRoute = audioRouteMonitor.route.value,
-                listeningMode = mode,
-                playbackBufferProvider = playbackBufferRecorder::snapshot,
-                micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
-                onIntent = { intent -> handleIntent(intent) },
-            )
-
+            try {
+                voiceAsrEngine.get().start(
+                    backend = backend,
+                    audioRoute = audioRouteMonitor.route.value,
+                    listeningMode = mode,
+                    playbackBufferProvider = playbackBufferRecorder::snapshot,
+                    micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
+                    onIntent = { intent -> handleIntent(intent) },
+                )
+            } catch (e: Exception) {
+                Timber.e(e, "[VoicePipeline] engine start failed")
+                return@startIfNotRunning false
+            }
+            true
+        },
+        // Post-start side effects run only after the coordinator has recorded the engine as
+        // started. They must not be able to un-set it: acquireCandidate hands the acquired
+        // stream to the engine based on this result, and a false would close a live stream.
+        onStarted = {
             // Only when the microphone opens where the user cannot see it: the decision is
-            // shouldPlayListeningStartCue in ListeningModePolicy. Nothing under test drives this
-            // service's start path, so this call site is untested by design — the predicate it
-            // calls is covered in ListeningModePolicyTest.
+            // shouldPlayListeningStartCue in ListeningModePolicy. The predicate it calls is
+            // covered in ListeningModePolicyTest.
             if (shouldPlayListeningStartCue(mode, gate.state.value.rules)) {
                 audioFeedbackRenderer.playEarcon(EarconId.LISTENING_START)
             }
@@ -358,12 +367,8 @@ class VoiceControlService : Service() {
             )
             notificationManager.notify(notification)
             Timber.i("[VoicePipeline] engine started mode=%s", mode)
-            true
-        } catch (e: Exception) {
-            Timber.e(e, "[VoicePipeline] engine start failed")
-            false
-        }
-    }
+        },
+    )
 
     /**
      * Acquires an external Bluetooth microphone for a candidate route, then starts capture.

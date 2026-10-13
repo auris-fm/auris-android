@@ -1442,7 +1442,15 @@ open class PlaybackManager @Inject constructor(
             // UNKNOWN IS NOT REFUSAL, and it is not "no result" either: the caller must be able to tell
             // that the operation may have run. Refusing here would look like a retryable failure and
             // could repeat an operation the receiver already performed.
-            return if (outcome.unknown) ScopedMutation(episodeUuid, null, unknown = true) else null
+            // THE OWNER'S KNOWN SNAPSHOT IS PRESERVED. `unknown` concerns whether the EXECUTION's
+            // outcome is knowable -- not whether the pre-action snapshot existed. Passing null here
+            // discarded a value the owner had already captured, so a caller could no longer say where
+            // playback WAS when the unknown operation began.
+            return if (outcome.unknown) {
+                ScopedMutation(episodeUuid, outcome.positionMs?.toInt(), unknown = true)
+            } else {
+                null
+            }
         }
         // THE POSITION MAY BE ABSENT WHILE THE OPERATION IS ACCEPTED. It is carried as null so the
         // history consumer records nothing rather than substituting a value -- absence is not refusal.

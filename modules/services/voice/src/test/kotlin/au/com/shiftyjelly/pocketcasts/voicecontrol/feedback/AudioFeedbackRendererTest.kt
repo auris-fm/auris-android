@@ -140,6 +140,33 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `the observation WAITS OUT the remaining interval to its deadline`() = runTest {
+        // @reviewer's measured case: the observer had ALREADY ENDED at 1_999 ms for a 2_000 ms limit,
+        // because the loop refused any heartbeat that would overshoot and so gave up one tick EARLY --
+        // the cue was never observed AT the boundary. The loop now sleeps exactly as far as the deadline.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        // ONE MILLISECOND SHORT OF THE LIMIT: the observation must still be running.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_999))
+        assertTrue(
+            "the observation must still be waiting at 1_999 ms, not have given up early",
+            renderer.coverageIsRunningForTest(),
+        )
+
+        // AT AND PAST THE LIMIT it ends, and the ending is an EXPIRY -- not evidence of consumed audio.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(100))
+        assertFalse("and it ends at the deadline", renderer.coverageIsRunningForTest())
+        assertTrue(
+            "a deadline expiry is UNKNOWN, not a claim that the cue completed",
+            renderer.coverageExpiredUnknownForTest(),
+        )
+    }
+
+    @Test
     fun `a permanently QUEUED cue is observed for a BOUNDED time, not forever`() = runTest {
         // @reviewer's measured defect in my policy implementation: my queued limit was computed as
         // `2_000 + elapsed` EACH PASS, so it grew with the loop and could NEVER be reached -- a

@@ -172,29 +172,31 @@ class EarconPlayer(
     var lastPlayedId: EarconId? = null
         private set
 
-    /**
-     * Starts [id] and reports whether the SINK ACCEPTED the whole clip.
-     *
-     * The boolean answers "did submission succeed", which is a START acknowledgement -- **it does not
-     * claim the audio has been emitted**, and treating it as completion is the conflation @spec
-     * ruled out. The drain runs on this player's own thread: the caller (the ASR collect coroutine,
-     * and Main) is released as soon as submission finishes rather than after the clip has played.
-     *
-     * Only PCM the sink ACCEPTED feeds the reference, so a partial write cannot leave the reference
-     * claiming audio that was never submitted.
-     */
-    fun play(id: EarconId): Boolean = onPlayerThread {
+    // Plays `id` and returns THE ADMISSION IT TOOK, or null when the cue was not admitted.
+    //
+    // A null result is a START acknowledgement that did NOT happen -- it does not claim the audio has
+    // been emitted, and treating acceptance as completion is the conflation @spec ruled out. The drain
+    // runs on this player's own thread, so the caller is released when submission finishes rather than
+    // after the clip has played. Only PCM the sink ACCEPTED feeds the reference, so a partial write
+    // cannot leave the reference claiming audio that was never submitted.
+    //
+    // THE TOKEN IS RETURNED RATHER THAN RE-READ. A caller that played the cue and then asked for "the
+    // current admission" would be asking a DIFFERENT question: between its play and its read a successor
+    // can take the track, and the caller would hold the SUCCESSOR'S token while believing it held its
+    // own -- so its later stop would release an admission it never made. The admission and the play are
+    // one act, so the result of the act is what carries it.
+    fun play(id: EarconId): AdmissionToken? = onPlayerThread {
         startOnPlayerThread(id)
     }
 
-    private fun startOnPlayerThread(id: EarconId): Boolean {
-        val clip = clips[id] ?: return false
-        if (clip.samples.isEmpty()) return false
+    private fun startOnPlayerThread(id: EarconId): AdmissionToken? {
+        val clip = clips[id] ?: return null
+        if (clip.samples.isEmpty()) return null
         val audioTrack = try {
             ensureTrack(clip.sampleRateHz)
         } catch (e: Exception) {
             Timber.w(e, "[Earcon] play failed")
-            return false
+            return null
         }
         return try {
             var offset = 0
@@ -211,7 +213,7 @@ class EarconPlayer(
                     // them. The cue itself FAILED, which is reported to the caller, and that is a
                     // separate fact from how much audio the track now owes.
                     acceptedFramesTotal += offset
-                    return false
+                    return null
                 }
                 clip.recordAccepted(offset, written, playbackBufferRecorder)
                 offset += written
@@ -219,7 +221,8 @@ class EarconPlayer(
             lastPlayedId = id
             // THE ADMISSION TOKEN IS MINTED WHEN THE CUE TAKES THE TRACK, so it identifies THIS playing
             // of the cue. A caller holds it to stop precisely this admission later.
-            currentAdmission = AdmissionToken(admissionCounter.incrementAndGet())
+            val admitted = AdmissionToken(admissionCounter.incrementAndGet())
+            currentAdmission = admitted
             // THE HEAD IS CUMULATIVE ACROSS CUES ON ONE TRACK, so completion must compare it against a
             // cumulative target. Comparing it against this cue's own frame COUNT made a second cue
             // read Consumed immediately: the head already stood at the first cue's total, which
@@ -242,10 +245,10 @@ class EarconPlayer(
             cueHeadOrigin = acceptedFramesTotal - offset
             emittedFrames = offset
             emittedRateHz = clip.sampleRateHz
-            true
+            admitted
         } catch (e: Exception) {
             Timber.w(e, "[Earcon] play failed")
-            false
+            null
         }
     }
 

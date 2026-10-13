@@ -358,8 +358,28 @@ class EarconPlayer(
      * can no longer hear.
      */
     fun stopNow() {
+        stopCueNow(expectedCueId = null)
+    }
+
+    /**
+     * Stops the cue this call was issued for, and ONLY that cue.
+     *
+     * [stopNow] stops whatever `track` is current, and the block runs LATER on the player thread -- so a
+     * SUCCESSOR that started in between is playing on that same track and would be stopped too. The stop
+     * is a statement about ONE cue, so it must be scoped to that cue rather than to the track that
+     * happens to be current when the block runs.
+     *
+     * [expectedCueId] null means "stop whatever is playing", which is the session-teardown shape: there
+     * the caller really does mean the track itself.
+     */
+    fun stopCueNow(expectedCueId: EarconId?) {
         onPlayerThread {
+            // THE SUCCESSOR'S CUE IS NOT THIS STOP'S SUBJECT. If the track has moved on to a different
+            // cue, this stop speaks for audio that is no longer sounding -- stopping the track here would
+            // silence a cue nobody asked to stop.
+            if (expectedCueId != null && lastPlayedId != expectedCueId) return@onPlayerThread
             track?.runCatching { stop() }
+            track = null
             emittedFrames = 0
             emittedRateHz = 0
             cueHeadOrigin = 0

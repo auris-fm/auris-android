@@ -173,7 +173,7 @@ class VoiceControlService : Service() {
         // the action it dispatched actually ran. Reading only the feedback would let an action whose
         // outcome could not be established pass as a delivered turn.
         val response = try {
-            voicePlaybackIntentExecutor.execute(intent).also { recordActionDecision(intent) }
+            voicePlaybackIntentExecutor.execute(intent)
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             // Cancellation is the caller withdrawing, not a failure to report: rethrow so structured
             // concurrency still unwinds instead of being swallowed into an earcon.
@@ -186,30 +186,33 @@ class VoiceControlService : Service() {
     }
 
     /**
-     * Publishes the decision the request-owned outcome implies, and holds the last one for callers.
+     * The decision the request-owned action outcome implies for THIS turn.
      *
-     * AN UNKNOWN OUTCOME IS NOT A DELIVERED ACTION. The turn's feedback may say everything went well
-     * while the action it dispatched was ISSUED without a returned outcome -- and a caller that could not
-     * tell those apart would treat an unknowable execution as a completed one. Recording the three values
-     * separately is what makes that distinction observable rather than a comment.
+     * Read it, do not store it: a slot nobody consults is the same non-implementation as an API with no
+     * caller. The decision is whether the turn may be treated as DELIVERED, and it is what the caller
+     * acts on -- see [actionOutcomeFor].
      */
-    @Volatile
-    internal var lastActionOutcome: CloudRouteActionOutcome = CloudRouteActionOutcome.None
-        private set
-
-    private fun recordActionDecision(
+    internal fun actionOutcomeFor(
         intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
-    ) {
-        // ONLY A CLOUD TURN HAS ONE. A local intent has no cloud action, so leaving the previous turn's
-        // outcome standing would attribute one turn's action to another -- stale state read as this
-        // turn's decision.
-        lastActionOutcome = if (intent is au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent.CloudRoute) {
+    ): CloudRouteActionOutcome = // ONLY A CLOUD TURN HAS ONE. A local intent has no cloud action, so reading a previous turn's
+        // outcome would attribute one turn's action to another.
+        if (intent is au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent.CloudRoute) {
             voicePlaybackIntentExecutor.lastActionOutcome
         } else {
             CloudRouteActionOutcome.None
         }
-        Timber.i("[VoicePipeline] action outcome: $lastActionOutcome")
-    }
+
+    /**
+     * Whether the turn may be treated as having delivered what it claimed.
+     *
+     * AN UNKNOWN OUTCOME IS NOT A DELIVERED ACTION. The feedback may say everything went well while the
+     * action it dispatched was ISSUED without a returned outcome. Treating that as delivered is the
+     * claim nobody could make; treating it as a plain failure would invite a repeat of something that
+     * may already have happened. So it is neither: the turn is NOT counted as a completed command -- it
+     * does not earn the privileges a recognized command grants -- and the user is told the request could
+     * not be completed, which is the honest report of "we do not know".
+     */
+    internal fun isDeliveredTurn(outcome: CloudRouteActionOutcome): Boolean = outcome != CloudRouteActionOutcome.Unknown
 
     private fun startVoiceControl() {
         if (engineStart.isStarted) {
@@ -799,10 +802,19 @@ class VoiceControlService : Service() {
             // which it does at its own boundary; adding a second handler here would put that decision in
             // two places without changing any outcome.
             renderWithFailureHandling(intent)
-            gracePeriodSignal.onCommandRecognized(
-                fromGeneration = intent.windowGenerationOf(),
-                restoresAllowance = intent.restoresAllowance(),
-            )
+            // THE TURN'S DELIVERY DECISION DECIDES RECOGNITION, which is the behaviour the request-owned
+            // outcome exists to drive. A command whose action outcome could not be established has not
+            // been shown to have done anything, so it must not earn the privileges a recognized command
+            // grants -- extending the listening window and clearing the escalation penalty. Claiming that
+            // for an unverified action is the success-nobody-observed the three-valued outcome prevents.
+            if (isDeliveredTurn(actionOutcomeFor(intent))) {
+                gracePeriodSignal.onCommandRecognized(
+                    fromGeneration = intent.windowGenerationOf(),
+                    restoresAllowance = intent.restoresAllowance(),
+                )
+            } else {
+                Timber.i("[VoicePipeline] turn not recognized: its action outcome is unknown")
+            }
         }
     }
 

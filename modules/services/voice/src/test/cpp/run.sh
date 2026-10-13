@@ -1,9 +1,12 @@
 #!/bin/sh
-# Build and run the host VAD segment-accounting test.
+# Build and run the host-side native tests.
 #
-# It needs no Oboe library and no Silero: the VAD externs are stubbed in the test, readRingBuffer is
-# virtual so a fake capture can serve scripted frames, and shim/ supplies a no-op <android/log.h>.
-# The only external input is the cached Oboe headers the Android build already fetched.
+# vad_segment_test needs no Oboe library and no Silero: the VAD externs are stubbed in the test,
+# readRingBuffer is virtual so a fake capture can serve scripted frames, and shim/ supplies a no-op
+# <android/log.h>. The only external input is the cached Oboe headers the Android build already
+# fetched.
+#
+# vad_handle_test covers the JNI VAD processor lifetime guard and needs only the production header.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 VOICE=$(cd "$HERE/../../.." && pwd)   # src/test/cpp -> the voice module
@@ -16,3 +19,4 @@ cmake -S "$HERE" -B "$BUILD" \
     -DOBOE_INCLUDE="$OBOE"
 cmake --build "$BUILD"
 "$BUILD/vad_segment_test"
+"$BUILD/vad_handle_test"

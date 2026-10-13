@@ -2,13 +2,17 @@
 #include <mutex>
 #include "OboeAudioCapture.h"
 #include "NativeVadProcessor.h"
+#include "RetireableProcessorHandle.h"
 
-// gCapture/gVadProcessor are protected by gCaptureMutex.
-// Combined start/stop (nativeStartCaptureAndVad / nativeStopCaptureAndVad)
-// hold the mutex for the entire sequence, preventing races from concurrent
-// route-change restarts and foreground transitions.
+// gCapture is protected by gCaptureMutex. gVadProcessor owns the NativeVadProcessor through a
+// usage-counting handle: the VAD event getters run on the collector thread and can be parked in
+// a blocking native call when another thread tears capture down, so deletion must wait for those
+// in-flight users to leave (see RetireableProcessorHandle.h) rather than free a pointer in use.
+// Combined start/stop (nativeStartCaptureAndVad / nativeStopCaptureAndVad) hold gCaptureMutex
+// for the whole sequence, preventing races from concurrent route-change restarts and foreground
+// transitions.
 static OboeAudioCapture* gCapture = nullptr;
-static NativeVadProcessor* gVadProcessor = nullptr;
+static RetireableProcessorHandle<NativeVadProcessor> gVadProcessor;
 static std::mutex gCaptureMutex;
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -52,15 +56,16 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartCap
         return JNI_FALSE;
     }
 
-    delete gVadProcessor;
-    gVadProcessor = new NativeVadProcessor(gCapture);
-
-    if (!gVadProcessor->start()) {
-        delete gVadProcessor;
-        gVadProcessor = nullptr;
+    // Retire any previous processor before replacing it: an in-flight getter must not have its
+    // processor deleted out from under it.
+    gVadProcessor.retire();
+    auto* processor = new NativeVadProcessor(gCapture);
+    if (!processor->start()) {
+        delete processor;
         // Capture is still valid — caller will stop/close it
         return JNI_FALSE;
     }
+    gVadProcessor.publish(processor);
 
     return JNI_TRUE;
 }
@@ -76,8 +81,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeOpenInpu
 {
     std::lock_guard<std::mutex> lock(gCaptureMutex);
 
-    delete gVadProcessor;
-    gVadProcessor = nullptr;
+    gVadProcessor.retire();
     delete gCapture;
     gCapture = nullptr;
 
@@ -113,8 +117,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeCloseInp
     jclass /*clazz*/)
 {
     std::lock_guard<std::mutex> lock(gCaptureMutex);
-    delete gVadProcessor;
-    gVadProcessor = nullptr;
+    gVadProcessor.retire();
     delete gCapture;
     gCapture = nullptr;
 }
@@ -126,9 +129,9 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStopCapt
 {
     std::lock_guard<std::mutex> lock(gCaptureMutex);
 
-    // Stop VAD before capture — VAD thread reads from capture's ring buffer
-    delete gVadProcessor;
-    gVadProcessor = nullptr;
+    // Stop VAD before capture — VAD thread reads from capture's ring buffer. retire() waits for
+    // any in-flight event getter to return, so the processor is never deleted while in use.
+    gVadProcessor.retire();
 
     delete gCapture;
     gCapture = nullptr;
@@ -145,15 +148,13 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeWaitForV
     jclass /*clazz*/,
     jint timeoutMs)
 {
-    NativeVadProcessor* processor = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(gCaptureMutex);
-        processor = gVadProcessor;
-    }
+    NativeVadProcessor* processor = gVadProcessor.acquire();
     if (processor == nullptr) {
         return -1;
     }
-    return processor->waitForEvent(static_cast<int32_t>(timeoutMs));
+    const int result = processor->waitForEvent(static_cast<int32_t>(timeoutMs));
+    gVadProcessor.release();
+    return result;
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -162,11 +163,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
     jclass /*clazz*/,
     jshortArray jBuffer)
 {
-    NativeVadProcessor* processor = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(gCaptureMutex);
-        processor = gVadProcessor;
-    }
+    NativeVadProcessor* processor = gVadProcessor.acquire();
     if (processor == nullptr) {
         return 0;
     }
@@ -174,6 +171,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
     jsize capacity = env->GetArrayLength(jBuffer);
     jshort* elements = env->GetShortArrayElements(jBuffer, nullptr);
     if (elements == nullptr) {
+        gVadProcessor.release();
         return 0;
     }
 
@@ -182,6 +180,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
         static_cast<int32_t>(capacity));
 
     env->ReleaseShortArrayElements(jBuffer, elements, 0); // copy back
+    gVadProcessor.release();
     return static_cast<jint>(copied);
 }
 
@@ -190,15 +189,13 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
     JNIEnv* /*env*/,
     jclass /*clazz*/)
 {
-    NativeVadProcessor* processor = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(gCaptureMutex);
-        processor = gVadProcessor;
-    }
+    NativeVadProcessor* processor = gVadProcessor.acquire();
     if (processor == nullptr) {
         return 0;
     }
-    return processor->getSpeechPcmSize();
+    const int result = processor->getSpeechPcmSize();
+    gVadProcessor.release();
+    return result;
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -206,15 +203,13 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
     JNIEnv* /*env*/,
     jclass /*clazz*/)
 {
-    NativeVadProcessor* processor = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(gCaptureMutex);
-        processor = gVadProcessor;
-    }
+    NativeVadProcessor* processor = gVadProcessor.acquire();
     if (processor == nullptr) {
         return 0;
     }
-    return processor->getSpeechOnsetSample();
+    const int result = processor->getSpeechOnsetSample();
+    gVadProcessor.release();
+    return result;
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -222,13 +217,11 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
     JNIEnv* /*env*/,
     jclass /*clazz*/)
 {
-    NativeVadProcessor* processor = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(gCaptureMutex);
-        processor = gVadProcessor;
-    }
+    NativeVadProcessor* processor = gVadProcessor.acquire();
     if (processor == nullptr) {
         return 0;
     }
-    return processor->getSpeechEndSample();
+    const int result = processor->getSpeechEndSample();
+    gVadProcessor.release();
+    return result;
 }

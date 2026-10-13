@@ -182,6 +182,17 @@ class AudioFeedbackRenderer(
     internal fun coverageIsRunningForTest(): Boolean = earconCoverageJob?.isActive == true
 
     /**
+     * Whether the last observation ended because its DEADLINE expired without an observed ending.
+     *
+     * DEADLINE EXPIRY IS UNKNOWN, NOT CONSUMED: the cue's fate was not established, so a caller must not
+     * read the ending as evidence that the audio finished sounding.
+     */
+    @Volatile
+    private var coverageExpiredUnknown: Boolean = false
+
+    internal fun coverageExpiredUnknownForTest(): Boolean = coverageExpiredUnknown
+
+    /**
      * Keeps the gate's attribution fresh until the cue is OBSERVED to have been consumed.
      *
      * The estimated duration is a BOUND, not the ending condition: the loop ends when the output
@@ -194,6 +205,7 @@ class AudioFeedbackRenderer(
      */
     private fun coverEarconUntilConsumed() {
         earconCoverageJob?.cancel()
+        coverageExpiredUnknown = false
         earconCoverageJob = scope.launch {
             // A cue that is never observed to progress must not be covered forever: the estimate
             // bounds the wait, and the bound is only a ceiling.
@@ -237,9 +249,24 @@ class AudioFeedbackRenderer(
             var renderingDeadlineMs: Long? = null
             while (!disposed) {
                 val limit = renderingDeadlineMs ?: queuedDeadlineMs
-                if (observed && elapsed + EMISSION_HEARTBEAT_MS > limit) return@launch
-                delay(if (observed) EMISSION_HEARTBEAT_MS else firstWaitMs)
-                elapsed += if (observed) EMISSION_HEARTBEAT_MS else firstWaitMs
+                // WAIT THE REMAINING INTERVAL, do not give up a whole heartbeat short. Returning as soon
+                // as the NEXT full heartbeat would overshoot the deadline ends the observation at
+                // 1_999 ms for a 2_000 ms limit -- one tick early, so the cue is never observed AT the
+                // boundary. The loop sleeps exactly as far as the deadline and observes there.
+                val remainingMs = limit - elapsed
+                if (observed && remainingMs <= 0) {
+                    // THE DEADLINE EXPIRED: the observation gives up WITHOUT having established the
+                    // cue's fate, so the ending is UNKNOWN rather than a claim that it completed.
+                    coverageExpiredUnknown = true
+                    return@launch
+                }
+                val waitMs = if (!observed) {
+                    minOf(firstWaitMs, maxOf(remainingMs, 1L))
+                } else {
+                    minOf(EMISSION_HEARTBEAT_MS, maxOf(remainingMs, 1L))
+                }
+                delay(waitMs)
+                elapsed += waitMs
                 observed = true
                 when (earconPlayer.completion()) {
                     // CONSUMED IS MEASURED RENDERING, so it NOTES BEFORE ENDING. The head has passed
@@ -248,6 +275,8 @@ class AudioFeedbackRenderer(
                     // Returning here without noting treated completion as if it proved nothing.
                     EarconPlayer.EarconCompletion.Consumed -> {
                         noteEmitted()
+                        // AN OBSERVED ENDING IS NOT AN EXPIRY: the cue's fate IS established.
+                        coverageExpiredUnknown = false
                         return@launch
                     }
 

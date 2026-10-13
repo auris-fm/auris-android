@@ -140,6 +140,42 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `an OLD observer cannot overwrite its successor's published outcome`() = runTest {
+        // @spec's measured race: `coverageExpiredUnknown` is written by a NON-SUSPENDING assignment after
+        // `completion()` returns, so CANCELLATION ALONE CANNOT PROTECT IT -- an old observer resuming
+        // after a successor has published can overwrite the successor's result.
+        //
+        // THE ORDERING IS THE CASE. The old observer must be AT ITS DEADLINE -- about to publish -- when
+        // the successor publishes its own result, so the two writes genuinely overlap. My first version
+        // idled only 1500 ms, well short of the old deadline, so the old observer never wrote at all and
+        // the ownership check was unnecessary for the outcome; the mutation SURVIVED it.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        // The OLD observer's cue never sounds, so it will expire.
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        // RUN THE OLD OBSERVER TO ITS DEADLINE, where it publishes its expiry.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_100))
+        assertTrue(
+            "the old observer expired, and its expiry is published while it owns the cue",
+            renderer.coverageExpiredUnknownForTest(),
+        )
+
+        // THE SUCCESSOR NOW OWNS THE CUE and observes it CONSUMED, so it publishes "not an expiry".
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(100))
+
+        assertFalse(
+            "the SUCCESSOR's outcome must stand: it observed the cue consumed, so the ending is not an " +
+                "expiry -- the old observer must not be able to overwrite it",
+            renderer.coverageExpiredUnknownForTest(),
+        )
+    }
+
+    @Test
     fun `the observation WAITS OUT the remaining interval to its deadline`() = runTest {
         // @reviewer's measured case: the observer had ALREADY ENDED at 1_999 ms for a 2_000 ms limit,
         // because the loop refused any heartbeat that would overshoot and so gave up one tick EARLY --

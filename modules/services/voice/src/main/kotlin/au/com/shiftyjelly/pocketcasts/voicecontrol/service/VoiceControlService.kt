@@ -31,8 +31,11 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonit
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.restoresAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.windowGenerationOf
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AcquisitionResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -41,6 +44,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
@@ -79,8 +83,11 @@ class VoiceControlService : Service() {
 
     @Inject lateinit var gracePeriodSignal: GracePeriodSignal
 
+    @Inject lateinit var routeAcquisition: RouteAcquisition
+
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var modeJob: Job? = null
+    private var acquisitionJob: Job? = null
     private var lastIntentType: String? = null
     private var lastCommandTime: Long = 0L
     private var engineStarted = false
@@ -150,6 +157,11 @@ class VoiceControlService : Service() {
                 ) { mode, _ -> mode }.onEach { mode ->
                     val route = audioRouteMonitor.route.value
                     val micExposure = route.toMicExposure()
+                    // A pending acquisition is only valid while the candidate is still present.
+                    if (route !is AudioRoute.BluetoothA2dpOnly) {
+                        acquisitionJob?.cancel()
+                        acquisitionJob = null
+                    }
                     when (mode) {
                         ListeningMode.Off -> {
                             if (engineStarted) {
@@ -169,6 +181,11 @@ class VoiceControlService : Service() {
                                     Timber.e(msg, reasons, gateState.setupPassed, gateState.conflictsPassed, gateState.contextPassed, micExposure, route, mode)
                                 }
                                 stopEngine()
+                            } else if (route is AudioRoute.BluetoothA2dpOnly && gate.state.value.allowed) {
+                                // The route is a candidate and every non-route gate question passes:
+                                // acquire the external microphone, then capture. Without this the route
+                                // stays Exposed and the mode never leaves Off — the deadlock.
+                                acquireCandidate(route)
                             } else if (!captureWasEverActive && !acquisitionLogged) {
                                 // Capture never started — log once, not on every recomputation
                                 acquisitionLogged = true
@@ -342,7 +359,70 @@ class VoiceControlService : Service() {
         }
     }
 
+    /**
+     * Acquires an external Bluetooth microphone for a candidate route, then starts capture.
+     * Acquisition is bounded and cancellable; when it fails or is cancelled no capture runs and
+     * routing is released.
+     */
+    private fun acquireCandidate(route: AudioRoute) {
+        if (acquisitionJob != null) return
+        val gateAllows = {
+            gate.state.value.allowed && audioRouteMonitor.route.value is AudioRoute.BluetoothA2dpOnly
+        }
+        acquisitionJob = serviceScope.launch {
+            try {
+                val result = routeAcquisition.acquire(route, gateAllows)
+                // Publish completion before starting the engine: the route monitor will flip to
+                // Headset while startEngine() suspends, and the route-change handling must not
+                // cancel the engine start as if it were still an acquisition.
+                acquisitionJob = null
+                when (result) {
+                    is AcquisitionResult.Acquired -> {
+                        if (gate.state.value.allowed) {
+                            @Suppress("MissingPermission") // permission checked in hasRequiredPermissions()
+                            startEngine(
+                                if (gracePeriodSignal.isActive.value) {
+                                    ListeningMode.Continuous
+                                } else {
+                                    ListeningMode.WakeWord
+                                },
+                            )
+                        }
+                    }
+
+                    is AcquisitionResult.Failed -> {
+                        val gateState = gate.state.value
+                        val blockedRules = gateState.rules
+                            .filter { it.value !is VoiceControlRuleState.Allowed }
+                        val reasons = blockedRules.entries
+                            .joinToString(";") { "${it.key}=${it.value}" }
+                        Timber.e(
+                            "mic_acquisition_skipped: reasons=%s;%s setup=%b conflicts=%b context=%b micExposure=%s route=%s mode=%s priorCaptureActive=false",
+                            result.reason,
+                            reasons,
+                            gateState.setupPassed,
+                            gateState.conflictsPassed,
+                            gateState.contextPassed,
+                            route.toMicExposure(),
+                            route,
+                            currentMode,
+                        )
+                    }
+
+                    AcquisitionResult.Cancelled, AcquisitionResult.NotNeeded -> Unit
+                }
+            } finally {
+                if (acquisitionJob === currentCoroutineContext()[Job]) {
+                    acquisitionJob = null
+                }
+            }
+        }
+    }
+
     private fun stopEngine() {
+        acquisitionJob?.cancel()
+        acquisitionJob = null
+        routeAcquisition.release()
         if (!engineStarted) return
         voiceAsrEngine.get().stop()
         engineStarted = false

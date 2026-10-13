@@ -43,26 +43,24 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartCap
 
     std::lock_guard<std::mutex> lock(gCaptureMutex);
 
-    // Clean up any previous instances
+    // Reuse a stream opened by acquisition (nativeOpenInputCapture) so the device it
+    // selected — already confirmed against the route — is the one that captures.
+    if (gCapture == nullptr) {
+        auto* capture = new OboeAudioCapture();
+        if (!capture->open()) {
+            delete capture;
+            return JNI_FALSE;
+        }
+        gCapture = capture;
+    }
+
+    if (!gCapture->isActive() && !gCapture->start()) {
+        delete gCapture;
+        gCapture = nullptr;
+        return JNI_FALSE;
+    }
+
     delete gVadProcessor;
-    gVadProcessor = nullptr;
-    delete gCapture;
-    gCapture = nullptr;
-
-    auto* capture = new OboeAudioCapture();
-
-    if (!capture->open()) {
-        delete capture;
-        return JNI_FALSE;
-    }
-
-    if (!capture->start()) {
-        capture->close();
-        delete capture;
-        return JNI_FALSE;
-    }
-
-    gCapture = capture;
     gVadProcessor = new NativeVadProcessor(gCapture);
 
     if (!gVadProcessor->start()) {
@@ -73,6 +71,60 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartCap
     }
 
     return JNI_TRUE;
+}
+
+// Opens the input stream without starting it; returns the AAudio device id it selected,
+// or -1 when the stream could not be opened. No audio flows until the stream is started.
+extern "C" JNIEXPORT jint JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeOpenInputCapture(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/,
+    jint /*sampleRate*/,
+    jint /*channels*/)
+{
+    std::lock_guard<std::mutex> lock(gCaptureMutex);
+
+    delete gVadProcessor;
+    gVadProcessor = nullptr;
+    delete gCapture;
+    gCapture = nullptr;
+
+    auto* capture = new OboeAudioCapture();
+    if (!capture->open()) {
+        delete capture;
+        return -1;
+    }
+    gCapture = capture;
+    return capture->getDeviceId();
+}
+
+// Starts a stream opened by nativeOpenInputCapture. No-op (true) when already active.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartInputStream(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/)
+{
+    std::lock_guard<std::mutex> lock(gCaptureMutex);
+    if (gCapture == nullptr) {
+        return JNI_FALSE;
+    }
+    if (gCapture->isActive()) {
+        return JNI_TRUE;
+    }
+    return gCapture->start() ? JNI_TRUE : JNI_FALSE;
+}
+
+// Closes any stream opened for acquisition. Idempotent.
+extern "C" JNIEXPORT void JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeCloseInputCapture(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/)
+{
+    std::lock_guard<std::mutex> lock(gCaptureMutex);
+    delete gVadProcessor;
+    gVadProcessor = nullptr;
+    delete gCapture;
+    gCapture = nullptr;
 }
 
 extern "C" JNIEXPORT void JNICALL

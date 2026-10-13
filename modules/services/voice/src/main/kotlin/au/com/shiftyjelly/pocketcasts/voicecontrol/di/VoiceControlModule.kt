@@ -9,6 +9,7 @@ import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.repositories.chromecast.CastManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.GoogleMlKitTranslator
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.foreground.ForegroundStateMonitor
@@ -62,7 +63,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceSleepSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceStatsQuerySink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceVolumeSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidRouteAcquisitionPlatform
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisitionPlatform
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.AndroidPlatformTtsEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.OpenWakeWordDetector
@@ -142,6 +146,15 @@ abstract class VoiceControlModule {
 
         @Provides @Singleton
         fun provideCurrentLocale(): () -> Locale = { Locale.getDefault() }
+
+        @Provides @Singleton
+        fun provideRouteAcquisitionPlatform(
+            @ApplicationContext context: Context,
+            microphoneCapture: MicrophoneCapture,
+        ): RouteAcquisitionPlatform = AndroidRouteAcquisitionPlatform(context, microphoneCapture)
+
+        @Provides @Singleton
+        fun provideRouteAcquisition(platform: RouteAcquisitionPlatform): RouteAcquisition = RouteAcquisition(platform)
 
         @Provides @Singleton
         fun provideDeviceSupportedCondition(): DeviceSupportedCondition = DeviceSupportedCondition()

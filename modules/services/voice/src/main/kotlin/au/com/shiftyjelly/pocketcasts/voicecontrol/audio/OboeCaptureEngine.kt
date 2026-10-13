@@ -27,6 +27,17 @@ internal object OboeNative {
     // Atomic capture + VAD stop
     external fun nativeStopCaptureAndVad()
 
+    // Acquisition: open the input stream without starting it, so the device it selected can
+    // be confirmed before any audio flows. Returns the AAudio device id (kUnspecified = 0),
+    // or -1 when the stream could not be opened.
+    external fun nativeOpenInputCapture(sampleRate: Int, channels: Int): Int
+
+    // Start a stream opened by nativeOpenInputCapture. No-op (true) when already active.
+    external fun nativeStartInputStream(): Boolean
+
+    // Close any stream opened by nativeOpenInputCapture. Idempotent.
+    external fun nativeCloseInputCapture()
+
     external fun nativeIsCapturing(): Boolean
     external fun nativeWaitForVadEvent(timeoutMs: Int): Int
     external fun nativeGetSpeechPcm(buffer: ShortArray): Int

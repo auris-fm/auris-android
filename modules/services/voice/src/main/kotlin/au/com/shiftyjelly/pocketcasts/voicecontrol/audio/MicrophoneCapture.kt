@@ -41,6 +41,21 @@ class MicrophoneCapture @Inject constructor(
     }
 
     /**
+     * Opens the input stream without starting it, returning the AAudio device id it selected
+     * (kUnspecified = 0, or -1 on failure). No audio flows until [startAcquiredStream] is called,
+     * so the device can be confirmed before capture begins.
+     */
+    fun openStreamForAcquisition(): Int = OboeNative.nativeOpenInputCapture(SAMPLE_RATE_HZ, CHANNELS)
+
+    /** Starts the stream opened by [openStreamForAcquisition]. */
+    fun startAcquiredStream(): Boolean = OboeNative.nativeStartInputStream()
+
+    /** Closes any stream opened by [openStreamForAcquisition]. Idempotent. */
+    fun closeAcquiredStream() {
+        OboeNative.nativeCloseInputCapture()
+    }
+
+    /**
      * Stop audio capture and release resources.
      */
     fun stopCapture() {

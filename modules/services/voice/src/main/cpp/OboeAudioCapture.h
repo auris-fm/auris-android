@@ -92,6 +92,11 @@ public:
     int32_t getSampleRate() const { return mSampleRate; }
     int32_t getChannelCount() const { return mChannelCount; }
 
+    // The device the opened stream actually selected. Valid after open(), before start().
+    // Returns kUnspecified (0) when unknown (for example on the OpenSL ES backend) and
+    // -1 when no stream is open.
+    int32_t getDeviceId();
+
     // --- oboe::AudioStreamDataCallback ---
     oboe::DataCallbackResult onAudioReady(
         oboe::AudioStream* audioStream,

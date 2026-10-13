@@ -1,0 +1,221 @@
+package au.com.shiftyjelly.pocketcasts.voicecontrol.route
+
+import android.media.AudioDeviceInfo
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
+import timber.log.Timber
+
+/** Which Bluetooth transport a candidate microphone is reached over. */
+enum class BluetoothTransport {
+    /** Classic `HFP`/`SCO`, opened with `AudioManager.startBluetoothSco()`. */
+    ClassicSco,
+
+    /** `LE Audio`, selected with `AudioManager.setCommunicationDevice()`. */
+    LeAudio,
+}
+
+/**
+ * A Bluetooth device that is currently output-only and whose microphone must be
+ * selected by acquisition before capture is permitted.
+ */
+data class BluetoothCandidate(
+    val deviceId: Int,
+    val transport: BluetoothTransport,
+)
+
+/** The outcome of an acquisition attempt. */
+sealed interface AcquisitionResult {
+    /** An external headset microphone is confirmed selected; capture may start. */
+    data class Acquired(val deviceId: Int) : AcquisitionResult
+
+    /** Acquisition was abandoned because a gate question blocked or the caller cancelled. */
+    data object Cancelled : AcquisitionResult
+
+    /** Acquisition failed, timed out, or could not confirm an external microphone. Routing was released. */
+    data class Failed(val reason: String) : AcquisitionResult
+
+    /** The route already exposes an external microphone (or no microphone); nothing to acquire. */
+    data object NotNeeded : AcquisitionResult
+}
+
+/**
+ * The platform operations acquisition performs. Abstracted so the ordering and the
+ * "availability is not selection" rules can be unit tested without Android or Oboe.
+ *
+ * See core `voice-control-core.md` > "Route acquisition" and `arch/android.md` >
+ * "Audio Route Detection".
+ */
+interface RouteAcquisitionPlatform {
+    /** Bluetooth devices that are connected but whose microphone is not selected. */
+    fun bluetoothCandidates(): List<BluetoothCandidate>
+
+    fun startBluetoothSco()
+
+    fun stopBluetoothSco()
+
+    fun isBluetoothScoOn(): Boolean
+
+    fun setCommunicationDevice(deviceId: Int): Boolean
+
+    fun communicationDeviceId(): Int?
+
+    fun clearCommunicationDevice()
+
+    /** The Android device type for [deviceId], or null when the id does not resolve. */
+    fun deviceType(deviceId: Int): Int?
+
+    /** Opens the input stream without starting it; returns the selected device id. */
+    fun openInputStream(): Int
+
+    /** Starts the previously opened stream. */
+    fun startInputStream(): Boolean
+
+    /** Closes any open stream. Idempotent. */
+    fun closeInputStream()
+}
+
+/**
+ * Acquires an external Bluetooth microphone without capturing.
+ *
+ * A Bluetooth device is output-only until the session selects its microphone, so the
+ * route is `Exposed` and capture is blocked. This opens the route, opens the Oboe stream
+ * without starting it, and starts capture only when the stream reports a wired, BLE, or
+ * `SCO` headset microphone. `TYPE_BUILTIN_MIC`, `kUnspecified`, and unresolvable ids are
+ * unconfirmed, so the stream is closed and the route stays blocked.
+ *
+ * Acquisition is bounded and cancellable: a blocking gate question aborts it, the opened
+ * stream is closed, and the acquired routing (`startBluetoothSco()` / communication
+ * device) is released on cancellation, failure, and gate loss.
+ */
+class RouteAcquisition(
+    private val platform: RouteAcquisitionPlatform,
+    private val timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+    private val pollIntervalMs: Long = DEFAULT_POLL_MS,
+) {
+
+    /** True once this attempt selected routing that [release] must undo. */
+    private var routingAcquired = false
+
+    suspend fun acquire(route: AudioRoute, gateAllows: () -> Boolean): AcquisitionResult {
+        if (route !is AudioRoute.BluetoothA2dpOnly) return AcquisitionResult.NotNeeded
+        val candidate = platform.bluetoothCandidates().firstOrNull()
+            ?: return AcquisitionResult.Failed(REASON_FAILED)
+        return acquire(candidate, gateAllows)
+    }
+
+    suspend fun acquire(candidate: BluetoothCandidate, gateAllows: () -> Boolean): AcquisitionResult {
+        return try {
+            performAcquisition(candidate, gateAllows)
+        } catch (e: CancellationException) {
+            release()
+            throw e
+        } catch (e: Exception) {
+            Timber.w(e, "[RouteAcquisition] route_acquisition_failed: %s", e.message)
+            release()
+            AcquisitionResult.Failed(REASON_FAILED)
+        }
+    }
+
+    private suspend fun performAcquisition(
+        candidate: BluetoothCandidate,
+        gateAllows: () -> Boolean,
+    ): AcquisitionResult {
+        if (candidate.transport == BluetoothTransport.LeAudio) {
+            if (!platform.setCommunicationDevice(candidate.deviceId)) {
+                release()
+                return AcquisitionResult.Failed(REASON_FAILED)
+            }
+            routingAcquired = true
+        }
+        if (candidate.transport == BluetoothTransport.ClassicSco) {
+            platform.startBluetoothSco()
+            routingAcquired = true
+        }
+
+        // Wait, bounded, for the platform to actually select the candidate. Presence in
+        // getDevices is never selection: only isBluetoothScoOn() / getCommunicationDevice()
+        // reporting the candidate counts.
+        val selection = withTimeoutOrNull(timeoutMs) {
+            while (true) {
+                if (!gateAllows()) return@withTimeoutOrNull Selection.GATE_LOST
+                if (isSelected(candidate)) return@withTimeoutOrNull Selection.SELECTED
+                delay(pollIntervalMs)
+            }
+            @Suppress("UNREACHABLE_CODE")
+            Selection.TIMEOUT
+        } ?: Selection.TIMEOUT
+
+        when (selection) {
+            Selection.GATE_LOST -> {
+                release()
+                return AcquisitionResult.Cancelled
+            }
+
+            Selection.TIMEOUT -> {
+                release()
+                return AcquisitionResult.Failed(REASON_TIMEOUT)
+            }
+
+            Selection.SELECTED -> Unit
+        }
+
+        // The opened stream is the final authority on which microphone was selected.
+        val deviceId = platform.openInputStream()
+        if (deviceId < 0 || !isConfirmedExternalMicrophone(platform.deviceType(deviceId))) {
+            release()
+            Timber.w(
+                "[RouteAcquisition] route_acquisition_failed: stream selected device=%d type=%s",
+                deviceId,
+                platform.deviceType(deviceId),
+            )
+            return AcquisitionResult.Failed(REASON_FAILED)
+        }
+
+        // A gate question may have blocked while the stream was opening; do not start capture then.
+        if (!gateAllows()) {
+            release()
+            return AcquisitionResult.Cancelled
+        }
+
+        if (!platform.startInputStream()) {
+            release()
+            return AcquisitionResult.Failed(REASON_FAILED)
+        }
+
+        return AcquisitionResult.Acquired(deviceId)
+    }
+
+    private fun isSelected(candidate: BluetoothCandidate): Boolean = when (candidate.transport) {
+        BluetoothTransport.ClassicSco -> platform.isBluetoothScoOn()
+        BluetoothTransport.LeAudio -> platform.communicationDeviceId() == candidate.deviceId
+    }
+
+    /** Closes any opened stream and releases routing this acquisition actually acquired. Idempotent. */
+    fun release() {
+        runCatching { platform.closeInputStream() }
+        if (routingAcquired) {
+            routingAcquired = false
+            runCatching { platform.stopBluetoothSco() }
+            runCatching { platform.clearCommunicationDevice() }
+        }
+    }
+
+    private enum class Selection { SELECTED, GATE_LOST, TIMEOUT }
+
+    companion object {
+        internal const val REASON_TIMEOUT = "route_acquisition_timeout"
+        internal const val REASON_FAILED = "route_acquisition_failed"
+
+        private const val DEFAULT_TIMEOUT_MS = 3_000L
+        private const val DEFAULT_POLL_MS = 50L
+
+        /**
+         * Only a wired, BLE, or classic `SCO` headset microphone confirms acquisition.
+         * `TYPE_BUILTIN_MIC`, a null (unresolvable) id, and every other type are unconfirmed.
+         */
+        internal fun isConfirmedExternalMicrophone(deviceType: Int?): Boolean = deviceType == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+            deviceType == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+            deviceType == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+    }
+}

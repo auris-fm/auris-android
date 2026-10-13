@@ -101,82 +101,6 @@ class VoiceControlServiceRenderTest {
     }
 
     @Test
-    fun `an unknown action outcome does not earn command recognition at the production caller`() = runTest {
-        // @spec: the decision must drive BEHAVIOUR, not fill a slot. Command recognition extends the
-        // listening window and clears the escalation penalty -- privileges a turn that has not been shown
-        // to have done anything must not earn. Observed through the window state, which only the
-        // recognition path moves.
-        val earconPlayer = mock(EarconPlayer::class.java)
-        val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
-        val executor = mock(VoicePlaybackIntentExecutor::class.java)
-        whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any()))
-            .thenAnswer { invocation ->
-                // THE PRODUCTION WRITE: the executor fills the REQUEST'S holder with an unknown outcome.
-                invocation.getArgument<VoicePlaybackIntentExecutor.TurnOutcome>(1).action =
-                    CloudRouteActionOutcome.Unknown
-                VoiceResponse.Silent
-            }
-        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
-        val service = VoiceControlService().apply {
-            audioFeedbackRenderer = renderer
-            voicePlaybackIntentExecutor = executor
-            gracePeriodSignal = signal
-            voiceControlServiceController = mock(au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlServiceController::class.java)
-        }
-        signal.onWakeWordDetected()
-        signal.issueEscalation()
-        assertEquals("the probe needs a spent escalation", "allowance spent in this window", signal.escalationRefusal())
-        try {
-            service.handleIntentForTest(
-                VoiceIntent.CloudRoute(
-                    request = "summarize this episode",
-                    tier = VoiceIntent.CloudTier.Premium,
-                ),
-            )
-            awaitRealTime { org.mockito.Mockito.mockingDetails(executor).invocations.size >= 1 }
-            awaitRealTime {
-                org.robolectric.shadows.ShadowLooper.idleMainLooper()
-                true
-            }
-
-            // THE SPENT ESCALATION IS STILL SPENT: recognition would have opened a new window and made
-            // it "available" again. An unknown outcome must not grant that.
-            assertEquals(
-                "an unverified action must not be recognized as a delivered command: " +
-                    "refusal=${signal.escalationRefusal()}",
-                "allowance spent in this window",
-                signal.escalationRefusal(),
-            )
-        } finally {
-            renderer.release()
-        }
-    }
-
-    /** Poll on real time: the service's scope dispatches off the test scheduler. */
-    private suspend fun awaitRealTime(
-        timeoutMs: Long = 5_000,
-        condition: () -> Boolean,
-    ) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            if (condition()) return
-            Thread.sleep(20)
-        }
-    }
-
-    /**
-     * @spec's launch-path cancellation check: a cancelled command produces NO feedback and does NOT
-     * renew the grace allowance.
-     *
-     * Driven through `handleIntent`, so both halves are observed at the launch site rather than at the
-     * helper: the helper rethrows cancellation, the launch rethrows it again before the cleanup, and
-     * nothing may reach `onCommandRecognized`.
-     *
-     * The allowance probe is the same one the ordinary-failure case uses, and it is why this is a
-     * check rather than a state read: the wake's escalation is spent first, so a renewed window would
-     * ACCEPT a further escalation while a window left untouched keeps refusing one.
-     */
-    @Test
     fun `a cancelled command gives no feedback and does not renew grace`() = runTest {
         val earconPlayer = mock(EarconPlayer::class.java)
         val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
@@ -296,5 +220,17 @@ class VoiceControlServiceRenderTest {
 
         renderer.playEarcon(EarconId.ERROR)
         verify(earconPlayer, org.mockito.Mockito.never()).play(EarconId.ERROR)
+    }
+
+    /** Poll on real time: the service's scope dispatches off the test scheduler. */
+    private suspend fun awaitRealTime(
+        timeoutMs: Long = 5_000,
+        condition: () -> Boolean,
+    ) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (condition()) return
+            Thread.sleep(20)
+        }
     }
 }

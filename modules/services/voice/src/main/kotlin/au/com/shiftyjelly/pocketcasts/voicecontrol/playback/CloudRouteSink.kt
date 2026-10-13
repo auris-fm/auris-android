@@ -566,8 +566,18 @@ class CloudRouteSink internal constructor(
                             myId,
                             plannedEpisodeId = context.episodeId,
                         )
-                        if (performed) noteOutcome(ActionOutcome.Confirmed)
-                        if (turnState.actionUnknown) noteOutcome(ActionOutcome.Unknown)
+                        // THE BOOLEAN IS NOT EVIDENCE OF CONFIRMATION. `executeAction` returns true
+                        // for an action it DISPATCHED, including one whose outcome is unknown -- so
+                        // noting Confirmed from `true` and then noting Unknown recorded BOTH for a
+                        // single unknown action, and Confirmed is the one a caller reads as success.
+                        //
+                        // ORDERED, NOT MERGED: an unknown outcome suppresses the confirmation claim,
+                        // because the stronger observation is the one that says "we could not tell".
+                        if (turnState.actionUnknown) {
+                            noteOutcome(ActionOutcome.Unknown)
+                        } else if (performed) {
+                            noteOutcome(ActionOutcome.Confirmed)
+                        }
                     }
 
                     is CloudRouteEvent.AudioFrame -> {

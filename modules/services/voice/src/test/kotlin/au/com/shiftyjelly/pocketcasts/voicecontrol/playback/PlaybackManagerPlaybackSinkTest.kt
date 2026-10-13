@@ -237,6 +237,11 @@ class PlaybackManagerPlaybackSinkTest {
                 accepted,
             )
         } finally {
+            // SETTLE BEFORE RESETTING MAIN. A coroutine still suspended on the test dispatcher would
+            // resume after `resetMain` on a dispatcher the test no longer owns, and the failure surfaces
+            // as an UNCAUGHT exception in a LATER test class -- a leak whose symptom is nowhere near its
+            // cause. Every probe in this file drains before releasing Main.
+            runCurrent()
             kotlinx.coroutines.Dispatchers.resetMain()
         }
     }
@@ -345,6 +350,11 @@ class PlaybackManagerPlaybackSinkTest {
             )
             assertFalse("and no seek may be performed (reached=$reached)", reached)
         } finally {
+            // SETTLE BEFORE RESETTING MAIN. A coroutine still suspended on the test dispatcher would
+            // resume after `resetMain` on a dispatcher the test no longer owns, and the failure surfaces
+            // as an UNCAUGHT exception in a LATER test class -- a leak whose symptom is nowhere near its
+            // cause. Every probe in this file drains before releasing Main.
+            runCurrent()
             kotlinx.coroutines.Dispatchers.resetMain()
         }
     }

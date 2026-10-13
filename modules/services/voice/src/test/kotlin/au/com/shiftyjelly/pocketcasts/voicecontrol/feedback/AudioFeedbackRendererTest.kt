@@ -11,6 +11,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -176,6 +177,34 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `a stop whose replacement lands DURING it does not retire the successor`() = runTest {
+        // @spec/@reviewer: a fresh stop after the successor completed does not test the window. The
+        // replacement must land INSIDE `stopNow` -- after the owner is claimed, before the write -- which
+        // is the only instant where capturing before versus after differs.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(true)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+        renderer.playEarcon(EarconId.WAKE_WORD)
+
+        // THE REPLACEMENT LANDS DURING THE STOP, and it publishes a verdict of its OWN.
+        renderer.duringStopForTest = {
+            renderer.duringStopForTest = null
+            whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+            renderer.playEarcon(EarconId.LISTENING_START)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+                .idleFor(java.time.Duration.ofMillis(100))
+        }
+
+        renderer.stopEarconNow()
+
+        assertEquals(
+            "the stop must retire the cue IT stopped, and the successor's own verdict must stand",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            renderer.lastCueObservation.value?.observation,
+        )
+    }
+
+    @Test
     fun `an old stop cannot retire a successor cue's observation`() = runTest {
         // @spec: "an old stop must not retire a successor". The first cue's observation expires to
         // Unknown; a SECOND cue then takes over and is observed Consumed. The first cue's retirement must
@@ -188,7 +217,7 @@ class AudioFeedbackRendererTest {
             .idleFor(java.time.Duration.ofMillis(2_100))
         assertEquals(
             AudioFeedbackRenderer.CueObservation.Unknown,
-            renderer.lastCueObservation.value,
+            renderer.lastCueObservation.value?.observation,
         )
 
         // THE SUCCESSOR TAKES OVER and is observed consumed. Its OWN play must be accepted, or the
@@ -202,7 +231,7 @@ class AudioFeedbackRendererTest {
         assertEquals(
             "the successor's own verdict stands",
             AudioFeedbackRenderer.CueObservation.Consumed,
-            renderer.lastCueObservation.value,
+            renderer.lastCueObservation.value?.observation,
         )
 
         // THE STALE RETIREMENT FOR THE FIRST CUE ARRIVES LATE and must change nothing.
@@ -214,7 +243,7 @@ class AudioFeedbackRendererTest {
         assertNotEquals(
             "a stale retirement must not resurrect the old cue's verdict",
             AudioFeedbackRenderer.CueObservation.Unknown,
-            renderer.lastCueObservation.value,
+            renderer.lastCueObservation.value?.observation,
         )
     }
 
@@ -233,7 +262,7 @@ class AudioFeedbackRendererTest {
         assertEquals(
             "the deadline first establishes UNKNOWN",
             AudioFeedbackRenderer.CueObservation.Unknown,
-            renderer.lastCueObservation.value,
+            renderer.lastCueObservation.value?.observation,
         )
 
         renderer.stopEarconNow()
@@ -241,7 +270,7 @@ class AudioFeedbackRendererTest {
         assertEquals(
             "an explicit stop RETIRES the unresolved observation, because the cue now has a known fate",
             AudioFeedbackRenderer.CueObservation.Ended,
-            renderer.lastCueObservation.value,
+            renderer.lastCueObservation.value?.observation,
         )
     }
 
@@ -260,7 +289,7 @@ class AudioFeedbackRendererTest {
         assertEquals(
             "a session end retires the cue it ended: nobody can hear it any more",
             AudioFeedbackRenderer.CueObservation.Ended,
-            renderer.lastCueObservation.value,
+            renderer.lastCueObservation.value?.observation,
         )
     }
 
@@ -294,7 +323,15 @@ class AudioFeedbackRendererTest {
         assertEquals(
             "the expiry must be published as the typed UNKNOWN observation",
             AudioFeedbackRenderer.CueObservation.Unknown,
-            renderer.lastCueObservation.value,
+            renderer.lastCueObservation.value?.observation,
+        )
+        // THE PUBLISHED VALUE CARRIES ITS OWN IDENTITY AND INSTANT: the consumer cannot derive either,
+        // and a bound measured from whenever the consumer polled would measure its schedule, not the cue.
+        val published = renderer.lastCueObservation.value
+        assertNotNull("the publication must carry the cue identity", published?.cueId)
+        assertTrue(
+            "the publication must carry the renderer's OWN instant",
+            (published?.publishedAtMs ?: 0L) > 0L,
         )
     }
 
@@ -312,7 +349,7 @@ class AudioFeedbackRendererTest {
         assertEquals(
             "an ending the output MEASURED is Consumed, and only an unresolved one is Unknown",
             AudioFeedbackRenderer.CueObservation.Consumed,
-            renderer.lastCueObservation.value,
+            renderer.lastCueObservation.value?.observation,
         )
     }
 

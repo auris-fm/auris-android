@@ -21,8 +21,13 @@ class OtherAppPlayingConditionTest {
         // cue then becomes unresolved. If the anchor were kept across cues, B would inherit A's elapsed
         // time and expire almost immediately -- a hold that never actually covered B.
         var now = 0L
-        val observation = MutableStateFlow<AudioFeedbackRenderer.CueObservation?>(
-            AudioFeedbackRenderer.CueObservation.Unknown,
+        // CUE A PUBLISHED AT 0. Its hold runs from that instant, not from this consumer's first poll.
+        val observation = MutableStateFlow<AudioFeedbackRenderer.PublishedObservation?>(
+            AudioFeedbackRenderer.PublishedObservation(
+                cueId = 1L,
+                observation = AudioFeedbackRenderer.CueObservation.Unknown,
+                publishedAtMs = 0L,
+            ),
         )
         val condition = OtherAppPlayingCondition(
             hostIsPlaying = MutableStateFlow(false),
@@ -38,17 +43,30 @@ class OtherAppPlayingConditionTest {
         now = 25_000L
         assertFalse(condition.otherAppPlaying(isMusicActive = true))
 
-        // CUE B TAKES OVER: the observation leaves Unknown and becomes Unknown again for the new cue.
-        observation.value = null
-        condition.otherAppPlaying(isMusicActive = true)
+        // CUE B PUBLISHES ITS OWN UNKNOWN WITH A DISTINCT IDENTITY. THE CONSUMER DOES NOT POLL AGAIN
+        // UNTIL LONG AFTER THAT PUBLICATION -- which is what makes this case discriminate: a hold
+        // anchored to the consumer's first sight would start counting at 40_000, while one anchored to
+        // the RENDERER'S instant has already expired.
         now = 26_000L
-        observation.value = AudioFeedbackRenderer.CueObservation.Unknown
+        observation.value = AudioFeedbackRenderer.PublishedObservation(
+            cueId = 2L,
+            observation = AudioFeedbackRenderer.CueObservation.Unknown,
+            publishedAtMs = 26_000L,
+        )
 
-        // B MUST GET ITS OWN HOLD. Inheriting A's anchor would expire B at 5_000 ms of ITS OWN life --
-        // here at 30_000 -- even though B's observation is only 4_000 ms old.
-        now = 30_000L
+        // THE CONSUMER'S FIRST SIGHT OF B IS 40_000, but B's observation is 14_000 ms old and its hold is
+        // 30_000 -- still within it, so the attribution remains ours. Had B inherited A's anchor (0),
+        // it would be 40_000 old and would wrongly expire here.
+        now = 40_000L
         assertFalse(
-            "the successor's hold must be measured from ITS OWN observation, not the previous cue's",
+            "the hold runs from the renderer's publication, so a late first poll does not expire it early",
+            condition.otherAppPlaying(isMusicActive = true),
+        )
+
+        // AND IT DOES EXPIRE, from its OWN publication: 26_000 + 30_000 = 56_000.
+        now = 57_000L
+        assertTrue(
+            "the successor's hold expires from ITS OWN publication instant, and the app listens again",
             condition.otherAppPlaying(isMusicActive = true),
         )
     }
@@ -59,8 +77,12 @@ class OtherAppPlayingConditionTest {
         // ended every later active-music reading stayed attributed to us. A hold is a BOUND, not a state
         // change of ownership.
         var now = 0L
-        val observation = MutableStateFlow<AudioFeedbackRenderer.CueObservation?>(
-            AudioFeedbackRenderer.CueObservation.Unknown,
+        val observation = MutableStateFlow<AudioFeedbackRenderer.PublishedObservation?>(
+            AudioFeedbackRenderer.PublishedObservation(
+                cueId = 1L,
+                observation = AudioFeedbackRenderer.CueObservation.Unknown,
+                publishedAtMs = 0L,
+            ),
         )
         val condition = OtherAppPlayingCondition(
             hostIsPlaying = MutableStateFlow(false),

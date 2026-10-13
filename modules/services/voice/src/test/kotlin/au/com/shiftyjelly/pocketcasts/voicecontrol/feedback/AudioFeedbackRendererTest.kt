@@ -37,6 +37,26 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `a REFUSED cue is reported as refused, not accepted`() {
+        // @reviewer: playEarcon returned true even when the player returned null, so a REFUSED cue looked
+        // accepted to every caller -- they could not tell a cue that never sounded from one that did.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(null)
+
+        assertFalse(
+            "a refused cue must not be reported as accepted",
+            renderer.playEarcon(EarconId.WAKE_WORD),
+        )
+        // AND AN ACCEPTED CUE IS REPORTED AS ACCEPTED, so the case is decided by the player's result
+        // rather than by the public result being false for everything.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD))
+            .thenReturn(EarconPlayer.AdmissionToken(1L))
+        assertTrue(
+            "an accepted cue must be reported as accepted",
+            renderer.playEarcon(EarconId.WAKE_WORD),
+        )
+    }
+
+    @Test
     fun `Silent response does nothing`() = runTest {
         renderer.render(VoiceResponse.Silent)
         verifyNoInteractions(earconPlayer)

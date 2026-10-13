@@ -6,6 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -39,7 +40,7 @@ class EarconPlayerTest {
     fun `play returns false for missing assets`() {
         // When assets are not present, play should return false, not crash
         val result = player.play(EarconId.SUCCESS)
-        assertFalse(result)
+        assertNull("a failed play admits nothing", result)
     }
 
     @Test
@@ -280,7 +281,7 @@ class EarconPlayerTest {
 
         // First track: a cue is accepted and consumed.
         val advanceFirst = installTrack()
-        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD) != null)
         repeat(100) { advanceFirst() }
         assertEquals(
             "the first cue is consumed on its own track",
@@ -291,7 +292,7 @@ class EarconPlayerTest {
         // A NEW track, as a later session would create. Its head starts at zero.
         mockPlayer.release()
         val advanceSecond = installTrack()
-        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD) != null)
 
         assertEquals(
             "a cue on a NEW track that has not begun sounding is QUEUED, not Playing: its frames " +
@@ -335,7 +336,7 @@ class EarconPlayerTest {
         var head = 0
         player.readPlaybackHeadFrames = { head }
 
-        assertTrue("the first cue is accepted", player.play(EarconId.WAKE_WORD))
+        assertTrue("the first cue is accepted", player.play(EarconId.WAKE_WORD) != null)
         assertEquals(
             "the first cue is QUEUED while the head has not passed its first frame: accepted, " +
                 "not yet audible",
@@ -349,7 +350,7 @@ class EarconPlayerTest {
             player.completion(),
         )
 
-        assertTrue("the second cue is accepted", player.play(EarconId.WAKE_WORD))
+        assertTrue("the second cue is accepted", player.play(EarconId.WAKE_WORD) != null)
         assertEquals(
             "a cue whose frames have not advanced must not inherit the previous cue's head " +
                 "(head=$head): it is QUEUED, which is the whole point -- inheriting the head would " +
@@ -392,9 +393,9 @@ class EarconPlayerTest {
         var head = 0
         mockPlayer.readPlaybackHeadFrames = { head }
 
-        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD) != null)
         head = 50 // half of cue 1 has sounded; cue 1 is still queued
-        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD) != null)
         head = 150 // cue 1 finished (100), so only 50 of cue 2's frames have sounded
 
         assertEquals(
@@ -438,7 +439,7 @@ class EarconPlayerTest {
             .set(mockPlayer, mapOf(EarconId.WAKE_WORD to clip))
         mockPlayer.readPlaybackHeadFrames = { headDuringWrite }
 
-        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD) != null)
 
         assertEquals(
             "all 100 submitted frames are already consumed, so the cue is complete",
@@ -471,7 +472,7 @@ class EarconPlayerTest {
             .set(mockPlayer, mapOf(EarconId.WAKE_WORD to clip))
         mockPlayer.readPlaybackHeadFrames = { null }
 
-        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD) != null)
 
         assertEquals(
             "a nil selected observer is UNAVAILABLE, not a platform-head reading",
@@ -513,7 +514,7 @@ class EarconPlayerTest {
         var head = 0
         mockPlayer.readPlaybackHeadFrames = { head }
 
-        assertFalse("the first cue is reported as FAILED", mockPlayer.play(EarconId.WAKE_WORD))
+        assertNull("the first cue is reported as FAILED", mockPlayer.play(EarconId.WAKE_WORD))
 
         // Second cue: fully accepted.
         org.mockito.Mockito.`when`(
@@ -523,7 +524,7 @@ class EarconPlayerTest {
                 org.mockito.ArgumentMatchers.anyInt(),
             ),
         ).thenAnswer { it.getArgument<Int>(2) }
-        assertTrue("the second cue is accepted", mockPlayer.play(EarconId.WAKE_WORD))
+        assertTrue("the second cue is accepted", mockPlayer.play(EarconId.WAKE_WORD) != null)
 
         // The head reaches 100: the 50 the failed cue accepted, plus 50 of the new 100.
         head = 100
@@ -617,14 +618,14 @@ class EarconPlayerTest {
         mockPlayer.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(mockPlayer, track)
         mockPlayer.readPlaybackHeadFrames = { 0 }
 
-        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD) != null)
         // THE FIRST CUE'S ADMISSION, held by a caller that will stop it LATER.
         val firstAdmission = mockPlayer.currentAdmissionToken()
         assertNotNull("the first admission must be observable", firstAdmission)
 
         // A SECOND ADMISSION OF THE SAME EARCON takes the track. Its token MUST differ, or a held stop
         // cannot tell them apart.
-        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD) != null)
         val secondAdmission = mockPlayer.currentAdmissionToken()
         assertNotEquals(
             "two admissions of the same earcon must be distinguishable",
@@ -673,7 +674,7 @@ class EarconPlayerTest {
         mockPlayer.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(mockPlayer, track)
         mockPlayer.readPlaybackHeadFrames = { 0 }
 
-        assertTrue(mockPlayer.play(EarconId.WAKE_WORD))
+        assertTrue(mockPlayer.play(EarconId.WAKE_WORD) != null)
 
         mockPlayer.stopAdmissionNow(null)
 

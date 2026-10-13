@@ -45,7 +45,7 @@ class AudioFeedbackRendererTest {
     @Test
     fun `an audible response is reported as emitted audio`() = runTest {
         assertFalse(renderer.hasEmittedAudio.value)
-        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
@@ -68,7 +68,7 @@ class AudioFeedbackRendererTest {
         // ACCEPTANCE IS NOT SOUNDING. `play` returning true means the sink took the frames; the cue may
         // sit queued behind earlier audio. Attribution follows OBSERVED progress past the cue's first
         // frame, so the heartbeat reports it and the acceptance alone does not.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
         assertFalse(renderer.hasEmittedAudio.value)
 
@@ -87,7 +87,7 @@ class AudioFeedbackRendererTest {
         // A cue shorter than one heartbeat has a bound BELOW one tick, so a loop that required the tick
         // to fit inside the bound NEVER RAN -- and a cue never observed was never attributed, however
         // audibly it sounded. The bound is a CEILING on waiting, not a reason to skip looking.
-        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(6L)
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
@@ -107,7 +107,7 @@ class AudioFeedbackRendererTest {
     fun `a SHORT cue still QUEUED is not attributed`() = runTest {
         // The same short cue, before it sounds: the first-frame distinction must hold here too, or the
         // fix above would attribute every short cue on acceptance -- the submission note by another route.
-        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(6L)
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
 
@@ -127,7 +127,7 @@ class AudioFeedbackRendererTest {
         // observation happened, so `completion()` reported Consumed immediately. The heartbeat returned
         // on Consumed WITHOUT noting, so a cue that finished between observations was never attributed --
         // treated as if completion proved nothing, when it is in fact the STRONGEST evidence of sounding.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
@@ -150,7 +150,7 @@ class AudioFeedbackRendererTest {
         // the successor publishes its own result, so the two writes genuinely overlap. My first version
         // idled only 1500 ms, well short of the old deadline, so the old observer never wrote at all and
         // the ownership check was unnecessary for the outcome; the mutation SURVIVED it.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         // The OLD observer's cue never sounds, so it will expire.
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
 
@@ -181,8 +181,8 @@ class AudioFeedbackRendererTest {
         // @spec/@reviewer: a fresh stop after the successor completed does not test the window. The
         // replacement must land INSIDE `stopNow` -- after the owner is claimed, before the write -- which
         // is the only instant where capturing before versus after differs.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
-        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
         renderer.playEarcon(EarconId.WAKE_WORD)
 
@@ -210,7 +210,7 @@ class AudioFeedbackRendererTest {
         // Unknown; a SECOND cue then takes over and is observed Consumed. The first cue's retirement must
         // not overwrite the successor's verdict -- otherwise a stale stop would re-open the gate's
         // attribution on a cue that already finished, or hide one that is still sounding.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
         renderer.playEarcon(EarconId.WAKE_WORD)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
@@ -223,7 +223,7 @@ class AudioFeedbackRendererTest {
         // THE SUCCESSOR TAKES OVER and is observed consumed. Its OWN play must be accepted, or the
         // observation never starts and the case would be about the missing acceptance rather than about
         // the retirement it is asking about.
-        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
         renderer.playEarcon(EarconId.LISTENING_START)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
@@ -252,7 +252,7 @@ class AudioFeedbackRendererTest {
         // @reviewer: "Consumed→Ended on one cue receives two IDs." An identity must be a property of the
         // CUE, allocated once at admission -- otherwise a consumer comparing ids reads its own cue
         // changing its verdict as a DIFFERENT cue and discards the elapsed time it should keep.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
@@ -273,7 +273,7 @@ class AudioFeedbackRendererTest {
 
         // A GENUINELY NEW CUE GETS A NEW IDENTITY, so the distinction is real rather than the id being
         // constant for everything.
-        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(EarconPlayer.AdmissionToken(1L))
         renderer.playEarcon(EarconId.LISTENING_START)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(2_100))
@@ -285,12 +285,32 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `the renderer covers the admission the PLAY returned, not a later one`() = runTest {
+        // @spec 2243570a, the producer-to-owner handoff window: playEarcon called play() and then read
+        // "the current admission" SEPARATELY. Between those two, a SUCCESSOR can take the track -- so the
+        // renderer would hold the successor's token while believing it held its own, and its later stop
+        // would release an admission it never made. The token now comes back FROM the play.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD))
+            .thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(1_000L)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(50))
+
+        // THE PLAYER IS NOT ASKED AGAIN. Re-reading would be the handoff window; the returned token is
+        // the one the renderer must hold.
+        org.mockito.Mockito.verify(earconPlayer, org.mockito.Mockito.never()).currentAdmissionToken()
+    }
+
+    @Test
     fun `an explicit stop RETIRES the unresolved observation`() = runTest {
         // @reviewer's expiry→actual-endSession reproduction, and @spec's retirement gap: the deadline
         // establishes UNKNOWN, and then the production stop path must retire it -- a cue that has been
         // stopped explicitly HAS a known fate, and leaving Unknown published would hold the gate's
         // attribution open for every later music reading.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
@@ -314,7 +334,7 @@ class AudioFeedbackRendererTest {
     @Test
     fun `a session end RETIRES the unresolved observation`() = runTest {
         // The other production retirement path, reached from `stopVoiceControl()`.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
@@ -335,7 +355,7 @@ class AudioFeedbackRendererTest {
         // @reviewer's measured case: the observer had ALREADY ENDED at 1_999 ms for a 2_000 ms limit,
         // because the loop refused any heartbeat that would overshoot and so gave up one tick EARLY --
         // the cue was never observed AT the boundary. The loop now sleeps exactly as far as the deadline.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
@@ -376,7 +396,7 @@ class AudioFeedbackRendererTest {
     fun `an observed ending is published as Consumed, not as Unknown`() = runTest {
         // THE OTHER SIDE OF THE DISCRIMINATION: if every ending published Unknown, the consumer would
         // hold our audio open forever and the typed outcome would carry no information.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
@@ -396,7 +416,7 @@ class AudioFeedbackRendererTest {
         // `2_000 + elapsed` EACH PASS, so it grew with the loop and could NEVER be reached -- a
         // permanently queued cue was observed forever and the deadline was a formality, not a bound.
         // The limit is ABSOLUTE from submission.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
@@ -433,7 +453,7 @@ class AudioFeedbackRendererTest {
         // stopped when the cue's ESTIMATED duration passed, while the cue was still queued. The estimate
         // is a bound on the WAIT, not a statement that the cue is over -- stopping at it ends the
         // observation BEFORE the sound it is waiting for.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(6L)
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
 
@@ -456,7 +476,7 @@ class AudioFeedbackRendererTest {
     @Test
     fun `a cue observed to be SOUNDING is reported as emitted audio`() = runTest {
         // The positive control, so the rule above is not satisfied by never attributing anything.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
@@ -478,7 +498,7 @@ class AudioFeedbackRendererTest {
     fun `an UNOBSERVABLE cue is not reported as emitted audio`() = runTest {
         // Unavailable progress is not evidence of sounding. Setting the attribution from an unknown
         // would let the gate read the microphone as ours on no observation at all.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Unknown)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
@@ -505,7 +525,7 @@ class AudioFeedbackRendererTest {
         // first window; anything observing the gate later than that needs the coverage.
         val clock = java.util.concurrent.atomic.AtomicLong(0)
         val notes = java.util.concurrent.atomic.AtomicInteger(0)
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
         // Still sounding for the whole observation: the attribution must keep being refreshed, and
         // only an observed CONSUMPTION may end it.
@@ -545,7 +565,7 @@ class AudioFeedbackRendererTest {
     fun `a short cue is attributed once it is observed to sound`() = runTest {
         // The control: the attribution comes from OBSERVED SOUNDING, and a cue whose span is shorter
         // than one heartbeat is still attributed once the observation reports progress.
-        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(1_500L)
         // OBSERVED SOUNDING, then consumed: the note comes from the cue being heard, not from its
         // submission -- acceptance alone is queued, not audible.
@@ -573,7 +593,7 @@ class AudioFeedbackRendererTest {
         // @spec's distinction: the accepted-frame duration is an estimate of queued audio, not
         // completion. The coverage must end on the OUTPUT's report, so a cue that finishes early
         // stops being attributed early -- and one still sounding keeps the gate informed.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
         // Still playing at first, then consumed.
         var consumed = false
@@ -619,7 +639,7 @@ class AudioFeedbackRendererTest {
         // it to its nominal length would keep the gate treating a sound the user can no longer hear
         // as ours. `Unknown` is that state -- the acceptance is gone.
         renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
         var stopped = false
         whenever(earconPlayer.completion()).thenAnswer {
@@ -647,7 +667,7 @@ class AudioFeedbackRendererTest {
         // claiming fresh output -- the session is over, so nothing it was attributed to is still
         // sounding for the user.
         renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
@@ -670,7 +690,7 @@ class AudioFeedbackRendererTest {
         // max(2_000 ms, accepted PCM duration + 1_000 ms) from its FIRST measured rendering. For a
         // 1_500 ms cue that is 2_500 ms, so the observation is BOUNDED and does not run forever -- which
         // is the property the older case was protecting, now stated against the rule that replaced it.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(1_500L)
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
@@ -694,7 +714,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `an earcon the player refuses is not reported as emitted audio`() = runTest {
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(false)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(null)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
 
@@ -710,7 +730,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `Earcon response plays via EarconPlayer`() = runTest {
-        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(1L))
         renderer.render(VoiceResponse.Earcon(EarconId.SUCCESS))
         verify(earconPlayer).play(EarconId.SUCCESS)
     }
@@ -726,7 +746,7 @@ class AudioFeedbackRendererTest {
     @Test
     fun `Combined response plays earcon then speaks`() = runTest {
         ttsEngine.warmUp("en")
-        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(1L))
         renderer.render(VoiceResponse.Combined(EarconId.SUCCESS, "1.5x speed"), language = "en")
         verify(earconPlayer).play(EarconId.SUCCESS)
         assertEquals("1.5x speed", ttsEngine.lastSpokenText)
@@ -734,7 +754,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `playEarcon delegates to EarconPlayer`() {
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         renderer.playEarcon(EarconId.WAKE_WORD)
         verify(earconPlayer).play(EarconId.WAKE_WORD)
     }

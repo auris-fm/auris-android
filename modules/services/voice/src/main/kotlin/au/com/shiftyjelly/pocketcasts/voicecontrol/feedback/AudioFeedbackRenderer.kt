@@ -148,8 +148,12 @@ class AudioFeedbackRenderer(
      */
     fun playEarcon(id: EarconId): Boolean {
         if (disposed) return false
-        val played = earconPlayer.play(id)
-        if (played) {
+        // THE ADMISSION COMES BACK FROM THE PLAY, so the cue this renderer covers is the cue it
+        // admitted. Reading "the current admission" afterwards would answer a different question: a
+        // successor could take the track in between, and this would then hold the SUCCESSOR'S token
+        // while believing it held its own.
+        val admitted = earconPlayer.play(id)
+        if (admitted != null) {
             // NO UNCONDITIONAL ATTRIBUTION. `play` reporting true means the sink ACCEPTED the cue, which
             // is not the same as its being audible: the cue may sit queued behind earlier audio, and the
             // gate would then read the microphone as ours before our own cue began. Attribution is the
@@ -163,9 +167,9 @@ class AudioFeedbackRenderer(
             // The span is the clip's OWN duration, from the frames the sink accepted and the rate it
             // accepted them at, so a shorter cue is not covered longer than it sounds and a longer one
             // is not cut short by an assumed length.
-            coverEarconUntilConsumed(id)
+            coverEarconUntilConsumed(id, admitted)
         }
-        return played
+        return true
     }
 
     /** The in-flight earcon coverage, so a session end can end it rather than let it run on. */
@@ -319,7 +323,7 @@ class AudioFeedbackRenderer(
      *
      * Runs on the renderer's own scope so a synchronous caller is not blocked.
      */
-    private fun coverEarconUntilConsumed(startedEarcon: EarconId) {
+    private fun coverEarconUntilConsumed(startedEarcon: EarconId, admitted: EarconPlayer.AdmissionToken) {
         // THE OBSERVER KNOWS ITS OWN CUE. `coverageExpiredUnknown` is a plain field written by a
         // NON-SUSPENDING assignment after `completion()` returns, so cancellation alone cannot protect it:
         // an OLD observer can resume after a SUCCESSOR has published its own result and overwrite it.
@@ -339,9 +343,9 @@ class AudioFeedbackRenderer(
             // THE NEW CUE'S IDENTITY IS ALLOCATED AT ADMISSION, so every verdict this cue publishes
             // carries the SAME id and a consumer can tell "my cue changed" from "a different cue".
             currentCueId = cueCounter.incrementAndGet()
-            // THE ADMISSION IS READ FROM THE PLAYER, which mints it when the cue takes the track, so the
-            // token the renderer holds is the one the player will compare against.
-            currentCueAdmission = earconPlayer.currentAdmissionToken()
+            // THE ADMISSION THE PLAY RETURNED, not one re-read afterwards: the token the renderer holds
+            // is then the one the player granted for THIS play.
+            currentCueAdmission = admitted
             _lastCueObservation.value = null
         }
         // A REFERENCE THE COROUTINE CAN READ FROM INSIDE ITS OWN INITIALIZER. Kotlin does not allow a

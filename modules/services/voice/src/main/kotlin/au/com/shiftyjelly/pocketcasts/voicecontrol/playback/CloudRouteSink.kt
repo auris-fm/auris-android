@@ -199,7 +199,7 @@ class CloudRouteSink internal constructor(
         isLiveGraceTurn: Boolean,
         capturedOrigin: Long?,
         isWakeOriginated: Boolean,
-    ): VoiceResponse = routeTurn(
+    ): CloudTurnResult = routeTurn(
         request = request,
         tier = tier,
         context = context,
@@ -217,7 +217,7 @@ class CloudRouteSink internal constructor(
         isLiveGraceTurn: Boolean,
         capturedOrigin: Long?,
         isWakeOriginated: Boolean,
-    ): VoiceResponse = routeTurn(
+    ): CloudTurnResult = routeTurn(
         request = request,
         tier = tier,
         context = context,
@@ -327,7 +327,7 @@ class CloudRouteSink internal constructor(
         retentionReleased = consumer
     }
 
-    override suspend fun dispatchPrepared(prepared: CloudRouteTurn): VoiceResponse = routeTurn(
+    override suspend fun dispatchPrepared(prepared: CloudRouteTurn): CloudTurnResult = routeTurn(
         request = prepared.request,
         tier = VoiceIntent.CloudTier.Premium,
         context = PlaybackContext(),
@@ -358,14 +358,17 @@ class CloudRouteSink internal constructor(
          * a retry sends the SAME logical request rather than minting a second conversation.
          */
         prepared: CloudRouteTurn? = null,
-    ): VoiceResponse {
+    ): CloudTurnResult {
         if (resolveBaseUrl().isBlank()) {
             val soon = localizedTemplate(KEY_CLOUD_COMING_SOON)
-            return if (soon.isBlank()) {
-                VoiceResponse.Earcon(EarconId.ERROR)
-            } else {
-                VoiceResponse.Spoken(soon)
-            }
+            return CloudTurnResult(
+                feedback = if (soon.isBlank()) {
+                    VoiceResponse.Earcon(EarconId.ERROR)
+                } else {
+                    VoiceResponse.Spoken(soon)
+                },
+                action = CloudRouteActionOutcome.None,
+            )
         }
 
         val myJob = currentCoroutineContext()[Job]
@@ -383,7 +386,10 @@ class CloudRouteSink internal constructor(
         val admitted = if (prepared != null) {
             conversationAdmission.validateForRetry(originForAdmission) ?: run {
                 Timber.i("[CloudRoute] retry discarded: its origin is no longer valid")
-                return VoiceResponse.Silent
+                return CloudTurnResult(
+                    feedback = VoiceResponse.Silent,
+                    action = CloudRouteActionOutcome.None,
+                )
             }
         } else {
             conversationAdmission.prepare(
@@ -392,7 +398,10 @@ class CloudRouteSink internal constructor(
                 isWakeOriginated = isWakeOriginated,
             ) ?: run {
                 Timber.i("[CloudRoute] turn discarded: its origin was superseded before admission")
-                return VoiceResponse.Silent
+                return CloudTurnResult(
+                    feedback = VoiceResponse.Silent,
+                    action = CloudRouteActionOutcome.None,
+                )
             }
         }
         val turnState = TurnState()
@@ -800,7 +809,10 @@ class CloudRouteSink internal constructor(
                 }
             }
         }
-        return outcome ?: VoiceResponse.Silent
+        return CloudTurnResult(
+            feedback = outcome ?: VoiceResponse.Silent,
+            action = CloudRouteActionOutcome.None,
+        )
     }
 
     private fun openRoute(turn: CloudRouteTurn): Flow<CloudRouteEvent> {

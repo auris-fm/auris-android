@@ -258,14 +258,14 @@ class CloudRouteSinkTest {
         val sink = deps.sink()
 
         // Both entry points, including one with no captured window at all.
-        sink.routeToCloud("with a captured window", VoiceIntent.CloudTier.Premium, playbackContext, capturedOrigin = 1)
-        sink.routeToCloud("and with none", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("with a captured window", VoiceIntent.CloudTier.Premium, playbackContext, capturedOrigin = 1).feedback
+        sink.routeToCloud("and with none", VoiceIntent.CloudTier.Premium, playbackContext).feedback
         sink.routeToCloudWithHint(
             request = "and via the typed-flow entry point",
             tier = VoiceIntent.CloudTier.Premium,
             context = playbackContext,
             hint = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint("playback"),
-        )
+        ).feedback
 
         assertEquals("all three dispatched", 3, deps.routeTurns.size)
         deps.routeTurns.forEach { turn ->
@@ -348,7 +348,7 @@ class CloudRouteSinkTest {
             playbackContext,
             capturedOrigin = 1,
             isWakeOriginated = true,
-        )
+        ).feedback
         assertEquals(1, deps.routeTurns.size)
 
         // Window 2, a successor wake: its first request must ALSO be admitted.
@@ -358,7 +358,7 @@ class CloudRouteSinkTest {
             playbackContext,
             capturedOrigin = 2,
             isWakeOriginated = true,
-        )
+        ).feedback
         assertEquals(
             "a request under a LATER live window must be adopted, not dropped " +
                 "(turns=${deps.routeTurns.size})",
@@ -374,7 +374,7 @@ class CloudRouteSinkTest {
             playbackContext,
             capturedOrigin = 1,
             isWakeOriginated = false,
-        )
+        ).feedback
         assertEquals(
             "an explicitly older origin is still refused",
             2,
@@ -403,7 +403,7 @@ class CloudRouteSinkTest {
             "about A",
             VoiceIntent.CloudTier.Premium,
             PlaybackContext(episodeId = "A", clientPositionMs = 0L),
-        )
+        ).feedback
         val forA = deps.routeTurns.last().context
         assertEquals(
             "episode A sees its own saved history",
@@ -417,7 +417,7 @@ class CloudRouteSinkTest {
             "about B",
             VoiceIntent.CloudTier.Premium,
             PlaybackContext(episodeId = "B", clientPositionMs = 0L),
-        )
+        ).feedback
         val forB = deps.routeTurns.last().context
         assertTrue(
             "saved A positions cannot be sent as B (recent=${forB.recentReferencePositions} " +
@@ -456,7 +456,7 @@ class CloudRouteSinkTest {
             "about episode A",
             VoiceIntent.CloudTier.Premium,
             PlaybackContext(episodeId = "A", clientPositionMs = 0L),
-        )
+        ).feedback
 
         assertTrue(
             "a refused seek must not be recorded as a performed action " +
@@ -496,7 +496,7 @@ class CloudRouteSinkTest {
                 "about episode A",
                 VoiceIntent.CloudTier.Premium,
                 PlaybackContext(episodeId = "A", clientPositionMs = 0L),
-            )
+            ).feedback
 
             // THE HISTORY IS THE OBSERVATION, not the call list. A refused operation records nothing,
             // so the episode's saved positions must be exactly what they were -- an assertion about
@@ -541,7 +541,7 @@ class CloudRouteSinkTest {
             "about episode A",
             VoiceIntent.CloudTier.Premium,
             PlaybackContext(episodeId = "A", clientPositionMs = 0L),
-        )
+        ).feedback
 
         assertTrue(
             "a skip planned for A must not proceed against B (calls=${deps.playback.calls})",
@@ -570,7 +570,7 @@ class CloudRouteSinkTest {
             "play the quote",
             VoiceIntent.CloudTier.Premium,
             PlaybackContext(episodeId = "A", clientPositionMs = 0L),
-        )
+        ).feedback
 
         assertTrue(
             "a quote whose episode was replaced must not seek or resume (calls=${deps.playback.calls})",
@@ -602,7 +602,7 @@ class CloudRouteSinkTest {
             "about episode A",
             VoiceIntent.CloudTier.Premium,
             PlaybackContext(episodeId = "A", clientPositionMs = 0L),
-        )
+        ).feedback
 
         assertTrue(
             "a refused bound skip must not reach the player (calls=${deps.playback.calls})",
@@ -669,7 +669,7 @@ class CloudRouteSinkTest {
                 "skip",
                 VoiceIntent.CloudTier.Premium,
                 PlaybackContext(episodeId = "episode-id", clientPositionMs = 0L),
-            )
+            ).feedback
             return sink.lastActionOutcome
         }
 
@@ -717,7 +717,7 @@ class CloudRouteSinkTest {
             "play the quote",
             VoiceIntent.CloudTier.Premium,
             PlaybackContext(episodeId = "episode-id", clientPositionMs = 0L),
-        )
+        ).feedback
 
         val recorded = state.snapshot("episode-id")
         assertTrue(
@@ -755,7 +755,7 @@ class CloudRouteSinkTest {
                 "seek",
                 VoiceIntent.CloudTier.Premium,
                 PlaybackContext(episodeId = "episode-id", clientPositionMs = 0L),
-            )
+            ).feedback
             return sink.lastActionOutcome
         }
 
@@ -798,7 +798,7 @@ class CloudRouteSinkTest {
             "play the quote",
             VoiceIntent.CloudTier.Premium,
             PlaybackContext(episodeId = null, clientPositionMs = 0L),
-        )
+        ).feedback
 
         assertTrue(
             "an unbound reference action must not seek whatever is playing " +
@@ -832,7 +832,7 @@ class CloudRouteSinkTest {
             "about episode A",
             VoiceIntent.CloudTier.Premium,
             PlaybackContext(episodeId = "A", clientPositionMs = 0L),
-        )
+        ).feedback
 
         assertTrue(
             "an action must still execute while the player is on the turn's own episode " +
@@ -874,7 +874,7 @@ class CloudRouteSinkTest {
             "about episode A",
             VoiceIntent.CloudTier.Premium,
             PlaybackContext(episodeId = "A", clientPositionMs = 0L),
-        )
+        ).feedback
 
         assertTrue(
             "an action planned for episode A must not seek the player now holding episode B " +
@@ -900,7 +900,7 @@ class CloudRouteSinkTest {
             playbackContext,
             capturedOrigin = 1,
             isWakeOriginated = true,
-        )
+        ).feedback
         val first = deps.routeTurns.last()
         assertEquals(CloudConversationMode.Create, first.conversationMode)
 
@@ -915,7 +915,7 @@ class CloudRouteSinkTest {
             isLiveGraceTurn = true,
             capturedOrigin = 2,
             isWakeOriginated = true,
-        )
+        ).feedback
         val second = deps.routeTurns.last()
         assertEquals(
             "a fresh wake begins a new conversation",
@@ -942,7 +942,7 @@ class CloudRouteSinkTest {
             playbackContext,
             capturedOrigin = 7,
             isWakeOriginated = true,
-        )
+        ).feedback
         val created = deps.routeTurns.last()
 
         // A wake-FREE follow-up in the SAME window continues the conversation.
@@ -953,7 +953,7 @@ class CloudRouteSinkTest {
             isLiveGraceTurn = true,
             capturedOrigin = 7,
             isWakeOriginated = false,
-        )
+        ).feedback
         val resumed = deps.routeTurns.last()
         assertEquals(CloudConversationMode.Resume, resumed.conversationMode)
         assertEquals(
@@ -971,7 +971,7 @@ class CloudRouteSinkTest {
             playbackContext,
             capturedOrigin = 7,
             isWakeOriginated = false,
-        )
+        ).feedback
         assertEquals(
             "a superseded origin must not reach transport at all",
             turnsBefore,
@@ -991,7 +991,7 @@ class CloudRouteSinkTest {
 
         // Populate LOCAL memory by recording a completed exchange, then ask a question.
         deps.conversationMemory.record("what is this podcast about", "it is about birds")
-        sink.routeToCloud("and this one", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("and this one", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         val turn = deps.routeTurns.last()
         assertTrue(
@@ -1014,7 +1014,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("first question", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("first question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
         val first = deps.routeTurns.last()
 
         assertEquals(
@@ -1033,7 +1033,7 @@ class CloudRouteSinkTest {
             VoiceIntent.CloudTier.Premium,
             playbackContext,
             isLiveGraceTurn = true,
-        )
+        ).feedback
         val second = deps.routeTurns.last()
 
         assertEquals(
@@ -1057,9 +1057,9 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("first question", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("first question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
         val first = deps.routeTurns.last()
-        sink.routeToCloud("an unrelated question", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("an unrelated question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
         val second = deps.routeTurns.last()
 
         assertEquals(CloudConversationMode.Create, second.conversationMode)
@@ -1098,7 +1098,7 @@ class CloudRouteSinkTest {
                 clientPositionMs = null,
                 referencePositionMs = null,
             ),
-        )
+        ).feedback
 
         val turn = deps.routeTurns.last()
         assertNull("no episode means no episode id", turn.context.episodeId)
@@ -1140,7 +1140,7 @@ class CloudRouteSinkTest {
                 podcastId = "podcast-1",
                 clientPositionMs = 5_000L,
             ),
-        )
+        ).feedback
 
         val turn = deps.routeTurns.last()
         assertEquals("episode-1", turn.context.episodeId)
@@ -1166,7 +1166,7 @@ class CloudRouteSinkTest {
         val sink = deps.sink()
 
         val failure = runCatching {
-            sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext)
+            sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
         }
         assertTrue(failure.exceptionOrNull() is IllegalStateException)
         assertEquals(listOf("pause", "resume"), deps.playback.calls)
@@ -1186,7 +1186,7 @@ class CloudRouteSinkTest {
 
         val cancelled = runCatching {
             withTimeout(1_000) {
-                sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext)
+                sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
             }
         }
         assertTrue(cancelled.exceptionOrNull() is CancellationException)
@@ -1199,7 +1199,7 @@ class CloudRouteSinkTest {
         val deps = TestDeps(baseUrl = "")
         val sink = deps.sink()
 
-        val response = sink.routeToCloud("summarize", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = sink.routeToCloud("summarize", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals(VoiceResponse.Spoken("Cloud processing is coming soon"), response)
         assertTrue(deps.routeCalls.isEmpty())
@@ -1219,7 +1219,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        val response = sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals(VoiceResponse.Spoken("She is arguing."), response)
         assertEquals(listOf("pause", "resume"), deps.playback.calls)
@@ -1258,7 +1258,7 @@ class CloudRouteSinkTest {
         deps.playback.preActionPositionMsForTest = 60_000L
         val sink = deps.sink()
 
-        sink.routeToCloud("play the quote", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("play the quote", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         val recorded = state.snapshot("episode-id")
         // 60_000 playback maps to 45_000 reference. The provider's 999_000 would map far away, so a live
@@ -1291,7 +1291,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("play the quote", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("play the quote", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // preQuote is playback-timeline; the context state must carry the
         // reference-timeline conversion (45s reference == 60s playback here).
@@ -1337,7 +1337,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("play the quote", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("play the quote", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // Turn 2+ regression guard: null must clear, not retain turn 1's value.
         assertEquals(null, state.snapshot("episode-id").previousReferencePositionMs)
@@ -1353,7 +1353,7 @@ class CloudRouteSinkTest {
             ),
         )
 
-        val response = deps.sink().routeToCloud("what?", VoiceIntent.CloudTier.Free, playbackContext)
+        val response = deps.sink().routeToCloud("what?", VoiceIntent.CloudTier.Free, playbackContext).feedback
 
         assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
     }
@@ -1367,7 +1367,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        val response = sink.routeToCloud("what?", VoiceIntent.CloudTier.Free, playbackContext)
+        val response = sink.routeToCloud("what?", VoiceIntent.CloudTier.Free, playbackContext).feedback
 
         assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
     }
@@ -1381,7 +1381,7 @@ class CloudRouteSinkTest {
             locale = java.util.Locale.FRENCH,
         )
 
-        val response = deps.sink().routeToCloud("quoi?", VoiceIntent.CloudTier.Free, playbackContext)
+        val response = deps.sink().routeToCloud("quoi?", VoiceIntent.CloudTier.Free, playbackContext).feedback
 
         // Deliberately changed: the earcon was the fallback when the client had nothing to say.
         // It now has its own words for a code it doesn't know, so the user hears which happened
@@ -1401,7 +1401,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        val response = sink.routeToCloud("pause", VoiceIntent.CloudTier.Free, playbackContext)
+        val response = sink.routeToCloud("pause", VoiceIntent.CloudTier.Free, playbackContext).feedback
 
         assertEquals(VoiceResponse.Silent, response)
         assertTrue(deps.playback.calls.contains("pause"))
@@ -1424,7 +1424,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("go back", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("go back", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertTrue(deps.playback.calls.contains("seekTo:45"))
     }
@@ -1452,7 +1452,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("jump to five minutes", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("jump to five minutes", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertTrue(
             "an ordinary sink-time seek must reach the sink unchanged, without a mapping " +
@@ -1478,7 +1478,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("go back", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("go back", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertTrue(
             "a negative position resolves against the episode end (calls=${deps.playback.calls})",
@@ -1505,7 +1505,7 @@ class CloudRouteSinkTest {
             ),
         )
 
-        deps.sink().routeToCloud("seek", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("seek", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertTrue(
             "a call carrying both forms must be refused (calls=${deps.playback.calls})",
@@ -1532,7 +1532,7 @@ class CloudRouteSinkTest {
             ),
         )
 
-        deps.sink().routeToCloud("seek", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("seek", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertTrue(
             "two present forms must refuse even when one does not parse (calls=${deps.playback.calls})",
@@ -1554,7 +1554,7 @@ class CloudRouteSinkTest {
             ),
         )
 
-        deps.sink().routeToCloud("seek", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("seek", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertTrue(
             "an unparseable single form must refuse (calls=${deps.playback.calls})",
@@ -1575,7 +1575,7 @@ class CloudRouteSinkTest {
             ),
         )
 
-        deps.sink().routeToCloud("seek nowhere", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("seek nowhere", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertTrue(
             "a seek with no target must be refused (calls=${deps.playback.calls})",
@@ -1605,7 +1605,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("go back", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("go back", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertTrue(
             "an unmapped reference target must not be seeked to (calls=${deps.playback.calls})",
@@ -1630,7 +1630,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("play quote", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("play quote", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals(
             // 900_000 ms on the REFERENCE timeline maps to 945 s on the sink timeline: the mapping's
@@ -1656,7 +1656,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("quote", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("quote", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertTrue(deps.playback.calls.contains("seekTo:60"))
     }
@@ -1674,7 +1674,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        val response = sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // Deliberately changed: an *ignored* action is not a delivery, so this turn neither spoke
         // nor did anything and must report that rather than stay silent.
@@ -1696,7 +1696,7 @@ class CloudRouteSinkTest {
             ),
         )
 
-        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals(
             VoiceResponse.Spoken("The assistant has reached its limit right now."),
@@ -1717,7 +1717,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        val response = sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // Deliberately changed: "Connection lost" was the server's message; the client now
         // speaks its own line for the code.
@@ -1735,7 +1735,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        val response = sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // Deliberately changed: an empty message is no longer a reason to fall silent; the
         // client now has its own words for a code it doesn't know.
@@ -1756,7 +1756,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // The reference target maps through the offset: 500 s on the reference timeline is 545 s on
         // the sink's. Asserting the mapped value is what shows the mapping was applied at all.
@@ -1779,7 +1779,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals(
             CloudRouteContext(
@@ -1799,8 +1799,8 @@ class CloudRouteSinkTest {
         val deps = TestDeps()
         val sink = deps.sink()
 
-        sink.routeToCloud("one", VoiceIntent.CloudTier.Premium, playbackContext)
-        sink.routeToCloud("two", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("one", VoiceIntent.CloudTier.Premium, playbackContext).feedback
+        sink.routeToCloud("two", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         val ids = deps.routeTurns.map { it.requestId }
         assertEquals(2, ids.size)
@@ -1811,11 +1811,11 @@ class CloudRouteSinkTest {
     @Test
     fun `capabilities are advertised only when a renderer is present`() = runTest {
         val withoutRenderer = TestDeps()
-        withoutRenderer.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        withoutRenderer.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
         assertTrue(withoutRenderer.routeTurns.single().capabilities.isEmpty())
 
         val withRenderer = TestDeps(renderer = RecordingRenderer())
-        withRenderer.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        withRenderer.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
         assertEquals(
             listOf(CloudRouteCapabilities.SEARCH_RESULTS_V1),
             withRenderer.routeTurns.single().capabilities,
@@ -1827,7 +1827,7 @@ class CloudRouteSinkTest {
         val deps = TestDeps()
         val sink = deps.sink()
 
-        sink.routeToCloud("find beginner investing episodes", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("find beginner investing episodes", VoiceIntent.CloudTier.Premium, playbackContext).feedback
         assertEquals(null, deps.routeTurns.single().routeHint)
 
         val hint = CloudRouteHint(operation = "search_episodes", arguments = mapOf("query" to "investing"))
@@ -1836,7 +1836,7 @@ class CloudRouteSinkTest {
             VoiceIntent.CloudTier.Premium,
             playbackContext,
             hint,
-        )
+        ).feedback
         assertEquals(hint, deps.routeTurns.last().routeHint)
     }
 
@@ -1863,9 +1863,9 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
         firstTurnStarted.await()
-        sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext).feedback
         firstCancelled.await()
         assertTrue(first.isCancelled)
     }
@@ -1896,7 +1896,7 @@ class CloudRouteSinkTest {
             ),
         )
 
-        deps.sink().routeToCloud("find investing", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("find investing", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals(1, renderer.rendered.size)
         assertEquals("ep-1", renderer.rendered.single().items.single().episodeId)
@@ -1923,7 +1923,7 @@ class CloudRouteSinkTest {
             ),
         )
 
-        deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertTrue(renderer.rendered.isEmpty())
         assertTrue(renderer.empties.isEmpty())
@@ -1946,7 +1946,7 @@ class CloudRouteSinkTest {
             ),
         )
 
-        deps.sink().routeToCloud("nothing matches", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("nothing matches", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertTrue(renderer.rendered.isEmpty())
         assertEquals(listOf(CloudSearchResults.SCOPE_LIBRARY), renderer.empties)
@@ -1968,8 +1968,8 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
-        sink.routeToCloud("a follow-up", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
+        sink.routeToCloud("a follow-up", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // The local record IS kept -- both exchanges, in order, which is what local memory is for.
         val remembered = memory.recent().map { it.role to it.text }
@@ -2009,7 +2009,7 @@ class CloudRouteSinkTest {
             ),
         )
 
-        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // The executed seek is not rolled back; the partial speech is dropped.
         assertTrue(
@@ -2054,7 +2054,7 @@ class CloudRouteSinkTest {
             ),
         )
 
-        deps.sink().routeToCloud("find something", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("find something", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals(1, renderer.rendered.size)
         assertTrue(deps.playback.calls.none { it.startsWith("seekTo") })
@@ -2075,7 +2075,7 @@ class CloudRouteSinkTest {
             ),
         )
 
-        val response = deps.sink().routeToCloud("what did she mean?", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = deps.sink().routeToCloud("what did she mean?", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // Deliberately changed: the rendered state has already told the user, so no sound or
         // sentence follows it. A spoken line on top said the same thing twice.
@@ -2105,13 +2105,13 @@ class CloudRouteSinkTest {
         // Turn 1 succeeds while the token is valid.
         assertEquals(
             VoiceResponse.Spoken("answer"),
-            sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext),
+            sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext).feedback,
         )
 
         // The token expires mid-session: the next turn fails closed and no
         // playback action is attempted.
         token = null
-        val second = sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext)
+        val second = sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // Deliberately changed: a rejected credential is the service being unavailable, which the
         // owner asked to hear as words rather than a tone.
@@ -2128,7 +2128,7 @@ class CloudRouteSinkTest {
 
         // The player is already paused when cancellation lands mid-call: the
         // restore must still run, or audio stays paused with no owner.
-        val turn = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        val turn = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
         deps.playback.pauseStarted.await()
         turn.cancel()
         gate.complete(Unit)
@@ -2157,11 +2157,11 @@ class CloudRouteSinkTest {
 
         // Turn A: auto-pause, then its play_quote action resumes — suspending
         // inside the player while A still owns it.
-        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
         deps.playback.resumeStarted.await()
 
         // B must not register/pause until A's action has finished with the player.
-        val second = launch { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext) }
+        val second = launch { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
         gate.complete(Unit)
         first.join()
         second.join()
@@ -2197,9 +2197,9 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        val first = launch { runCatching { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) } }
+        val first = launch { runCatching { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext).feedback } }
         deps.playback.pauseStarted.await()
-        val second = launch { runCatching { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext) } }
+        val second = launch { runCatching { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext).feedback } }
         first.join()
         second.join()
 
@@ -2231,11 +2231,11 @@ class CloudRouteSinkTest {
 
         // Nothing was paused before the failure, so the only claim this test
         // makes is about ownership: a later turn registers cleanly.
-        val first = launch { runCatching { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) } }
+        val first = launch { runCatching { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext).feedback } }
         first.join()
 
         fail = false
-        val second = sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext)
+        val second = sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals(VoiceResponse.Spoken("answer"), second)
         assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
@@ -2250,12 +2250,12 @@ class CloudRouteSinkTest {
 
         // Turn A runs to completion, entering its restore — which suspends
         // inside resume() (play-queue load) while still owning the player.
-        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
         deps.playback.resumeStarted.await()
 
         // Turn B starts during that suspension: its registration and pause must
         // wait for A's restore to finish, or B's answer streams over resumed audio.
-        val second = launch { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext) }
+        val second = launch { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
         gate.complete(Unit)
         first.join()
         second.join()
@@ -2297,9 +2297,9 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext) }
+        val first = launch { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
         firstStarted.await()
-        sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext).feedback
         firstCancelled.await()
         first.join()
 
@@ -2321,7 +2321,7 @@ class CloudRouteSinkTest {
             events = flowOf(CloudRouteEvent.Error(code = "connection_lost", message = "")),
         )
 
-        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
     }
@@ -2330,7 +2330,7 @@ class CloudRouteSinkTest {
     fun `the no-gateway message is an earcon where no translation exists`() = runTest {
         val deps = TestDeps(baseUrl = "", locale = java.util.Locale.JAPANESE)
 
-        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
     }
@@ -2341,7 +2341,7 @@ class CloudRouteSinkTest {
             events = flowOf(CloudRouteEvent.Error(code = "connection_lost", message = "")),
         )
 
-        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // Localized template, not the client's own prose and not the code.
         assertEquals(VoiceResponse.Spoken("Connection lost. Please try again."), response)
@@ -2353,7 +2353,7 @@ class CloudRouteSinkTest {
             events = flowOf(CloudRouteEvent.Error(code = "connection_lost", message = "   ")),
         )
 
-        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // Whitespace is not a message: it must resolve the localized template
         // rather than being spoken as silence.
@@ -2366,7 +2366,7 @@ class CloudRouteSinkTest {
             events = flowOf(CloudRouteEvent.Error(code = "invalid_response", message = "")),
         )
 
-        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // Internal diagnostics are a sound, never English prose to a
         // non-English user.
@@ -2381,7 +2381,7 @@ class CloudRouteSinkTest {
             events = flowOf(CloudRouteEvent.Error(code = "limit_exceeded", message = "You've used 10/10 free requests today.")),
         )
 
-        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // The whole point: the server's message is not spoken at all — it can carry upstream
         // detail, as the captured turn did — even when it is a sentence written for the user.
@@ -2399,7 +2399,7 @@ class CloudRouteSinkTest {
         )
 
         val sink = deps.sink()
-        val response = sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // Deliberately changed: the rule that blank is not *speech* still holds — "   " is never
         // sent to the TTS engine — but a turn that delivers no usable answer no longer leaves the
@@ -2409,7 +2409,7 @@ class CloudRouteSinkTest {
 
         // And it is not worth remembering either: what follows carries no
         // conversation context, which is only true if nothing was recorded.
-        sink.routeToCloud("a follow-up", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("a follow-up", VoiceIntent.CloudTier.Premium, playbackContext).feedback
         // The premise first: null is also the expected value for turn one, so
         // without this the next line stays green even if the turn never routed.
         assertEquals("a follow-up", deps.routeTurns.last().request)
@@ -2423,7 +2423,7 @@ class CloudRouteSinkTest {
             events = flowOf(CloudRouteEvent.Error(code = "connection_lost", message = "")),
         )
 
-        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
     }
@@ -2442,7 +2442,7 @@ class CloudRouteSinkTest {
         deps.playback.throwOnPauseCall = 2
         val sink = deps.sink()
 
-        val outcome = runCatching { sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext) }
+        val outcome = runCatching { sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
 
         // Without this the assertions below would also hold if the action's
         // pause had silently succeeded — the calls list would look the same.
@@ -2460,7 +2460,7 @@ class CloudRouteSinkTest {
         // playback started — because the turn claimed a pause it never made.
         val deps = TestDeps(hostPlaying = false, events = flowOf(CloudRouteEvent.Done(1, 0)))
 
-        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals(
             "a paused host must be left exactly as it was",
@@ -2479,7 +2479,7 @@ class CloudRouteSinkTest {
         val deps = TestDeps(hostPlaying = false, events = flowOf(CloudRouteEvent.Done(1, 0)))
         deps.privacyClosed = true
 
-        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals(
             "a privacy closure during an inherited-pause turn must not end in playback",
@@ -2498,7 +2498,7 @@ class CloudRouteSinkTest {
         deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
         val sink = deps.sink()
 
-        val turn = launch { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        val turn = launch { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
         deps.playback.pauseStarted.await()
 
         // Backgrounding closes the window; the turn's own pause is what stopped playback, and it was
@@ -2524,7 +2524,7 @@ class CloudRouteSinkTest {
         deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
         val sink = deps.sink()
 
-        val turn = launch { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        val turn = launch { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
         deps.playback.pauseStarted.await()
 
         // Backgrounding alone: the closure count rises, but the host's audio never stopped, so no
@@ -2549,7 +2549,7 @@ class CloudRouteSinkTest {
         deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
         val sink = deps.sink()
 
-        val turn = launch { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        val turn = launch { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
         deps.playback.pauseStarted.await()
 
         // The closure coincides with a playback stop: the observed-stop count rises too.
@@ -2572,7 +2572,7 @@ class CloudRouteSinkTest {
         // user's place, so the pause does not happen without it.
         val deps = TestDeps(hostPlaying = true, routeInvoker = withHold(flowOf(CloudRouteEvent.Done(1, 0))))
 
-        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals(listOf("pause", "resume"), deps.playback.calls)
         assertTrue("playback is where it started", deps.host.playing)
@@ -2586,7 +2586,7 @@ class CloudRouteSinkTest {
         val deps = TestDeps(hostPlaying = true, routeInvoker = withHold(flowOf(CloudRouteEvent.Done(1, 0))))
         deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
 
-        val route = launch { deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        val route = launch { deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
         deps.playback.pauseStarted.await()
 
         // The user presses pause while our pause is suspended.
@@ -2630,7 +2630,7 @@ class CloudRouteSinkTest {
         // The turn's failure is the scenario, so it is caught here: what is asserted is the player's
         // final state, which is what the user's pause depends on.
         val turn = launch {
-            runCatching { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+            runCatching { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
         }
         deps.playback.pauseStarted.await()
         deps.playback.pauseGate?.complete(Unit)
@@ -2676,7 +2676,7 @@ class CloudRouteSinkTest {
             },
         )
 
-        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("pause it", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals(
             "the app-operation pause must supersede the hold, not be resumed over " +
@@ -2716,7 +2716,7 @@ class CloudRouteSinkTest {
             },
         )
 
-        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         assertEquals("the user's pause stands", listOf("pause"), deps.playback.calls)
     }
@@ -2745,7 +2745,7 @@ class CloudRouteSinkTest {
             },
         )
 
-        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // The turn's own pause is not undone twice: resuming again would fight
         // the user's decision, which is the same class of defect as resuming a
@@ -2795,7 +2795,7 @@ class CloudRouteSinkTest {
             ),
         )
 
-        deps.sink().routeToCloud("stay put", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("stay put", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // A named zero is a real delta, not a missing one. Applying the interval here would move
         // a user who named no movement — the defaulted-seek failure this dispatch exists to avoid.
@@ -2820,7 +2820,7 @@ class CloudRouteSinkTest {
             ),
         )
 
-        val response = deps.sink().routeToCloud("go sideways", VoiceIntent.CloudTier.Premium, playbackContext)
+        val response = deps.sink().routeToCloud("go sideways", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // The refusal must be OBSERVABLE, not merely an absence of movement: a refused action
         // means the turn delivered nothing, so the turn must not read as delivered (Silent).
@@ -2850,7 +2850,7 @@ class CloudRouteSinkTest {
             ),
         )
 
-        deps.sink().routeToCloud("go back", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("go back", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // A null delta is the only case that uses the sink's own interval.
         assertEquals(
@@ -3148,7 +3148,7 @@ class CloudRouteSinkTest {
             audioPlayer = player,
         )
         try {
-            val response = deps.sink().routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext)
+            val response = deps.sink().routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
             assertEquals(
                 "a refused answer must reach the user as an error, not a delivered reply",
                 VoiceResponse.Earcon(EarconId.ERROR),
@@ -3181,7 +3181,7 @@ class CloudRouteSinkTest {
         val deps = TestDeps(hostPlaying = true, routeInvoker = withHold(flowOf(CloudRouteEvent.Done(1, 0))))
         deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
 
-        val route = launch { deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        val route = launch { deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
         deps.playback.pauseStarted.await()
 
         // Privacy closes WITH an observed playback stop while the turn's own pause is in flight; the
@@ -3206,7 +3206,7 @@ class CloudRouteSinkTest {
         // The closure was earlier and privacy has since reopened (a wake clears it).
         deps.privacyClosed = false
 
-        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+        deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // The property is that an open window lets the turn restore its own pause: the host ends
         // playing again. A stale flag would leave it paused.
@@ -3235,7 +3235,7 @@ class CloudRouteSinkTest {
         deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
         val sink = deps.sink()
 
-        val turnA = launch { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+        val turnA = launch { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
         deps.playback.pauseStarted.await()
 
         // Privacy ends A, then a wake reopens the window before A's cleanup arrives. No successor
@@ -3289,7 +3289,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // One hold, taken and released, and the host is where it started. The frame confirmed the
         // reservation, so the hold that remains is the ACTUAL one.
@@ -3313,7 +3313,7 @@ class CloudRouteSinkTest {
         val deps = TestDeps(hostPlaying = true, routeInvoker = withHold(flowOf(CloudRouteEvent.Done(1, 0))))
         val sink = deps.sink()
 
-        sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // The reservation was taken and released: the pause happened and was undone, and no
         // confirmation ever arrived to make it stand.
@@ -3347,7 +3347,7 @@ class CloudRouteSinkTest {
         )
         val sink = deps.sink()
 
-        sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext)
+        sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
         // A foreign frame neither takes a hold nor confirms one; the turn's own reservation is still
         // released by the end of the turn.
@@ -3408,7 +3408,7 @@ class CloudRouteSinkTest {
         deps.playback.pauseGate = kotlinx.coroutines.CompletableDeferred()
         val sink = deps.sink()
         val turn = scope.launch {
-            runCatching { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext) }
+            runCatching { sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback }
         }
         // The pause only happens when the frame activates the hold, so the UNCONFIRMED variant never
         // reaches it. Waiting unconditionally would hang rather than report that -- which is exactly

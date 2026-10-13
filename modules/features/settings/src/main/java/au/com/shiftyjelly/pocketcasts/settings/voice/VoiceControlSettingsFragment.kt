@@ -27,7 +27,6 @@ import au.com.shiftyjelly.pocketcasts.compose.components.SettingRowToggle
 import au.com.shiftyjelly.pocketcasts.compose.extensions.contentWithoutConsumedInsets
 import au.com.shiftyjelly.pocketcasts.compose.preview.ThemePreviewParameterProvider
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
-import au.com.shiftyjelly.pocketcasts.preferences.model.VoiceControlAudioRoutePolicy
 import au.com.shiftyjelly.pocketcasts.ui.theme.Theme
 import au.com.shiftyjelly.pocketcasts.utils.extensions.pxToDp
 import au.com.shiftyjelly.pocketcasts.views.fragments.BaseFragment
@@ -51,8 +50,6 @@ class VoiceControlSettingsFragment : BaseFragment() {
         AppThemeWithBackground(theme.activeTheme) {
             val enabled by settings.voiceControlUserDisabled.flow
                 .collectAsState(false)
-            val policy by settings.voiceControlAudioRoutePolicy.flow
-                .collectAsState(VoiceControlAudioRoutePolicy.HeadsetOnly)
             val modelState by modelManager.downloadState
                 .collectAsState(ModelDownloadState.NotStarted)
             val modelReady = modelManager.isMoonshineModelReady()
@@ -61,14 +58,10 @@ class VoiceControlSettingsFragment : BaseFragment() {
 
             VoiceControlSettingsPage(
                 enabled = !enabled,
-                routePolicy = policy,
                 modelReady = modelReady,
                 modelState = modelState,
                 onEnabledChange = { checked ->
                     settings.voiceControlUserDisabled.set(!checked, updateModifiedAt = false)
-                },
-                onRoutePolicyChange = { newPolicy ->
-                    settings.voiceControlAudioRoutePolicy.set(newPolicy, updateModifiedAt = false)
                 },
                 onBackPress = { activity?.onBackPressedDispatcher?.onBackPressed() },
                 bottomInset = bottomInset.value.pxToDp(LocalContext.current).dp,
@@ -80,11 +73,9 @@ class VoiceControlSettingsFragment : BaseFragment() {
 @Composable
 private fun VoiceControlSettingsPage(
     enabled: Boolean,
-    routePolicy: VoiceControlAudioRoutePolicy,
     modelReady: Boolean,
     modelState: ModelDownloadState,
     onEnabledChange: (Boolean) -> Unit,
-    onRoutePolicyChange: (VoiceControlAudioRoutePolicy) -> Unit,
     onBackPress: () -> Unit,
     bottomInset: Dp,
 ) {
@@ -103,30 +94,6 @@ private fun VoiceControlSettingsPage(
                         value = enabled,
                         role = Role.Switch,
                     ) { onEnabledChange(it) },
-                    indent = false,
-                )
-            }
-            item {
-                val policyText = when (routePolicy) {
-                    VoiceControlAudioRoutePolicy.HeadsetOnly -> "Headset Only"
-                    VoiceControlAudioRoutePolicy.SpeakerExperimental -> "Speaker (Experimental)"
-                }
-                SettingRow(
-                    primaryText = "Audio Route Policy",
-                    secondaryText = policyText,
-                    toggle = SettingRowToggle.None,
-                    modifier = Modifier.toggleable(
-                        value = routePolicy == VoiceControlAudioRoutePolicy.SpeakerExperimental,
-                        role = Role.Switch,
-                    ) {
-                        onRoutePolicyChange(
-                            if (it) {
-                                VoiceControlAudioRoutePolicy.SpeakerExperimental
-                            } else {
-                                VoiceControlAudioRoutePolicy.HeadsetOnly
-                            },
-                        )
-                    },
                     indent = false,
                 )
             }
@@ -156,11 +123,9 @@ private fun VoiceControlSettingsPagePreview(
     AppTheme(themeType) {
         VoiceControlSettingsPage(
             enabled = true,
-            routePolicy = VoiceControlAudioRoutePolicy.HeadsetOnly,
             modelReady = true,
             modelState = ModelDownloadState.Ready,
             onEnabledChange = {},
-            onRoutePolicyChange = {},
             onBackPress = {},
             bottomInset = 0.dp,
         )

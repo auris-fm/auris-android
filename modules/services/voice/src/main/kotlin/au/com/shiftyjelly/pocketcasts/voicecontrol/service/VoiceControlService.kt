@@ -90,7 +90,7 @@ class VoiceControlService : Service() {
     private var acquisitionJob: Job? = null
     private var lastIntentType: String? = null
     private var lastCommandTime: Long = 0L
-    private var engineStarted = false
+    private val engineStart = EngineStartCoordinator()
     private var wiredBackend: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend? = null
     private var captureWasEverActive = false
     private var acquisitionLogged = false
@@ -117,7 +117,7 @@ class VoiceControlService : Service() {
     }
 
     private fun startVoiceControl() {
-        if (engineStarted) {
+        if (engineStart.isStarted) {
             Timber.i("Voice control already started")
             return
         }
@@ -164,7 +164,7 @@ class VoiceControlService : Service() {
                     }
                     when (mode) {
                         ListeningMode.Off -> {
-                            if (engineStarted) {
+                            if (engineStart.isStarted) {
                                 // Active capture was ongoing, now stopping
                                 val gateState = gate.state.value
                                 val blockedRules = gateState.rules
@@ -212,7 +212,7 @@ class VoiceControlService : Service() {
 
                         ListeningMode.Continuous, ListeningMode.WakeWord -> {
                             captureWasEverActive = true
-                            if (engineStarted) {
+                            if (engineStart.isStarted) {
                                 if (mode != currentMode) {
                                     voiceAsrEngine.get().updateListeningMode(mode)
                                     // Keep the wake-word hint accurate as grace opens/expires
@@ -310,15 +310,20 @@ class VoiceControlService : Service() {
         Timber.i("ASR model ready")
     }
 
+    /**
+     * Starts the engine exactly once across concurrent callers. Both the acquisition coroutine and
+     * the mode-flow collector reach this when acquisition turns a Bluetooth candidate into an
+     * isolated headset, so the start is serialized: the second caller waits for the first and then
+     * skips it. Returns true when the engine is running afterwards.
+     */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    private suspend fun startEngine(mode: ListeningMode) {
-        if (engineStarted) return
+    private suspend fun startEngine(mode: ListeningMode): Boolean = engineStart.startIfNotRunning {
         val backend = asrBackendSelector.select()
         if (backend == null) {
             Timber.w(
                 "[VoicePipeline] ASR locale unsupported — refusing to start engine",
             )
-            return
+            return@startIfNotRunning false
         }
 
         // Prepare the model before telling the user we are listening. The engine also checks
@@ -327,7 +332,7 @@ class VoiceControlService : Service() {
         // user told "listening" with a microphone that never opens.
         if (backend.ensureReady().isFailure) {
             Timber.e("[VoicePipeline] engine not started: ASR backend not ready")
-            return
+            return@startIfNotRunning false
         }
 
         try {
@@ -339,7 +344,6 @@ class VoiceControlService : Service() {
                 micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
                 onIntent = { intent -> handleIntent(intent) },
             )
-            engineStarted = true
 
             // Only when the microphone opens where the user cannot see it: the decision is
             // shouldPlayListeningStartCue in ListeningModePolicy. Nothing under test drives this
@@ -354,8 +358,10 @@ class VoiceControlService : Service() {
             )
             notificationManager.notify(notification)
             Timber.i("[VoicePipeline] engine started mode=%s", mode)
+            true
         } catch (e: Exception) {
             Timber.e(e, "[VoicePipeline] engine start failed")
+            false
         }
     }
 
@@ -380,7 +386,7 @@ class VoiceControlService : Service() {
                     is AcquisitionResult.Acquired -> {
                         if (gate.state.value.allowed) {
                             @Suppress("MissingPermission") // permission checked in hasRequiredPermissions()
-                            startEngine(
+                            val started = startEngine(
                                 if (gracePeriodSignal.isActive.value) {
                                     ListeningMode.Continuous
                                 } else {
@@ -390,7 +396,7 @@ class VoiceControlService : Service() {
                             // The engine owns the acquired stream from here: release() must not
                             // close it. When the engine did not start (backend not ready, no
                             // backend), the stream is still acquisition's to close.
-                            if (engineStarted) {
+                            if (started) {
                                 routeAcquisition.handOffStream()
                             } else {
                                 routeAcquisition.release()
@@ -435,9 +441,9 @@ class VoiceControlService : Service() {
         // Stop the engine before releasing acquisition routing: the engine tears down the
         // stream it owns in its own flow `finally`, and release() must never delete a live
         // capture. After hand-off release() only undoes the acquired routing.
-        if (engineStarted) {
+        if (engineStart.isStarted) {
             voiceAsrEngine.get().stop()
-            engineStarted = false
+            engineStart.onStopped()
             Timber.i("[VoicePipeline] engine stopped")
         }
         routeAcquisition.release()

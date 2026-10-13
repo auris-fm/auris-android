@@ -74,6 +74,12 @@ class AndroidRouteAcquisitionPlatform(
         audioManager.clearCommunicationDevice()
     }
 
+    override fun audioMode(): Int = audioManager.mode
+
+    override fun setAudioMode(mode: Int) {
+        audioManager.mode = mode
+    }
+
     override fun deviceType(deviceId: Int): Int? = allDevices().firstOrNull { it.id == deviceId }?.type
 
     override fun openInputStream(): Int {

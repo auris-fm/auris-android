@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.route
 
 import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
@@ -62,6 +63,12 @@ interface RouteAcquisitionPlatform {
 
     fun clearCommunicationDevice()
 
+    /** The current [AudioManager] mode, saved so acquisition can restore it. */
+    fun audioMode(): Int
+
+    /** Sets the [AudioManager] mode for the duration of the acquisition. */
+    fun setAudioMode(mode: Int)
+
     /** The Android device type for [deviceId], or null when the id does not resolve. */
     fun deviceType(deviceId: Int): Int?
 
@@ -103,6 +110,9 @@ class RouteAcquisition(
     /** True once the opened stream was started and so belongs to the capture engine. */
     private var streamHandedOff = false
 
+    /** The [AudioManager] mode that was active before classic acquisition changed it. */
+    private var savedAudioMode: Int? = null
+
     suspend fun acquire(route: AudioRoute, gateAllows: () -> Boolean): AcquisitionResult {
         if (route !is AudioRoute.BluetoothA2dpOnly) return AcquisitionResult.NotNeeded
         val candidate = platform.bluetoothCandidates().firstOrNull()
@@ -135,6 +145,11 @@ class RouteAcquisition(
             routingAcquired = true
         }
         if (candidate.transport == BluetoothTransport.ClassicSco) {
+            // HFP establishment needs the normal audio mode on some devices. This is the mode
+            // handling that used to live in VoiceAsrEngine.awaitBluetoothSco(), scoped here to
+            // the acquisition path; release() restores the previous mode.
+            savedAudioMode = platform.audioMode()
+            platform.setAudioMode(AudioManager.MODE_NORMAL)
             platform.startBluetoothSco()
             routingAcquired = true
         }
@@ -232,6 +247,8 @@ class RouteAcquisition(
             runCatching { platform.stopBluetoothSco() }
             runCatching { platform.clearCommunicationDevice() }
         }
+        savedAudioMode?.let { mode -> runCatching { platform.setAudioMode(mode) } }
+        savedAudioMode = null
     }
 
     private enum class Selection { SELECTED, GATE_LOST, TIMEOUT }

@@ -3,6 +3,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.route
 
 import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -37,6 +38,11 @@ class RouteAcquisitionTest {
         var streamStartResult = true
         var closeCalls = 0
         val deviceTypes = mutableMapOf<Int, Int>()
+        var currentAudioMode = AudioManager.MODE_IN_COMMUNICATION
+        val modeSets = mutableListOf<Int>()
+
+        /** Ordered record of routing / mode calls, so ordering can be asserted. */
+        val events = mutableListOf<String>()
 
         fun interactions(): Int = scoStartCalls + scoCalls + communicationDeviceCalls.size +
             clearCommunicationDeviceCalls + openCalls + startCalls + closeCalls
@@ -45,6 +51,7 @@ class RouteAcquisitionTest {
 
         override fun startBluetoothSco() {
             scoStartCalls++
+            events += "startSco"
         }
 
         override fun stopBluetoothSco() {
@@ -67,6 +74,14 @@ class RouteAcquisitionTest {
         }
 
         override fun deviceType(deviceId: Int): Int? = deviceTypes[deviceId]
+
+        override fun audioMode(): Int = currentAudioMode
+
+        override fun setAudioMode(mode: Int) {
+            currentAudioMode = mode
+            modeSets += mode
+            events += "mode=$mode"
+        }
 
         override fun openInputStream(): Int {
             openCalls++
@@ -119,6 +134,39 @@ class RouteAcquisitionTest {
         assertEquals(AcquisitionResult.Acquired(41), result)
         assertEquals(1, platform.openCalls)
         assertEquals(1, platform.startCalls)
+    }
+
+    @Test
+    fun `classic acquisition sets the normal audio mode before SCO and restores it on release`() = runTest {
+        // HFP establishment needs the normal audio mode on some devices; this is the mode
+        // handling that used to live in awaitBluetoothSco, scoped here to acquisition.
+        val platform = FakePlatform().apply {
+            currentAudioMode = AudioManager.MODE_IN_COMMUNICATION
+            scoOn = true
+            openedDeviceId = 32
+            deviceTypes[32] = AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+        }
+        val acquisition = acquisition(platform)
+
+        val result = acquisition.acquire(
+            BluetoothCandidate(deviceId = 32, transport = BluetoothTransport.ClassicSco),
+            gateAllows = { true },
+        )
+
+        assertEquals(AcquisitionResult.Acquired(32), result)
+        // The normal mode must be set before startBluetoothSco(), not after it.
+        assertEquals(
+            listOf("mode=" + AudioManager.MODE_NORMAL, "startSco"),
+            platform.events.take(2),
+        )
+
+        acquisition.release()
+
+        assertEquals(
+            "the previous mode must be restored on release",
+            AudioManager.MODE_IN_COMMUNICATION,
+            platform.currentAudioMode,
+        )
     }
 
     // ── BLE (LE Audio) ──────────────────────────────────────────────────
@@ -203,6 +251,31 @@ class RouteAcquisitionTest {
         assertEquals(AcquisitionResult.Failed(RouteAcquisition.REASON_FAILED), result)
         assertEquals(0, platform.startCalls)
         assertEquals(1, platform.closeCalls)
+    }
+
+    @Test
+    fun `a gate that blocks after the stream opens cancels without starting capture`() = runTest {
+        // gateAllows() is checked twice: while polling for selection and again after the stream
+        // is opened and confirmed. A gate that was passable through selection but blocks at the
+        // post-open check must still cancel, close the stream, and release routing.
+        val platform = FakePlatform().apply {
+            scoOn = true
+            openedDeviceId = 31
+            deviceTypes[31] = AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+        }
+        var gateChecks = 0
+
+        val result = acquisition(platform).acquire(
+            BluetoothCandidate(deviceId = 31, transport = BluetoothTransport.ClassicSco),
+            // true for the selection check, false at the post-open re-check
+            gateAllows = { gateChecks++ == 0 },
+        )
+
+        assertTrue("the gate must have been checked again after the stream opened", gateChecks >= 2)
+        assertEquals(AcquisitionResult.Cancelled, result)
+        assertEquals("the stream must not be started", 0, platform.startCalls)
+        assertEquals("the opened stream must be closed", 1, platform.closeCalls)
+        assertTrue("routing must be released", platform.scoCalls >= 1)
     }
 
     // ── Cancellation and gate loss ──────────────────────────────────────

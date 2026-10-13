@@ -391,10 +391,21 @@ class EarconPlayer(
             // A DIFFERENT ADMISSION IS NOT THIS STOP'S SUBJECT, even when it is the SAME earcon: the
             // successor's audio is not what this stop was issued for.
             if (expectedAdmission != null && currentAdmission != expectedAdmission) return@onPlayerThread
-            track?.runCatching { stop() }
+            // DISCARDING A TRACK MEANS DISCARDING EVERYTHING IT OWNS, in one step. Nulling the reference
+            // after `stop()` alone LEFT THE RESOURCE UNRELEASED -- nothing could release it afterwards,
+            // because the only reference was gone -- AND LEFT the track's cumulative frontier standing:
+            // the next cue runs on a NEW track whose head starts at zero, while its completion target
+            // still counted the retired track's frames, so it could report Consumed before sounding.
+            track?.runCatching {
+                stop()
+                release()
+            }
             track = null
             emittedFrames = 0
             emittedRateHz = 0
+            // THE FRONTIER BELONGS TO THE TRACK, so it goes with it -- the same reset `release()` does,
+            // for the same reason.
+            acceptedFramesTotal = 0
             cueHeadOrigin = 0
             cueHeadTarget = 0
             lastPlayedId = null

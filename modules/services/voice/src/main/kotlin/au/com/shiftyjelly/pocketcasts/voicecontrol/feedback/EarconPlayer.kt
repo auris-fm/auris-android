@@ -399,10 +399,11 @@ class EarconPlayer(
             // because the only reference was gone -- AND LEFT the track's cumulative frontier standing:
             // the next cue runs on a NEW track whose head starts at zero, while its completion target
             // still counted the retired track's frames, so it could report Consumed before sounding.
-            track?.runCatching {
-                stop()
-                release()
-            }
+            // RELEASE IS ATTEMPTED INDEPENDENTLY OF STOP. In one `runCatching` block a THROWING `stop()`
+            // skips the release, and the reference is dropped anyway -- so the resource is leaked by
+            // exactly the case that most needs releasing. ONE RULE, EVERY CALL SITE.
+            track?.runCatching { stop() }
+            track?.runCatching { release() }
             track = null
             emittedFrames = 0
             emittedRateHz = 0
@@ -444,10 +445,11 @@ class EarconPlayer(
      */
     fun release() {
         onPlayerThread {
-            track?.runCatching {
-                stop()
-                release()
-            }
+            // RELEASE IS ATTEMPTED INDEPENDENTLY OF STOP. In one `runCatching` block a THROWING `stop()`
+            // skips the release, and the reference is dropped anyway -- so the resource is leaked by
+            // exactly the case that most needs releasing. ONE RULE, EVERY CALL SITE.
+            track?.runCatching { stop() }
+            track?.runCatching { release() }
             track = null
             // The frontier belongs to the track that was just released, so it must not outlive it: the
             // NEXT track's head starts at zero, and carrying the old total forward would make its first

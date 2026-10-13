@@ -594,10 +594,9 @@ class EarconPlayerTest {
     }
 
     @Test
-    fun `a held stop for the SAME earcon does not release a successor admission`() {
-        // @reviewer's same-ID gap: the earcon id names the KIND, so two consecutive wake cues look
-        // identical and an id comparison cannot tell a held stop aimed at the first from one aimed at the
-        // second. The admission token can, and that difference is the whole question.
+    fun `a discarded track is not released AGAIN by the later session release`() {
+        // EXACTLY-ONCE OWNERSHIP, which `atLeastOnce` cannot show: the discarded track's reference is
+        // gone, so a later `release()` must not be able to reach it a second time.
         val context = org.robolectric.RuntimeEnvironment.getApplication()
         val mockPlayer = EarconPlayer(context)
         val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
@@ -619,32 +618,101 @@ class EarconPlayerTest {
         mockPlayer.readPlaybackHeadFrames = { 0 }
 
         assertTrue(mockPlayer.play(EarconId.WAKE_WORD) != null)
-        // THE FIRST CUE'S ADMISSION, held by a caller that will stop it LATER.
-        val firstAdmission = mockPlayer.currentAdmissionToken()
-        assertNotNull("the first admission must be observable", firstAdmission)
+        mockPlayer.stopAdmissionNow(null)
+        // The session release runs afterwards, as it does at the end of every service stop.
+        mockPlayer.release()
 
-        // A SECOND ADMISSION OF THE SAME EARCON takes the track. Its token MUST differ, or a held stop
-        // cannot tell them apart.
+        org.mockito.Mockito.verify(track, org.mockito.Mockito.times(1)).release()
+    }
+
+    @Test
+    fun `a THROWING stop still releases the discarded track`() {
+        // @reviewer: one `runCatching` around stop-then-release means a throwing stop SKIPS the release,
+        // and the reference is dropped anyway -- the resource leaks in exactly the case that most needs
+        // releasing. The release must be attempted independently.
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val mockPlayer = EarconPlayer(context)
+        val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
+        val clip = clipClass.declaredConstructors.single().apply { isAccessible = true }
+            .newInstance(mockPlayer, ShortArray(100), 16000)
+        @Suppress("UNCHECKED_CAST")
+        mockPlayer.javaClass.getDeclaredField("clips").apply { isAccessible = true }
+            .set(mockPlayer, mapOf(EarconId.WAKE_WORD to clip))
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        // THE STOP ITSELF FAILS, which is the case the single block leaks.
+        org.mockito.Mockito.doThrow(RuntimeException("stop failed")).`when`(track).stop()
+        mockPlayer.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(mockPlayer, track)
+        mockPlayer.readPlaybackHeadFrames = { 0 }
+
         assertTrue(mockPlayer.play(EarconId.WAKE_WORD) != null)
-        val secondAdmission = mockPlayer.currentAdmissionToken()
-        assertNotEquals(
-            "two admissions of the same earcon must be distinguishable",
-            firstAdmission,
-            secondAdmission,
-        )
+        mockPlayer.stopAdmissionNow(null)
 
-        // THE HELD STOP ARRIVES LATE, aimed at the FIRST admission. It must NOT release the second.
-        mockPlayer.stopAdmissionNow(firstAdmission)
+        org.mockito.Mockito.verify(track, org.mockito.Mockito.times(1)).release()
+    }
+
+    @Test
+    fun `an OLD admission's stop leaves a same-sound successor sounding`() {
+        // @reviewer: the earlier case only showed that currentAdmissionToken is not called on a mock.
+        // THE REAL INTERLEAVING: hold A's token, admit B with the SAME sound, then execute A's stop and
+        // require B to be intact -- accepted frames, head target and admission all unchanged.
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val mockPlayer = EarconPlayer(context)
+        val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
+        val clip = clipClass.declaredConstructors.single().apply { isAccessible = true }
+            .newInstance(mockPlayer, ShortArray(100), 16000)
+        @Suppress("UNCHECKED_CAST")
+        mockPlayer.javaClass.getDeclaredField("clips").apply { isAccessible = true }
+            .set(mockPlayer, mapOf(EarconId.WAKE_WORD to clip))
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        mockPlayer.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(mockPlayer, track)
+        mockPlayer.readPlaybackHeadFrames = { 0 }
+
+        // A IS ADMITTED, and ITS token is held -- the same token the renderer would carry for A.
+        val tokenA = mockPlayer.play(EarconId.WAKE_WORD)
+        assertNotNull("A must be admitted", tokenA)
+
+        // B IS ADMITTED WITH THE SAME SOUND. It takes the track and gets its own token.
+        val tokenB = mockPlayer.play(EarconId.WAKE_WORD)
+        assertNotNull("B must be admitted", tokenB)
+        assertNotEquals("B is a different admission of the same sound", tokenA, tokenB)
+
+        // B'S STATE BEFORE A'S STOP, so the assertion is about what A's stop CHANGED.
+        fun field(name: String): Any? = mockPlayer.javaClass.getDeclaredField(name)
+            .apply { isAccessible = true }
+            .get(mockPlayer)
+        val bFrontier = field("acceptedFramesTotal")
+        val bTarget = field("cueHeadTarget")
+        val bAdmission = field("currentAdmission")
+
+        // A'S STOP ARRIVES LATE.
+        mockPlayer.stopAdmissionNow(tokenA)
+
+        // B IS UNTOUCHED: its admission still owns the track, its resource was not stopped, and its
+        // frontier and completion target are exactly as they were.
+        assertEquals("B still owns the track", bAdmission, field("currentAdmission"))
+        assertEquals("B's frontier is unchanged", bFrontier, field("acceptedFramesTotal"))
+        assertEquals("B's completion target is unchanged", bTarget, field("cueHeadTarget"))
         org.mockito.Mockito.verify(track, org.mockito.Mockito.never()).stop()
-        assertEquals(
-            "the successor admission still owns the track",
-            secondAdmission,
-            mockPlayer.currentAdmissionToken(),
-        )
 
-        // THE CONTROL: a stop for the admission that IS current does release it, so the case is decided by
-        // the token rather than by stop being inert.
-        mockPlayer.stopAdmissionNow(secondAdmission)
+        // THE CURRENT-OWNER POSITIVE: B's own stop DOES act, so the case is decided by ownership rather
+        // than by stop being inert.
+        mockPlayer.stopAdmissionNow(tokenB)
         org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).stop()
     }
 
@@ -678,9 +746,9 @@ class EarconPlayerTest {
 
         mockPlayer.stopAdmissionNow(null)
 
-        // THE RESOURCE IS RELEASED: a track that is discarded without release() can never be released,
-        // because its only reference is gone.
-        org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).release()
+        // THE RESOURCE IS RELEASED EXACTLY ONCE. `atLeastOnce` cannot establish ownership: it passes
+        // for a track released twice, which is its own defect.
+        org.mockito.Mockito.verify(track, org.mockito.Mockito.times(1)).release()
         // AND ITS FRONTIER IS GONE WITH IT, so the next cue on a fresh track is not measured against
         // frames the retired track had accepted.
         assertEquals(

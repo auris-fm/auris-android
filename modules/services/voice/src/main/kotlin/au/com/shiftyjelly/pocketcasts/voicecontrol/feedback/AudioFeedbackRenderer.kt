@@ -169,7 +169,10 @@ class AudioFeedbackRenderer(
             // is not cut short by an assumed length.
             coverEarconUntilConsumed(id, admitted)
         }
-        return true
+        // THE PUBLIC RESULT STILL REPORTS ACCEPTANCE. Returning true unconditionally made a REFUSED cue
+        // look accepted to every caller, so a caller could not tell a cue that never sounded from one
+        // that did -- the same conflation the null result exists to express.
+        return admitted != null
     }
 
     /** The in-flight earcon coverage, so a session end can end it rather than let it run on. */

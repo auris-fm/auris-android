@@ -149,6 +149,16 @@ class CloudRouteSink internal constructor(
      */
     private val turnMutex = Mutex()
     private var activeTurnId: Long = 0
+
+    /**
+     * The outcome of the last turn's playback action, for the external API to report.
+     *
+     * DISTINCT FROM "feedback": a turn can produce feedback and still have DISPATCHED an action whose
+     * outcome is unknown, and a caller that only sees feedback cannot tell those apart.
+     */
+    @Volatile
+    internal var lastActionOutcome: ActionOutcome = ActionOutcome.None
+        private set
     private var activeTurn: Job? = null
 
     /**
@@ -395,6 +405,9 @@ class CloudRouteSink internal constructor(
         // Raised where a three-way outcome is KNOWN; the Boolean `executeAction` result cannot express it.
         fun noteOutcome(outcome: ActionOutcome) {
             actionOutcome = mergeActionOutcome(actionOutcome, outcome)
+            // PUBLISHED FOR THE CALLER. The external API must report what the turn's action achieved
+            // rather than only "feedback", so the outcome is observable after the turn completes.
+            lastActionOutcome = actionOutcome
         }
         var handledResult = false
         var audioPlayed = false
@@ -952,7 +965,11 @@ class CloudRouteSink internal constructor(
                         // EVERY ARM YIELDS THE TYPED OUTCOME. Mixing `return@withLock` with block values
                         // makes the `when`'s type ambiguous -- a `return@withLock` leaves the enclosing
                         // lambda rather than producing a value, so the expression's type collapses.
-                        when (outcome) {
+                        // RETURNED, NOT MERELY EVALUATED. A bare `when` here computes the outcome and
+                        // then DISCARDS it, so execution falls through to the REFERENCE branch below and
+                        // an ordinary seek is followed by a reference seek -- @reviewer's measured
+                        // regression from my conversion. The branch must RETURN its typed outcome.
+                        return@withLock when (outcome) {
                             is EpisodeOperationResult.Refused -> ActionOutcome.None
 
                             is EpisodeOperationResult.Accepted -> {
@@ -995,7 +1012,7 @@ class CloudRouteSink internal constructor(
                     // THE REFERENCE FORM PRESERVES ALL THREE OUTCOMES TOO -- it previously narrowed to
                     // Accepted, which COLLAPSED Unknown into a refusal. History comes from the result,
                     // never a live re-read, and only an OBSERVED outcome records the target.
-                    handleSeekOutcome(outcome, referenceMs, turnState)
+                    return@withLock handleSeekOutcome(outcome, referenceMs, turnState)
                 }
 
                 "play_quote" -> {

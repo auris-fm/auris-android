@@ -647,6 +647,55 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `an ordinary position seek reports its TYPED outcome to the caller, not None`() = runTest {
+        // @reviewer's measured regression from my conversion: the ordinary branch computed its `when`
+        // and DISCARDED it, so execution fell through to `referenceMs == null` and returned None. The
+        // CALLER therefore saw [None, None] for Unknown->Confirmed and [None] for a single Unknown --
+        // every seek reaching the real sink yet reporting that nothing happened.
+        //
+        // The observation is the OUTCOME THE CALLER RECEIVES, which is the value the mechanism decides
+        // on. Asserting the response or the seek count cannot see this: both are unchanged by the
+        // discarded result.
+        suspend fun outcomeFor(result: EpisodeOperationResult, action: String = "seek_to"): CloudRouteSink.Companion.ActionOutcome {
+            val deps = TestDeps(
+                cloudPlaybackContextState = CloudPlaybackContextState(),
+                episodeId = "episode-id",
+                events = flowOf(
+                    CloudRouteEvent.Action(
+                        tool = "playback",
+                        action = action,
+                        params = mapOf("position_seconds" to 100),
+                    ),
+                ),
+            )
+            deps.playback.seekOutcomeForTest = result
+            val sink = deps.sink()
+            sink.routeToCloud(
+                "seek",
+                VoiceIntent.CloudTier.Premium,
+                PlaybackContext(episodeId = "episode-id", clientPositionMs = 0L),
+            )
+            return sink.lastActionOutcome
+        }
+
+        assertEquals(
+            "an ACCEPTED ordinary seek must report Confirmed, not None",
+            CloudRouteSink.Companion.ActionOutcome.Confirmed,
+            outcomeFor(EpisodeOperationResult.Accepted("episode-id", 0L)),
+        )
+        assertEquals(
+            "an UNKNOWN ordinary seek must report Unknown, not None",
+            CloudRouteSink.Companion.ActionOutcome.Unknown,
+            outcomeFor(EpisodeOperationResult.Unknown("episode-id", 0L)),
+        )
+        assertEquals(
+            "a REFUSED ordinary seek reports None: nothing happened",
+            CloudRouteSink.Companion.ActionOutcome.None,
+            outcomeFor(EpisodeOperationResult.Refused),
+        )
+    }
+
+    @Test
     fun `an UNBOUND reference position is refused rather than applied to whatever is playing`() = runTest {
         // @spec's unbound case: a reference position is a position IN a recording, so with no episode to
         // be a position in there is nothing it can be a position in. A null expectation must not turn an

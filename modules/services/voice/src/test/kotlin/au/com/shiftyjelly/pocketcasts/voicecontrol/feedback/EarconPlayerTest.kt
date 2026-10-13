@@ -589,4 +589,46 @@ class EarconPlayerTest {
             player.submitForTest { 1 },
         )
     }
+
+    @Test
+    fun `a stop aimed at a cue that is not playing does not silence the one that is`() {
+        // @reviewer: the real player's stop must not be able to harm a successor. Its block runs LATER on
+        // the player thread, by which time `track` may hold a DIFFERENT cue -- and stopping the TRACK
+        // would stop audio nobody asked to stop. So the stop is scoped to the cue it was issued for.
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val mockPlayer = EarconPlayer(context)
+        val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
+        val clip = clipClass.declaredConstructors.single().apply { isAccessible = true }
+            .newInstance(mockPlayer, ShortArray(100), 16000)
+        @Suppress("UNCHECKED_CAST")
+        mockPlayer.javaClass.getDeclaredField("clips").apply { isAccessible = true }
+            .set(mockPlayer, mapOf(EarconId.WAKE_WORD to clip, EarconId.LISTENING_START to clip))
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        mockPlayer.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(mockPlayer, track)
+        mockPlayer.readPlaybackHeadFrames = { 0 }
+
+        assertTrue("the cue under test must be accepted", mockPlayer.play(EarconId.WAKE_WORD))
+        // THE PRECONDITION: the track must OWE the cue, or the case would be about a failed play rather
+        // than about the scoping it asks about.
+        assertEquals(
+            "the precondition is that the track owes the cue just played",
+            EarconId.WAKE_WORD,
+            mockPlayer.javaClass.getDeclaredField("lastPlayedId")
+                .apply { isAccessible = true }
+                .get(mockPlayer),
+        )
+
+        // A STOP FOR A DIFFERENT CUE: the track is playing WAKE_WORD, and this stop speaks for another.
+        mockPlayer.stopCueNow(EarconId.LISTENING_START)
+
+        org.mockito.Mockito.verify(track, org.mockito.Mockito.never()).stop()
+    }
 }

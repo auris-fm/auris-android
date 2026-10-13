@@ -80,6 +80,58 @@ class PlaybackManagerPlaybackSinkTest {
     fun `the REAL manager refuses a seek the player is RE-POINTED during`() = probeActualManagerReuse(reuse = true)
 
     @Test
+    fun `the REAL owner skipIfPlaying reports Unknown through the public path`() = runTest {
+        // @spec's remaining item: the ACTUAL owner's skip, through its PUBLIC entry point. The decision
+        // was verified in isolation (172e220ff); this drives the real method and its callers.
+        val manager = org.mockito.Mockito.mock(
+            PlaybackManager::class.java,
+            org.mockito.Mockito.CALLS_REAL_METHODS,
+        )
+        val target = object : au.com.shiftyjelly.pocketcasts.repositories.playback.Player by mock() {
+            override val enforcesEpisodeBoundSeek: Boolean get() = true
+            override val episodeUuid: String? get() = "episode-A"
+            override suspend fun durationMs(): Int? = 3_600_000
+            override suspend fun getCurrentPositionMs(): Int = 60_000
+            override suspend fun seekToTimeMsIfEpisode(
+                positionMs: Int,
+                expectedEpisodeUuid: String,
+            ): au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome = au.com.shiftyjelly.pocketcasts.repositories.playback.Player.EpisodeSeekOutcome
+                .unknown(0L)
+        }
+        val fields = PlaybackManager::class.java
+        fields.getDeclaredField("_playerFlow").apply { isAccessible = true }.set(
+            manager,
+            kotlinx.coroutines.flow.MutableStateFlow<au.com.shiftyjelly.pocketcasts.repositories.playback.Player?>(target),
+        )
+        val episode = au.com.shiftyjelly.pocketcasts.models.entity.PodcastEpisode(
+            uuid = "episode-A",
+            podcastUuid = "podcast-1",
+            publishedDate = java.util.Date(),
+        )
+        val queue = org.mockito.kotlin.mock<au.com.shiftyjelly.pocketcasts.repositories.playback.UpNextQueue>()
+        org.mockito.kotlin.whenever(queue.currentEpisode).thenReturn(episode)
+        fields.getDeclaredField("upNextQueue").apply { isAccessible = true }.set(manager, queue)
+        fields.getDeclaredField("playbackStateRelay\$delegate").apply { isAccessible = true }.set(
+            manager,
+            kotlin.lazyOf(com.jakewharton.rxrelay2.BehaviorRelay.createDefault(PlaybackState())),
+        )
+        val settings = org.mockito.kotlin.mock<au.com.shiftyjelly.pocketcasts.preferences.Settings>()
+        val skipForward = org.mockito.kotlin.mock<au.com.shiftyjelly.pocketcasts.preferences.UserSetting<Int>>()
+        org.mockito.kotlin.whenever(skipForward.value).thenReturn(30)
+        org.mockito.kotlin.whenever(settings.skipForwardInSecs).thenReturn(skipForward)
+        fields.getDeclaredField("settings").apply { isAccessible = true }.set(manager, settings)
+        fields.getDeclaredField("selectedPlayerLock").apply { isAccessible = true }.set(manager, Any())
+
+        // THE PUBLIC PATH: the sink adapter the production caller uses.
+        val result = sink(manager).skipForward(seconds = 30, expectedEpisodeId = "episode-A")
+
+        assertTrue(
+            "the real owner's unknown skip must reach the caller as Unknown, not Refused",
+            result is EpisodeOperationResult.Unknown,
+        )
+    }
+
+    @Test
     fun `an unknown owner skip is reported as Unknown, not refused`() = runTest {
         // THE OWNER'S TYPED OUTCOME IS WHAT TRAVELS. The mock answers the owner operation with Unknown, so
         // the case fails if the adapter collapses it into Refused -- which is what a Boolean owner result

@@ -163,7 +163,7 @@ class AudioFeedbackRenderer(
             // The span is the clip's OWN duration, from the frames the sink accepted and the rate it
             // accepted them at, so a shorter cue is not covered longer than it sounds and a longer one
             // is not cut short by an assumed length.
-            coverEarconUntilConsumed()
+            coverEarconUntilConsumed(id)
         }
         return played
     }
@@ -275,6 +275,15 @@ class AudioFeedbackRenderer(
     private var currentCueId: Long = 0L
 
     /**
+     * The earcon the cue currently being observed was started for.
+     *
+     * The PLAYER scopes a stop by this id, because the id is what it knows its track is playing. Held
+     * beside [currentCueId] so a stop speaks about the cue it was issued for rather than about whatever
+     * the track holds by the time the deferred stop runs.
+     */
+    private var currentCueEarcon: EarconId? = null
+
+    /**
      * Publishes an observation ONLY while [observer] is still the cue's current observer.
      *
      * `coverageExpiredUnknown` is written by a NON-SUSPENDING assignment, so cancellation cannot protect
@@ -309,7 +318,7 @@ class AudioFeedbackRenderer(
      *
      * Runs on the renderer's own scope so a synchronous caller is not blocked.
      */
-    private fun coverEarconUntilConsumed() {
+    private fun coverEarconUntilConsumed(startedEarcon: EarconId) {
         // THE OBSERVER KNOWS ITS OWN CUE. `coverageExpiredUnknown` is a plain field written by a
         // NON-SUSPENDING assignment after `completion()` returns, so cancellation alone cannot protect it:
         // an OLD observer can resume after a SUCCESSOR has published its own result and overwrite it.
@@ -329,6 +338,7 @@ class AudioFeedbackRenderer(
             // THE NEW CUE'S IDENTITY IS ALLOCATED AT ADMISSION, so every verdict this cue publishes
             // carries the SAME id and a consumer can tell "my cue changed" from "a different cue".
             currentCueId = cueCounter.incrementAndGet()
+            currentCueEarcon = startedEarcon
             _lastCueObservation.value = null
         }
         // A REFERENCE THE COROUTINE CAN READ FROM INSIDE ITS OWN INITIALIZER. Kotlin does not allow a
@@ -457,11 +467,15 @@ class AudioFeedbackRenderer(
         // succeeded, applying this stop's verdict to a cue this stop never touched. The claim and the
         // write therefore concern the SAME cue.
         val stoppedOwner = currentObserver()
+        // THE CUE THIS STOP IS ABOUT, captured with the owner so the player stops THAT cue rather than
+        // whatever track is current when the deferred block runs -- a successor that starts in between
+        // plays on the same track and would otherwise be silenced by a stop aimed at its predecessor.
+        val stoppedCue = currentCueEarcon
         // THE INTERLEAVING SEAM. A case must be able to land the replacement INSIDE this call -- the only
         // instant where capturing before versus after differs. A seam that runs the hook around the call
         // instead of within it would not exercise the window it exists for.
         duringStopForTest?.invoke()
-        earconPlayer.stopNow()
+        earconPlayer.stopCueNow(stoppedCue)
         // RETIREMENT, NOT A TEST ACCESSOR. The observation's deadline is a bound on WAITING, not a claim
         // about the cue; once the cue is stopped explicitly its fate IS established, and leaving the
         // outstanding Unknown published would hold the gate's attribution open indefinitely -- every

@@ -11,7 +11,7 @@ class ModelsReadyCondition(
     private val failed: Boolean = false,
 ) : VoiceControlRule {
 
-    override val id = "models_ready"
+    override val id = ID
     override val group = VoiceControlRuleGroup.Setup
 
     private val mutableState = MutableStateFlow(evaluate())
@@ -29,5 +29,9 @@ class ModelsReadyCondition(
             failed -> VoiceControlRuleState.Blocked("model_download_failed")
             else -> VoiceControlRuleState.Unknown("models_loading")
         }
+    }
+
+    companion object {
+        const val ID = "models_ready"
     }
 }

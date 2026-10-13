@@ -10,7 +10,7 @@ class NotCastingCondition(
     private val isCasting: Boolean = false,
 ) : VoiceControlRule {
 
-    override val id = "not_casting"
+    override val id = ID
     override val group = VoiceControlRuleGroup.Conflicts
 
     private val mutableState = MutableStateFlow(evaluate())
@@ -28,5 +28,9 @@ class NotCastingCondition(
         } else {
             VoiceControlRuleState.Allowed
         }
+    }
+
+    companion object {
+        const val ID = "not_casting"
     }
 }

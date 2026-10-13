@@ -10,7 +10,7 @@ class NotOnCallCondition(
     private val isInCall: Boolean = false,
 ) : VoiceControlRule {
 
-    override val id = "not_on_call"
+    override val id = ID
     override val group = VoiceControlRuleGroup.Conflicts
 
     private val mutableState = MutableStateFlow(evaluate())
@@ -28,5 +28,9 @@ class NotOnCallCondition(
         } else {
             VoiceControlRuleState.Allowed
         }
+    }
+
+    companion object {
+        const val ID = "not_on_call"
     }
 }

@@ -1,5 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.settings.voice
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.ViewGroup
@@ -18,6 +20,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.tooling.preview.PreviewParameter
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import au.com.shiftyjelly.pocketcasts.compose.AppTheme
 import au.com.shiftyjelly.pocketcasts.compose.AppThemeWithBackground
@@ -30,8 +33,12 @@ import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.ui.theme.Theme
 import au.com.shiftyjelly.pocketcasts.utils.extensions.pxToDp
 import au.com.shiftyjelly.pocketcasts.views.fragments.BaseFragment
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
+import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningModePolicy
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelDownloadState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 
@@ -42,24 +49,48 @@ class VoiceControlSettingsFragment : BaseFragment() {
 
     @Inject lateinit var modelManager: ModelManager
 
+    @Inject lateinit var gate: VoiceControlGate
+
+    @Inject lateinit var audioRouteMonitor: AudioRouteMonitor
+
+    @Inject lateinit var listeningModePolicy: ListeningModePolicy
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
         savedInstanceState: Bundle?,
     ) = contentWithoutConsumedInsets {
         AppThemeWithBackground(theme.activeTheme) {
+            val context = LocalContext.current
             val enabled by settings.voiceControlUserDisabled.flow
                 .collectAsState(false)
             val modelState by modelManager.downloadState
                 .collectAsState(ModelDownloadState.NotStarted)
             val modelReady = modelManager.isMoonshineModelReady()
+            val gateState by gate.state
+                .collectAsStateWithLifecycle()
+            val route by audioRouteMonitor.route
+                .collectAsStateWithLifecycle()
+            val mode by listeningModePolicy.mode
+                .collectAsStateWithLifecycle()
             val bottomInset = settings.bottomInset
                 .collectAsStateWithLifecycle(0)
+
+            val permissionGranted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO,
+            ) == PackageManager.PERMISSION_GRANTED
 
             VoiceControlSettingsPage(
                 enabled = !enabled,
                 modelReady = modelReady,
                 modelState = modelState,
+                statusText = voiceControlStatus(
+                    mode = mode,
+                    gate = gateState,
+                    micExposure = route.toMicExposure(),
+                    permissionGranted = permissionGranted,
+                ),
                 onEnabledChange = { checked ->
                     settings.voiceControlUserDisabled.set(!checked, updateModifiedAt = false)
                 },
@@ -75,6 +106,7 @@ private fun VoiceControlSettingsPage(
     enabled: Boolean,
     modelReady: Boolean,
     modelState: ModelDownloadState,
+    statusText: String,
     onEnabledChange: (Boolean) -> Unit,
     onBackPress: () -> Unit,
     bottomInset: Dp,
@@ -111,6 +143,14 @@ private fun VoiceControlSettingsPage(
                     indent = false,
                 )
             }
+            item {
+                SettingRow(
+                    primaryText = "Status",
+                    secondaryText = statusText,
+                    toggle = SettingRowToggle.None,
+                    indent = false,
+                )
+            }
         }
     }
 }
@@ -125,6 +165,7 @@ private fun VoiceControlSettingsPagePreview(
             enabled = true,
             modelReady = true,
             modelState = ModelDownloadState.Ready,
+            statusText = "Active (wake word required)",
             onEnabledChange = {},
             onBackPress = {},
             bottomInset = 0.dp,

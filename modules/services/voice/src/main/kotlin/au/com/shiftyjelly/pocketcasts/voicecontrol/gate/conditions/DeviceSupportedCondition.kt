@@ -11,7 +11,7 @@ class DeviceSupportedCondition(
     private val sufficientRam: Boolean = true,
 ) : VoiceControlRule {
 
-    override val id = "device_supported"
+    override val id = ID
     override val group = VoiceControlRuleGroup.Setup
 
     private val mutableState = MutableStateFlow(evaluate())
@@ -23,5 +23,9 @@ class DeviceSupportedCondition(
         } else {
             VoiceControlRuleState.Blocked("device_unsupported")
         }
+    }
+
+    companion object {
+        const val ID = "device_supported"
     }
 }

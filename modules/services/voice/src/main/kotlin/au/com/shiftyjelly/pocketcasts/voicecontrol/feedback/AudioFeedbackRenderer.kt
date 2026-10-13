@@ -185,6 +185,38 @@ class AudioFeedbackRenderer(
     internal fun coverageIsRunningForTest(): Boolean = earconCoverageJob?.isActive == true
 
     /**
+     * What became of a cue, as the renderer was able to OBSERVE it.
+     *
+     * A per-cue PRODUCTION outcome, not a test readout. [Unknown] exists because the observation's own
+     * deadline can expire without the cue's fate ever being established: the cue may still be queued, may
+     * have stalled, or may have finished sounding with nobody looking. A caller that collapsed that into
+     * "consumed" would claim audio nobody observed, and one that collapsed it into "stopped" would claim
+     * a stop nobody observed either.
+     *
+     * DISTINCT FROM AN ACTION OUTCOME. That the observation expired says nothing about whether an action
+     * ran, and it does not authorize a replay.
+     */
+    enum class CueObservation {
+        /** The cue's frames were OBSERVED consumed -- the head passed every accepted frame. */
+        Consumed,
+
+        /** The cue stopped being consumable; its attribution was ended deliberately. */
+        Ended,
+
+        /** The deadline expired with the cue's fate unestablished. */
+        Unknown,
+    }
+
+    /**
+     * The last per-cue observation, so the owning consumer can act on it.
+     *
+     * Exposed as a StateFlow, not a plain field: the consumer EVALUATES asynchronously from the
+     * publication, so a value read once at construction would be the value at that moment forever.
+     */
+    private val _lastCueObservation = kotlinx.coroutines.flow.MutableStateFlow<CueObservation?>(null)
+    val lastCueObservation: kotlinx.coroutines.flow.StateFlow<CueObservation?> = _lastCueObservation
+
+    /**
      * Whether the last observation ended because its DEADLINE expired without an observed ending.
      *
      * DEADLINE EXPIRY IS UNKNOWN, NOT CONSUMED: the cue's fate was not established, so a caller must not
@@ -194,6 +226,18 @@ class AudioFeedbackRenderer(
     private var coverageExpiredUnknown: Boolean = false
 
     internal fun coverageExpiredUnknownForTest(): Boolean = coverageExpiredUnknown
+
+    /**
+     * One writer for the observation and its typed form, so they cannot disagree.
+     *
+     * The two travel together because the consumer reads the TYPED value while the timing controls read
+     * the flag; publishing them separately would let one be updated and the other not, which is the
+     * disagreement a single write prevents.
+     */
+    private fun publishCueObservation(observation: CueObservation) {
+        coverageExpiredUnknown = observation == CueObservation.Unknown
+        _lastCueObservation.value = observation
+    }
 
     /**
      * Publishes an observation ONLY while [observer] is still the cue's current observer.
@@ -211,7 +255,13 @@ class AudioFeedbackRenderer(
     }
 
     /** The deadline-expiry form of [publishObservationIfOwning]. */
-    private fun publishExpiryIfOwning(observer: Job?) = publishObservationIfOwning(observer) { coverageExpiredUnknown = true }
+    private fun publishExpiryIfOwning(observer: Job?) = publishObservationIfOwning(observer) { publishCueObservation(CueObservation.Unknown) }
+
+    /** The observed-completion form: the cue's fate IS established. */
+    private fun publishConsumedIfOwning(observer: Job?) = publishObservationIfOwning(observer) { publishCueObservation(CueObservation.Consumed) }
+
+    /** The deliberately-ended form: attribution was stopped at the moment the sound stopped. */
+    private fun publishEndedIfOwning(observer: Job?) = publishObservationIfOwning(observer) { publishCueObservation(CueObservation.Ended) }
 
     /**
      * Keeps the gate's attribution fresh until the cue is OBSERVED to have been consumed.
@@ -237,7 +287,11 @@ class AudioFeedbackRenderer(
         // coroutine is then started explicitly.
         synchronized(coverageLock) {
             earconCoverageJob?.cancel()
+            // A NEW CUE'S OBSERVATION STARTS WITHOUT A VERDICT. Clearing the flag is not a claim that the
+            // cue ended; it is the absence of any observation yet -- the typed value is cleared too, so a
+            // consumer cannot read the PREVIOUS cue's result as this one's.
             coverageExpiredUnknown = false
+            _lastCueObservation.value = null
         }
         // A REFERENCE THE COROUTINE CAN READ FROM INSIDE ITS OWN INITIALIZER. Kotlin does not allow a
         // `val` to be referenced within its own initialiser, and the observer needs its own job identity
@@ -317,7 +371,7 @@ class AudioFeedbackRenderer(
                         noteEmitted()
                         // AN OBSERVED ENDING IS NOT AN EXPIRY: the cue's fate IS established -- and it
                         // is only published if this observer still owns the cue.
-                        publishObservationIfOwning(observerRef.await()) { coverageExpiredUnknown = false }
+                        publishConsumedIfOwning(observerRef.await())
                         return@launch
                     }
 

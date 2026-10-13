@@ -200,6 +200,31 @@ class AudioFeedbackRendererTest {
             "a deadline expiry is UNKNOWN, not a claim that the cue completed",
             renderer.coverageExpiredUnknownForTest(),
         )
+        // THE TYPED PRODUCTION OUTCOME, not just the test flag: a deadline expiry must reach the consumer
+        // as Unknown. Asserting only the flag left the outcome with no production reader.
+        assertEquals(
+            "the expiry must be published as the typed UNKNOWN observation",
+            AudioFeedbackRenderer.CueObservation.Unknown,
+            renderer.lastCueObservation.value,
+        )
+    }
+
+    @Test
+    fun `an observed ending is published as Consumed, not as Unknown`() = runTest {
+        // THE OTHER SIDE OF THE DISCRIMINATION: if every ending published Unknown, the consumer would
+        // hold our audio open forever and the typed outcome would carry no information.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(100))
+
+        assertEquals(
+            "an ending the output MEASURED is Consumed, and only an unresolved one is Unknown",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            renderer.lastCueObservation.value,
+        )
     }
 
     @Test

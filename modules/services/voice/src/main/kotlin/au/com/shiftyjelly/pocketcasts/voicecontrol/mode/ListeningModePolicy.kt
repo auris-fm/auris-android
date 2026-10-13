@@ -80,17 +80,10 @@ internal fun resolve(
     micExposure: MicExposure,
     isGracePeriodActive: Boolean,
 ): ListeningMode {
-    if (!gateState.allowed) {
-        return ListeningMode.Off
-    }
-    if (micExposure == MicExposure.NoMic) {
-        return ListeningMode.Off
-    }
+    if (!gateState.allowed) return ListeningMode.Off
+    // Capture requires an external microphone; Exposed (built-in) and NoMic both block.
+    if (micExposure != MicExposure.Isolated) return ListeningMode.Off
 
     // Grace period is the ONLY wake-word waiver
-    if (isGracePeriodActive) {
-        return ListeningMode.Continuous
-    }
-
-    return ListeningMode.WakeWord
+    return if (isGracePeriodActive) ListeningMode.Continuous else ListeningMode.WakeWord
 }

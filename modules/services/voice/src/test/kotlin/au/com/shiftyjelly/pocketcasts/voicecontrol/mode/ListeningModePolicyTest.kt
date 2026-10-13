@@ -1,17 +1,9 @@
-@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
-
 package au.com.shiftyjelly.pocketcasts.voicecontrol.mode
 
-import app.cash.turbine.test
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGateState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRule
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleGroup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.AppInForegroundCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -21,108 +13,65 @@ class ListeningModePolicyTest {
 
     // --- Static resolve tests ---
 
+    // Grace period active on an isolated route → Continuous (the only wake-word waiver)
     @Test
-    fun `grace period active resolves to Continuous regardless of exposure`() {
-        // Grace period overrides everything — the ONLY path to Continuous
-        val result = resolve(
-            gateState = allowedGateState,
-            micExposure = MicExposure.Exposed,
-            isGracePeriodActive = true,
-        )
-        assertEquals(ListeningMode.Continuous, result)
-    }
-
-    @Test
-    fun `grace period inactive resolves to WakeWord even with Isolated route`() {
-        // Isolated route still requires wake word without grace
-        val result = resolve(
-            gateState = allowedGateState,
-            micExposure = MicExposure.Isolated,
-            isGracePeriodActive = false,
-        )
-        assertEquals(ListeningMode.WakeWord, result)
-    }
-
-    @Test
-    fun `gate blocked resolves to Off`() = runTest {
-        val rule = FakeRule("test", VoiceControlRuleGroup.Setup, VoiceControlRuleState.Blocked("blocked"))
-        val gate = VoiceControlGate(listOf(rule), backgroundScope)
-
-        gate.state.test {
-            val result = resolve(
-                gateState = awaitItem(),
-                micExposure = MicExposure.Exposed,
-                isGracePeriodActive = true,
-            )
-            assertEquals(ListeningMode.Off, result)
-            cancelAndIgnoreRemainingEvents()
-        }
-    }
-
-    @Test
-    fun `NoMic resolves to Off even with grace active`() {
-        val result = resolve(
-            gateState = allowedGateState,
-            micExposure = MicExposure.NoMic,
-            isGracePeriodActive = true,
-        )
-        assertEquals(ListeningMode.Off, result)
-    }
-
-    @Test
-    fun `gate blocked overrides grace period`() {
-        // Gate safety is absolute — even grace period cannot override it
-        val result = resolve(
-            gateState = VoiceControlGateState(allowed = false, rules = emptyMap()),
-            micExposure = MicExposure.Exposed,
-            isGracePeriodActive = true,
-        )
-        assertEquals(ListeningMode.Off, result)
-    }
-
-    // --- Transition tests ---
-
-    @Test
-    fun `grace opens transitions from WakeWord to Continuous`() {
-        // Start with grace inactive → WakeWord
-        assertEquals(
-            ListeningMode.WakeWord,
-            resolve(
-                gateState = allowedGateState,
-                micExposure = MicExposure.Exposed,
-                isGracePeriodActive = false,
-            ),
-        )
-        // Grace becomes active → Continuous
+    fun `grace period active → Continuous`() {
         assertEquals(
             ListeningMode.Continuous,
-            resolve(
-                gateState = allowedGateState,
-                micExposure = MicExposure.Exposed,
-                isGracePeriodActive = true,
-            ),
+            resolve(allowedGateState, MicExposure.Isolated, isGracePeriodActive = true),
         )
     }
 
+    // Grace period inactive → WakeWord
     @Test
-    fun `grace expires transitions from Continuous to WakeWord`() {
-        // Start with grace active → Continuous
-        assertEquals(
-            ListeningMode.Continuous,
-            resolve(
-                gateState = allowedGateState,
-                micExposure = MicExposure.Exposed,
-                isGracePeriodActive = true,
-            ),
-        )
-        // Grace expires → WakeWord (capture continues)
+    fun `grace period inactive → WakeWord`() {
         assertEquals(
             ListeningMode.WakeWord,
-            resolve(
-                gateState = allowedGateState,
-                micExposure = MicExposure.Exposed,
-                isGracePeriodActive = false,
-            ),
+            resolve(allowedGateState, MicExposure.Isolated, isGracePeriodActive = false),
+        )
+    }
+
+    // Gate blocked → Off
+    @Test
+    fun `gate blocked → Off`() {
+        assertEquals(
+            ListeningMode.Off,
+            resolve(blockedGateState, MicExposure.Isolated, isGracePeriodActive = true),
+        )
+    }
+
+    // Capture requires an external microphone: NoMic → Off even with grace active
+    @Test
+    fun `no mic → Off`() {
+        assertEquals(
+            ListeningMode.Off,
+            resolve(allowedGateState, MicExposure.NoMic, isGracePeriodActive = true),
+        )
+    }
+
+    // Exposed (built-in microphone) → Off regardless of grace
+    @Test
+    fun `built-in microphone → Off`() {
+        assertEquals(
+            ListeningMode.Off,
+            resolve(allowedGateState, MicExposure.Exposed, isGracePeriodActive = true),
+        )
+        assertEquals(
+            ListeningMode.Off,
+            resolve(allowedGateState, MicExposure.Exposed, isGracePeriodActive = false),
+        )
+    }
+
+    // Grace is the only waiver: the same isolated route is WakeWord without it and Continuous with it
+    @Test
+    fun `grace period is the only waiver`() {
+        assertEquals(
+            ListeningMode.WakeWord,
+            resolve(allowedGateState, MicExposure.Isolated, isGracePeriodActive = false),
+        )
+        assertEquals(
+            ListeningMode.Continuous,
+            resolve(allowedGateState, MicExposure.Isolated, isGracePeriodActive = true),
         )
     }
 
@@ -133,13 +82,12 @@ class ListeningModePolicyTest {
         rules = emptyMap(),
     )
 
-    private class FakeRule(
-        override val id: String,
-        override val group: VoiceControlRuleGroup,
-        initialState: VoiceControlRuleState,
-    ) : VoiceControlRule {
-        override val state = MutableStateFlow(initialState)
-    }
+    private val blockedGateState = VoiceControlGateState(
+        allowed = false,
+        rules = emptyMap(),
+    )
+
+    // --- Listening start cue tests ---
 
     @Test
     fun `no cue while the user can see the app`() {

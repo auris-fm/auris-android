@@ -766,4 +766,75 @@ class EarconPlayerTest {
                 .get(mockPlayer),
         )
     }
+
+    @Test
+    fun `a same-sound successor completes from ITS OWN frames as the head advances`() {
+        // @spec: the field-level checks do not show COMPLETION. This drives the render head and requires
+        // the successor to reach Consumed on its own accepted frames -- and NOT before them, since a
+        // target that still included the predecessor's frames would report it Consumed immediately.
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val mockPlayer = EarconPlayer(context)
+        val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
+        val clip = clipClass.declaredConstructors.single().apply { isAccessible = true }
+            .newInstance(mockPlayer, ShortArray(100), 16000)
+        @Suppress("UNCHECKED_CAST")
+        mockPlayer.javaClass.getDeclaredField("clips").apply { isAccessible = true }
+            .set(mockPlayer, mapOf(EarconId.WAKE_WORD to clip))
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        mockPlayer.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(mockPlayer, track)
+        var head = 0
+        mockPlayer.readPlaybackHeadFrames = { head }
+
+        // THE FIRST CUE SOUNDS AND IS CONSUMED on this track.
+        val first = mockPlayer.play(EarconId.WAKE_WORD)
+        assertNotNull("the first cue must be admitted", first)
+        head = 100
+        assertEquals(
+            "the first cue must be observed consumed before it is stopped",
+            EarconPlayer.EarconCompletion.Consumed,
+            mockPlayer.completion(),
+        )
+        mockPlayer.stopAdmissionNow(first)
+
+        // THE TRACK IS GONE. A SAME-SOUND SUCCESSOR is admitted on a NEW track whose head starts at
+        // zero -- installed here through the same field seam the other player fixtures use, because
+        // building a real AudioTrack is not what this case is about.
+        head = 0
+        val newTrack = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(newTrack.sampleRate).thenReturn(16000)
+        org.mockito.Mockito.`when`(
+            newTrack.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        mockPlayer.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(mockPlayer, newTrack)
+        val successor = mockPlayer.play(EarconId.WAKE_WORD)
+        assertNotNull("the successor must be admitted", successor)
+
+        // NOT CONSUMED YET: the successor's own frames have not sounded. Inheriting the first cue's
+        // target would have reported Consumed here, before any of its audio played.
+        assertNotEquals(
+            "the successor must not read Consumed before its own frames sound",
+            EarconPlayer.EarconCompletion.Consumed,
+            mockPlayer.completion(),
+        )
+
+        // THE HEAD ADVANCES THROUGH THE SUCCESSOR'S OWN FRAMES, and NOW it completes.
+        head = 100
+        assertEquals(
+            "the successor completes from ITS OWN accepted frames",
+            EarconPlayer.EarconCompletion.Consumed,
+            mockPlayer.completion(),
+        )
+    }
 }

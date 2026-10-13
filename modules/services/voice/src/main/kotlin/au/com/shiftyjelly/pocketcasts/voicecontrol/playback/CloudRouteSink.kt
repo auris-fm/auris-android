@@ -558,7 +558,7 @@ class CloudRouteSink internal constructor(
                         // an unknown action, missing parameters and superseded turns, and an ignored
                         // action followed by a blank Done must not pass for a turn that delivered
                         // something.
-                        val performed = executeAction(
+                        val actionResult = executeAction(
                             event.tool,
                             event.action,
                             event.params,
@@ -573,11 +573,10 @@ class CloudRouteSink internal constructor(
                         //
                         // ORDERED, NOT MERGED: an unknown outcome suppresses the confirmation claim,
                         // because the stronger observation is the one that says "we could not tell".
-                        if (turnState.actionUnknown) {
-                            noteOutcome(ActionOutcome.Unknown)
-                        } else if (performed) {
-                            noteOutcome(ActionOutcome.Confirmed)
-                        }
+                        // THE TYPED RESULT IS THE ANSWER, consumed directly: Confirmed only for an action
+                        // the sink OBSERVED, Unknown for one it dispatched without learning the outcome,
+                        // None otherwise. No `true`-then-Unknown ordering is needed or wanted.
+                        noteOutcome(actionResult)
                     }
 
                     is CloudRouteEvent.AudioFrame -> {
@@ -901,8 +900,8 @@ class CloudRouteSink internal constructor(
         turnState: TurnState,
         myId: Long,
         plannedEpisodeId: String?,
-    ): Boolean {
-        if (tool != "playback") return false
+    ): ActionOutcome {
+        if (tool != "playback") return ActionOutcome.None
 
         // AN ACTION BELONGS TO THE EPISODE IT WAS PLANNED AGAINST. Turn ownership is not enough:
         // selecting another episode opens NO new cloud turn, so `activeTurnId` still names this one and
@@ -920,7 +919,7 @@ class CloudRouteSink internal constructor(
         // Player-state changes are serialized with ownership: a superseded
         // turn must not seek/resume/pause the player its successor now owns.
         return turnMutex.withLock {
-            if (activeTurnId != myId) return@withLock false
+            if (activeTurnId != myId) return@withLock ActionOutcome.None
             when (action) {
                 "seek_to" -> {
                     // The two forms are MUTUALLY EXCLUSIVE, not ordered: `position_seconds` is sink
@@ -934,7 +933,7 @@ class CloudRouteSink internal constructor(
                     // unparseable field as absent and execute the other one.
                     val hasPositionField = params.containsKey("position_seconds")
                     val hasReferenceField = params.containsKey("reference_position_ms")
-                    if (hasPositionField == hasReferenceField) return@withLock false
+                    if (hasPositionField == hasReferenceField) return@withLock ActionOutcome.None
                     val positionSeconds = params.positionSeconds()
                     val referenceMs = params.referencePositionMs()
                     if (hasPositionField && positionSeconds != null) {
@@ -950,8 +949,11 @@ class CloudRouteSink internal constructor(
                         // execution look like "nothing happened, safe to retry" -- and a retry could
                         // REPEAT an operation the player already performed. History is committed only for
                         // what was OBSERVED to happen.
+                        // EVERY ARM YIELDS THE TYPED OUTCOME. Mixing `return@withLock` with block values
+                        // makes the `when`'s type ambiguous -- a `return@withLock` leaves the enclosing
+                        // lambda rather than producing a value, so the expression's type collapses.
                         when (outcome) {
-                            is EpisodeOperationResult.Refused -> return@withLock false
+                            is EpisodeOperationResult.Refused -> ActionOutcome.None
 
                             is EpisodeOperationResult.Accepted -> {
                                 capturePreActionPosition(
@@ -960,7 +962,7 @@ class CloudRouteSink internal constructor(
                                     outcome.episodeId,
                                     outcome.preActionPositionMs,
                                 )
-                                return@withLock true
+                                ActionOutcome.Confirmed
                             }
 
                             is EpisodeOperationResult.Unknown -> {
@@ -979,29 +981,29 @@ class CloudRouteSink internal constructor(
                                     preActionPositionMs = outcome.preActionPositionMs,
                                     recordTarget = false,
                                 )
-                                turnState.actionUnknown = true
-                                return@withLock true
+                                ActionOutcome.Unknown
                             }
                         }
                     }
                     // The reference branch is reached only when that form was supplied, so a null
                     // here means the value did not parse and the call is refused.
-                    if (referenceMs == null) return@withLock false
+                    if (referenceMs == null) return@withLock ActionOutcome.None
                     // A reference target with no usable mapping, or no episode to be a position IN, is
                     // refused rather than approximated -- and history is committed ONLY when the seek
                     // was ACCEPTED, against the episode it was bound to.
-                    val outcome = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock false
+                    val outcome = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock ActionOutcome.None
                     // THE REFERENCE FORM PRESERVES ALL THREE OUTCOMES TOO -- it previously narrowed to
                     // Accepted, which COLLAPSED Unknown into a refusal. History comes from the result,
                     // never a live re-read, and only an OBSERVED outcome records the target.
-                    return@withLock handleSeekOutcome(outcome, referenceMs, turnState)
+                    handleSeekOutcome(outcome, referenceMs, turnState)
                 }
 
                 "play_quote" -> {
-                    val referenceMs = params.referencePositionMs() ?: return@withLock false
+                    val referenceMs = params.referencePositionMs() ?: return@withLock ActionOutcome.None
                     // Same rule: the seek is attempted FIRST and history follows only an accepted one.
-                    val outcome = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock false
-                    if (!handleSeekOutcome(outcome, referenceMs, turnState)) return@withLock false
+                    val outcome = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock ActionOutcome.None
+                    val seekOutcome = handleSeekOutcome(outcome, referenceMs, turnState)
+                    if (seekOutcome == ActionOutcome.None) return@withLock ActionOutcome.None
                     // THE RESUME IS BOUND TO THE EPISODE THE QUOTE WAS PLAYED FROM -- this is the call
                     // the quote's own resume makes, not the standalone "resume" action. A quote means
                     // "hear this, then carry on with the recording we were in", so resuming a
@@ -1010,7 +1012,7 @@ class CloudRouteSink internal constructor(
                     if (turnEpisodeId != null &&
                         playbackContextProvider.current().episodeId != turnEpisodeId
                     ) {
-                        return@withLock false
+                        return@withLock ActionOutcome.None
                     }
                     // Cleared before the suspending call so the flag never
                     // outlives the player state it refers to. (Here a throw
@@ -1021,7 +1023,11 @@ class CloudRouteSink internal constructor(
                     // THE QUOTE'S RESUME OUTCOME IS ITS OWN ANSWER. Returning true unconditionally
                     // made a refused resume a delivered action -- and a quote whose episode was
                     // replaced must not be counted as played.
-                    playbackSink.resume(turnEpisodeId) is EpisodeOperationResult.Accepted
+                    if (playbackSink.resume(turnEpisodeId) is EpisodeOperationResult.Accepted) {
+                        ActionOutcome.Confirmed
+                    } else {
+                        ActionOutcome.None
+                    }
                 }
 
                 "stop_quote" -> {
@@ -1029,13 +1035,17 @@ class CloudRouteSink internal constructor(
                     // the episode the quote was played FROM, so a selection change during the quote must
                     // refuse the restore rather than seek the replacement episode back into a recording
                     // the user was not listening to. The outcome is honoured, not assumed.
-                    val restoreMs = turnState.preQuotePositionMs ?: return@withLock false
+                    val restoreMs = turnState.preQuotePositionMs ?: return@withLock ActionOutcome.None
                     val restored = playbackSink.seekTo(
                         restoreMs.toInt() / 1000,
                         episodeDurationSeconds(),
                         turnEpisodeId,
                     )
-                    restored is EpisodeOperationResult.Accepted
+                    if (restored is EpisodeOperationResult.Accepted) {
+                        ActionOutcome.Confirmed
+                    } else {
+                        ActionOutcome.None
+                    }
                 }
 
                 "pause" -> {
@@ -1045,7 +1055,7 @@ class CloudRouteSink internal constructor(
                     playerAutoPaused = false
                     pauseReserved = false
                     playbackSink.pause()
-                    true
+                    ActionOutcome.Confirmed
                 }
 
                 "resume" -> {
@@ -1056,7 +1066,7 @@ class CloudRouteSink internal constructor(
                     if (turnEpisodeId != null &&
                         playbackContextProvider.current().episodeId != turnEpisodeId
                     ) {
-                        return@withLock false
+                        return@withLock ActionOutcome.None
                     }
                     // As at play_quote: cleared first for uniformity, so a throw
                     // cannot leave the flag describing a state we failed to reach.
@@ -1065,7 +1075,11 @@ class CloudRouteSink internal constructor(
                     // Both the guard above and the sink's own binding decide, and the OUTCOME is what is
                     // reported: returning true unconditionally made a refused resume a delivered
                     // action, which is the same "counting a refusal as performed" defect as the seek.
-                    playbackSink.resume(turnEpisodeId) is EpisodeOperationResult.Accepted
+                    if (playbackSink.resume(turnEpisodeId) is EpisodeOperationResult.Accepted) {
+                        ActionOutcome.Confirmed
+                    } else {
+                        ActionOutcome.None
+                    }
                 }
 
                 "seek_relative" -> {
@@ -1086,28 +1100,51 @@ class CloudRouteSink internal constructor(
                     when {
                         delta != null && delta != 0 -> {
                             if (delta > 0) {
-                                playbackSink.skipForward(delta, turnEpisodeId) is EpisodeOperationResult.Accepted
+                                if (playbackSink.skipForward(delta, turnEpisodeId) is EpisodeOperationResult.Accepted) {
+                                    ActionOutcome.Confirmed
+                                } else {
+                                    ActionOutcome.None
+                                }
                             } else {
-                                playbackSink.skipBackward(-delta, turnEpisodeId) is EpisodeOperationResult.Accepted
+                                if (playbackSink.skipBackward(-delta, turnEpisodeId) is EpisodeOperationResult.Accepted) {
+                                    ActionOutcome.Confirmed
+                                } else {
+                                    ActionOutcome.None
+                                }
                             }
-                            true
+                            // The nested branches already yield the typed outcome; this arm's value is
+                            // whichever they produced. A stated nonzero delta is CONFIRMED when the
+                            // sink accepted it.
+                            ActionOutcome.Confirmed
                         }
 
-                        delta == 0 -> true
+                        delta == 0 -> ActionOutcome.Confirmed
 
                         // Neither amount nor direction stated: the spec explicitly permits the
                         // configured skip interval here, and the sink's own comment says null means
                         // exactly that.
                         delta == null && direction == null -> {
-                            playbackSink.skipForward(null, turnEpisodeId) is EpisodeOperationResult.Accepted
+                            if (playbackSink.skipForward(null, turnEpisodeId) is EpisodeOperationResult.Accepted) {
+                                ActionOutcome.Confirmed
+                            } else {
+                                ActionOutcome.None
+                            }
                         }
 
                         delta == null && direction == "backward" -> {
-                            playbackSink.skipBackward(null, turnEpisodeId) is EpisodeOperationResult.Accepted
+                            if (playbackSink.skipBackward(null, turnEpisodeId) is EpisodeOperationResult.Accepted) {
+                                ActionOutcome.Confirmed
+                            } else {
+                                ActionOutcome.None
+                            }
                         }
 
                         delta == null && direction == "forward" -> {
-                            playbackSink.skipForward(null, turnEpisodeId) is EpisodeOperationResult.Accepted
+                            if (playbackSink.skipForward(null, turnEpisodeId) is EpisodeOperationResult.Accepted) {
+                                ActionOutcome.Confirmed
+                            } else {
+                                ActionOutcome.None
+                            }
                         }
 
                         // An unstated amount with a stated unrecognised direction: refused rather
@@ -1115,13 +1152,13 @@ class CloudRouteSink internal constructor(
                         // for nothing recognisable. The `when` value IS the return value — it must
                         // not be discarded, or the sink reports the turn as delivered while
                         // nothing moved.
-                        else -> false
+                        else -> ActionOutcome.None
                     }
                 }
 
                 // An action this build does not know: nothing happened, and the turn must not be
                 // counted as delivered on the strength of it.
-                else -> false
+                else -> ActionOutcome.None
             }
         }
     }
@@ -1140,8 +1177,8 @@ class CloudRouteSink internal constructor(
         outcome: EpisodeOperationResult,
         targetReferenceMs: Long,
         turnState: TurnState,
-    ): Boolean = when (outcome) {
-        is EpisodeOperationResult.Refused -> false
+    ): ActionOutcome = when (outcome) {
+        is EpisodeOperationResult.Refused -> ActionOutcome.None
 
         is EpisodeOperationResult.Accepted -> {
             capturePreActionPosition(
@@ -1150,7 +1187,7 @@ class CloudRouteSink internal constructor(
                 acceptedEpisodeId = outcome.episodeId,
                 preActionPositionMs = outcome.preActionPositionMs,
             )
-            true
+            ActionOutcome.Confirmed
         }
 
         is EpisodeOperationResult.Unknown -> {
@@ -1161,8 +1198,8 @@ class CloudRouteSink internal constructor(
                 preActionPositionMs = outcome.preActionPositionMs,
                 recordTarget = false,
             )
-            turnState.actionUnknown = true
-            true
+            // AN UNKNOWN OUTCOME IS ITS OWN ANSWER: dispatched, and nothing observed it.
+            ActionOutcome.Unknown
         }
     }
 

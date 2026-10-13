@@ -1065,7 +1065,10 @@ class CloudRouteSink internal constructor(
                     } else {
                         ActionOutcome.None
                     }
-                    mergeActionOutcome(seekOutcome, resumeOutcome)
+                    // COMPOSITE AGGREGATION, not the turn-level merge: all required steps must be
+                    // confirmed, so an unknown seek plus an accepted resume stays Unknown instead of
+                    // being promoted to Confirmed by the resume's success.
+                    mergeCompositeSteps(seekOutcome, resumeOutcome)
                 }
 
                 "stop_quote" -> {
@@ -1380,6 +1383,27 @@ class CloudRouteSink internal constructor(
             is EpisodeOperationResult.Refused -> ActionOutcome.None
         }
 
+        /**
+         * Aggregates the outcomes of ONE action's COMPOSITE steps -- a quote's seek and its resume.
+         *
+         * A composite succeeds only if EVERY required step was confirmed: one step whose outcome could not
+         * be established leaves the whole action unknown, however well a LATER step went. Precedence for
+         * [ActionOutcome.Confirmed] would report the composite as achieved on the strength of whichever step
+         * happened to be observable, which is a claim nobody made.
+         */
+        internal fun mergeCompositeSteps(previous: ActionOutcome, next: ActionOutcome): ActionOutcome = when {
+            previous == ActionOutcome.Unknown || next == ActionOutcome.Unknown -> ActionOutcome.Unknown
+            previous == ActionOutcome.Confirmed && next == ActionOutcome.Confirmed -> ActionOutcome.Confirmed
+            else -> ActionOutcome.None
+        }
+
+        /**
+         * Aggregates the outcomes of INDEPENDENT actions within a turn.
+         *
+         * This is a DIFFERENT contract from [mergeCompositeSteps]: these actions do not depend on each
+         * other, so one confirmed action is a confirmed action regardless of a sibling's fate. It is
+         * deliberately not reused for composite steps, where the same rule would erase an unknown step.
+         */
         internal fun mergeActionOutcome(previous: ActionOutcome, next: ActionOutcome): ActionOutcome = when {
             previous == ActionOutcome.Confirmed || next == ActionOutcome.Confirmed -> ActionOutcome.Confirmed
             previous == ActionOutcome.Unknown || next == ActionOutcome.Unknown -> ActionOutcome.Unknown

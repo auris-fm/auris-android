@@ -1271,6 +1271,57 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `composite steps stay unknown when one step was not established`() {
+        // THE THREE INPUTS THAT DECIDE IT are enumerated, so the case cannot pass on a rule that only
+        // happens to agree for one of them. A confirmed-later-step rule would report the first two as
+        // Confirmed.
+        assertEquals(
+            "an unknown step leaves the composite unknown however well the later step went",
+            CloudRouteSink.Companion.ActionOutcome.Unknown,
+            CloudRouteSink.mergeCompositeSteps(
+                CloudRouteSink.Companion.ActionOutcome.Unknown,
+                CloudRouteSink.Companion.ActionOutcome.Confirmed,
+            ),
+        )
+        assertEquals(
+            CloudRouteSink.Companion.ActionOutcome.Unknown,
+            CloudRouteSink.mergeCompositeSteps(
+                CloudRouteSink.Companion.ActionOutcome.Confirmed,
+                CloudRouteSink.Companion.ActionOutcome.Unknown,
+            ),
+        )
+        // The composite is confirmed only when EVERY required step was.
+        assertEquals(
+            CloudRouteSink.Companion.ActionOutcome.Confirmed,
+            CloudRouteSink.mergeCompositeSteps(
+                CloudRouteSink.Companion.ActionOutcome.Confirmed,
+                CloudRouteSink.Companion.ActionOutcome.Confirmed,
+            ),
+        )
+        // A step that did nothing cannot make the composite confirmed.
+        assertEquals(
+            CloudRouteSink.Companion.ActionOutcome.None,
+            CloudRouteSink.mergeCompositeSteps(
+                CloudRouteSink.Companion.ActionOutcome.Confirmed,
+                CloudRouteSink.Companion.ActionOutcome.None,
+            ),
+        )
+    }
+
+    @Test
+    fun `turn aggregation still promotes a confirmed action past an unknown sibling`() {
+        // THE OTHER CONTRACT, asserted here so the two rules cannot silently become one. Independent
+        // actions do not depend on each other, so an unknown sibling must not erase a confirmed one.
+        assertEquals(
+            CloudRouteSink.Companion.ActionOutcome.Confirmed,
+            CloudRouteSink.mergeActionOutcome(
+                CloudRouteSink.Companion.ActionOutcome.Unknown,
+                CloudRouteSink.Companion.ActionOutcome.Confirmed,
+            ),
+        )
+    }
+
+    @Test
     fun `play_quote records previous position on the reference timeline`() = runTest {
         val fingerprint = mock<FingerprintTimingManager>()
         whenever(fingerprint.referenceTime(60_000)).thenReturn(45.0)

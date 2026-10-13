@@ -1303,9 +1303,9 @@ open class PlaybackManager @Inject constructor(
         forward: Boolean,
         sourceView: SourceView = SourceView.UNKNOWN,
         jumpAmountSeconds: Int? = null,
-    ): Boolean {
+    ): SkipOutcome {
         if (getCurrentEpisode()?.uuid != episodeUuid) {
-            return false
+            return SkipOutcome.Refused
         }
         // THE ORIGINAL EXPECTATION TRAVELS WITH THE CALL. This function already knows which episode the
         // skip was planned for; letting the skip below RE-READ the queue would replace that expectation
@@ -1316,10 +1316,28 @@ open class PlaybackManager @Inject constructor(
         // a second, weaker observation of the same fact: it reports what the player names NOW rather than
         // whether the skip acted, and a later replacement would flip it back to a false refusal.
         return if (forward) {
-            skipForwardSuspend(sourceView, jumpAmountSeconds, expectedEpisodeUuid = episodeUuid)
+            skipForwardScoped(sourceView, jumpAmountSeconds, episodeUuid)
         } else {
-            skipBackwardSuspend(sourceView, jumpAmountSeconds, expectedEpisodeUuid = episodeUuid)
+            skipBackwardScoped(sourceView, jumpAmountSeconds, episodeUuid)
         }
+    }
+
+    /**
+     * What a skip DID, as the owner observed it.
+     *
+     * [Unknown] exists because a skip that was ISSUED without a returned outcome is neither a refusal nor
+     * a confirmation. A Boolean cannot express that: collapsing it into `false` reports "did not happen"
+     * for an operation the receiver may already have performed, which invites a caller to repeat it.
+     */
+    sealed interface SkipOutcome {
+        /** The skip was confirmed performed. */
+        data object Accepted : SkipOutcome
+
+        /** The skip was refused; nothing was moved. */
+        data object Refused : SkipOutcome
+
+        /** The skip was ISSUED and its outcome could not be established. */
+        data object Unknown : SkipOutcome
     }
 
     /**
@@ -1618,6 +1636,62 @@ open class PlaybackManager @Inject constructor(
         launch {
             skipForwardSuspend(sourceView, jumpAmountSeconds)
         }
+    }
+
+    /**
+     * The episode-bound skip that can report [SkipOutcome.Unknown].
+     *
+     * [skipForwardSuspend] returns a Boolean, which can only say "moved" or "did not move". The scoped
+     * mutation the skip performs is what knows whether the operation was ISSUED without an outcome, so
+     * that fact is read from the mutation rather than reconstructed from a Boolean that has no room for
+     * it.
+     */
+    private suspend fun skipForwardScoped(
+        sourceView: SourceView,
+        jumpAmountSeconds: Int?,
+        expectedEpisodeUuid: String,
+    ): SkipOutcome {
+        if (getCurrentEpisode()?.uuid != expectedEpisodeUuid) return SkipOutcome.Refused
+        val episode = getCurrentEpisode() ?: return SkipOutcome.Refused
+        val jumpAmountMs = (jumpAmountSeconds ?: settings.skipForwardInSecs.value) * 1000
+        val currentTimeMs = getCurrentTimeMs(episode = episode)
+        if (currentTimeMs < 0 || player?.episodeUuid != episode.uuid) return SkipOutcome.Refused
+        val newPositionMs = currentTimeMs + jumpAmountMs
+        val durationMs = player?.durationMs() ?: Int.MAX_VALUE
+        if (newPositionMs < durationMs) {
+            val mutation = seekToTimeMsInternalIfEpisodeCapturing(episode.uuid, newPositionMs)
+                ?: return SkipOutcome.Refused
+            if (mutation.unknown) return SkipOutcome.Unknown
+            statsManager.addTimeSavedSkipping((newPositionMs - currentTimeMs).toLong())
+        } else {
+            LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Seek beyond end of episode so completing. ${episode.uuid}")
+            onCompletion(episode.uuid)
+        }
+        trackPlaybackEvent(sourceView) { source, contentType ->
+            PlaybackSkipForwardEvent(source = source.analyticsValue, contentType = contentType)
+        }
+        return SkipOutcome.Accepted
+    }
+
+    /** [skipForwardScoped]'s backward counterpart. */
+    private suspend fun skipBackwardScoped(
+        sourceView: SourceView,
+        jumpAmountSeconds: Int?,
+        expectedEpisodeUuid: String,
+    ): SkipOutcome {
+        if (getCurrentEpisode()?.uuid != expectedEpisodeUuid) return SkipOutcome.Refused
+        val episode = getCurrentEpisode() ?: return SkipOutcome.Refused
+        val jumpAmountMs = (jumpAmountSeconds ?: settings.skipBackInSecs.value) * 1000
+        val currentTimeMs = getCurrentTimeMs(episode = episode)
+        if (currentTimeMs < 0) return SkipOutcome.Refused
+        val newPositionMs = (currentTimeMs - jumpAmountMs).coerceAtLeast(0)
+        val mutation = seekToTimeMsInternalIfEpisodeCapturing(episode.uuid, newPositionMs)
+            ?: return SkipOutcome.Refused
+        if (mutation.unknown) return SkipOutcome.Unknown
+        trackPlaybackEvent(sourceView) { source, contentType ->
+            PlaybackSkipBackEvent(source = source.analyticsValue, contentType = contentType)
+        }
+        return SkipOutcome.Accepted
     }
 
     suspend fun skipForwardSuspend(

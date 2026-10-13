@@ -7,6 +7,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 import timber.log.Timber
 
 /**
@@ -29,15 +30,32 @@ class MicrophoneCapture @Inject constructor(
     private var activeEngine: OboeCaptureEngine? = null
 
     /**
-     * Start capturing audio using Oboe native capture engine.
-     * VAD is performed in C++ and emitted as VoiceSegmenterResult events.
+     * Attaches the native VAD pipeline to the stream the confirmation path has already opened
+     * and started, without opening or starting a stream of its own. Returns false when the
+     * attach fails; the caller must then leave the confirmed stream to be closed.
+     */
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    fun attachCapture(): Boolean {
+        val engine = OboeCaptureEngine(context.assets)
+        val attached = engine.attachCapture()
+        if (attached) {
+            activeEngine = engine
+            Timber.i("Using OboeCaptureEngine (event-driven VAD)")
+        } else {
+            activeEngine = null
+            Timber.w("Oboe capture attach failed")
+        }
+        return attached
+    }
+
+    /**
+     * Consume VAD events from the capture attached by [attachCapture]. VAD is performed in C++
+     * and emitted as VoiceSegmenterResult events.
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun startCapture(): Flow<VoiceSegmenterResult> {
-        val engine = OboeCaptureEngine(context.assets)
-        Timber.i("Using OboeCaptureEngine (event-driven VAD)")
-        activeEngine = engine
-        return engine.startCapture()
+        val engine = activeEngine ?: return emptyFlow()
+        return engine.captureEvents()
     }
 
     /**

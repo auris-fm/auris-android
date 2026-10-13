@@ -39,6 +39,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -378,7 +379,7 @@ class VoiceControlService : Service() {
                     return@startIfNotRunning false
                 }
 
-                try {
+                val attachment = try {
                     voiceAsrEngine.get().start(
                         backend = backend,
                         audioRoute = audioRouteMonitor.route.value,
@@ -391,6 +392,33 @@ class VoiceControlService : Service() {
                     // The engine did not take the stream; it is still ours to close.
                     routeAcquisition.release()
                     Timber.e(e, "[VoicePipeline] engine start failed")
+                    return@startIfNotRunning false
+                }
+                // Wait for the native capture pipeline to attach to the confirmed stream before
+                // handing it over. Until then the stream is still ours: a start that ends before
+                // attaching (backend failure, cancellation) must be closed here, or it stays live
+                // with no consumer. Fail closed.
+                val attached = try {
+                    attachment.await()
+                } catch (e: CancellationException) {
+                    // The start caller was cancelled while the pipeline was attaching; the
+                    // stream is still ours to stop and close.
+                    voiceAsrEngine.get().stop()
+                    routeAcquisition.release()
+                    throw e
+                }
+                if (!attached) {
+                    routeAcquisition.release()
+                    Timber.e("[VoicePipeline] engine did not attach capture — confirmed stream closed")
+                    return@startIfNotRunning false
+                }
+                // A gate loss/Off can arrive while the pipeline is attaching; the engine is now
+                // running, so stop it rather than hand over a stream the user is no longer
+                // eligible to have open.
+                if (!engineStart.isCurrent(generation) || !gate.state.value.allowed) {
+                    voiceAsrEngine.get().stop()
+                    routeAcquisition.release()
+                    Timber.i("[VoicePipeline] engine stopped: start was invalidated while attaching")
                     return@startIfNotRunning false
                 }
                 // The engine owns the confirmed stream from here; release() must not close it.

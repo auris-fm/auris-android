@@ -19,7 +19,16 @@ class VoiceAudioProcessor @Inject constructor(
     private val microphoneCapture: MicrophoneCapture,
 ) {
     /**
-     * Start processing audio from the microphone and emit voice segmenter results.
+     * Attach the native capture pipeline to the confirmed stream, without opening or starting a
+     * stream of its own. The caller owns the stream until this returns true.
+     */
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    fun attachCapture(): Boolean {
+        return microphoneCapture.attachCapture()
+    }
+
+    /**
+     * Start processing audio from the attached microphone and emit voice segmenter results.
      *
      * @return Flow of VoiceSegmenterResult objects indicating speech activity
      */

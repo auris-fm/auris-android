@@ -70,11 +70,20 @@ internal class OboeCaptureEngine(
     @Volatile
     private var disposed = false
 
-    fun startCapture(): Flow<VoiceSegmenterResult> = flow {
-        if (!OboeNative.nativeStartCaptureAndVad(OboeConfig.SAMPLE_RATE_HZ, OboeConfig.CHANNELS, assetManager)) {
-            throw MicrophoneCaptureException.InitializationFailed("Oboe stream creation failed")
-        }
+    /**
+     * Attaches the native VAD pipeline to the stream the confirmation path already opened and
+     * started. It does not open or start a stream: the opened stream is the authority on which
+     * microphone is selected, so capture must never begin here. Returns false when no confirmed
+     * stream is active or the VAD pipeline could not start.
+     */
+    fun attachCapture(): Boolean = OboeNative.nativeStartCaptureAndVad(OboeConfig.SAMPLE_RATE_HZ, OboeConfig.CHANNELS, assetManager)
 
+    /**
+     * Consumes VAD events from an attached capture; [attachCapture] must have returned true
+     * first. The stream is torn down in the flow's `finally`, so stopping this collection always
+     * stops native capture.
+     */
+    fun captureEvents(): Flow<VoiceSegmenterResult> = flow {
         try {
             while (currentCoroutineContext().isActive && !disposed) {
                 when (val event = OboeNative.nativeWaitForVadEvent(500)) {
@@ -128,6 +137,10 @@ internal class OboeCaptureEngine(
 
     fun stopCapture() {
         disposed = true
+        // Tear the native stream down directly as well: the flow's `finally` only runs when the
+        // event loop was actually collected, and a capture that was attached but never collected
+        // must still be stopped. Idempotent with the flow's own teardown.
+        OboeNative.nativeStopCaptureAndVad()
     }
 
     val isRecording: Boolean

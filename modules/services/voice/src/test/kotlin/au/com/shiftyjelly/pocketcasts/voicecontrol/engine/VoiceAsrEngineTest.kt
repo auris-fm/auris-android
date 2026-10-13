@@ -4,6 +4,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.engine
 
 import android.content.Context
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import au.com.shiftyjelly.pocketcasts.sharedtest.MainCoroutineRule
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
@@ -29,7 +30,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizeResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.BluetoothCandidate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisitionPlatform
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult
 import java.util.Locale
@@ -42,6 +46,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -74,6 +79,9 @@ class VoiceAsrEngineTest {
         // The engine reads the grace window to decide whether the user was addressing us, so the
         // mock has to answer. Default false = the window is shut: a capture from the room.
         `when`(gracePeriodSignal.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(false))
+        // By default the native capture pipeline attaches. Tests that exercise a failed or
+        // cancelled start override this with false.
+        `when`(voiceAudioProcessor.attachCapture()).thenReturn(true)
     }
 
     private val captureFlow: Flow<VoiceSegmenterResult> = MutableStateFlow(VoiceSegmenterResult.Silence)
@@ -1227,6 +1235,109 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
+    // ── Capture attachment gates the stream hand-off ─────────────────
+    //
+    // A confirmed stream is only handed to the engine once the native VAD pipeline has
+    // attached. A start that ends before attaching (backend failure, cancellation) must
+    // leave the stream owned by the caller so it can be closed — never a live microphone
+    // with no consumer.
+
+    @Test
+    fun `a pipeline that fails to attach reports the stream was not taken`() = runTest {
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
+        `when`(voiceAudioProcessor.attachCapture()).thenReturn(false)
+
+        val attachment = engine.start(
+            backend = backend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+
+        assertFalse("the pipeline never attached capture", attachment.await())
+        verify(voiceAudioProcessor, never()).startProcessing()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `a pipeline that attaches reports the start took the stream`() = runTest {
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
+
+        val attachment = engine.start(
+            backend = backend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+
+        assertTrue("the pipeline attached capture", attachment.await())
+        verify(voiceAudioProcessor).attachCapture()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `a start that fails to attach closes the confirmed stream and leaves no active capture`() = runTest {
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
+        `when`(voiceAudioProcessor.attachCapture()).thenReturn(false)
+        val platform = FakeAcquisitionPlatform()
+        val acquisition = RouteAcquisition(platform, timeoutMs = 1_000L, pollIntervalMs = 10L)
+
+        // The service sequence: confirm the external stream, start the engine, wait for attach.
+        assertTrue(acquisition.confirmCaptureStream())
+        val attachment = engine.start(
+            backend = backend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        assertFalse("the pipeline never attached capture", attachment.await())
+        verify(voiceAudioProcessor, never()).startProcessing()
+
+        // The engine never took the stream, so the service releases it and it must be closed.
+        acquisition.release()
+        assertEquals("the confirmed stream must be closed", 1, platform.closeCalls)
+        assertFalse("no capture stream is left open", acquisition.hasConfirmedStream)
+
+        engine.stop()
+    }
+
+    @Test
+    fun `a start that attaches hands the confirmed stream to the engine exactly once`() = runTest {
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
+        val platform = FakeAcquisitionPlatform()
+        val acquisition = RouteAcquisition(platform, timeoutMs = 1_000L, pollIntervalMs = 10L)
+
+        assertTrue(acquisition.confirmCaptureStream())
+        val attachment = engine.start(
+            backend = backend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        assertTrue("the pipeline attached capture", attachment.await())
+
+        acquisition.handOffStream()
+        acquisition.release()
+        // Handed off: the engine owns the live stream, so release must not close it.
+        assertEquals(0, platform.closeCalls)
+
+        engine.stop()
+    }
+
     /** A router that cannot load its model at all. */
     private class NotReadyRecognizer : VoiceRecognizer {
         var recognizes = 0
@@ -1325,5 +1436,42 @@ class VoiceAsrEngineTest {
         )
 
         override fun release() = Unit
+    }
+
+    /** A platform that opens and starts an external headset stream, so confirmation succeeds. */
+    private class FakeAcquisitionPlatform : RouteAcquisitionPlatform {
+        var openCalls = 0
+        var closeCalls = 0
+
+        override fun bluetoothCandidates(): List<BluetoothCandidate> = emptyList()
+
+        override fun startBluetoothSco() = Unit
+
+        override fun stopBluetoothSco() = Unit
+
+        override fun isBluetoothScoOn(): Boolean = false
+
+        override fun setCommunicationDevice(deviceId: Int): Boolean = false
+
+        override fun communicationDeviceId(): Int? = null
+
+        override fun clearCommunicationDevice() = Unit
+
+        override fun audioMode(): Int = AudioManager.MODE_NORMAL
+
+        override fun setAudioMode(mode: Int) = Unit
+
+        override fun deviceType(deviceId: Int): Int? = AudioDeviceInfo.TYPE_WIRED_HEADSET
+
+        override fun openInputStream(): Int {
+            openCalls++
+            return 21
+        }
+
+        override fun startInputStream(): Boolean = true
+
+        override fun closeInputStream() {
+            closeCalls++
+        }
     }
 }

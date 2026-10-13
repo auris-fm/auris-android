@@ -32,6 +32,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -41,6 +42,17 @@ import timber.log.Timber
 
 /** How close the completion band must sit to speech end for a capture to be the wake word alone. */
 private const val WAKE_ONLY_TOLERANCE_MS = 120
+
+/**
+ * Handle to a [VoiceAsrEngine.start] attempt. [await] returns true once the native capture
+ * pipeline is attached to the confirmed stream, or false when the attempt ended before
+ * attaching (backend not ready, native attach failure, or cancellation). The caller must not
+ * hand the stream to the engine until [await] returns true; until then the stream is still the
+ * caller's to close, so a start that never attaches cannot leave a hot microphone behind.
+ */
+class CaptureAttachment internal constructor(private val attached: CompletableDeferred<Boolean>) {
+    suspend fun await(): Boolean = attached.await()
+}
 
 @Singleton
 class VoiceAsrEngine @Inject constructor(
@@ -77,7 +89,7 @@ class VoiceAsrEngine @Inject constructor(
         playbackBufferProvider: () -> FloatArray,
         micExposureProvider: () -> MicExposure,
         onIntent: (VoiceIntent) -> Unit,
-    ) {
+    ): CaptureAttachment {
         this.backend = backend
         this.currentMode = listeningMode
         this.playbackBufferProvider = playbackBufferProvider
@@ -85,6 +97,7 @@ class VoiceAsrEngine @Inject constructor(
         this.onIntent = onIntent
         utteranceFilter.reset()
 
+        val attached = CompletableDeferred<Boolean>()
         processingJob = scope.launch {
             Timber.i("[VoicePipeline] start route=%s bluetoothCandidate=%b", audioRoute, audioRoute is AudioRoute.BluetoothA2dpOnly)
             // Prepare the backend on every start. Not because a pause releases it — stop()
@@ -97,6 +110,15 @@ class VoiceAsrEngine @Inject constructor(
                 Timber.e(backendReady.exceptionOrNull(), "[VoicePipeline] ASR backend not ready — not listening")
                 return@launch
             }
+            // Attach the native VAD pipeline to the confirmed stream before reporting the start
+            // as attached. The caller hands the stream over only on a true signal, so a start
+            // that ends here leaves the stream owned by the caller and closed, never live with
+            // no consumer.
+            if (!voiceAudioProcessor.attachCapture()) {
+                Timber.e("[VoicePipeline] capture attach failed — not listening")
+                return@launch
+            }
+            attached.complete(true)
             // A Bluetooth candidate is acquired before the engine starts; the stream opened
             // by acquisition is the one this pipeline attaches to. Opening SCO here would
             // deadlock under the isolated-microphone rule (voice-control-core.md > Route
@@ -129,7 +151,12 @@ class VoiceAsrEngine @Inject constructor(
                 Timber.e(e, "[VoicePipeline] audio processing failed")
             }
         }
-        Timber.i("[VoicePipeline] engine started backend=%s mode=%s", backend::class.simpleName, listeningMode)
+        // If the job ends without ever attaching (backend not ready, native attach failure, or
+        // cancellation before the body ran), report that the stream was never taken. Completing
+        // an already-completed true is a no-op.
+        processingJob?.invokeOnCompletion { attached.complete(false) }
+        Timber.i("[VoicePipeline] engine start requested backend=%s mode=%s", backend::class.simpleName, listeningMode)
+        return CaptureAttachment(attached)
     }
 
     fun updateListeningMode(mode: ListeningMode) {
@@ -522,6 +549,10 @@ class VoiceAsrEngine @Inject constructor(
     fun stop() {
         processingJob?.cancel()
         processingJob = null
+        // Tear down native capture directly too: the processing job's flow `finally` only runs
+        // when the event loop was collected, and a capture attached but never collected must
+        // still be stopped. Idempotent with the flow's own teardown.
+        voiceAudioProcessor.stopProcessing()
         // Listening pauses are frequent (gate conflicts, route changes), so the backend is
         // deliberately kept warm here rather than released: releasing it would force a full
         // model reload on the next start, and everything spoken during that reload is lost.

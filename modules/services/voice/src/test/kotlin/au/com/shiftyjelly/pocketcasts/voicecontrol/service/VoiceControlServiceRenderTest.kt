@@ -222,8 +222,17 @@ class VoiceControlServiceRenderTest {
             awaitRealTime { org.mockito.Mockito.mockingDetails(executor).invocations.size >= 1 }
 
             // Feedback: the service must have produced a failure response rather than letting the
-            // throw escape. The renderer dispatches on Main.immediate, so idle the looper for it.
-            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            // throw escape. The renderer dispatches on Main.immediate, so the earcon is POSTED rather
+            // than taken synchronously -- and idling the looper ONCE races that post, which is why this
+            // failed intermittently with "Wanted but not invoked: earconPlayer.play(ERROR)".
+            //
+            // A SINGLE IDLE IS A GUESS ABOUT TIMING. The wait now polls for the EFFECT, idling the looper
+            // on each pass, so it neither races the post nor depends on a fixed schedule.
+            awaitRealTime {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                org.mockito.Mockito.mockingDetails(earconPlayer).invocations
+                    .any { it.method.name == "play" }
+            }
             verify(earconPlayer, org.mockito.Mockito.atLeastOnce()).play(EarconId.ERROR)
             // AND the cleanup ran, shown through an effect only the cleanup can produce: an ordinary
             // intent has no generation, so onCommandRecognized opens a NEW window and advances the

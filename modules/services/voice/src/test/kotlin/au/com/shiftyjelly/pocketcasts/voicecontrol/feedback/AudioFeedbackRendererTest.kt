@@ -248,6 +248,43 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `one cue keeps ONE identity across its verdict changes`() = runTest {
+        // @reviewer: "Consumed→Ended on one cue receives two IDs." An identity must be a property of the
+        // CUE, allocated once at admission -- otherwise a consumer comparing ids reads its own cue
+        // changing its verdict as a DIFFERENT cue and discards the elapsed time it should keep.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_100))
+        val atExpiry = renderer.lastCueObservation.value
+        assertEquals(AudioFeedbackRenderer.CueObservation.Unknown, atExpiry?.observation)
+
+        // THE SAME CUE NOW GETS A SECOND VERDICT. Its identity must NOT change.
+        renderer.stopEarconNow()
+        val atStop = renderer.lastCueObservation.value
+        assertEquals(AudioFeedbackRenderer.CueObservation.Ended, atStop?.observation)
+        assertEquals(
+            "one cue's verdict change is the SAME cue, not a new one",
+            atExpiry?.cueId,
+            atStop?.cueId,
+        )
+
+        // A GENUINELY NEW CUE GETS A NEW IDENTITY, so the distinction is real rather than the id being
+        // constant for everything.
+        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(true)
+        renderer.playEarcon(EarconId.LISTENING_START)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_100))
+        assertNotEquals(
+            "a DIFFERENT cue must be distinguishable from the first one",
+            atExpiry?.cueId,
+            renderer.lastCueObservation.value?.cueId,
+        )
+    }
+
+    @Test
     fun `an explicit stop RETIRES the unresolved observation`() = runTest {
         // @reviewer's expiry→actual-endSession reproduction, and @spec's retirement gap: the deadline
         // establishes UNKNOWN, and then the production stop path must retire it -- a cue that has been

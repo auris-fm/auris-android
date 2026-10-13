@@ -103,18 +103,19 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         boundDialogManager = null
     }
 
-    /**
-     * The action outcome of the most recent cloud dispatch.
-     *
-     * Recorded at the dispatch site from the request-owned result, so a caller can distinguish a CONFIRMED
-     * action from one that was dispatched with an unknowable outcome -- which the feedback alone cannot
-     * express.
-     */
-    @Volatile
-    var lastActionOutcome: CloudRouteActionOutcome = CloudRouteActionOutcome.None
-        private set
+    // Owns the outcome of ONE dispatch, for the caller that dispatched it.
+    //
+    // NOT A SHARED SLOT. A field on the executor belongs to whoever writes it last: two turns' outcomes
+    // would race for one place, and a caller reading it afterwards cannot tell whose it is. The caller
+    // mints this and keeps it, so the value belongs to the REQUEST rather than to the object that
+    // happened to perform it.
+    class TurnOutcome {
+        @Volatile
+        var action: CloudRouteActionOutcome = CloudRouteActionOutcome.None
+            internal set
+    }
 
-    suspend fun execute(intent: VoiceIntent): VoiceResponse {
+    suspend fun execute(intent: VoiceIntent, outcome: TurnOutcome = TurnOutcome()): VoiceResponse {
         // Recorded *before* the action runs: the revision is what a cloud turn
         // compares at restore time, and a user's pause that has already reached
         // the player but not this counter is exactly the window where the turn
@@ -189,7 +190,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                     // recorded. A retry that returns only its feedback would hide an unknowable action
                     // on exactly the path where the caller most needs to know whether it ran.
                     val retried = cloudRouteSink.dispatchPrepared(alreadyPrepared)
-                    lastActionOutcome = retried.action
+                    outcome.action = retried.action
                     return retried.feedback
                 }
                 val context = playbackContextProvider.current()
@@ -245,7 +246,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                 // FEEDBACK is what the user hears; its ACTION OUTCOME is recorded so a caller can tell a
                 // confirmed action from one that was dispatched without a knowable outcome. Reading only
                 // the feedback would treat an unknowable execution as if nothing had happened.
-                lastActionOutcome = dispatched.action
+                outcome.action = dispatched.action
                 // Noted after the dispatch: this window now has a request, so a LATER one continues
                 // rather than beginning.
                 captured?.let { gracePeriodSignal.notePreparedRequest(it) }

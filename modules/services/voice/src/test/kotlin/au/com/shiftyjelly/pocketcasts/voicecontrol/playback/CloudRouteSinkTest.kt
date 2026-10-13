@@ -2859,6 +2859,45 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `the terminal result carries the outcome the turn ACCUMULATED`() = runTest {
+        // THE SINK'S OWN RETURN, which no case observed before: the accumulated outcome must LEAVE the
+        // sink. The terminal return used to hardcode `None`, so every action a turn performed was
+        // reported as "no action" to the caller -- the value was computed, merged, and then discarded at
+        // the exit. Asserted at the RETURN, because that is where it was lost.
+        val confirmed = TestDeps(
+            events = flowOf(
+                CloudRouteEvent.Action(
+                    tool = "playback",
+                    action = "pause",
+                    params = emptyMap(),
+                ),
+                CloudRouteEvent.Done(1, 0),
+            ),
+        )
+
+        val confirmedResult = confirmed.sink().routeToCloud("pause", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(
+            "a confirmed action must be reported as confirmed at the sink's own return",
+            CloudRouteActionOutcome.Confirmed,
+            confirmedResult.action,
+        )
+
+        // THE CONTROL: a turn with no action reports None, so the case is decided by the accumulated
+        // value rather than by the return always claiming something.
+        val none = TestDeps(
+            events = flowOf(CloudRouteEvent.Done(1, 0)),
+        )
+
+        val noneResult = none.sink().routeToCloud("hello", VoiceIntent.CloudTier.Premium, playbackContext)
+
+        assertEquals(
+            CloudRouteActionOutcome.None,
+            noneResult.action,
+        )
+    }
+
+    @Test
     fun `an unstated amount with an unknown direction is refused instead of defaulted`() = runTest {
         val deps = TestDeps(
             events = flowOf(

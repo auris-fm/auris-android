@@ -88,7 +88,7 @@ class VoiceControlServiceRenderTest {
                 "an UNKNOWN action outcome must survive to the production caller rather than being " +
                     "reported as a delivered action",
                 CloudRouteActionOutcome.Unknown,
-                service.lastActionOutcome,
+                service.actionOutcomeFor(cloudIntent()),
             )
         } finally {
             renderer.release()
@@ -115,7 +115,7 @@ class VoiceControlServiceRenderTest {
             assertEquals(
                 "a local turn reports no cloud action, however the previous turn ended",
                 CloudRouteActionOutcome.None,
-                service.lastActionOutcome,
+                service.actionOutcomeFor(noopIntent()),
             )
         } finally {
             renderer.release()
@@ -311,6 +311,53 @@ class VoiceControlServiceRenderTest {
             service.handleIntentForTest(VoiceIntent.Playback.Resume)
             awaitRealTime { org.mockito.Mockito.mockingDetails(executor).invocations.size >= 2 }
             verify(executor, org.mockito.Mockito.times(2)).execute(org.mockito.kotlin.any())
+        } finally {
+            renderer.release()
+        }
+    }
+
+    @Test
+    fun `an unknown action outcome does not earn command recognition at the production caller`() = runTest {
+        // @spec: the decision must drive BEHAVIOUR, not fill a slot. Command recognition extends the
+        // listening window and clears the escalation penalty -- privileges a turn that has not been shown
+        // to have done anything must not earn. Observed through the window state, which only the
+        // recognition path moves.
+        val earconPlayer = mock(EarconPlayer::class.java)
+        val renderer = AudioFeedbackRenderer(earconPlayer, noopTts())
+        val executor = mock(VoicePlaybackIntentExecutor::class.java)
+        whenever(executor.execute(org.mockito.kotlin.any())).thenReturn(VoiceResponse.Silent)
+        whenever(executor.lastActionOutcome).thenReturn(CloudRouteActionOutcome.Unknown)
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
+        val service = VoiceControlService().apply {
+            audioFeedbackRenderer = renderer
+            voicePlaybackIntentExecutor = executor
+            gracePeriodSignal = signal
+            voiceControlServiceController = mock(au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlServiceController::class.java)
+        }
+        signal.onWakeWordDetected()
+        signal.issueEscalation()
+        assertEquals("the probe needs a spent escalation", "allowance spent in this window", signal.escalationRefusal())
+        try {
+            service.handleIntentForTest(
+                VoiceIntent.CloudRoute(
+                    request = "summarize this episode",
+                    tier = VoiceIntent.CloudTier.Premium,
+                ),
+            )
+            awaitRealTime { org.mockito.Mockito.mockingDetails(executor).invocations.size >= 1 }
+            awaitRealTime {
+                org.robolectric.shadows.ShadowLooper.idleMainLooper()
+                true
+            }
+
+            // THE SPENT ESCALATION IS STILL SPENT: recognition would have opened a new window and made
+            // it "available" again. An unknown outcome must not grant that.
+            assertEquals(
+                "an unverified action must not be recognized as a delivered command: " +
+                    "refusal=${signal.escalationRefusal()}",
+                "allowance spent in this window",
+                signal.escalationRefusal(),
+            )
         } finally {
             renderer.release()
         }

@@ -811,8 +811,25 @@ class CloudRouteSink internal constructor(
         }
         return CloudTurnResult(
             feedback = outcome ?: VoiceResponse.Silent,
-            action = CloudRouteActionOutcome.None,
+            // THE TURN'S OWN ACCUMULATED OUTCOME, not a fresh None. Hardcoding None here DISCARDED
+            // everything `noteOutcome` accumulated: the request-owned result reported "no action" for a
+            // turn whose action was confirmed, and -- worse -- reported the same for one whose outcome
+            // could not be established, which is exactly the distinction the three-valued type exists to
+            // carry out of the sink.
+            action = outcomeOfTurn(actionOutcome),
         )
+    }
+
+    /**
+     * The turn's accumulated outcome, in the form a caller outside this class can consume.
+     *
+     * The mapping lives in ONE place so no call site can drift from it -- and so the accumulated value
+     * cannot be silently replaced by a constant on the way out.
+     */
+    private fun outcomeOfTurn(outcome: ActionOutcome): CloudRouteActionOutcome = when (outcome) {
+        ActionOutcome.None -> CloudRouteActionOutcome.None
+        ActionOutcome.Unknown -> CloudRouteActionOutcome.Unknown
+        ActionOutcome.Confirmed -> CloudRouteActionOutcome.Confirmed
     }
 
     private fun openRoute(turn: CloudRouteTurn): Flow<CloudRouteEvent> {

@@ -217,6 +217,9 @@ class EarconPlayer(
                 offset += written
             }
             lastPlayedId = id
+            // THE ADMISSION TOKEN IS MINTED WHEN THE CUE TAKES THE TRACK, so it identifies THIS playing
+            // of the cue. A caller holds it to stop precisely this admission later.
+            currentAdmission = AdmissionToken(admissionCounter.incrementAndGet())
             // THE HEAD IS CUMULATIVE ACROSS CUES ON ONE TRACK, so completion must compare it against a
             // cumulative target. Comparing it against this cue's own frame COUNT made a second cue
             // read Consumed immediately: the head already stood at the first cue's total, which
@@ -358,26 +361,36 @@ class EarconPlayer(
      * can no longer hear.
      */
     fun stopNow() {
-        stopCueNow(expectedCueId = null)
+        stopAdmissionNow(expectedAdmission = null)
     }
 
     /**
-     * Stops the cue this call was issued for, and ONLY that cue.
+     * A UNIQUE TOKEN FOR ONE ADMISSION OF A CUE.
      *
-     * [stopNow] stops whatever `track` is current, and the block runs LATER on the player thread -- so a
-     * SUCCESSOR that started in between is playing on that same track and would be stopped too. The stop
-     * is a statement about ONE cue, so it must be scoped to that cue rather than to the track that
-     * happens to be current when the block runs.
-     *
-     * [expectedCueId] null means "stop whatever is playing", which is the session-teardown shape: there
-     * the caller really does mean the track itself.
+     * The earcon ID is the KIND of cue, not this playing of it: two consecutive wake cues share an id, so
+     * an id comparison cannot tell a held stop aimed at the first from a stop aimed at the second. An
+     * incarnation can, and the difference is the whole question -- a stale stop must not release a cue it
+     * never admitted.
      */
-    fun stopCueNow(expectedCueId: EarconId?) {
+    @JvmInline
+    value class AdmissionToken(val raw: Long)
+
+    /**
+     * Stops the ADMISSION this call was issued for, and only that one.
+     *
+     * [stopNow] stops whatever `track` is current, and the block runs LATER on the player thread, so a
+     * successor admitted in between plays on that same track and would be stopped too. Scoping by
+     * [EarconId] only reaches the KIND: a second cue of the same kind looks identical, so a held old stop
+     * would still release it. The token is per admission, which is what a stop is actually about.
+     *
+     * [expectedAdmission] null means "stop whatever is playing", the session-teardown shape, where the
+     * caller really does mean the track itself.
+     */
+    fun stopAdmissionNow(expectedAdmission: AdmissionToken?) {
         onPlayerThread {
-            // THE SUCCESSOR'S CUE IS NOT THIS STOP'S SUBJECT. If the track has moved on to a different
-            // cue, this stop speaks for audio that is no longer sounding -- stopping the track here would
-            // silence a cue nobody asked to stop.
-            if (expectedCueId != null && lastPlayedId != expectedCueId) return@onPlayerThread
+            // A DIFFERENT ADMISSION IS NOT THIS STOP'S SUBJECT, even when it is the SAME earcon: the
+            // successor's audio is not what this stop was issued for.
+            if (expectedAdmission != null && currentAdmission != expectedAdmission) return@onPlayerThread
             track?.runCatching { stop() }
             track = null
             emittedFrames = 0
@@ -385,8 +398,22 @@ class EarconPlayer(
             cueHeadOrigin = 0
             cueHeadTarget = 0
             lastPlayedId = null
+            currentAdmission = null
         }
     }
+
+    /** The admission currently owning the track, or null when nothing has been admitted. */
+    private var currentAdmission: AdmissionToken? = null
+
+    /**
+     * The admission that currently owns the track, for a caller that will later stop THAT admission.
+     *
+     * Read on the player thread, so it is the admission owning the track at the moment of the read rather
+     * than one that a later admission may have replaced.
+     */
+    fun currentAdmissionToken(): AdmissionToken? = onPlayerThread { currentAdmission }
+
+    private val admissionCounter = java.util.concurrent.atomic.AtomicLong(0)
 
     /**
      * Frees this session's audio resources.

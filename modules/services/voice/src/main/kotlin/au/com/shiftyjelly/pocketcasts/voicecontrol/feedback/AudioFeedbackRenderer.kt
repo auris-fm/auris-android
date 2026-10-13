@@ -275,13 +275,14 @@ class AudioFeedbackRenderer(
     private var currentCueId: Long = 0L
 
     /**
-     * The earcon the cue currently being observed was started for.
+     * The PLAYER ADMISSION the cue currently being observed took.
      *
-     * The PLAYER scopes a stop by this id, because the id is what it knows its track is playing. Held
-     * beside [currentCueId] so a stop speaks about the cue it was issued for rather than about whatever
-     * the track holds by the time the deferred stop runs.
+     * The earcon id names the KIND; this names THIS playing of it. A stop scoped by kind cannot tell a
+     * held stop aimed at the first wake cue from the second wake cue -- they look identical -- so the
+     * stop would release an admission it never made. Held beside [currentCueId] so the renderer's
+     * observation identity and the player's admission refer to the same cue.
      */
-    private var currentCueEarcon: EarconId? = null
+    private var currentCueAdmission: EarconPlayer.AdmissionToken? = null
 
     /**
      * Publishes an observation ONLY while [observer] is still the cue's current observer.
@@ -338,7 +339,9 @@ class AudioFeedbackRenderer(
             // THE NEW CUE'S IDENTITY IS ALLOCATED AT ADMISSION, so every verdict this cue publishes
             // carries the SAME id and a consumer can tell "my cue changed" from "a different cue".
             currentCueId = cueCounter.incrementAndGet()
-            currentCueEarcon = startedEarcon
+            // THE ADMISSION IS READ FROM THE PLAYER, which mints it when the cue takes the track, so the
+            // token the renderer holds is the one the player will compare against.
+            currentCueAdmission = earconPlayer.currentAdmissionToken()
             _lastCueObservation.value = null
         }
         // A REFERENCE THE COROUTINE CAN READ FROM INSIDE ITS OWN INITIALIZER. Kotlin does not allow a
@@ -470,12 +473,12 @@ class AudioFeedbackRenderer(
         // THE CUE THIS STOP IS ABOUT, captured with the owner so the player stops THAT cue rather than
         // whatever track is current when the deferred block runs -- a successor that starts in between
         // plays on the same track and would otherwise be silenced by a stop aimed at its predecessor.
-        val stoppedCue = currentCueEarcon
+        val stoppedAdmission = currentCueAdmission
         // THE INTERLEAVING SEAM. A case must be able to land the replacement INSIDE this call -- the only
         // instant where capturing before versus after differs. A seam that runs the hook around the call
         // instead of within it would not exercise the window it exists for.
         duringStopForTest?.invoke()
-        earconPlayer.stopCueNow(stoppedCue)
+        earconPlayer.stopAdmissionNow(stoppedAdmission)
         // RETIREMENT, NOT A TEST ACCESSOR. The observation's deadline is a bound on WAITING, not a claim
         // about the cue; once the cue is stopped explicitly its fate IS established, and leaving the
         // outstanding Unknown published would hold the gate's attribution open indefinitely -- every

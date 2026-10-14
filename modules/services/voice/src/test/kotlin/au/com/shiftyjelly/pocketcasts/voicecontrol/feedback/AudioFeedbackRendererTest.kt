@@ -949,6 +949,21 @@ class AudioFeedbackRendererTest {
             renderer.lastCueObservation.value?.observation,
         )
 
+        // B'S ADMISSION AND OUTPUT, which the earlier version left only MOCKED and unasserted: the
+        // renderer must have taken B's token and must be observing B's own audio, not A's.
+        org.mockito.Mockito.verify(earconPlayer, org.mockito.Mockito.atLeastOnce())
+            .play(EarconId.WAKE_WORD)
+        assertEquals(
+            "the renderer holds B's admission, not the superseded A's",
+            EarconPlayer.AdmissionToken(2L),
+            renderer.currentCueAdmission,
+        )
+        assertTrue(
+            "B's output is the one being observed",
+            renderer.coverageIsRunningForTest() || bVerdict?.observation ==
+                AudioFeedbackRenderer.CueObservation.Consumed,
+        )
+
         // B'S OWN TEARDOWN, through the real session path.
         renderer.endSession()
         assertEquals(

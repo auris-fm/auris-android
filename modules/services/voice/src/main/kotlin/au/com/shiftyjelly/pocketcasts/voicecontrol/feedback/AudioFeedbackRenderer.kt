@@ -182,6 +182,15 @@ class AudioFeedbackRenderer(
     private val coverageLock = Any()
 
     /**
+     * Runs INSIDE an observer, after it starts and before it observes, so a case can hold it in flight.
+     *
+     * Null in production -- an already-completed deferred -- so the await costs a fast path and changes
+     * no behaviour. Test-only, and it exists because a real delayed continuation CANNOT be simulated by
+     * finishing the observer and then calling a retirement by hand.
+     */
+    internal var holdObserverForTest: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
+    /**
      * Whether the coverage observation is STILL RUNNING, so a case can assert that a deadline BOUNDS it.
      *
      * A note count cannot show this: a queued cue emits no notes either way, so a deadline that never
@@ -356,6 +365,18 @@ class AudioFeedbackRenderer(
         // observer ever runs.
         val observerRef = kotlinx.coroutines.CompletableDeferred<Job>()
         val observer = scope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            // THE HOLD SEAM. Reached after this observer has started but BEFORE it observes anything, so a
+            // case can keep THIS observer in flight while a successor takes the cue. That is the only way
+            // to exercise a genuinely delayed continuation -- a case that lets the observer finish and
+            // then calls a retirement by hand tests the hand, not the continuation.
+            // ONE-SHOT: only the observer that finds a hold takes it, and it is cleared as it is taken, so
+            // a SUCCESSOR's observer runs normally. A hold that stayed armed would stall every later cue
+            // and the case would prove nothing about the cue it meant to hold.
+            synchronized(coverageLock) {
+                val pending = holdObserverForTest
+                holdObserverForTest = null
+                pending
+            }?.await()
             // A cue that is never observed to progress must not be covered forever: the estimate
             // bounds the wait, and the bound is only a ceiling.
             val boundMs = earconPlayer.emittedDurationMs()

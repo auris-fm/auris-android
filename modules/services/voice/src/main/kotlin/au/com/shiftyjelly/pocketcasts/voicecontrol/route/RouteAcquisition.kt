@@ -128,7 +128,10 @@ class RouteAcquisition(
     suspend fun acquire(route: AudioRoute, gateAllows: () -> Boolean): AcquisitionResult {
         if (route !is AudioRoute.BluetoothA2dpOnly) return AcquisitionResult.NotNeeded
         val candidate = platform.bluetoothCandidates().firstOrNull()
-            ?: return AcquisitionResult.Failed(REASON_FAILED)
+        if (candidate == null) {
+            Timber.w("[RouteAcquisition] no bluetooth candidate for route=%s", route)
+            return AcquisitionResult.Failed(REASON_FAILED)
+        }
         return acquire(candidate, gateAllows)
     }
 

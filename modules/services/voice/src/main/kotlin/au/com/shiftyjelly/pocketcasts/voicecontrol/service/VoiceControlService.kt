@@ -8,6 +8,7 @@ import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.annotation.RequiresPermission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackendSelector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.CanaryFlashBackend
@@ -47,6 +48,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
@@ -98,6 +101,16 @@ class VoiceControlService : Service() {
     private var wiredBackend: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend? = null
     private var captureWasEverActive = false
     private var acquisitionLogged = false
+    private var consecutiveCaptureRestarts = 0
+    private var lastCaptureTerminationMs = 0L
+    private var lastObserverDecision: String? = null
+
+    /**
+     * Bumped to ask the mode observer to re-evaluate capture after it ended on its own. The
+     * observer is the single owner of engine starts, so recovery signals it rather than starting
+     * the engine from another coroutine, which could race an in-flight start.
+     */
+    private val captureRestartSignal = MutableStateFlow(0L)
     private var mediaSession: MediaSession? = null
     private var currentMode: ListeningMode = ListeningMode.Off
 
@@ -107,6 +120,11 @@ class VoiceControlService : Service() {
 
         /** The spec's closed runtime-reason mapping for a pipeline that ended on its own. */
         private const val REASON_CAPTURE_FAILURE = "capture_failure"
+
+        /** Delay before re-starting capture after it ended on its own, and the retry ceiling. */
+        private const val CAPTURE_RESTART_DELAY_MS = 500L
+        private const val CAPTURE_RESTART_WINDOW_MS = 5_000L
+        private const val MAX_CONSECUTIVE_CAPTURE_RESTARTS = 3
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -161,9 +179,28 @@ class VoiceControlService : Service() {
                 modeJob = kotlinx.coroutines.flow.combine(
                     listeningModePolicy.mode,
                     audioRouteMonitor.route,
-                ) { mode, _ -> mode }.onEach { mode ->
+                    // The gate is a third source so a gate transition that leaves the mode `Off` — a
+                    // candidate route blocked only by the gate — still re-runs this observer. With
+                    // `mode` alone, `Off` is unchanged across such a transition, no emission
+                    // arrives, and acquisition is never attempted: the microphone stays shut after
+                    // the user starts playback, with nothing to retry it.
+                    gate.state,
+                    // Recovery from a capture that ended on its own is a signal, not a second
+                    // starter: this observer owns engine starts and re-runs on the bump.
+                    captureRestartSignal,
+                ) { mode, _, _, _ -> mode }.onEach { mode ->
                     val route = audioRouteMonitor.route.value
                     val micExposure = route.toMicExposure()
+                    // Transitions, not repeated evaluations: the gate also emits for changes that
+                    // leave this tuple alone (other rule state), and the composite decision — mode,
+                    // route, exposure, gate — is what capture depends on. Debug level, and no audio
+                    // or transcript content (voice-control-core.md > Privacy and UX).
+                    val decision = "mode=$mode route=$route exposure=$micExposure " +
+                        "gateAllowed=${gate.state.value.allowed} acquiring=${acquisitionJob != null}"
+                    if (decision != lastObserverDecision) {
+                        lastObserverDecision = decision
+                        Timber.d("[VoicePipeline] observer: %s", decision)
+                    }
                     // A pending acquisition stays valid while its candidate is present or has
                     // become the selected external microphone: the selection callbacks publish
                     // `Headset` while acquisition is still confirming, and cancelling on any
@@ -479,6 +516,29 @@ class VoiceControlService : Service() {
         // the runtime reason `capture_failure`, so lifecycle monitoring sees it.
         logCaptureStopped(REASON_CAPTURE_FAILURE, isUserRequested = false)
         clearCaptureState()
+        recoverCapture()
+    }
+
+    /**
+     * Capture ended without the gate asking it to — an AAudio disconnect, a backend failure. The
+     * mode was not re-evaluated, so nothing else would start it again: restart while the gate still
+     * calls for listening. Rate-limited, so a stream that keeps ending cannot spin.
+     */
+    private fun recoverCapture() {
+        val now = SystemClock.elapsedRealtime()
+        consecutiveCaptureRestarts =
+            if (now - lastCaptureTerminationMs < CAPTURE_RESTART_WINDOW_MS) consecutiveCaptureRestarts + 1 else 1
+        lastCaptureTerminationMs = now
+        if (consecutiveCaptureRestarts > MAX_CONSECUTIVE_CAPTURE_RESTARTS) {
+            Timber.w("[VoicePipeline] capture keeps ending — not restarting")
+            return
+        }
+        // Signal the mode observer rather than starting the engine here: it is the single owner of
+        // engine starts, so a recovery cannot race an in-flight start that is still suspended.
+        serviceScope.launch(Dispatchers.Main) {
+            delay(CAPTURE_RESTART_DELAY_MS)
+            captureRestartSignal.value = SystemClock.elapsedRealtime()
+        }
     }
 
     /**
@@ -516,6 +576,7 @@ class VoiceControlService : Service() {
      */
     private fun acquireCandidate(route: AudioRoute) {
         if (acquisitionJob != null) return
+        Timber.i("[VoicePipeline] acquiring external microphone for route=%s", route)
         val gateAllows = {
             gate.state.value.allowed && audioRouteMonitor.route.value.keepsPendingAcquisition()
         }

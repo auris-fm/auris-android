@@ -997,10 +997,12 @@ class AudioFeedbackRendererTest {
         combinedRenderer.holdObserverForTest = barrier
         combinedRenderer.holdArrivalForTest = arrival
 
-        // A IS ADMITTED, AND ITS RETURNED ADMISSION IS RETAINED: two admissions of the SAME sound are
-        // indistinguishable by label, so the tokens are what prove B is a distinct admission.
-        val aAdmission = realPlayer.currentAdmissionForTest()
+        // A IS ADMITTED, AND ITS ADMISSION IS READ AFTER ITS SUCCESSFUL PLAY. Reading it BEFORE the play
+        // returned null, and comparing null to B proves nothing about distinctness -- a defect in my
+        // earlier version, caught in review.
         combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        val aAdmission = realPlayer.currentAdmissionForTest()
+        assertNotNull("A's admission must exist after its successful play", aAdmission)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(1_100))
         assertTrue("A's observer must actually ARRIVE at the hold", arrival.isCompleted)
@@ -1012,6 +1014,9 @@ class AudioFeedbackRendererTest {
         val bAdmission = realPlayer.currentAdmissionForTest()
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(1_100))
+        // BOTH TOKENS MUST EXIST before the comparison: two nulls are equal, so an inequality between
+        // them would prove nothing.
+        assertNotNull("B's admission must exist after its successful play", bAdmission)
         assertNotEquals(
             "B is a DISTINCT admission of the same sound, which a label cannot show",
             aAdmission,
@@ -1052,7 +1057,11 @@ class AudioFeedbackRendererTest {
             realPlayer.completion(),
         )
 
-        // A RESUMES AND IS REFUSED; B'S VERDICT STANDS.
+        // RELEASING THE BARRIER IS NOT EVIDENCE THAT A RESUMED TO PUBLICATION. A's job is CANCELLED (it
+        // was observed above), and completing the barrier does not undo that -- so this asserts only what
+        // the release can show: B's verdict is still the one standing, and nothing retracted it. The
+        // refusal mechanism itself is covered by the sibling ownership cases, which fail when the guard
+        // is defeated.
         barrier.complete(Unit)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(3_000))
@@ -1060,6 +1069,10 @@ class AudioFeedbackRendererTest {
             "the successor's verdict survives the released continuation",
             AudioFeedbackRenderer.CueObservation.Consumed,
             combinedRenderer.lastCueObservation.value?.observation,
+        )
+        assertTrue(
+            "A's job was cancelled, which is what removes the stale continuation",
+            aJob.isCancelled,
         )
 
         // TEARDOWN, through the RENDERER's own lifecycle -- not a direct player.release(), which would

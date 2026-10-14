@@ -894,4 +894,27 @@ class AudioFeedbackRendererTest {
 
         verify(feedbackPlayer).play(EarconId.ERROR)
     }
+
+    @Test
+    fun `the renderer's stop targets the ADMISSION it last took, not an earlier cue's`() = runTest {
+        // @reviewer: the mock never-getter case does not exercise the handoff. THE RENDERER'S OWN
+        // INTERLEAVING: cue A is played and its coverage starts, cue B is then admitted with a DIFFERENT
+        // token, and the renderer's stop must name B -- the admission it currently holds -- rather than
+        // A's. If the renderer kept A's token, its stop would release an admission it no longer owns.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(EarconPlayer.AdmissionToken(2L))
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(1_000L)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        renderer.playEarcon(EarconId.LISTENING_START)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(50))
+
+        renderer.stopEarconNow()
+
+        org.mockito.Mockito.verify(earconPlayer).stopAdmissionNow(EarconPlayer.AdmissionToken(2L))
+        org.mockito.Mockito.verify(earconPlayer, org.mockito.Mockito.never())
+            .stopAdmissionNow(EarconPlayer.AdmissionToken(1L))
+    }
 }

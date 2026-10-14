@@ -104,6 +104,9 @@ class VoiceControlService : Service() {
     companion object {
         private const val COMMAND_DEBOUNCE_MS = 2000L
         internal const val STOP_ACTION = "au.com.shiftyjelly.pocketcasts.voicecontrol.action.STOP"
+
+        /** The spec's closed runtime-reason mapping for a pipeline that ended on its own. */
+        private const val REASON_CAPTURE_FAILURE = "capture_failure"
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -181,20 +184,14 @@ class VoiceControlService : Service() {
                             engineStart.invalidatePendingStart()
                             if (engineStart.isStarted) {
                                 // Active capture was ongoing, now stopping
-                                val gateState = gate.state.value
-                                val blockedRules = gateState.rules
+                                val blockedRules = gate.state.value.rules
                                     .filter { it.value !is VoiceControlRuleState.Allowed }
                                 val reasons = blockedRules.entries
                                     .joinToString(";") { "${it.key}=${it.value}" }
                                 val isUserRequested = blockedRules.keys.any {
                                     it == EnabledByUserCondition.ID
                                 }
-                                val msg = "mic_capture_stopped: reasons=%s setup=%b conflicts=%b context=%b micExposure=%s route=%s mode=%s priorCaptureActive=true"
-                                if (isUserRequested) {
-                                    Timber.i(msg, reasons, gateState.setupPassed, gateState.conflictsPassed, gateState.contextPassed, micExposure, route, mode)
-                                } else {
-                                    Timber.e(msg, reasons, gateState.setupPassed, gateState.conflictsPassed, gateState.contextPassed, micExposure, route, mode)
-                                }
+                                logCaptureStopped(reasons, isUserRequested)
                                 stopEngine()
                             } else if (route is AudioRoute.BluetoothA2dpOnly && gate.state.value.allowed) {
                                 // The route is a candidate and every non-route gate question passes:
@@ -478,12 +475,38 @@ class VoiceControlService : Service() {
      */
     private fun onPipelineTerminated(generation: Int) {
         if (!engineStart.isCurrent(generation) || !engineStart.isStarted) return
-        Timber.w("[VoicePipeline] capture pipeline ended unexpectedly — clearing capture state")
+        // A runtime stop, not a user request: the spec requires `mic_capture_stopped` at ERROR with
+        // the runtime reason `capture_failure`, so lifecycle monitoring sees it.
+        logCaptureStopped(REASON_CAPTURE_FAILURE, isUserRequested = false)
+        clearCaptureState()
+    }
+
+    /**
+     * Teardown shared by every stop: clear the started state, release acquisition routing, and list
+     * the mode as Off. A caller that still holds a running engine stops it first.
+     */
+    private fun clearCaptureState() {
         engineStart.onStopped()
         captureStateHolder.update(VoiceControlCaptureState.Idle)
         currentMode = ListeningMode.Off
         routeAcquisition.release()
         updateListeningState()
+    }
+
+    /**
+     * One `mic_capture_stopped` event for every way an active capture ends. The spec requires the
+     * full gate posture, route/exposure, mode and prior capture state, at `ERROR` unless the user
+     * directly asked for the stop.
+     */
+    private fun logCaptureStopped(reasons: String, isUserRequested: Boolean) {
+        val gateState = gate.state.value
+        val route = audioRouteMonitor.route.value
+        val msg = "mic_capture_stopped: reasons=%s setup=%b conflicts=%b context=%b micExposure=%s route=%s mode=%s priorCaptureActive=true"
+        if (isUserRequested) {
+            Timber.i(msg, reasons, gateState.setupPassed, gateState.conflictsPassed, gateState.contextPassed, route.toMicExposure(), route, currentMode)
+        } else {
+            Timber.e(msg, reasons, gateState.setupPassed, gateState.conflictsPassed, gateState.contextPassed, route.toMicExposure(), route, currentMode)
+        }
     }
 
     /**
@@ -558,11 +581,11 @@ class VoiceControlService : Service() {
         // capture. After hand-off release() only undoes the acquired routing.
         if (engineStart.isStarted) {
             voiceAsrEngine.get().stop()
-            engineStart.onStopped()
-            captureStateHolder.update(VoiceControlCaptureState.Idle)
+            clearCaptureState()
             Timber.i("[VoicePipeline] engine stopped")
+        } else {
+            routeAcquisition.release()
         }
-        routeAcquisition.release()
     }
 
     private fun handleIntent(

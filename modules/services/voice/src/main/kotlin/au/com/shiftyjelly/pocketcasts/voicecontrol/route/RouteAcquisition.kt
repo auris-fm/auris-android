@@ -207,20 +207,7 @@ class RouteAcquisition(
         // Reuse the stream this attempt already owns.
         if (openedStream) return AcquisitionResult.Acquired(openedDeviceId)
 
-        // The opened stream is the final authority on which microphone was selected.
-        val deviceId = platform.openInputStream()
-        openedStream = true
-        openedDeviceId = deviceId
-        streamHandedOff = false
-        if (deviceId < 0 || !isConfirmedExternalMicrophone(platform.deviceType(deviceId))) {
-            release()
-            Timber.w(
-                "[RouteAcquisition] route_acquisition_failed: stream selected device=%d type=%s",
-                deviceId,
-                platform.deviceType(deviceId),
-            )
-            return AcquisitionResult.Failed(REASON_FAILED)
-        }
+        if (openConfirmedStream() < 0) return AcquisitionResult.Failed(REASON_FAILED)
 
         // A gate question may have blocked while the stream was opening; do not start capture then.
         if (!gateAllows()) {
@@ -233,7 +220,7 @@ class RouteAcquisition(
             return AcquisitionResult.Failed(REASON_FAILED)
         }
 
-        return AcquisitionResult.Acquired(deviceId)
+        return AcquisitionResult.Acquired(openedDeviceId)
     }
 
     private fun isSelected(candidate: BluetoothCandidate): Boolean = when (candidate.transport) {
@@ -262,6 +249,22 @@ class RouteAcquisition(
      */
     fun confirmCaptureStream(): Boolean {
         if (openedStream) return true
+        if (openConfirmedStream() < 0) return false
+        if (!platform.startInputStream()) {
+            release()
+            return false
+        }
+        return true
+    }
+
+    /**
+     * Opens the input stream and confirms the device it selected is a wired, BLE, or `SCO` headset
+     * microphone, recording the ownership fields. Returns the device id, or -1 with the stream
+     * released when the selection cannot be confirmed. Acquisition and capture start both go
+     * through this one primitive; acquisition additionally rechecks the gate before starting.
+     */
+    private fun openConfirmedStream(): Int {
+        if (openedStream) return openedDeviceId
         val deviceId = platform.openInputStream()
         openedStream = true
         openedDeviceId = deviceId
@@ -273,13 +276,9 @@ class RouteAcquisition(
                 platform.deviceType(deviceId),
             )
             release()
-            return false
+            return -1
         }
-        if (!platform.startInputStream()) {
-            release()
-            return false
-        }
-        return true
+        return deviceId
     }
 
     /**

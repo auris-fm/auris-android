@@ -1,9 +1,13 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.route
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
+import androidx.core.content.ContextCompat
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -42,6 +46,25 @@ class AndroidAudioRouteMonitor @Inject constructor(
         }
     }
 
+    // The enumerated device set is unchanged when the session *selects* a microphone, so the
+    // device callback above never fires for these. Without them the route stays on the candidate
+    // (`BluetoothA2dpOnly` → `Exposed`) even after SCO/BLE selection, and the gate has no new
+    // route to act on.
+    private val communicationDeviceListener = AudioManager.OnCommunicationDeviceChangedListener {
+        refreshRouteNow()
+    }
+
+    @Suppress("DEPRECATION") // SCO state has no replacement broadcast; the actions are deprecated, not unused
+    private val scoStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED ||
+                intent.action == AudioManager.ACTION_SCO_AUDIO_STATE_CHANGED
+            ) {
+                refreshRouteNow()
+            }
+        }
+    }
+
     private fun scheduleRouteUpdate() {
         debounceJob?.cancel()
         debounceJob = scope.launch {
@@ -51,8 +74,45 @@ class AndroidAudioRouteMonitor @Inject constructor(
         }
     }
 
+    // Selection changes are discrete and leave the device list untouched, so they need no
+    // debounce: the route is re-read from the selected state immediately.
+    private fun refreshRouteNow() {
+        debounceJob?.cancel()
+        mutableRoute.value = readRoute()
+        gracePeriodSignal.onAudioRouteChanged()
+    }
+
+    /**
+     * Publishes the external microphone acquisition has just confirmed selected. The device list
+     * does not change when the session selects a microphone, so the callbacks may not fire before
+     * the gate must know; acquisition already verified the selected device, so this is the
+     * authority. Emitting here lets the mode leave `Off` (capture is governed) and makes a later
+     * blocker produce a new mode emission that stops capture.
+     */
+    fun onExternalMicrophoneConfirmed() {
+        debounceJob?.cancel()
+        mutableRoute.value = AudioRoute.Headset(hasMicrophone = true)
+        gracePeriodSignal.onAudioRouteChanged()
+    }
+
     init {
         audioManager.registerAudioDeviceCallback(audioDeviceCallback, null)
+        audioManager.addOnCommunicationDeviceChangedListener(
+            ContextCompat.getMainExecutor(context),
+            communicationDeviceListener,
+        )
+        ContextCompat.registerReceiver(
+            context,
+            scoStateReceiver,
+            scoStateFilter(),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+    }
+
+    @Suppress("DEPRECATION") // SCO state has no replacement broadcast; the actions are deprecated, not unused
+    private fun scoStateFilter(): IntentFilter = IntentFilter().apply {
+        addAction(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED)
+        addAction(AudioManager.ACTION_SCO_AUDIO_STATE_CHANGED)
     }
 
     @Suppress("DEPRECATION") // isBluetoothScoOn deprecated in API 34; used to distinguish enumerated-but-inactive SCO

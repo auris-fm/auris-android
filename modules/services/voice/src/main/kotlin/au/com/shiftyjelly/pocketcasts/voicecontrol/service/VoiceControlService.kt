@@ -464,6 +464,12 @@ class VoiceControlService : Service() {
                 acquisitionJob = null
                 when (result) {
                     is AcquisitionResult.Acquired -> {
+                        // Publish the confirmed selection into the route state before starting.
+                        // The device list does not change when a microphone is selected, so the
+                        // monitor may still report BluetoothA2dpOnly: without this the mode never
+                        // leaves Off, and a later gate blocker would produce no new mode emission
+                        // to stop capture.
+                        audioRouteMonitor.onExternalMicrophoneConfirmed()
                         val started = if (gate.state.value.allowed) {
                             @Suppress("MissingPermission") // permission checked in hasRequiredPermissions()
                             startEngine(

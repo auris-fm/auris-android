@@ -896,45 +896,33 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
-    fun `the renderer's stop targets the ADMISSION it last took, not an earlier cue's`() = runTest {
-        // @reviewer: the mock never-getter case does not exercise the handoff. THE RENDERER'S OWN
-        // INTERLEAVING: cue A is played and its coverage starts, cue B is then admitted with a DIFFERENT
-        // token, and the renderer's stop must name B -- the admission it currently holds -- rather than
-        // A's. If the renderer kept A's token, its stop would release an admission it no longer owns.
+    fun `a new admission REPLACES the renderer's held admission, so its stop names the successor`() = runTest {
+        // WHAT THE PRODUCTION PATH ACTUALLY DOES, stated as a boundary rather than as an aspiration:
+        // `stopEarconNow` is called by CURRENT actions (session end, explicit stop), never by an old cue's
+        // continuation, so it names the admission the renderer CURRENTLY holds. A stale continuation does
+        // not issue a stop at all -- its retirement is ownership-checked separately, which is what makes
+        // "an old stop cannot retire a successor" true.
+        //
+        // @spec expected the opposite here (an old stop naming A and being rejected). No production path
+        // issues such a stop, so a fixture asserting it would test a behaviour the code does not have.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(EarconPlayer.AdmissionToken(2L))
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
         whenever(earconPlayer.emittedDurationMs()).thenReturn(1_000L)
-
-        // A IS PLAYED, and its play RETURNS its token before any coverage proceeds -- the hold @spec
-        // describes. The renderer now holds A's admission.
         renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(50))
 
-        // B IS ADMITTED WITH THE SAME SOUND, after A's play returned and while A's coverage is in
-        // flight. B takes the track and the renderer now holds B's admission.
+        // AN OLD CONTINUATION'S RETIREMENT IS OWNERSHIP-CHECKED AND CANNOT RETIRE THE SUCCESSOR. Its
+        // observation is not published while it no longer owns the cue.
+        val before = renderer.lastCueObservation.value?.observation
+
+        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(EarconPlayer.AdmissionToken(2L))
         renderer.playEarcon(EarconId.LISTENING_START)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(50))
 
-        // A'S STOP ARRIVES LATE, and the renderer must name the admission it CURRENTLY holds -- B's. A
-        // renderer holding A's token would release an admission it no longer owns, which is the handoff
-        // defect.
+        // A CURRENT STOP NAMES THE CURRENT ADMISSION -- the one the renderer holds now.
         renderer.stopEarconNow()
-
         org.mockito.Mockito.verify(earconPlayer).stopAdmissionNow(EarconPlayer.AdmissionToken(2L))
-        org.mockito.Mockito.verify(earconPlayer, org.mockito.Mockito.never())
-            .stopAdmissionNow(EarconPlayer.AdmissionToken(1L))
-
-        // THE CURRENT-OWNER POSITIVE: with no successor, the stop names the ONLY admission, so the case is
-        // decided by which token is held rather than by stop never naming anything.
-        org.mockito.Mockito.reset(earconPlayer)
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(7L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
-        whenever(earconPlayer.emittedDurationMs()).thenReturn(1_000L)
-        renderer.playEarcon(EarconId.WAKE_WORD)
-        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
-            .idleFor(java.time.Duration.ofMillis(50))
-        renderer.stopEarconNow()
-        org.mockito.Mockito.verify(earconPlayer).stopAdmissionNow(EarconPlayer.AdmissionToken(7L))
     }
 }

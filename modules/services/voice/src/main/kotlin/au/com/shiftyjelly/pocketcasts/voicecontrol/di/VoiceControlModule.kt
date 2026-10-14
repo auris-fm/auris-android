@@ -240,8 +240,9 @@ abstract class VoiceControlModule {
                 EnabledByUserCondition(settings, scope),
                 deviceSupported,
                 modelsReady,
-                // Conflicts group — audio route does not gate voice control; MicExposure
-                // only blocks capture for NoMic (spec: MicExposure does not select mode)
+                // Conflicts group — the route does not gate voice control here. Capture eligibility
+                // is `MicExposure` in `ListeningModePolicy.resolve`: only `Isolated` permits capture,
+                // so `Exposed` (built-in) blocks as well as `NoMic`.
                 notOnCall,
                 notCasting,
                 batteryOk,

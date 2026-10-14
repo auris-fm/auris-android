@@ -360,10 +360,11 @@ class VoiceControlService : Service() {
     }
 
     /**
-     * Starts the engine exactly once across concurrent callers. Both the acquisition coroutine and
-     * the mode-flow collector reach this when acquisition turns a Bluetooth candidate into an
-     * isolated headset, so the start is serialized: the second caller waits for the first and then
-     * skips it. Returns true when the engine is running afterwards.
+     * Starts the engine. The mode-flow collector is the only caller, and a `StateFlow` collector is
+     * sequential, so one start cannot overlap another and no start lock is needed: serialization is
+     * a consequence of there being one caller, not of [EngineStartState]. A second caller would not
+     * be safe — two `VoiceAsrEngine.start` calls overwrite `processingJob` and attach two pipelines
+     * to one stream. Returns true when the engine is running afterwards.
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private suspend fun startEngine(mode: ListeningMode): Boolean {

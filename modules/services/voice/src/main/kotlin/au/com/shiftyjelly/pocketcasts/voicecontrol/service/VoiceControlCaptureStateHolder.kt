@@ -7,22 +7,20 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * The actual microphone-capture state, distinct from the listening mode the gate resolves.
+ * Whether the microphone is actually capturing.
  *
- * The mode reads `WakeWord`/`Continuous` whenever the route is eligible, including when stream
- * confirmation or VAD attachment later fails, so settings must not equate "eligible" with
- * "listening". Voice control runs in a foreground service the settings screen cannot query, so the
- * service publishes here and settings observes.
+ * The settings screen runs in a different component from the foreground service and cannot read
+ * its state, so the service publishes this one bit. It is a boolean rather than a state enum on
+ * purpose: the only question the status line has to answer is whether capture is running, and
+ * `Starting`/`Idle`/`StartFailed` collapse into "not yet" or "not".
  */
-enum class VoiceControlCaptureState { Idle, Starting, Active, StartFailed }
-
 @Singleton
 class VoiceControlCaptureStateHolder @Inject constructor() {
-    private val mutableState = MutableStateFlow(VoiceControlCaptureState.Idle)
+    private val mutableCapturing = MutableStateFlow(false)
 
-    val state: StateFlow<VoiceControlCaptureState> = mutableState.asStateFlow()
+    val capturing: StateFlow<Boolean> = mutableCapturing.asStateFlow()
 
-    fun update(state: VoiceControlCaptureState) {
-        mutableState.value = state
+    fun update(capturing: Boolean) {
+        mutableCapturing.value = capturing
     }
 }

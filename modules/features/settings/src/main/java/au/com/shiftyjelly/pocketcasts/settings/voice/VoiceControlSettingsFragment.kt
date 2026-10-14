@@ -46,7 +46,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelDownloadState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
-import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlCaptureState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlCaptureStateHolder
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -89,8 +88,8 @@ class VoiceControlSettingsFragment : BaseFragment() {
                 .collectAsStateWithLifecycle()
             val mode by listeningModePolicy.mode
                 .collectAsStateWithLifecycle()
-            val captureState by captureStateHolder.state
-                .collectAsStateWithLifecycle(VoiceControlCaptureState.Idle)
+            val capturing by captureStateHolder.capturing
+                .collectAsStateWithLifecycle(false)
             val bottomInset = settings.bottomInset
                 .collectAsStateWithLifecycle(0)
 
@@ -116,7 +115,7 @@ class VoiceControlSettingsFragment : BaseFragment() {
                     gate = gateState,
                     micExposure = route.toMicExposure(),
                     permissionGranted = permissionGranted,
-                    captureState = captureState,
+                    capturing = capturing,
                 ),
                 onEnabledChange = { checked ->
                     settings.voiceControlUserDisabled.set(!checked, updateModifiedAt = false)

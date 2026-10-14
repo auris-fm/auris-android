@@ -48,7 +48,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
@@ -371,11 +370,6 @@ class VoiceControlService : Service() {
         // Captured before the attempt: validated after ensureReady() so a start that was
         // invalidated while suspended (gate loss, stop) does not commit.
         val generation = engineStart.generation()
-        // Publish the real capture state: the mode reads WakeWord/Continuous whenever the route is
-        // eligible, including when a start fails below, so settings must not equate the two.
-        if (!engineStart.isStarted) {
-            captureStateHolder.update(VoiceControlCaptureState.Starting)
-        }
         val started = engineStart.startIfNotRunning(
             start = {
                 val backend = asrBackendSelector.select()
@@ -494,10 +488,10 @@ class VoiceControlService : Service() {
                 Timber.i("[VoicePipeline] engine started mode=%s", mode)
             },
         )
-        if (started) {
-            captureStateHolder.update(VoiceControlCaptureState.Active)
-        } else {
-            captureStateHolder.update(VoiceControlCaptureState.StartFailed)
+        // Publish whether capture is actually running: the mode reads WakeWord/Continuous whenever
+        // the route is eligible, including when a start fails, so settings must not equate the two.
+        captureStateHolder.update(started)
+        if (!started) {
             // A start that failed before taking the stream leaves acquisition's opened stream
             // unowned; close it rather than let it stay live with no consumer.
             routeAcquisition.release()
@@ -517,8 +511,8 @@ class VoiceControlService : Service() {
         // selection callbacks that re-enter acquisition and the start path, and they consult the
         // same budget.
         captureRestartBudget.onTerminated()
-        if (captureRestartBudget.isBlocked) {
-            Timber.w("[VoicePipeline] capture keeps ending — restart withheld until the cooldown passes")
+        if (!captureRestartBudget.allows()) {
+            Timber.w("[VoicePipeline] capture keeps ending — automatic restart withheld")
         }
         // A runtime stop, not a user request: the spec requires `mic_capture_stopped` at ERROR with
         // the runtime reason `capture_failure`, so lifecycle monitoring sees it.
@@ -529,22 +523,15 @@ class VoiceControlService : Service() {
 
     /**
      * Capture ended without the gate asking it to — an AAudio disconnect, a backend failure. The
-     * mode was not re-evaluated, so nothing else would start it again: signal the observer once the
-     * settle delay has passed, if the budget still allows a restart.
+     * mode was not re-evaluated, so nothing else would re-run the observer: nudge it, if the rate
+     * limiter still allows a restart, and it starts capture again on its own sequential turn.
      *
-     * The signal goes to the observer rather than starting the engine here: it is the single owner of
-     * engine starts, so a recovery cannot race an in-flight start that is still suspended.
+     * The nudge goes to the observer rather than starting the engine here: it is the single owner
+     * of engine starts, so a recovery cannot race an in-flight start that is still suspended.
      */
     private fun recoverCapture() {
-        serviceScope.launch(Dispatchers.Main) {
-            // Wait the settle delay — or the cooldown the ceiling tripped — before signalling the
-            // observer. Waiting rather than refusing covers a route and gate that do not change:
-            // nothing else would re-run the observer, and capture would stay off.
-            val wait = captureRestartBudget.delayUntilAllowedMs()
-            if (wait > 0) delay(wait)
-            if (!captureRestartBudget.allows()) return@launch
-            captureRestartSignal.value = SystemClock.elapsedRealtime()
-        }
+        if (!captureRestartBudget.allows()) return
+        captureRestartSignal.value = SystemClock.elapsedRealtime()
     }
 
     /**
@@ -553,7 +540,7 @@ class VoiceControlService : Service() {
      */
     private fun clearCaptureState() {
         engineStart.onStopped()
-        captureStateHolder.update(VoiceControlCaptureState.Idle)
+        captureStateHolder.update(false)
         currentMode = ListeningMode.Off
         routeAcquisition.release()
         updateListeningState()

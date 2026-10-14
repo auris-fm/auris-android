@@ -11,7 +11,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotOnCallCond
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.OtherAppPlayingCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
-import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlCaptureState
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -262,39 +261,7 @@ class VoiceControlStatusTest {
     }
 
     @Test
-    fun `an eligible route whose capture failed to start does not read as active`() {
-        val gate = gateState()
-
-        assertEquals(
-            "Blocked: microphone capture failed to start",
-            voiceControlStatus(
-                ListeningMode.WakeWord,
-                gate,
-                MicExposure.Isolated,
-                permissionGranted = true,
-                captureState = VoiceControlCaptureState.StartFailed,
-            ),
-        )
-    }
-
-    @Test
-    fun `a start in progress reads as starting, not active`() {
-        val gate = gateState()
-
-        assertEquals(
-            "Starting…",
-            voiceControlStatus(
-                ListeningMode.WakeWord,
-                gate,
-                MicExposure.Isolated,
-                permissionGranted = true,
-                captureState = VoiceControlCaptureState.Starting,
-            ),
-        )
-    }
-
-    @Test
-    fun `an eligible route with no capture running reads as off`() {
+    fun `an eligible route that is not capturing reads as off, not active`() {
         val gate = gateState()
 
         assertEquals(
@@ -304,7 +271,7 @@ class VoiceControlStatusTest {
                 gate,
                 MicExposure.Isolated,
                 permissionGranted = true,
-                captureState = VoiceControlCaptureState.Idle,
+                capturing = false,
             ),
         )
     }

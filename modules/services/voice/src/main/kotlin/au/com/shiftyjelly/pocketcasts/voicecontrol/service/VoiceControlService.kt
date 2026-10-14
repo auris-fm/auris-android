@@ -101,9 +101,10 @@ class VoiceControlService : Service() {
     private var wiredBackend: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend? = null
     private var captureWasEverActive = false
     private var acquisitionLogged = false
-    private var consecutiveCaptureRestarts = 0
-    private var lastCaptureTerminationMs = 0L
     private var lastObserverDecision: String? = null
+
+    /** Settling delay and retry ceiling for automatic restarts, shared by every start decision. */
+    private val captureRestartBudget = CaptureRestartBudget()
 
     /**
      * Bumped to ask the mode observer to re-evaluate capture after it ended on its own. The
@@ -120,11 +121,6 @@ class VoiceControlService : Service() {
 
         /** The spec's closed runtime-reason mapping for a pipeline that ended on its own. */
         private const val REASON_CAPTURE_FAILURE = "capture_failure"
-
-        /** Delay before re-starting capture after it ended on its own, and the retry ceiling. */
-        private const val CAPTURE_RESTART_DELAY_MS = 500L
-        private const val CAPTURE_RESTART_WINDOW_MS = 5_000L
-        private const val MAX_CONSECUTIVE_CAPTURE_RESTARTS = 3
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -146,6 +142,8 @@ class VoiceControlService : Service() {
             Timber.i("Voice control already started")
             return
         }
+        // A user-driven service start clears any restart cooldown left by a previous session.
+        captureRestartBudget.reset()
 
         if (!hasRequiredPermissions()) {
             Timber.w("Missing permissions, stopping")
@@ -270,12 +268,14 @@ class VoiceControlService : Service() {
                                     )
                                     notificationManager.notify(notification)
                                 }
-                            } else {
+                            } else if (captureRestartBudget.allows()) {
                                 @Suppress("MissingPermission") // permission checked in hasRequiredPermissions() above
                                 startEngine(mode)
+                                currentMode = mode
+                                updateListeningState()
+                            } else {
+                                Timber.w("[VoicePipeline] start skipped: capture restart cooling down")
                             }
-                            currentMode = mode
-                            updateListeningState()
                         }
                     }
                 }.launchIn(serviceScope)
@@ -513,6 +513,12 @@ class VoiceControlService : Service() {
      */
     private fun onPipelineTerminated(generation: Int) {
         if (!engineStart.isCurrent(generation) || !engineStart.isStarted) return
+        // Budget the automatic restarts before anything releases routing: the release fires
+        // selection callbacks that re-enter acquisition and the start path, and they consult the
+        // same budget.
+        if (!captureRestartBudget.onTerminated()) {
+            Timber.w("[VoicePipeline] capture keeps ending — restart withheld until the cooldown passes")
+        }
         // A runtime stop, not a user request: the spec requires `mic_capture_stopped` at ERROR with
         // the runtime reason `capture_failure`, so lifecycle monitoring sees it.
         logCaptureStopped(REASON_CAPTURE_FAILURE, isUserRequested = false)
@@ -522,22 +528,17 @@ class VoiceControlService : Service() {
 
     /**
      * Capture ended without the gate asking it to — an AAudio disconnect, a backend failure. The
-     * mode was not re-evaluated, so nothing else would start it again: restart while the gate still
-     * calls for listening. Rate-limited, so a stream that keeps ending cannot spin.
+     * mode was not re-evaluated, so nothing else would start it again: signal the observer once the
+     * settle delay has passed, if the budget still allows a restart.
+     *
+     * The signal goes to the observer rather than starting the engine here: it is the single owner of
+     * engine starts, so a recovery cannot race an in-flight start that is still suspended.
      */
     private fun recoverCapture() {
-        val now = SystemClock.elapsedRealtime()
-        consecutiveCaptureRestarts =
-            if (now - lastCaptureTerminationMs < CAPTURE_RESTART_WINDOW_MS) consecutiveCaptureRestarts + 1 else 1
-        lastCaptureTerminationMs = now
-        if (consecutiveCaptureRestarts > MAX_CONSECUTIVE_CAPTURE_RESTARTS) {
-            Timber.w("[VoicePipeline] capture keeps ending — not restarting")
-            return
-        }
-        // Signal the mode observer rather than starting the engine here: it is the single owner of
-        // engine starts, so a recovery cannot race an in-flight start that is still suspended.
+        if (!captureRestartBudget.allows()) return
         serviceScope.launch(Dispatchers.Main) {
-            delay(CAPTURE_RESTART_DELAY_MS)
+            delay(captureRestartBudget.settleDelayMs)
+            if (!captureRestartBudget.allows()) return@launch
             captureRestartSignal.value = SystemClock.elapsedRealtime()
         }
     }
@@ -577,6 +578,10 @@ class VoiceControlService : Service() {
      */
     private fun acquireCandidate(route: AudioRoute) {
         if (acquisitionJob != null) return
+        if (!captureRestartBudget.allows()) {
+            Timber.w("[VoicePipeline] acquisition skipped: capture restart cooling down")
+            return
+        }
         Timber.i("[VoicePipeline] acquiring external microphone for route=%s", route)
         val gateAllows = {
             gate.state.value.allowed && audioRouteMonitor.route.value.keepsPendingAcquisition()

@@ -46,6 +46,8 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelDownloadState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.ModelManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlCaptureState
+import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlCaptureStateHolder
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 
@@ -61,6 +63,8 @@ class VoiceControlSettingsFragment : BaseFragment() {
     @Inject lateinit var audioRouteMonitor: AudioRouteMonitor
 
     @Inject lateinit var listeningModePolicy: ListeningModePolicy
+
+    @Inject lateinit var captureStateHolder: VoiceControlCaptureStateHolder
 
     private fun Context.isRecordAudioGranted() = ContextCompat.checkSelfPermission(
         this,
@@ -85,6 +89,8 @@ class VoiceControlSettingsFragment : BaseFragment() {
                 .collectAsStateWithLifecycle()
             val mode by listeningModePolicy.mode
                 .collectAsStateWithLifecycle()
+            val captureState by captureStateHolder.state
+                .collectAsStateWithLifecycle(VoiceControlCaptureState.Idle)
             val bottomInset = settings.bottomInset
                 .collectAsStateWithLifecycle(0)
 
@@ -110,6 +116,7 @@ class VoiceControlSettingsFragment : BaseFragment() {
                     gate = gateState,
                     micExposure = route.toMicExposure(),
                     permissionGranted = permissionGranted,
+                    captureState = captureState,
                 ),
                 onEnabledChange = { checked ->
                     settings.voiceControlUserDisabled.set(!checked, updateModifiedAt = false)

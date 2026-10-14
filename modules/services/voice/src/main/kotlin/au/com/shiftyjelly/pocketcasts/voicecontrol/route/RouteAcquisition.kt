@@ -107,6 +107,9 @@ class RouteAcquisition(
     /** True when this attempt opened an input stream that it has not handed off yet. */
     private var openedStream = false
 
+    /** Device id reported by the stream this attempt opened, reused when capture already started it. */
+    private var openedDeviceId: Int = -1
+
     /** True once the opened stream was started and so belongs to the capture engine. */
     private var streamHandedOff = false
 
@@ -197,9 +200,17 @@ class RouteAcquisition(
             Selection.SELECTED -> Unit
         }
 
+        // The mode observer can confirm, start and hand off a stream while this attempt was
+        // waiting for selection: the callbacks publish the confirmed route, and the engine starts
+        // from that. Opening a second stream here would delete the one the engine is using, and
+        // the coordinator would then report "already started" with VAD attached to nothing.
+        // Reuse the stream this attempt already owns.
+        if (openedStream) return AcquisitionResult.Acquired(openedDeviceId)
+
         // The opened stream is the final authority on which microphone was selected.
         val deviceId = platform.openInputStream()
         openedStream = true
+        openedDeviceId = deviceId
         streamHandedOff = false
         if (deviceId < 0 || !isConfirmedExternalMicrophone(platform.deviceType(deviceId))) {
             release()
@@ -253,6 +264,7 @@ class RouteAcquisition(
         if (openedStream) return true
         val deviceId = platform.openInputStream()
         openedStream = true
+        openedDeviceId = deviceId
         streamHandedOff = false
         if (deviceId < 0 || !isConfirmedExternalMicrophone(platform.deviceType(deviceId))) {
             Timber.w(
@@ -282,6 +294,7 @@ class RouteAcquisition(
         }
         openedStream = false
         streamHandedOff = false
+        openedDeviceId = -1
         if (routingAcquired) {
             routingAcquired = false
             runCatching { platform.stopBluetoothSco() }

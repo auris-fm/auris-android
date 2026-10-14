@@ -10,17 +10,23 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotOnCallCond
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.OtherAppPlayingCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlCaptureState
 
 /**
  * The voice-control status line shown in settings, in the order the gate checks permission,
  * setup, conflicts, context and route. The first matching row wins
  * (`voice-control-core.md` > "Privacy and UX").
+ *
+ * `captureState` is the actual capture state, not the mode: the mode reads
+ * `WakeWord`/`Continuous` whenever the route is eligible, so an eligible route whose capture never
+ * started (or failed to start) must not read as "Active".
  */
 internal fun voiceControlStatus(
     mode: ListeningMode,
     gate: VoiceControlGateState,
     micExposure: MicExposure,
     permissionGranted: Boolean,
+    captureState: VoiceControlCaptureState = VoiceControlCaptureState.Active,
 ): String {
     if (!permissionGranted) return "Blocked: microphone permission required"
     if (gate.isNotAllowed(EnabledByUserCondition.ID)) return "Disabled in settings"
@@ -36,10 +42,18 @@ internal fun voiceControlStatus(
 
         MicExposure.Exposed -> "Built-in microphone; a headset or earbud microphone is required"
 
-        MicExposure.Isolated -> when (mode) {
-            ListeningMode.Continuous -> "Active (grace period)"
-            ListeningMode.WakeWord -> "Active (wake word required)"
-            ListeningMode.Off -> "Off"
+        MicExposure.Isolated -> when (captureState) {
+            VoiceControlCaptureState.StartFailed -> "Blocked: microphone capture failed to start"
+
+            VoiceControlCaptureState.Starting -> "Starting…"
+
+            VoiceControlCaptureState.Active -> when (mode) {
+                ListeningMode.Continuous -> "Active (grace period)"
+                ListeningMode.WakeWord -> "Active (wake word required)"
+                ListeningMode.Off -> "Off"
+            }
+
+            VoiceControlCaptureState.Idle -> "Off"
         }
     }
 }

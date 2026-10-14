@@ -87,6 +87,8 @@ class VoiceControlService : Service() {
 
     @Inject lateinit var routeAcquisition: RouteAcquisition
 
+    @Inject lateinit var captureStateHolder: VoiceControlCaptureStateHolder
+
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var modeJob: Job? = null
     private var acquisitionJob: Job? = null
@@ -334,7 +336,12 @@ class VoiceControlService : Service() {
         // Captured before the attempt: validated after ensureReady() so a start that was
         // invalidated while suspended (gate loss, stop) does not commit.
         val generation = engineStart.generation()
-        return engineStart.startIfNotRunning(
+        // Publish the real capture state: the mode reads WakeWord/Continuous whenever the route is
+        // eligible, including when a start fails below, so settings must not equate the two.
+        if (!engineStart.isStarted) {
+            captureStateHolder.update(VoiceControlCaptureState.Starting)
+        }
+        val started = engineStart.startIfNotRunning(
             start = {
                 val backend = asrBackendSelector.select()
                 if (backend == null) {
@@ -449,6 +456,12 @@ class VoiceControlService : Service() {
                 Timber.i("[VoicePipeline] engine started mode=%s", mode)
             },
         )
+        if (started) {
+            captureStateHolder.update(VoiceControlCaptureState.Active)
+        } else {
+            captureStateHolder.update(VoiceControlCaptureState.StartFailed)
+        }
+        return started
     }
 
     /**
@@ -534,6 +547,7 @@ class VoiceControlService : Service() {
         if (engineStart.isStarted) {
             voiceAsrEngine.get().stop()
             engineStart.onStopped()
+            captureStateHolder.update(VoiceControlCaptureState.Idle)
             Timber.i("[VoicePipeline] engine stopped")
         }
         routeAcquisition.release()

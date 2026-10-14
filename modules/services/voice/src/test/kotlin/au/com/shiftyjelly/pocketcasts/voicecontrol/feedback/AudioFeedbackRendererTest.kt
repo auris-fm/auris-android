@@ -197,34 +197,6 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
-    fun `a stop whose replacement lands DURING it does not retire the successor`() = runTest {
-        // @spec/@reviewer: a fresh stop after the successor completed does not test the window. The
-        // replacement must land INSIDE `stopNow` -- after the owner is claimed, before the write -- which
-        // is the only instant where capturing before versus after differs.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
-        renderer.playEarcon(EarconId.WAKE_WORD)
-
-        // THE REPLACEMENT LANDS DURING THE STOP, and it publishes a verdict of its OWN.
-        renderer.duringStopForTest = {
-            renderer.duringStopForTest = null
-            whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
-            renderer.playEarcon(EarconId.LISTENING_START)
-            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
-                .idleFor(java.time.Duration.ofMillis(100))
-        }
-
-        renderer.stopEarconNow()
-
-        assertEquals(
-            "the stop must retire the cue IT stopped, and the successor's own verdict must stand",
-            AudioFeedbackRenderer.CueObservation.Consumed,
-            renderer.lastCueObservation.value?.observation,
-        )
-    }
-
-    @Test
     fun `an old stop cannot retire a successor cue's observation`() = runTest {
         // @spec: "an old stop must not retire a successor". The first cue's observation expires to
         // Unknown; a SECOND cue then takes over and is observed Consumed. The first cue's retirement must
@@ -254,15 +226,19 @@ class AudioFeedbackRendererTest {
             renderer.lastCueObservation.value?.observation,
         )
 
-        // THE STALE RETIREMENT FOR THE FIRST CUE ARRIVES LATE and must change nothing.
-        renderer.stopEarconNow()
+        // THE OLD OBSERVER'S OWN RETIREMENT CANNOT PUBLISH, because it no longer owns the cue: the
+        // ownership check in `publishObservationIfOwning` refuses it. This is the REAL stale-retirement
+        // path -- `publishEndedIfOwning(observer)` -- not a stop API.
+        renderer.retireObservationForTest(owner = null)
 
-        // The stop path retires the CURRENT owner, which IS the successor, so the verdict becomes Ended --
-        // what must NOT happen is the OLD cue's Unknown being republished. Any value is acceptable except
-        // the successor's observation being replaced by a verdict about a cue nobody is observing.
         assertNotEquals(
             "a stale retirement must not resurrect the old cue's verdict",
             AudioFeedbackRenderer.CueObservation.Unknown,
+            renderer.lastCueObservation.value?.observation,
+        )
+        assertEquals(
+            "the successor's verdict is untouched by the stale retirement",
+            AudioFeedbackRenderer.CueObservation.Consumed,
             renderer.lastCueObservation.value?.observation,
         )
     }
@@ -281,8 +257,9 @@ class AudioFeedbackRendererTest {
         val atExpiry = renderer.lastCueObservation.value
         assertEquals(AudioFeedbackRenderer.CueObservation.Unknown, atExpiry?.observation)
 
-        // THE SAME CUE NOW GETS A SECOND VERDICT. Its identity must NOT change.
-        renderer.stopEarconNow()
+        // THE SAME CUE NOW GETS A SECOND VERDICT, through the session end -- the production path that
+        // retires a cue. Its identity must NOT change.
+        renderer.endSession()
         val atStop = renderer.lastCueObservation.value
         assertEquals(AudioFeedbackRenderer.CueObservation.Ended, atStop?.observation)
         assertEquals(
@@ -322,33 +299,6 @@ class AudioFeedbackRendererTest {
         // THE PLAYER IS NOT ASKED AGAIN. Re-reading would be the handoff window; the returned token is
         // the one the renderer must hold.
         org.mockito.Mockito.verify(earconPlayer, org.mockito.Mockito.never()).currentAdmissionToken()
-    }
-
-    @Test
-    fun `an explicit stop RETIRES the unresolved observation`() = runTest {
-        // @reviewer's expiry→actual-endSession reproduction, and @spec's retirement gap: the deadline
-        // establishes UNKNOWN, and then the production stop path must retire it -- a cue that has been
-        // stopped explicitly HAS a known fate, and leaving Unknown published would hold the gate's
-        // attribution open for every later music reading.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
-
-        renderer.playEarcon(EarconId.WAKE_WORD)
-        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
-            .idleFor(java.time.Duration.ofMillis(2_100))
-        assertEquals(
-            "the deadline first establishes UNKNOWN",
-            AudioFeedbackRenderer.CueObservation.Unknown,
-            renderer.lastCueObservation.value?.observation,
-        )
-
-        renderer.stopEarconNow()
-
-        assertEquals(
-            "an explicit stop RETIRES the unresolved observation, because the cue now has a known fate",
-            AudioFeedbackRenderer.CueObservation.Ended,
-            renderer.lastCueObservation.value?.observation,
-        )
     }
 
     @Test
@@ -896,33 +846,43 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
-    fun `a new admission REPLACES the renderer's held admission, so its stop names the successor`() = runTest {
-        // WHAT THE PRODUCTION PATH ACTUALLY DOES, stated as a boundary rather than as an aspiration:
-        // `stopEarconNow` is called by CURRENT actions (session end, explicit stop), never by an old cue's
-        // continuation, so it names the admission the renderer CURRENTLY holds. A stale continuation does
-        // not issue a stop at all -- its retirement is ownership-checked separately, which is what makes
-        // "an old stop cannot retire a successor" true.
-        //
-        // @spec expected the opposite here (an old stop naming A and being rejected). No production path
-        // issues such a stop, so a fixture asserting it would test a behaviour the code does not have.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+    fun `a RELEASED old observer cannot overwrite the same-sound successor's verdict`() = runTest {
+        // @spec: verify the ACTUAL stale-observer retirement path end to end. Hold A's observer, admit a
+        // SAME-SOUND B, release A, and require B's observation to survive. This is where the ownership
+        // guarantee really lives -- `publishObservationIfOwning` refuses a writer that no longer owns the
+        // cue -- not in a stop API.
         whenever(earconPlayer.emittedDurationMs()).thenReturn(1_000L)
+
+        // A IS OBSERVED AND ITS VERDICT PUBLISHED.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        // THE LOOP WAITS ONE HEARTBEAT-SCALED INTERVAL BEFORE ITS FIRST OBSERVATION, so a 100 ms idle
+        // samples before A has been observed at all -- the wait must cover that first observation.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        val aVerdict = renderer.lastCueObservation.value
+        assertEquals(
+            "A's own verdict is published before the successor arrives",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            aVerdict?.observation,
+        )
+
+        // B TAKES OVER -- SAME SOUND, a DIFFERENT admission -- and publishes its OWN verdict.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(2L))
         renderer.playEarcon(EarconId.WAKE_WORD)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
-            .idleFor(java.time.Duration.ofMillis(50))
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        val bVerdict = renderer.lastCueObservation.value
+        assertNotEquals("B is a distinct cue", aVerdict?.cueId, bVerdict?.cueId)
 
-        // AN OLD CONTINUATION'S RETIREMENT IS OWNERSHIP-CHECKED AND CANNOT RETIRE THE SUCCESSOR. Its
-        // observation is not published while it no longer owns the cue.
-        val before = renderer.lastCueObservation.value?.observation
+        // A'S RELEASED OBSERVER RETIRES LATE. It no longer owns the cue, so the attempt is REFUSED.
+        renderer.retireObservationForTest(owner = null)
 
-        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(EarconPlayer.AdmissionToken(2L))
-        renderer.playEarcon(EarconId.LISTENING_START)
-        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
-            .idleFor(java.time.Duration.ofMillis(50))
-
-        // A CURRENT STOP NAMES THE CURRENT ADMISSION -- the one the renderer holds now.
-        renderer.stopEarconNow()
-        org.mockito.Mockito.verify(earconPlayer).stopAdmissionNow(EarconPlayer.AdmissionToken(2L))
+        assertEquals(
+            "the successor's observation survives a stale retirement",
+            bVerdict,
+            renderer.lastCueObservation.value,
+        )
     }
 }

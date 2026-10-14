@@ -963,4 +963,99 @@ class AudioFeedbackRendererTest {
         // EarconPlayer (accepted-frames/frontier and completion cases). Asserting it here is structurally
         // impossible without swapping in the real player, which is the player test's job.
     }
+
+    @Test
+    fun `B's writes and head progression are observed while A's held job is cancelled`() {
+        // THE COMBINED OUTCOME @spec asked for, which the two separate controls did not provide: a REAL
+        // EarconPlayer and controlled track INSIDE the renderer fixture, so B's accepted writes and
+        // queued-to-consumed progression are observed in the SAME scenario where A's actual job is held
+        // and cancelled. The renderer takes any EarconPlayer, so this swaps the mock for the real one.
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val realPlayer = EarconPlayer(context)
+        val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
+        val clip = clipClass.declaredConstructors.single().apply { isAccessible = true }
+            .newInstance(realPlayer, ShortArray(100), 16000)
+        @Suppress("UNCHECKED_CAST")
+        realPlayer.javaClass.getDeclaredField("clips").apply { isAccessible = true }
+            .set(realPlayer, mapOf(EarconId.WAKE_WORD to clip))
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        realPlayer.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(realPlayer, track)
+        var head = 0
+        realPlayer.readPlaybackHeadFrames = { head }
+
+        val combinedRenderer = AudioFeedbackRenderer(realPlayer, ttsEngine)
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        combinedRenderer.holdObserverForTest = barrier
+        combinedRenderer.holdArrivalForTest = arrival
+
+        // A IS ADMITTED, WRITES, AND ITS OBSERVER ARRIVES AT THE HOLD.
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue("A's observer must actually ARRIVE at the hold", arrival.isCompleted)
+        val aJob = arrival.getCompleted()
+        assertEquals("A's writes are accepted by the real track", 100, realPlayer.emittedFrames)
+
+        // B TAKES THE SAME SOUND WHILE A IS HELD: its OWN writes land, cumulatively, on that track.
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertEquals("B supersedes A as the last admission", EarconId.WAKE_WORD, realPlayer.lastPlayedId)
+        assertEquals("B wrote its own 100 frames", 100, realPlayer.emittedFrames)
+        assertEquals(
+            "the cumulative frontier is A's writes plus B's",
+            200,
+            realPlayer.javaClass.getDeclaredField("acceptedFramesTotal")
+                .apply { isAccessible = true }
+                .get(realPlayer),
+        )
+        // AND A'S ACTUAL JOB IS CANCELLED while its continuation is held.
+        assertTrue("admitting B cancels A's continuation", aJob.isCancelled)
+
+        // B'S HEAD PROGRESSION, queued and then consumed from ITS OWN cumulative target.
+        // THE HEAD IS CUMULATIVE ACROSS CUES: B's own frames start at A's accepted 100, so a head at 150
+        // means B's audio HAS begun -- Playing, not Queued. Queued would be a head at or below B's own
+        // origin (100), which is the earlier, pre-sounding state.
+        head = 100
+        assertEquals(
+            "B is Queued while the head is still at its own origin",
+            EarconPlayer.EarconCompletion.Queued,
+            realPlayer.completion(),
+        )
+        head = 150
+        assertEquals(
+            "B is Playing once its own frames begin, and not yet consumed",
+            EarconPlayer.EarconCompletion.Playing,
+            realPlayer.completion(),
+        )
+        head = 200
+        assertEquals(
+            "B reaches Consumed at its own cumulative frontier",
+            EarconPlayer.EarconCompletion.Consumed,
+            realPlayer.completion(),
+        )
+
+        // A RESUMES AND IS REFUSED; B'S VERDICT STANDS.
+        barrier.complete(Unit)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(3_000))
+        assertEquals(
+            "the successor's verdict survives the released continuation",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            combinedRenderer.lastCueObservation.value?.observation,
+        )
+
+        // TEARDOWN, the real session path.
+        combinedRenderer.endSession()
+        org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).release()
+    }
 }

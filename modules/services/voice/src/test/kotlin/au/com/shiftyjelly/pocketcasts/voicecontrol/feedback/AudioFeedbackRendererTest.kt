@@ -997,7 +997,9 @@ class AudioFeedbackRendererTest {
         combinedRenderer.holdObserverForTest = barrier
         combinedRenderer.holdArrivalForTest = arrival
 
-        // A IS ADMITTED, WRITES, AND ITS OBSERVER ARRIVES AT THE HOLD.
+        // A IS ADMITTED, AND ITS RETURNED ADMISSION IS RETAINED: two admissions of the SAME sound are
+        // indistinguishable by label, so the tokens are what prove B is a distinct admission.
+        val aAdmission = realPlayer.currentAdmissionForTest()
         combinedRenderer.playEarcon(EarconId.WAKE_WORD)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(1_100))
@@ -1007,9 +1009,15 @@ class AudioFeedbackRendererTest {
 
         // B TAKES THE SAME SOUND WHILE A IS HELD: its OWN writes land, cumulatively, on that track.
         combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        val bAdmission = realPlayer.currentAdmissionForTest()
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(1_100))
-        assertEquals("B supersedes A as the last admission", EarconId.WAKE_WORD, realPlayer.lastPlayedId)
+        assertNotEquals(
+            "B is a DISTINCT admission of the same sound, which a label cannot show",
+            aAdmission,
+            bAdmission,
+        )
+        assertEquals("the same-sound cue is what was last admitted", EarconId.WAKE_WORD, realPlayer.lastPlayedId)
         assertEquals("B wrote its own 100 frames", 100, realPlayer.emittedFrames)
         assertEquals(
             "the cumulative frontier is A's writes plus B's",
@@ -1054,7 +1062,8 @@ class AudioFeedbackRendererTest {
             combinedRenderer.lastCueObservation.value?.observation,
         )
 
-        // TEARDOWN, the real session path.
+        // TEARDOWN, through the RENDERER's own lifecycle -- not a direct player.release(), which would
+        // bypass the contract this case is about.
         combinedRenderer.endSession()
         org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).release()
     }

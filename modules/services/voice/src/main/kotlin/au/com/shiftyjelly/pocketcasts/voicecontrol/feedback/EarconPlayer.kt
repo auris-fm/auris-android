@@ -421,6 +421,12 @@ class EarconPlayer(
     private var currentAdmission: AdmissionToken? = null
 
     /**
+     * The admission currently owning the track, so a caller can tell TWO admissions of the SAME sound
+     * apart -- their label is identical, so only the token distinguishes them.
+     */
+    fun currentAdmissionForTest(): AdmissionToken? = currentAdmission
+
+    /**
      * The admission that currently owns the track, for a caller that will later stop THAT admission.
      *
      * Read on the player thread, so it is the admission owning the track at the moment of the read rather

@@ -94,7 +94,7 @@ class VoiceControlService : Service() {
     private var acquisitionJob: Job? = null
     private var lastIntentType: String? = null
     private var lastCommandTime: Long = 0L
-    private val engineStart = EngineStartCoordinator()
+    private val engineStart = EngineStartState()
     private var wiredBackend: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend? = null
     private var captureWasEverActive = false
     private var acquisitionLogged = false
@@ -400,6 +400,9 @@ class VoiceControlService : Service() {
                         playbackBufferProvider = playbackBufferRecorder::snapshot,
                         micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
                         onIntent = { intent -> handleIntent(intent) },
+                        onTerminated = {
+                            serviceScope.launch(Dispatchers.Main) { onPipelineTerminated(generation) }
+                        },
                     )
                 } catch (e: Exception) {
                     // The engine did not take the stream; it is still ours to close.
@@ -460,8 +463,27 @@ class VoiceControlService : Service() {
             captureStateHolder.update(VoiceControlCaptureState.Active)
         } else {
             captureStateHolder.update(VoiceControlCaptureState.StartFailed)
+            // A start that failed before taking the stream leaves acquisition's opened stream
+            // unowned; close it rather than let it stay live with no consumer.
+            routeAcquisition.release()
         }
         return started
+    }
+
+    /**
+     * The processing pipeline can end on its own — a backend failure, or a stream that stops. Capture
+     * state must not stay `Active`: settings would report listening and a later start would be
+     * skipped as "already running". Scoped to the start generation, so an intentional stop (which
+     * bumps it) is ignored.
+     */
+    private fun onPipelineTerminated(generation: Int) {
+        if (!engineStart.isCurrent(generation) || !engineStart.isStarted) return
+        Timber.w("[VoicePipeline] capture pipeline ended unexpectedly — clearing capture state")
+        engineStart.onStopped()
+        captureStateHolder.update(VoiceControlCaptureState.Idle)
+        currentMode = ListeningMode.Off
+        routeAcquisition.release()
+        updateListeningState()
     }
 
     /**
@@ -483,28 +505,18 @@ class VoiceControlService : Service() {
                 acquisitionJob = null
                 when (result) {
                     is AcquisitionResult.Acquired -> {
-                        // Publish the confirmed selection into the route state before starting.
-                        // The device list does not change when a microphone is selected, so the
-                        // monitor may still report BluetoothA2dpOnly: without this the mode never
-                        // leaves Off, and a later gate blocker would produce no new mode emission
-                        // to stop capture.
+                        // Publish the confirmed selection into the route state. The device list does
+                        // not change when a microphone is selected, so the monitor may still report
+                        // BluetoothA2dpOnly; without this the mode never leaves Off.
+                        //
+                        // Capture is started by the mode observer, the single owner of engine
+                        // starts: the published route flips the mode to WakeWord/Continuous and the
+                        // observer's startEngine reuses this attempt's already-opened stream.
                         audioRouteMonitor.onExternalMicrophoneConfirmed()
-                        val started = if (gate.state.value.allowed) {
-                            @Suppress("MissingPermission") // permission checked in hasRequiredPermissions()
-                            startEngine(
-                                if (gracePeriodSignal.isActive.value) {
-                                    ListeningMode.Continuous
-                                } else {
-                                    ListeningMode.WakeWord
-                                },
-                            )
-                        } else {
-                            false
-                        }
-                        // startEngine hands the stream to the engine on success and closes it on
-                        // its own failures. This release covers the gate-lost case before the
-                        // start, and is idempotent for the rest.
-                        if (!started) {
+                        // The gate can block between acquisition's own check and this point. The
+                        // stream is still ours until the engine takes it, so release it rather than
+                        // leave it live with no consumer.
+                        if (!gate.state.value.allowed) {
                             routeAcquisition.release()
                         }
                     }

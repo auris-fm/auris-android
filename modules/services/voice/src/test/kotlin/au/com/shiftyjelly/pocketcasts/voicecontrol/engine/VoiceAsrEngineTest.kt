@@ -128,6 +128,48 @@ class VoiceAsrEngineTest {
         )
     }
 
+    @Test
+    fun `a processing flow that ends reports termination`() = runTest {
+        createEngine()
+        // The pipeline exiting on its own (a backend failure, a stream that stops) must reach the
+        // service so it can clear capture state instead of reporting a listening engine forever.
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(flowOf(VoiceSegmenterResult.Silence))
+        var terminated = false
+
+        engine.start(
+            backend = backend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.WakeWord,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+            onTerminated = { terminated = true },
+        )
+        advanceUntilIdle()
+
+        assertTrue("the service must learn when the pipeline ends", terminated)
+    }
+
+    @Test
+    fun `a pipeline that never attaches reports termination`() = runTest {
+        createEngine()
+        `when`(voiceAudioProcessor.attachCapture()).thenReturn(false)
+        var terminated = false
+
+        engine.start(
+            backend = backend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.WakeWord,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+            onTerminated = { terminated = true },
+        )
+        advanceUntilIdle()
+
+        assertTrue("a start that ends before attaching must report termination", terminated)
+    }
+
     // ── The backend must be prepared on every start, not just the first ──
 
     @Test

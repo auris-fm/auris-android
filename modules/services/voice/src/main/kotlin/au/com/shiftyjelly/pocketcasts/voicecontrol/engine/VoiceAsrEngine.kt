@@ -89,6 +89,10 @@ class VoiceAsrEngine @Inject constructor(
         playbackBufferProvider: () -> FloatArray,
         micExposureProvider: () -> MicExposure,
         onIntent: (VoiceIntent) -> Unit,
+        // Invoked when the processing job ends for any reason, so the service can clear capture
+        // state the pipeline no longer backs. The job ends on an intentional stop too; the caller
+        // scopes the reaction to its start generation so only an unexpected end is acted on.
+        onTerminated: () -> Unit = {},
     ): CaptureAttachment {
         this.backend = backend
         this.currentMode = listeningMode
@@ -154,7 +158,10 @@ class VoiceAsrEngine @Inject constructor(
         // If the job ends without ever attaching (backend not ready, native attach failure, or
         // cancellation before the body ran), report that the stream was never taken. Completing
         // an already-completed true is a no-op.
-        processingJob?.invokeOnCompletion { attached.complete(false) }
+        processingJob?.invokeOnCompletion {
+            attached.complete(false)
+            onTerminated()
+        }
         Timber.i("[VoicePipeline] engine start requested backend=%s mode=%s", backend::class.simpleName, listeningMode)
         return CaptureAttachment(attached)
     }

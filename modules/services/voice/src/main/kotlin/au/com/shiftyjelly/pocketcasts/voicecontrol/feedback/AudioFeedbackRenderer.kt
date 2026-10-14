@@ -369,14 +369,6 @@ class AudioFeedbackRenderer(
             // case can keep THIS observer in flight while a successor takes the cue. That is the only way
             // to exercise a genuinely delayed continuation -- a case that lets the observer finish and
             // then calls a retirement by hand tests the hand, not the continuation.
-            // ONE-SHOT: only the observer that finds a hold takes it, and it is cleared as it is taken, so
-            // a SUCCESSOR's observer runs normally. A hold that stayed armed would stall every later cue
-            // and the case would prove nothing about the cue it meant to hold.
-            synchronized(coverageLock) {
-                val pending = holdObserverForTest
-                holdObserverForTest = null
-                pending
-            }?.await()
             // A cue that is never observed to progress must not be covered forever: the estimate
             // bounds the wait, and the bound is only a ceiling.
             val boundMs = earconPlayer.emittedDurationMs()
@@ -437,6 +429,16 @@ class AudioFeedbackRenderer(
                 } else {
                     minOf(EMISSION_HEARTBEAT_MS, maxOf(remainingMs, 1L))
                 }
+                // THE HOLD SITS AT THE EXISTING OBSERVATION WAIT, OUTSIDE `coverageLock`. That is a real
+                // suspension the loop already has, so holding here keeps a genuine continuation in flight
+                // without parking the shared thread (a parking barrier would deadlock it) and without
+                // suspending inside the monitor (which is the interleaving the monitor prevents).
+                // ONE-SHOT: the observer that finds a hold takes it, so a SUCCESSOR runs normally.
+                synchronized(coverageLock) {
+                    val pending = holdObserverForTest
+                    holdObserverForTest = null
+                    pending
+                }?.await()
                 delay(waitMs)
                 elapsed += waitMs
                 observed = true

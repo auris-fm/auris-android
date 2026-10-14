@@ -915,16 +915,40 @@ class AudioFeedbackRendererTest {
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(2L))
         renderer.playEarcon(EarconId.WAKE_WORD)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
-            .idleFor(java.time.Duration.ofMillis(50))
+            .idleFor(java.time.Duration.ofMillis(1_100))
 
-        // THE FIRST MECHANISM: the held continuation is CANCELLED by the successor's admission, so it
-        // cannot reach the publish path to be refused there.
+        // THE MECHANISM: the held continuation is CANCELLED by the successor's admission, so it cannot
+        // reach the publish path to be refused there. This is asserted as the MECHANISM, not as a failing
+        // mutant -- a mutant cannot fail here because the continuation never arrives.
+        // A'S RESUMPTION WOULD PUBLISH A DIFFERENT VERDICT IF IT WERE ALLOWED TO: what it observes after
+        // resuming is a DEADLINE EXPIRY, not B's consumption. So "B's Consumed still stands" separates
+        // "A was cancelled" from "A published and happened to agree" -- without this the case cannot fail,
+        // which is what the first two versions were caught on.
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
         hold.complete(Unit)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
-            .idleFor(java.time.Duration.ofMillis(50))
-        assertTrue(
-            "the successor's observer owns the cue",
-            renderer.coverageIsRunningForTest(),
+            .idleFor(java.time.Duration.ofMillis(3_000))
+        // THE SUCCESSOR IS NOT THE HELD ONE: its own observation completed normally, so it is no longer
+        // running -- the assertion that matters is that ITS verdict is the one that stands, below.
+        assertEquals(
+            "the successor's verdict is in place before the held continuation is released",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            renderer.lastCueObservation.value?.observation,
+        )
+
+        // B'S OWN COMPLETION IS UNAFFECTED by the held predecessor: it reaches its own verdict.
+        assertEquals(
+            "the successor completes on its own observation",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            renderer.lastCueObservation.value?.observation,
+        )
+
+        // AND SESSION TEARDOWN IS THE REAL RETIREMENT PATH, which names B and ends its attribution.
+        renderer.endSession()
+        assertEquals(
+            "session teardown retires the cue it ended",
+            AudioFeedbackRenderer.CueObservation.Ended,
+            renderer.lastCueObservation.value?.observation,
         )
     }
 }

@@ -9,7 +9,9 @@ import au.com.shiftyjelly.pocketcasts.preferences.Settings
 import au.com.shiftyjelly.pocketcasts.repositories.chromecast.CastManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.GoogleMlKitTranslator
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CaptureHardware
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeCaptureHardware
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.foreground.ForegroundStateMonitor
@@ -146,6 +148,9 @@ abstract class VoiceControlModule {
 
         @Provides @Singleton
         fun provideCurrentLocale(): () -> Locale = { Locale.getDefault() }
+
+        @Provides @Singleton
+        fun provideCaptureHardware(): CaptureHardware = OboeCaptureHardware()
 
         @Provides @Singleton
         fun provideRouteAcquisitionPlatform(

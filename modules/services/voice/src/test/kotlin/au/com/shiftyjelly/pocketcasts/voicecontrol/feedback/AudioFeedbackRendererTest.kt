@@ -887,63 +887,69 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
-    fun `a HELD observer is STOPPED BY CANCELLATION before ownership is consulted`() = runTest {
-        // WHAT THIS ESTABLISHES, measured rather than assumed: when a successor is admitted, the previous
-        // observer is CANCELLED (`earconCoverageJob?.cancel()`), so a held continuation never resumes to
-        // reach the ownership check at all. Two mechanisms stop a stale continuation and CANCELLATION IS
-        // THE FIRST ONE.
+    fun `a held continuation that ARRIVED is refused, preserving its successor`() = runTest {
+        // THE CORRECTED CONTROL, per @reviewer's 325d7bd4 and @spec's instruction.
         //
-        // I built this case expecting to exercise the held continuation reaching `publishObservationIfOwning`
-        // and being refused there. It does not: `coverageIsRunningForTest()` is FALSE after the successor
-        // is admitted, so the continuation is already gone. Asserting "B's verdict is unchanged" would
-        // therefore pass under a broken ownership check too -- a case that cannot fail, which is the
-        // critique this case was written to answer.
+        // TWO THINGS THE EARLIER VERSIONS GOT WRONG, both of them preconditions rather than assertions:
+        //  1. `coverageIsRunningForTest` reports only whether the CURRENT job is active. By the time it was
+        //     read, the predecessor had already been replaced, so it could be true for the SUCCESSOR --
+        //     the case asserted an arrival it never established. Arrival is now ACKNOWLEDGED by the
+        //     observer that takes the hold, and that acknowledgement carries A'S OWN JOB.
+        //  2. The barrier sits AFTER the loop's wait, outside `coverageLock`, so A has no further
+        //     suspension before it reads the output and publishes.
         //
-        // So it asserts the fact it can establish, and the ownership check keeps its own separate
-        // coverage (the sibling cases, which DO fail when the check is removed).
-        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
-        renderer.holdObserverForTest = hold
+        // And one thing about the mutant: a surviving cancellation-only mutant is NOT a coverage failure.
+        // With cancellation removed, A still holds `observerRef = A` while B owns `earconCoverageJob`, so
+        // the ownership guard REFUSES A anyway -- the guard, not cancellation, is what preserves B here.
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        renderer.holdObserverForTest = barrier
+        renderer.holdArrivalForTest = arrival
         whenever(earconPlayer.emittedDurationMs()).thenReturn(1_000L)
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
 
+        // A STARTS AND ARRIVES AT THE HOLD.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         renderer.playEarcon(EarconId.WAKE_WORD)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
-            .idleFor(java.time.Duration.ofMillis(50))
-        assertTrue("A's observer is in flight, holding", renderer.coverageIsRunningForTest())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue("A must actually ARRIVE at the hold", arrival.isCompleted)
+        val aJob = arrival.getCompleted()
 
+        // B TAKES THE SAME SOUND WHILE A IS HELD, and is admitted with its OWN token.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(2L))
         renderer.playEarcon(EarconId.WAKE_WORD)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(1_100))
+        val bVerdict = renderer.lastCueObservation.value
+        assertEquals(
+            "B's own verdict is in place while A is held",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            bVerdict?.observation,
+        )
 
-        // THE MECHANISM: the held continuation is CANCELLED by the successor's admission, so it cannot
-        // reach the publish path to be refused there. This is asserted as the MECHANISM, not as a failing
-        // mutant -- a mutant cannot fail here because the continuation never arrives.
-        // A'S RESUMPTION WOULD PUBLISH A DIFFERENT VERDICT IF IT WERE ALLOWED TO: what it observes after
-        // resuming is a DEADLINE EXPIRY, not B's consumption. So "B's Consumed still stands" separates
-        // "A was cancelled" from "A published and happened to agree" -- without this the case cannot fail,
-        // which is what the first two versions were caught on.
+        // THE CANCELLATION IS OBSERVED ON A'S OWN JOB -- the identity the arrival carried, not a probe.
+        assertTrue("admitting B cancels A's continuation", aJob.isCancelled)
+
+        // A RESUMES AND REACHES THE PUBLISH PATH. What it would write is a DIFFERENT verdict, so the
+        // assertion separates "A was refused" from "A published and happened to agree".
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
-        hold.complete(Unit)
+        barrier.complete(Unit)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(3_000))
-        // THE SUCCESSOR IS NOT THE HELD ONE: its own observation completed normally, so it is no longer
-        // running -- the assertion that matters is that ITS verdict is the one that stands, below.
+
         assertEquals(
-            "the successor's verdict is in place before the held continuation is released",
+            "the arrived continuation is REFUSED: the successor's verdict stands",
+            bVerdict,
+            renderer.lastCueObservation.value,
+        )
+        assertEquals(
+            "and the verdict A would have written is NOT what stands",
             AudioFeedbackRenderer.CueObservation.Consumed,
             renderer.lastCueObservation.value?.observation,
         )
 
-        // B'S OWN COMPLETION IS UNAFFECTED by the held predecessor: it reaches its own verdict.
-        assertEquals(
-            "the successor completes on its own observation",
-            AudioFeedbackRenderer.CueObservation.Consumed,
-            renderer.lastCueObservation.value?.observation,
-        )
-
-        // AND SESSION TEARDOWN IS THE REAL RETIREMENT PATH, which names B and ends its attribution.
+        // B'S OWN TEARDOWN, through the real session path.
         renderer.endSession()
         assertEquals(
             "session teardown retires the cue it ended",

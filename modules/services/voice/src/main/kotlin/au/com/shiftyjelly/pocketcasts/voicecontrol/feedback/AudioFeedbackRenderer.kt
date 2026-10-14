@@ -191,6 +191,17 @@ class AudioFeedbackRenderer(
     internal var holdObserverForTest: kotlinx.coroutines.CompletableDeferred<Unit>? = null
 
     /**
+     * Completed by the observer that TAKES the hold, and carrying that observer's OWN job.
+     *
+     * `coverageIsRunningForTest` reports only whether the CURRENT job is active, which is not the same as
+     * "A arrived at the hold" -- a predecessor is already replaced by the time we look, so that probe could
+     * be true for the successor and the case would assert a precondition it never established. This
+     * acknowledgement is the arrival proof, and the job it carries is the one whose cancellation and
+     * eventual refusal the case is about.
+     */
+    internal var holdArrivalForTest: kotlinx.coroutines.CompletableDeferred<Job>? = null
+
+    /**
      * Whether the coverage observation is STILL RUNNING, so a case can assert that a deadline BOUNDS it.
      *
      * A note count cannot show this: a queued cue emits no notes either way, so a deadline that never
@@ -429,19 +440,28 @@ class AudioFeedbackRenderer(
                 } else {
                     minOf(EMISSION_HEARTBEAT_MS, maxOf(remainingMs, 1L))
                 }
-                // THE HOLD SITS AT THE EXISTING OBSERVATION WAIT, OUTSIDE `coverageLock`. That is a real
-                // suspension the loop already has, so holding here keeps a genuine continuation in flight
-                // without parking the shared thread (a parking barrier would deadlock it) and without
-                // suspending inside the monitor (which is the interleaving the monitor prevents).
+                delay(waitMs)
+                elapsed += waitMs
+                observed = true
+                // THE HOLD SITS AFTER THE WAIT, IMMEDIATELY BEFORE THE OBSERVATION IS READ. This placement
+                // is the whole distinction: a hold BEFORE `delay` releases into a CANCELLABLE suspension,
+                // so a cancelled continuation throws there and never reaches the observation at all --
+                // which made the earlier fixture unobservable rather than discriminating. Here the
+                // continuation has no further suspension before it reads the output and publishes, so a
+                // cancelled continuation reaches the publish path exactly as production's does whenever a
+                // successor is admitted during this window.
                 // ONE-SHOT: the observer that finds a hold takes it, so a SUCCESSOR runs normally.
                 synchronized(coverageLock) {
                     val pending = holdObserverForTest
                     holdObserverForTest = null
                     pending
-                }?.await()
-                delay(waitMs)
-                elapsed += waitMs
-                observed = true
+                }?.let { barrier ->
+                    // ARRIVAL IS ACKNOWLEDGED BEFORE WAITING, and it carries THIS observer's identity, so
+                    // the case knows A genuinely reached the hold rather than inferring it from a probe
+                    // about the current job.
+                    holdArrivalForTest?.complete(observerRef.await())
+                    barrier.await()
+                }
                 when (earconPlayer.completion()) {
                     // CONSUMED IS MEASURED RENDERING, so it NOTES BEFORE ENDING. The head has passed
                     // every accepted frame, which is the STRONGEST evidence the cue sounded -- and a cue

@@ -36,6 +36,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonito
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.keepsPendingAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -158,8 +159,13 @@ class VoiceControlService : Service() {
                 ) { mode, _ -> mode }.onEach { mode ->
                     val route = audioRouteMonitor.route.value
                     val micExposure = route.toMicExposure()
-                    // A pending acquisition is only valid while the candidate is still present.
-                    if (route !is AudioRoute.BluetoothA2dpOnly) {
+                    // A pending acquisition stays valid while its candidate is present or has
+                    // become the selected external microphone: the selection callbacks publish
+                    // `Headset` while acquisition is still confirming, and cancelling on any
+                    // non-candidate route would abort the acquisition that just succeeded and
+                    // release the routing it acquired. Only actual device loss ends it; a gate
+                    // blocker is handled by the gateAllows predicate inside acquisition.
+                    if (!route.keepsPendingAcquisition()) {
                         acquisitionJob?.cancel()
                         acquisitionJob = null
                     }
@@ -453,7 +459,7 @@ class VoiceControlService : Service() {
     private fun acquireCandidate(route: AudioRoute) {
         if (acquisitionJob != null) return
         val gateAllows = {
-            gate.state.value.allowed && audioRouteMonitor.route.value is AudioRoute.BluetoothA2dpOnly
+            gate.state.value.allowed && audioRouteMonitor.route.value.keepsPendingAcquisition()
         }
         acquisitionJob = serviceScope.launch {
             try {

@@ -15,6 +15,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningMode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.mode.ListeningModePolicy
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -109,6 +110,26 @@ class AndroidAudioRouteMonitorSelectionTest {
 
             assertEquals(ListeningMode.WakeWord, awaitItem())
         }
+    }
+
+    @Test
+    @Suppress("DEPRECATION") // ACTION_SCO_AUDIO_STATE_UPDATED is the only signal for SCO selection
+    fun `a pending acquisition survives the selection callback that confirms it`() {
+        setOutputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
+        val monitor = AndroidAudioRouteMonitor(context, GracePeriodSignal())
+        // The attempt starts with a candidate route, so it is valid.
+        assertEquals(AudioRoute.BluetoothA2dpOnly, monitor.route.value)
+        assertTrue(monitor.route.value.keepsPendingAcquisition())
+
+        // The selection callback publishes the selected headset while acquisition is still
+        // confirming. That is the attempt succeeding, not device loss: it must keep the attempt
+        // alive rather than cancel it and release the routing it acquired.
+        setBluetoothScoOn(true)
+        context.sendBroadcast(Intent(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED))
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(AudioRoute.Headset(hasMicrophone = true), monitor.route.value)
+        assertTrue(monitor.route.value.keepsPendingAcquisition())
     }
 
     private fun setOutputDevices(vararg types: Int) {

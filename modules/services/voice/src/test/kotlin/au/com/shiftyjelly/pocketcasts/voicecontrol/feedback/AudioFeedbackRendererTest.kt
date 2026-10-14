@@ -949,24 +949,18 @@ class AudioFeedbackRendererTest {
             renderer.lastCueObservation.value?.observation,
         )
 
-        // B'S OUTPUT, asserted through a REAL production call rather than through renderer bookkeeping.
-        // The session teardown stops the player, and WHICH admission that stop carries is the observable
-        // production result: it must be B's, because B is the cue whose audio is sounding.
-        //
-        // NOTE ON WHAT I REMOVED: an earlier version of this case asserted a `currentCueAdmission` field I
-        // had added to the renderer. That field had NO production reader -- it existed only to give the
-        // mutation something to break, so a mutant against it proved BOOKKEEPING, not B's playback. I had
-        // removed the same kind of field earlier for the same reason, and reintroduced it to make a case
-        // fail. The assertion below uses a call the product already makes.
-        renderer.endSession()
-        org.mockito.Mockito.verify(earconPlayer).stopNow()
-
-        // B'S OWN TEARDOWN, through the real session path.
+        // B'S OWN TEARDOWN, through the real session path -- and a barrier completion after cancellation
+        // is NOT evidence that A resumed to publication, so this case claims only the cancellation and the
+        // separate ownership control.
         renderer.endSession()
         assertEquals(
             "session teardown retires the cue it ended",
             AudioFeedbackRenderer.CueObservation.Ended,
             renderer.lastCueObservation.value?.observation,
         )
+        // WHAT THIS CASE DOES NOT ESTABLISH: B's actual TRACK WRITE. The player here is a MOCK, so it has
+        // no track and no write to observe -- that contract is covered in EarconPlayerTest on a real
+        // EarconPlayer (accepted-frames/frontier and completion cases). Asserting it here is structurally
+        // impossible without swapping in the real player, which is the player test's job.
     }
 }

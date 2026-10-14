@@ -906,15 +906,35 @@ class AudioFeedbackRendererTest {
         whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
         whenever(earconPlayer.emittedDurationMs()).thenReturn(1_000L)
 
+        // A IS PLAYED, and its play RETURNS its token before any coverage proceeds -- the hold @spec
+        // describes. The renderer now holds A's admission.
         renderer.playEarcon(EarconId.WAKE_WORD)
+
+        // B IS ADMITTED WITH THE SAME SOUND, after A's play returned and while A's coverage is in
+        // flight. B takes the track and the renderer now holds B's admission.
         renderer.playEarcon(EarconId.LISTENING_START)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(50))
 
+        // A'S STOP ARRIVES LATE, and the renderer must name the admission it CURRENTLY holds -- B's. A
+        // renderer holding A's token would release an admission it no longer owns, which is the handoff
+        // defect.
         renderer.stopEarconNow()
 
         org.mockito.Mockito.verify(earconPlayer).stopAdmissionNow(EarconPlayer.AdmissionToken(2L))
         org.mockito.Mockito.verify(earconPlayer, org.mockito.Mockito.never())
             .stopAdmissionNow(EarconPlayer.AdmissionToken(1L))
+
+        // THE CURRENT-OWNER POSITIVE: with no successor, the stop names the ONLY admission, so the case is
+        // decided by which token is held rather than by stop never naming anything.
+        org.mockito.Mockito.reset(earconPlayer)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(7L))
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(1_000L)
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(50))
+        renderer.stopEarconNow()
+        org.mockito.Mockito.verify(earconPlayer).stopAdmissionNow(EarconPlayer.AdmissionToken(7L))
     }
 }

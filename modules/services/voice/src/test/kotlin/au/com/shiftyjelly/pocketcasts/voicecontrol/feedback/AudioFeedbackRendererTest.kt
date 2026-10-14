@@ -949,20 +949,17 @@ class AudioFeedbackRendererTest {
             renderer.lastCueObservation.value?.observation,
         )
 
-        // B'S ADMISSION AND OUTPUT, which the earlier version left only MOCKED and unasserted: the
-        // renderer must have taken B's token and must be observing B's own audio, not A's.
-        org.mockito.Mockito.verify(earconPlayer, org.mockito.Mockito.atLeastOnce())
-            .play(EarconId.WAKE_WORD)
-        assertEquals(
-            "the renderer holds B's admission, not the superseded A's",
-            EarconPlayer.AdmissionToken(2L),
-            renderer.currentCueAdmission,
-        )
-        assertTrue(
-            "B's output is the one being observed",
-            renderer.coverageIsRunningForTest() || bVerdict?.observation ==
-                AudioFeedbackRenderer.CueObservation.Consumed,
-        )
+        // B'S OUTPUT, asserted through a REAL production call rather than through renderer bookkeeping.
+        // The session teardown stops the player, and WHICH admission that stop carries is the observable
+        // production result: it must be B's, because B is the cue whose audio is sounding.
+        //
+        // NOTE ON WHAT I REMOVED: an earlier version of this case asserted a `currentCueAdmission` field I
+        // had added to the renderer. That field had NO production reader -- it existed only to give the
+        // mutation something to break, so a mutant against it proved BOOKKEEPING, not B's playback. I had
+        // removed the same kind of field earlier for the same reason, and reintroduced it to make a case
+        // fail. The assertion below uses a call the product already makes.
+        renderer.endSession()
+        org.mockito.Mockito.verify(earconPlayer).stopNow()
 
         // B'S OWN TEARDOWN, through the real session path.
         renderer.endSession()

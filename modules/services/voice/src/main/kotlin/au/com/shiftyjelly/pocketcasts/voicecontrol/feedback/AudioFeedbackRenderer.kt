@@ -167,7 +167,7 @@ class AudioFeedbackRenderer(
             // The span is the clip's OWN duration, from the frames the sink accepted and the rate it
             // accepted them at, so a shorter cue is not covered longer than it sounds and a longer one
             // is not cut short by an assumed length.
-            coverEarconUntilConsumed(id, admitted)
+            coverEarconUntilConsumed(id)
         }
         // THE PUBLIC RESULT STILL REPORTS ACCEPTANCE. Returning true unconditionally made a REFUSED cue
         // look accepted to every caller, so a caller could not tell a cue that never sounded from one
@@ -282,16 +282,6 @@ class AudioFeedbackRenderer(
     private var currentCueId: Long = 0L
 
     /**
-     * The PLAYER ADMISSION the cue currently being observed took.
-     *
-     * The earcon id names the KIND; this names THIS playing of it. A stop scoped by kind cannot tell a
-     * held stop aimed at the first wake cue from the second wake cue -- they look identical -- so the
-     * stop would release an admission it never made. Held beside [currentCueId] so the renderer's
-     * observation identity and the player's admission refer to the same cue.
-     */
-    private var currentCueAdmission: EarconPlayer.AdmissionToken? = null
-
-    /**
      * Publishes an observation ONLY while [observer] is still the cue's current observer.
      *
      * `coverageExpiredUnknown` is written by a NON-SUSPENDING assignment, so cancellation cannot protect
@@ -312,6 +302,16 @@ class AudioFeedbackRenderer(
     /** The observed-completion form: the cue's fate IS established. */
     private fun publishConsumedIfOwning(observer: Job?) = publishObservationIfOwning(observer) { publishCueObservation(currentCueId, CueObservation.Consumed) }
 
+    /**
+     * Attempts a retirement for [owner], and reports whether that owner still spoke for the cue.
+     *
+     * TEST VISIBILITY for the REAL stale-retirement path: a retirement is only published while its owner
+     * still owns the cue, which is what makes a stale continuation unable to overwrite its successor. The
+     * production caller is the observation loop's own ending; passing a substituted owner lets a case
+     * exercise the refusal without standing up a second concurrent observer.
+     */
+    internal fun retireObservationForTest(owner: kotlinx.coroutines.Job?) = publishEndedIfOwning(owner)
+
     /** The deliberately-ended form: attribution was stopped at the moment the sound stopped. */
     private fun publishEndedIfOwning(observer: Job?) = publishObservationIfOwning(observer) { publishCueObservation(currentCueId, CueObservation.Ended) }
 
@@ -326,7 +326,7 @@ class AudioFeedbackRenderer(
      *
      * Runs on the renderer's own scope so a synchronous caller is not blocked.
      */
-    private fun coverEarconUntilConsumed(startedEarcon: EarconId, admitted: EarconPlayer.AdmissionToken) {
+    private fun coverEarconUntilConsumed(startedEarcon: EarconId) {
         // THE OBSERVER KNOWS ITS OWN CUE. `coverageExpiredUnknown` is a plain field written by a
         // NON-SUSPENDING assignment after `completion()` returns, so cancellation alone cannot protect it:
         // an OLD observer can resume after a SUCCESSOR has published its own result and overwrite it.
@@ -348,7 +348,6 @@ class AudioFeedbackRenderer(
             currentCueId = cueCounter.incrementAndGet()
             // THE ADMISSION THE PLAY RETURNED, not one re-read afterwards: the token the renderer holds
             // is then the one the player granted for THIS play.
-            currentCueAdmission = admitted
             _lastCueObservation.value = null
         }
         // A REFERENCE THE COROUTINE CAN READ FROM INSIDE ITS OWN INITIALIZER. Kotlin does not allow a
@@ -466,37 +465,6 @@ class AudioFeedbackRenderer(
     }
 
     /**
-     * Ends the earcon's attribution now: the cue stopped, failed, or the session ended.
-     *
-     * Deferred to the player so the acceptance it reports and the acceptance this reads are the same
-     * state, and attribution stops at the moment the sound does rather than at its estimate.
-     */
-    fun stopEarconNow() {
-        // THE STOPPED CUE'S OWNER IS CAPTURED BEFORE THE STOP, not after it. `stopNow` is a call into the
-        // player and a REPLACEMENT CAN LAND DURING IT; reading the owner afterwards would retire whatever
-        // succeeded, applying this stop's verdict to a cue this stop never touched. The claim and the
-        // write therefore concern the SAME cue.
-        val stoppedOwner = currentObserver()
-        // THE CUE THIS STOP IS ABOUT, captured with the owner so the player stops THAT cue rather than
-        // whatever track is current when the deferred block runs -- a successor that starts in between
-        // plays on the same track and would otherwise be silenced by a stop aimed at its predecessor.
-        val stoppedAdmission = currentCueAdmission
-        // THE INTERLEAVING SEAM. A case must be able to land the replacement INSIDE this call -- the only
-        // instant where capturing before versus after differs. A seam that runs the hook around the call
-        // instead of within it would not exercise the window it exists for.
-        duringStopForTest?.invoke()
-        earconPlayer.stopAdmissionNow(stoppedAdmission)
-        // RETIREMENT, NOT A TEST ACCESSOR. The observation's deadline is a bound on WAITING, not a claim
-        // about the cue; once the cue is stopped explicitly its fate IS established, and leaving the
-        // outstanding Unknown published would hold the gate's attribution open indefinitely -- every
-        // later active-music reading would be attributed to us after the cue had already stopped.
-        //
-        // OWNERSHIP IS CHECKED IN THE SAME STEP, so a stop issued for an OLD cue cannot retire the
-        // successor that has since taken over.
-        publishEndedIfOwning(stoppedOwner)
-    }
-
-    /**
      * Speaks while refreshing what we last emitted, because speech outlasts the gate's attribution
      * window: a reply longer than it would otherwise read as a foreign app for the rest of its own
      * duration, and the microphone would be closed mid-answer.
@@ -534,14 +502,6 @@ class AudioFeedbackRenderer(
         earconPlayer.stopNow()
         earconPlayer.release()
     }
-
-    /**
-     * Runs INSIDE `stopEarconNow`, after the owner is captured and before the player is stopped.
-     *
-     * Test visibility for the one window where "capture before" and "capture after" differ. Null in
-     * production, so the seam costs a null check and changes no behaviour.
-     */
-    internal var duringStopForTest: (() -> Unit)? = null
 
     /** The observer that currently speaks for the cue, read under the monitor that installs one. */
     private fun currentObserver(): Job? = synchronized(coverageLock) { earconCoverageJob }

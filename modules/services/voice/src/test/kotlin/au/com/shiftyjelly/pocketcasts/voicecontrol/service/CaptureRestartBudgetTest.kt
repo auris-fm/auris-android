@@ -1,5 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -58,6 +59,35 @@ class CaptureRestartBudgetTest {
 
         now += 30_000
         assertTrue("the cooldown passes and a restart is allowed again", budget.allows())
+    }
+
+    @Test
+    fun `right after an ending the wait is the settle delay`() {
+        now = 10_000
+        budget.onTerminated()
+
+        assertFalse(budget.allows())
+        assertEquals("a recovery waits the settle delay rather than refusing", 500, budget.delayUntilAllowedMs())
+
+        now += 500
+        assertEquals(0, budget.delayUntilAllowedMs())
+        assertTrue(budget.allows())
+    }
+
+    @Test
+    fun `a tripped ceiling reports the cooldown remaining rather than refusing outright`() {
+        now = 10_000
+        repeat(4) {
+            budget.onTerminated()
+            now += 600
+        }
+
+        assertTrue(budget.isBlocked)
+        assertEquals("the wait covers the cooldown, not just the settle delay", 29_400, budget.delayUntilAllowedMs())
+
+        now += 29_400
+        assertFalse(budget.isBlocked)
+        assertTrue(budget.allows())
     }
 
     @Test

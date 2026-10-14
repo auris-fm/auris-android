@@ -23,10 +23,10 @@ internal class CaptureRestartBudget(
     private var blockedUntilMs = 0L
 
     /**
-     * Record an unexpected end of capture and return whether a restart is still allowed. More than
-     * [maxConsecutiveRestarts] endings inside [windowMs] block restarts for [cooldownMs].
+     * Record an unexpected end of capture. More than [maxConsecutiveRestarts] endings inside
+     * [windowMs] block restarts until the cooldown passes.
      */
-    fun onTerminated(): Boolean {
+    fun onTerminated() {
         val now = nowMs()
         consecutiveRestarts =
             if (now - lastTerminationMs < windowMs) consecutiveRestarts + 1 else 1
@@ -34,15 +34,30 @@ internal class CaptureRestartBudget(
         if (consecutiveRestarts > maxConsecutiveRestarts) {
             blockedUntilMs = now + cooldownMs
         }
-        return allows()
     }
+
+    /** True while the ceiling's cooldown is withholding restarts. */
+    val isBlocked: Boolean
+        get() = nowMs() < blockedUntilMs
 
     /** True when an automatic capture (re)start may begin now. */
     fun allows(): Boolean {
-        val now = nowMs()
-        if (now < blockedUntilMs) return false
+        if (isBlocked) return false
         // No termination yet: a first start is always allowed. Otherwise wait for the settle delay.
+        val now = nowMs()
         return lastTerminationMs == 0L || now - lastTerminationMs >= settleDelayMs
+    }
+
+    /**
+     * Milliseconds to wait before [allows] becomes true, or 0 when it already is. A caller that
+     * wants the automatic restart to happen (not merely to pass a gate) waits this out rather than
+     * giving up, so a tripped ceiling and a quiet route both still resume.
+     */
+    fun delayUntilAllowedMs(): Long {
+        val now = nowMs()
+        val cooldownRemaining = (blockedUntilMs - now).coerceAtLeast(0L)
+        val settleRemaining = if (lastTerminationMs == 0L) 0L else (lastTerminationMs + settleDelayMs - now).coerceAtLeast(0L)
+        return maxOf(cooldownRemaining, settleRemaining)
     }
 
     /** Clear the budget for a user-driven start. */

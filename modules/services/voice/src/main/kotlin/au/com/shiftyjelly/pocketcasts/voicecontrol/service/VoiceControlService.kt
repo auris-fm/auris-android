@@ -516,7 +516,8 @@ class VoiceControlService : Service() {
         // Budget the automatic restarts before anything releases routing: the release fires
         // selection callbacks that re-enter acquisition and the start path, and they consult the
         // same budget.
-        if (!captureRestartBudget.onTerminated()) {
+        captureRestartBudget.onTerminated()
+        if (captureRestartBudget.isBlocked) {
             Timber.w("[VoicePipeline] capture keeps ending — restart withheld until the cooldown passes")
         }
         // A runtime stop, not a user request: the spec requires `mic_capture_stopped` at ERROR with
@@ -535,9 +536,12 @@ class VoiceControlService : Service() {
      * engine starts, so a recovery cannot race an in-flight start that is still suspended.
      */
     private fun recoverCapture() {
-        if (!captureRestartBudget.allows()) return
         serviceScope.launch(Dispatchers.Main) {
-            delay(captureRestartBudget.settleDelayMs)
+            // Wait the settle delay — or the cooldown the ceiling tripped — before signalling the
+            // observer. Waiting rather than refusing covers a route and gate that do not change:
+            // nothing else would re-run the observer, and capture would stay off.
+            val wait = captureRestartBudget.delayUntilAllowedMs()
+            if (wait > 0) delay(wait)
             if (!captureRestartBudget.allows()) return@launch
             captureRestartSignal.value = SystemClock.elapsedRealtime()
         }

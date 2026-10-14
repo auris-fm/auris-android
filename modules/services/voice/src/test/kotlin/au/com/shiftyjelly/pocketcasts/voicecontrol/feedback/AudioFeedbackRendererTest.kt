@@ -885,4 +885,46 @@ class AudioFeedbackRendererTest {
             renderer.lastCueObservation.value,
         )
     }
+
+    @Test
+    fun `a HELD observer is STOPPED BY CANCELLATION before ownership is consulted`() = runTest {
+        // WHAT THIS ESTABLISHES, measured rather than assumed: when a successor is admitted, the previous
+        // observer is CANCELLED (`earconCoverageJob?.cancel()`), so a held continuation never resumes to
+        // reach the ownership check at all. Two mechanisms stop a stale continuation and CANCELLATION IS
+        // THE FIRST ONE.
+        //
+        // I built this case expecting to exercise the held continuation reaching `publishObservationIfOwning`
+        // and being refused there. It does not: `coverageIsRunningForTest()` is FALSE after the successor
+        // is admitted, so the continuation is already gone. Asserting "B's verdict is unchanged" would
+        // therefore pass under a broken ownership check too -- a case that cannot fail, which is the
+        // critique this case was written to answer.
+        //
+        // So it asserts the fact it can establish, and the ownership check keeps its own separate
+        // coverage (the sibling cases, which DO fail when the check is removed).
+        val hold = kotlinx.coroutines.CompletableDeferred<Unit>()
+        renderer.holdObserverForTest = hold
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(1_000L)
+        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(50))
+        assertTrue("A's observer is in flight, holding", renderer.coverageIsRunningForTest())
+
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(2L))
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(50))
+
+        // THE FIRST MECHANISM: the held continuation is CANCELLED by the successor's admission, so it
+        // cannot reach the publish path to be refused there.
+        hold.complete(Unit)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(50))
+        assertTrue(
+            "the successor's observer owns the cue",
+            renderer.coverageIsRunningForTest(),
+        )
+    }
 }

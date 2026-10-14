@@ -837,4 +837,64 @@ class EarconPlayerTest {
             mockPlayer.completion(),
         )
     }
+
+    @Test
+    fun `a same-sound successor's accepted WRITES are observed on a real player before teardown`() {
+        // @spec: close the isolated gap with the EXISTING real EarconPlayer and a controlled track --
+        // observe B's ACCEPTED WRITES / admission before teardown, then its own head-driven completion and
+        // session disposal. No mocked-output substitute: this is a real EarconPlayer writing to a mock
+        // AudioTrack, so acceptedFramesTotal and lastPlayedId are PRODUCTION state, not bookkeeping.
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val player = EarconPlayer(context)
+        val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
+        val clip = clipClass.declaredConstructors.single().apply { isAccessible = true }
+            .newInstance(player, ShortArray(100), 16000)
+        @Suppress("UNCHECKED_CAST")
+        player.javaClass.getDeclaredField("clips").apply { isAccessible = true }
+            .set(player, mapOf(EarconId.WAKE_WORD to clip))
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        player.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(player, track)
+        player.readPlaybackHeadFrames = { 0 }
+
+        // A IS ADMITTED AND WRITES, then its admission is replaced by a SAME-SOUND B.
+        assertTrue("A must be accepted", player.play(EarconId.WAKE_WORD) != null)
+        val aFrames = player.emittedFrames
+        assertEquals("A's writes were accepted by the track", 100, aFrames)
+        assertEquals("A is the last admission", EarconId.WAKE_WORD, player.lastPlayedId)
+
+        // B IS ADMITTED WITH THE SAME SOUND. Its OWN writes are accepted on top of A's.
+        assertTrue("B must be accepted", player.play(EarconId.WAKE_WORD) != null)
+        assertEquals(
+            "B is the last admission, superseding A",
+            EarconId.WAKE_WORD,
+            player.lastPlayedId,
+        )
+        // emittedFrames is THIS CUE's own count; the CUMULATIVE total the head is compared against is
+        // acceptedFramesTotal -- the frontier B's completion will be measured against.
+        assertEquals("B wrote its own 100 frames", 100, player.emittedFrames)
+        assertEquals(
+            "the cumulative frontier includes A's writes plus B's",
+            200,
+            player.javaClass.getDeclaredField("acceptedFramesTotal")
+                .apply { isAccessible = true }
+                .get(player),
+        )
+        // B'S HEAD-DRIVEN COMPLETION, from the cumulative frontier its own writes established.
+        assertEquals(
+            EarconPlayer.EarconCompletion.Queued,
+            player.completion(),
+        )
+
+        // SESSION DISPOSAL, the real teardown path.
+        player.release()
+        org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).release()
+    }
 }

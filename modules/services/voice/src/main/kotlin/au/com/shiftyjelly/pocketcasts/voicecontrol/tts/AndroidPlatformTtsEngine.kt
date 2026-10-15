@@ -402,7 +402,12 @@ class AndroidPlatformTtsEngine @Inject constructor(
                 waited += 10
             }
             framesWritten = offset
-            framesPlayedAtReturn = if (positionBroken) 0 else headPosition()
+            // Read FIRST, then consult the flag (@reviewer ca0a39554 review): checking positionBroken
+            // before this final read lets a THROWING final read return headPosition()'s fallback and
+            // be mistaken for a fully drained utterance. Every failed read -- including this one --
+            // must produce the explicit incomplete outcome below.
+            val finalPosition = headPosition()
+            framesPlayedAtReturn = if (positionBroken) 0 else finalPosition
             // Surface the truncation through the same channel the cloud path uses, so a caller can
             // avoid reporting a completed answer that was actually cut short.
             if (writeRefused) {
@@ -556,7 +561,16 @@ class AndroidPlatformTtsEngine @Inject constructor(
         )
     }
 
-    private fun buildTrack(sampleRateHz: Int): AudioTrack? = runCatching {
+    /**
+     * Optional track-construction override for controls (@reviewer ca0a39554 review): a test can
+     * supply an AudioTrack subclass that records release() and refuses position reads afterwards,
+     * making premature engine-level release observable at the instance boundary. Null uses the real
+     * platform construction below. This is a construction seam only -- production behavior is the
+     * same code path with the default null.
+     */
+    internal var trackFactoryForTest: ((Int) -> AudioTrack?)? = null
+
+    private fun buildTrack(sampleRateHz: Int): AudioTrack? = trackFactoryForTest?.invoke(sampleRateHz) ?: runCatching {
         val minBuffer = AudioTrack.getMinBufferSize(
             sampleRateHz,
             AudioFormat.CHANNEL_OUT_MONO,

@@ -52,6 +52,35 @@ class EchoReferenceFilterTest {
         return recorder to filter
     }
 
+    // END TO END THROUGH THE FILTER: after the clock passes the retired tail's expiry, speech that
+    // resembles the stopped answer is user speech again. Same harness as the echo-rejection controls.
+    @Test
+    fun `speech resembling an expired stopped answer is accepted by the filter`() {
+        var nowMs = 2_000_000L
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap(), monotonicNowMs = { nowMs })
+        val routeMonitor = au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            gracePeriodSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(),
+        )
+        val filter = UtteranceFilter(PlaybackCrossCorrelator(), routeMonitor)
+        assertTrue(routeMonitor.route.value !is au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute.Headset)
+
+        val answer = FloatArray(8_000) { i -> (0.6 * sin(2 * PI * 220.0 * i / 16_000)).toFloat() }
+        recorder.write(answer, producerId = 41L)
+        val echoLikeSpeech = FloatArray(1_600) { i -> 0.3f * answer[i] }
+        assertFalse(
+            "precondition: while the answer is live its echo is bleed",
+            filter.shouldProcess(echoLikeSpeech, hasSpeakerId = false, speakerIndex = 0, playbackBuffer = recorder.snapshot()),
+        )
+
+        recorder.retireProducer(41L)
+        nowMs += PlaybackBufferRecorder.DELAY_TAIL_SAMPLES * 1_000 / PlaybackBufferRecorder.SAMPLE_RATE + 1
+        assertTrue(
+            "after expiry, speech resembling the STOPPED answer must be accepted, not suppressed forever",
+            filter.shouldProcess(echoLikeSpeech, hasSpeakerId = false, speakerIndex = 0, playbackBuffer = recorder.snapshot()),
+        )
+    }
+
     @Test
     fun `echo-only input is rejected once the reference holds the submitted playback`() {
         val (recorder, filter) = buildFilter()

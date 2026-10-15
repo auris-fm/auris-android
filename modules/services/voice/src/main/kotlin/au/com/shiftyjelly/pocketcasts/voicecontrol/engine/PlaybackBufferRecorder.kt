@@ -56,6 +56,13 @@ import kotlinx.coroutines.flow.onEach
 @Singleton
 class PlaybackBufferRecorder @Inject constructor(
     private val fingerprintPcmTap: FingerprintPcmTap,
+    // Monotonic millisecond clock, deltas only (production default is System.nanoTime-based, which is
+    // constructible off-device; only differences are consumed, never the absolute origin). A retired
+    // producer's surviving tail is audio the hardware is STILL playing: it may stay matchable only
+    // until that playback finishes. The tail's sample count bounds WHEN it can still sound, but with
+    // no further writes nothing advances time -- so expiry is measured against this clock at every
+    // consumer, not against later activity. Injectable for deterministic controls.
+    private val monotonicNowMs: () -> Long = { System.nanoTime() / 1_000_000L },
 ) {
     private val buffer: FloatArray = FloatArray(SAMPLE_RATE * BUFFER_DURATION_SECONDS)
 
@@ -67,6 +74,20 @@ class PlaybackBufferRecorder @Inject constructor(
     private val ownerTags = LongArray(buffer.size) { UNTAGGED }
     private var writePos = 0
     private var filled = false
+
+    /**
+     * Producers whose retirement CLOSED ADMISSION: a write or render observation naming one of these
+     * identities is refused, so a callback held across the stop cannot resurrect retired audio or
+     * re-enter state the successor already owns. Entries clear when the producer's tail expires.
+     */
+    private val retiredProducers = HashSet<Long>()
+
+    /**
+     * When each retired producer's surviving tail stops being plausible playback: retirement instant
+     * + the tail's own duration. Enforced by [expireRetiredTailsLocked] at every consumer, so a stale
+     * tail ages out on elapsed TIME even if no later write ever arrives.
+     */
+    private val tailExpiryMs = HashMap<Long, Long>()
 
     /**
      * Guards [buffer], [writePos], [filled] and [lastPositionMs].
@@ -238,6 +259,38 @@ class PlaybackBufferRecorder @Inject constructor(
     }
 
     /**
+     * Enforces retired-tail expiry at a consumer under [lock]: once a retired producer's deadline
+     * passes, its surviving tail is zeroed and untagged, its remaining records go, and its admission
+     * flag clears (the identity is then fully dead: nothing it names can be stored any more until an
+     * unrelated whole-recorder [retire]). A stale tail must not stay matchable merely because no new
+     * write arrived to age it out -- elapsed TIME, not later activity, bounds how long hardware could
+     * still be sounding it.
+     *
+     * Caller holds [lock].
+     */
+    private fun expireRetiredTailsLocked(nowMs: Long) {
+        if (tailExpiryMs.isEmpty()) return
+        val due = tailExpiryMs.entries.filter { it.value <= nowMs }.map { it.key }
+        if (due.isEmpty()) return
+        for (producerId in due) {
+            var cleared = 0
+            for (idx in ownerTags.indices) {
+                if (ownerTags[idx] == producerId) {
+                    buffer[idx] = 0f
+                    ownerTags[idx] = UNTAGGED
+                    cleared++
+                }
+            }
+            blocks.removeAll { it.producerId == producerId }
+            if (renderObservation?.producerId == producerId) renderObservation = null
+            tailExpiryMs.remove(producerId)
+            // Admission stays closed after expiry: the identity is retired, expired, and empty. A NEW
+            // stream reusing the same id would be indistinguishable from a resurrecting callback, so
+            // resurrection-by-id-reuse is refused until [retire] resets the recorder wholesale.
+        }
+    }
+
+    /**
      * Retires ONE producer's stream completely -- conversion state AND acoustic reference:
      *  - its resampling continuation leaves the map;
      *  - its ring samples older than the audible delay tail are zeroed and untagged, so speech after
@@ -251,6 +304,11 @@ class PlaybackBufferRecorder @Inject constructor(
     fun retireProducer(producerId: Long?) {
         if (producerId == null) return
         synchronized(lock) {
+            // Admission CLOSES with retirement, in this one boundary: from here on, writes and render
+            // observations naming this identity are refused, so a callback admitted BEFORE the stop but
+            // released AFTER it cannot resurrect audio this producer no longer owns.
+            retiredProducers += producerId
+            tailExpiryMs[producerId] = monotonicNowMs() + DELAY_TAIL_SAMPLES * 1_000L / SAMPLE_RATE
             continuations.keys.removeAll { it.producerId == producerId }
             // The producer's OWN newest tail stays matchable; everything older from it is dead air.
             var surviving = DELAY_TAIL_SAMPLES
@@ -291,6 +349,8 @@ class PlaybackBufferRecorder @Inject constructor(
             // Whole-recorder retirement (stop or route change) ends EVERY producer's stream through
             // this recorder, so all continuations go. A single stream ending is [retireProducer].
             continuations.clear()
+            retiredProducers.clear()
+            tailExpiryMs.clear()
 
             // THE SURVIVING TAIL KEEPS ITS CONTINUITY METADATA. Clearing `expectedNextPositionMs` while
             // samples survive would forget where the tail ENDS, so the FIRST contribution after the
@@ -432,6 +492,15 @@ class PlaybackBufferRecorder @Inject constructor(
         producerId: Long?,
     ) {
         synchronized(lock) {
+            expireRetiredTailsLocked(monotonicNowMs())
+            // Same admission rule as [write]: a late observation naming a retired incarnation cannot
+            // re-anchor the correlator to audio that is expiring or gone. It is DROPPED, not applied --
+            // and it must not clear a SUCCESSOR's live anchor either: withdrawal belongs to the
+            // retirement boundary, not to a refused callback.
+            if (producerId != null && producerId in retiredProducers) {
+                if (renderObservation?.producerId == producerId) renderObservation = null
+                return
+            }
             // The observation is matched only against blocks of ITS OWN track incarnation: after a
             // rebuild both indexes restart at zero, so an old-track frame number can agree with a
             // new-track write head while the clocks behind them describe different audio.
@@ -464,6 +533,7 @@ class PlaybackBufferRecorder @Inject constructor(
      */
     fun renderedReference(): PlaybackReference? {
         synchronized(lock) {
+            expireRetiredTailsLocked(monotonicNowMs())
             val obs = renderObservation ?: return null
             // Same rule here: only blocks of the CURRENT incarnation are selectable, so an old
             // observation (already cleared by the rule above, but defensive for a same-call race)
@@ -548,6 +618,12 @@ class PlaybackBufferRecorder @Inject constructor(
         require(sourceChannels > 0) { "sourceChannels must be positive" }
         val axisClaimed = axis != null
         synchronized(lock) {
+            expireRetiredTailsLocked(monotonicNowMs())
+            // ADMISSION IS CLOSED WITH RETIREMENT. A callback admitted before the stop but released
+            // after it must not store audio this identity no longer owns, nor open a continuation the
+            // successor may already hold under the same key. Refusing the WHOLE write -- samples and
+            // position alike -- is the atomic form; nothing about a retired id re-enters the recorder.
+            if (producerId != null && producerId in retiredProducers) return
             // ONE OWNERSHIP BOUNDARY. Normalization mutates continuation state, so it runs under the
             // same lock that orders the ring write: concurrent writers cannot mix carry/phase, and a
             // concurrent retire() cannot clear continuations mid-chunk.
@@ -628,6 +704,7 @@ class PlaybackBufferRecorder @Inject constructor(
         // span that never existed. `write()` updates both, and `retire()` changes the sample count
         // without touching the position.
         synchronized(lock) {
+            expireRetiredTailsLocked(monotonicNowMs())
             val samples = snapshotLocked()
             val end = lastPositionMs
             // A window spanning two clocks reports NO position. The start would otherwise be computed
@@ -668,10 +745,14 @@ class PlaybackBufferRecorder @Inject constructor(
      * nothing about when they sounded.
      */
     fun window(): PlaybackReference = synchronized(lock) {
+        expireRetiredTailsLocked(monotonicNowMs())
         PlaybackReference(snapshotLocked(), SAMPLE_RATE, null)
     }
 
-    fun snapshot(): FloatArray = synchronized(lock) { snapshotLocked() }
+    fun snapshot(): FloatArray = synchronized(lock) {
+        expireRetiredTailsLocked(monotonicNowMs())
+        snapshotLocked()
+    }
 
     /** The window's samples. Callers must hold [lock] so the read is one coherent step. */
     private fun snapshotLocked(): FloatArray {

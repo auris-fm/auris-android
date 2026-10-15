@@ -348,24 +348,92 @@ class PlaybackBufferRecorderTest {
         }
         assertEquals("episode keeps its full solo duration across the scoped stop", baseline.size, bOff)
 
-        // Retired-entry cleanup: the retired (producer, rate) entry left the map. A 16 kHz mono stream
-        // never populates carry (no resample), so exercise a RESAMPLING format: after scoped
-        // retirement the same identity must start at phase zero, not resume the retired stream.
+        // ADMISSION CLOSES WITH RETIREMENT (@spec): a callback admitted BEFORE the stop but released
+        // AFTER it must reintroduce NOTHING -- no samples, no continuation, no position claim -- and
+        // must not corrupt what the successor owns under its own id. The contract is stricter than
+        // "restarts fresh": the retired identity contributes nothing at all until a wholesale retire()
+        // resets the recorder. Falsified by an implementation that reopens continuations on late writes.
         val resampledChunk = FloatArray(4_096 * 2) { (0.3 * sin(2 * PI * 600.0 * (it / 2).toDouble() / srcRate)).toFloat() }
         val retiredRun = PlaybackBufferRecorder(FingerprintPcmTap())
         retiredRun.write(resampledChunk, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = cloudId)
         retiredRun.retireProducer(cloudId)
+        val afterRetire = retiredRun.snapshot().toList()
         retiredRun.write(resampledChunk, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = cloudId)
-        val freshRun = PlaybackBufferRecorder(FingerprintPcmTap())
-        freshRun.write(resampledChunk, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = cloudId)
-        // retiredRun holds two writes; its SECOND write must equal freshRun's single fresh write.
-        val retiredAll = retiredRun.snapshot().toList()
-        val freshAll = freshRun.snapshot().toList()
-        val secondWrite = retiredAll.takeLast(freshAll.size)
-        assertTrue(
-            "a retired producer restarts fresh, not mid-phase (sizes ${'$'}{retiredAll.size} vs ${'$'}{freshAll.size})",
-            secondWrite.size == freshAll.size && secondWrite.zip(freshAll).all { (a, b) -> kotlin.math.abs(a - b) < 1e-4f },
+        assertEquals(
+            "a held old write for the retired identity stores nothing beyond what retirement left",
+            afterRetire,
+            retiredRun.snapshot().toList(),
         )
+        // The successor under a DIFFERENT id is unaffected by either the retirement or the refused write.
+        val successorChunk = FloatArray(3_200) { 0.25f }
+        retiredRun.write(successorChunk, producerId = 99L)
+        assertEquals("the successor's contribution lands whole", 3_200, retiredRun.snapshot().count { it == 0.25f })
+    }
+
+    // RETIRED TAILS EXPIRE ON ELAPSED TIME, NOT LATER ACTIVITY. Reviewer: keeping the newest 8,000
+    // samples with no deadline means a stopped answer stays matchable FOREVER if nothing else writes
+    // -- a <=500 ms sample count is not a <=500 ms lifetime. Retirement records a monotonic deadline
+    // (tail duration) and every consumer enforces it against the injected clock. Control: stop an
+    // answer, advance the clock past the tail WITHOUT another write, and prove the reference no longer
+    // holds it -- so real later speech matching the stopped audio is accepted, not dropped as bleed.
+    @Test
+    fun `a retired tail expires with elapsed time even when no later write arrives`() {
+        var nowMs = 1_000_000L
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap(), monotonicNowMs = { nowMs })
+        val tail = PlaybackBufferRecorder.DELAY_TAIL_SAMPLES
+        recorder.write(FloatArray(tail + 4_000) { 0.9f }, producerId = 31L)
+
+        recorder.retireProducer(31L)
+        // Within the plausible playback window the tail legitimately survives.
+        assertEquals("tail survives inside its expiry window", tail.toLong(), recorder.snapshot().count { it == 0.9f }.toLong())
+
+        // Advance past the tail's own duration. NO further writes happen.
+        nowMs += tail * 1_000 / PlaybackBufferRecorder.SAMPLE_RATE + 1
+        assertEquals(
+            "expired tail must be gone from the reference with no intervening write",
+            0,
+            recorder.snapshot().count { it == 0.9f },
+        )
+        // reference() -- the production consumer path -- agrees, not just snapshot().
+        assertEquals("expired tail must be gone from reference() too", 0, recorder.reference().samples.count { it == 0.9f })
+    }
+
+    // HELD OBSERVATION ACROSS RETIREMENT AND A SUCCESSOR. @spec's admission case in its observation
+    // form: an observation captured before the stop, delivered after it, must neither re-anchor the
+    // correlator to the retired incarnation nor disturb a successor's own observation.
+    @Test
+    fun `a held render observation cannot reopen a retired producer or overwrite a successor`() {
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        recorder.write(
+            FloatArray(9_600) { 0.5f },
+            trackStartFrame = 0L,
+            trackEndFrame = 9_600L,
+            trackGeneration = 1L,
+            producerId = 51L,
+        )
+        recorder.retireProducer(51L)
+        // Successor incarnation anchors normally.
+        recorder.write(
+            FloatArray(9_600) { 0.6f },
+            trackStartFrame = 0L,
+            trackEndFrame = 9_600L,
+            trackGeneration = 2L,
+            producerId = 52L,
+        )
+        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 7_000_000L, trackRateHz = 16_000, trackGeneration = 2L, producerId = 52L)
+        val successorRef = recorder.renderedReference()
+        assertNotNull("successor keeps its own observation", successorRef)
+
+        // The OLD callback arrives late.
+        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 5_000_000L, trackRateHz = 16_000, trackGeneration = 1L, producerId = 51L)
+        assertNotNull("a retired id's late observation cannot clear the successor's anchor", recorder.renderedReference())
+        // And a retired id names no live audio: an observation without a prior write is refused anyway;
+        // assert the retired id never re-enters through write either.
+        // The retired producer's own not-yet-expired tail legitimately remains; what must NOT change
+        // is anything at all: a refused write contributes zero samples and shifts no cursor.
+        val before = recorder.snapshot().toList()
+        recorder.write(FloatArray(1_600) { 0.45f }, producerId = 51L)
+        assertEquals("a retired identity stores nothing -- the reference is byte-identical", before, recorder.snapshot().toList())
     }
 
     // THE CARRY MUST BE ATOMIC WITH THE WRITE THAT CONSUMES IT. Probe design: two producers stream

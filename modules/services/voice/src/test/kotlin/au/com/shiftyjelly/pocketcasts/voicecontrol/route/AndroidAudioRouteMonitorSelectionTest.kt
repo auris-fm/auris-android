@@ -183,6 +183,111 @@ class AndroidAudioRouteMonitorSelectionTest {
         shadowOf(audioManager).setInputDevices(types.map { device(it) })
     }
 
+    @Test
+    fun `an observed speaker output stays speaker despite an enumerated wired input, whichever input is captured`() {
+        // THE COLLISION THE FINDING IS ABOUT: the live stream reports the SPEAKER; a wired input is
+        // enumerated (availability). The availability classifier's wired-input rule must not reach the
+        // observed route, so the route is Speaker for BOTH capture observations -- built-in and
+        // external -- while availability separately names the acquirable headset.
+        val builtinId = 11
+        val externalId = 12
+        fun monitorWithCapture(capturedId: Int?): AndroidAudioRouteMonitor = AndroidAudioRouteMonitor(
+            context = context,
+            gracePeriodSignal = GracePeriodSignal(),
+            routedOutputObserver = RoutedOutputObserver().also {
+                it.observe().publishType(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+            },
+            enumeratedDeviceTypes = {
+                AndroidAudioRouteMonitor.EnumeratedDevices(
+                    outputs = listOf(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER, AudioDeviceInfo.TYPE_BLUETOOTH_A2DP),
+                    inputs = listOf(AudioDeviceInfo.TYPE_BUILTIN_MIC, AudioDeviceInfo.TYPE_WIRED_HEADSET),
+                    inputIds = listOf(builtinId, externalId),
+                )
+            },
+            captureRoutedDeviceId = { capturedId },
+        )
+
+        val builtin = monitorWithCapture(builtinId)
+        assertEquals(AudioRoute.Speaker, builtin.route.value)
+        assertEquals(AudioRoute.Headset(hasMicrophone = true), builtin.availability.value)
+
+        val external = monitorWithCapture(externalId)
+        assertEquals(AudioRoute.Speaker, external.route.value)
+        assertEquals(AudioRoute.Headset(hasMicrophone = true), external.availability.value)
+    }
+
+    @Test
+    fun `an observed a2dp output keeps its own output despite an enumerated wired input, whichever input is captured`() {
+        // The observed A2DP route must not borrow the enumerated wired input: the output names the
+        // route, and the observed capture input alone would decide a headset microphone -- but it
+        // cannot turn A2DP into Headset.
+        val builtinId = 21
+        val externalId = 22
+        fun monitorWithCapture(capturedId: Int?): AndroidAudioRouteMonitor = AndroidAudioRouteMonitor(
+            context = context,
+            gracePeriodSignal = GracePeriodSignal(),
+            routedOutputObserver = RoutedOutputObserver().also {
+                it.observe().publishType(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
+            },
+            enumeratedDeviceTypes = {
+                AndroidAudioRouteMonitor.EnumeratedDevices(
+                    outputs = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP),
+                    inputs = listOf(AudioDeviceInfo.TYPE_BUILTIN_MIC, AudioDeviceInfo.TYPE_WIRED_HEADSET),
+                    inputIds = listOf(builtinId, externalId),
+                )
+            },
+            captureRoutedDeviceId = { capturedId },
+        )
+
+        assertEquals(AudioRoute.BluetoothA2dpOnly, monitorWithCapture(builtinId).route.value)
+        assertEquals(AudioRoute.BluetoothA2dpOnly, monitorWithCapture(externalId).route.value)
+    }
+
+    @Test
+    fun `an observed wired output attributes its microphone from the captured input, not the enumeration`() {
+        // ACQUIRED-INPUT ATTRIBUTION through the real consumer: the same observed wired headphones and
+        // enumerated wired input yield Headset(false) when the CAPTURE is observed on the built-in
+        // microphone and Headset(true) when it is observed on the wired input.
+        val builtinId = 31
+        val externalId = 32
+        fun monitorWithCapture(capturedId: Int?): AndroidAudioRouteMonitor = AndroidAudioRouteMonitor(
+            context = context,
+            gracePeriodSignal = GracePeriodSignal(),
+            routedOutputObserver = RoutedOutputObserver().also {
+                it.observe().publishType(AudioDeviceInfo.TYPE_WIRED_HEADPHONES)
+            },
+            enumeratedDeviceTypes = {
+                AndroidAudioRouteMonitor.EnumeratedDevices(
+                    outputs = listOf(AudioDeviceInfo.TYPE_WIRED_HEADPHONES),
+                    inputs = listOf(AudioDeviceInfo.TYPE_BUILTIN_MIC, AudioDeviceInfo.TYPE_WIRED_HEADSET),
+                    inputIds = listOf(builtinId, externalId),
+                )
+            },
+            captureRoutedDeviceId = { capturedId },
+        )
+
+        assertEquals(AudioRoute.Headset(hasMicrophone = false), monitorWithCapture(builtinId).route.value)
+        assertEquals(AudioRoute.Headset(hasMicrophone = true), monitorWithCapture(externalId).route.value)
+    }
+
+    @Test
+    @Suppress("DEPRECATION") // ACTION_SCO_AUDIO_STATE_UPDATED drives the live SCO signal
+    fun `a live sco link answers the route over conflicting enumeration`() {
+        // CONFLICTING ENUMERATION against the open SCO link: only a speaker is enumerated, so the
+        // availability classifier would say Speaker. The SCO link is the observed acquisition, so the
+        // ROUTE is Headset -- and availability stays the enumeration's answer, read separately.
+        setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+        val monitor = AndroidAudioRouteMonitor(context, GracePeriodSignal())
+        assertEquals(AudioRoute.Speaker, monitor.availability.value)
+
+        setBluetoothScoOn(true)
+        context.sendBroadcast(Intent(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED))
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(AudioRoute.Headset(hasMicrophone = true), monitor.route.value)
+        assertEquals(AudioRoute.Speaker, monitor.availability.value)
+    }
+
     private fun setOutputDevices(vararg types: Int) {
         shadowOf(audioManager).setOutputDevices(types.map { device(it) })
     }

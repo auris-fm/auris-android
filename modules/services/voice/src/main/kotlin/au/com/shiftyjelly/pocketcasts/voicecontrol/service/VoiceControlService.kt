@@ -102,7 +102,7 @@ class VoiceControlService : Service() {
     private var acquisitionLogged = false
     private var lastObserverDecision: String? = null
 
-    /** Settling delay and retry ceiling for automatic restarts, shared by every start decision. */
+    /** The automatic-restart cap, consulted by every start decision. */
     private val captureRestartBudget = CaptureRestartBudget()
 
     /**
@@ -216,6 +216,11 @@ class VoiceControlService : Service() {
                             // it. Bumping the generation makes the pending start abandon
                             // itself instead of committing capture.
                             engineStart.invalidatePendingStart()
+                            // The user turning voice control off is a fresh start, not a retry: clear
+                            // the automatic-restart cap so re-enabling it can capture again.
+                            if (gate.state.value.rules[EnabledByUserCondition.ID] is VoiceControlRuleState.Blocked) {
+                                captureRestartBudget.reset()
+                            }
                             if (engineStart.isStarted) {
                                 // Active capture was ongoing, now stopping
                                 val blockedRules = gate.state.value.rules
@@ -280,7 +285,7 @@ class VoiceControlService : Service() {
                                     updateListeningState()
                                 }
                             } else {
-                                Timber.w("[VoicePipeline] start skipped: capture restart cooling down")
+                                Timber.w("[VoicePipeline] start skipped: automatic restart withheld (cap reached)")
                             }
                         }
                     }
@@ -531,7 +536,7 @@ class VoiceControlService : Service() {
     /**
      * Capture ended without the gate asking it to — an AAudio disconnect, a backend failure. The
      * mode was not re-evaluated, so nothing else would re-run the observer: nudge it, if the rate
-     * limiter still allows a restart, and it starts capture again on its own sequential turn.
+     * cap still allows a restart, and it starts capture again on its own sequential turn.
      *
      * The nudge goes to the observer rather than starting the engine here: it is the single owner
      * of engine starts, so a recovery cannot race an in-flight start that is still suspended.
@@ -577,7 +582,7 @@ class VoiceControlService : Service() {
     private fun acquireCandidate(route: AudioRoute) {
         if (acquisitionJob != null) return
         if (!captureRestartBudget.allows()) {
-            Timber.w("[VoicePipeline] acquisition skipped: capture restart cooling down")
+            Timber.w("[VoicePipeline] acquisition skipped: automatic restart withheld (cap reached)")
             return
         }
         Timber.i("[VoicePipeline] acquiring external microphone for route=%s", route)

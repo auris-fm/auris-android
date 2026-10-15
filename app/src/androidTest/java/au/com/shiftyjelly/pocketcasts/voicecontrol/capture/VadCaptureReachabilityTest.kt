@@ -6,6 +6,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.rule.GrantPermissionRule
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeCaptureHardware
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -51,7 +52,7 @@ class VadCaptureReachabilityTest {
         // The TARGET app's context, not the test APK's: the native VAD reads the model from this
         // AssetManager, and the model ships in the app, not in the instrumentation APK.
         val targetContext = InstrumentationRegistry.getInstrumentation().targetContext
-        val capture = MicrophoneCapture(targetContext)
+        val capture = MicrophoneCapture(targetContext, OboeCaptureHardware())
         // startCapture returns a COLD flow: the native capture only starts once it is collected.
         val flow = capture.startCapture()
 

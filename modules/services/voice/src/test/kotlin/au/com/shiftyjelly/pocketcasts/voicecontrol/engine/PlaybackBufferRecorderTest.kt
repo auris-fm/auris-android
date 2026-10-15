@@ -1738,4 +1738,71 @@ class PlaybackBufferRecorderTest {
             nextSession.count { it > 0.5f } <= 8_000,
         )
     }
+
+    // CONTROL @reviewer 4235702596 (episode renderer stop/pause hook): the media3 sink forwards BOTH
+    // flush() and reset() to tap.onSinkFlush(), which bumps the stream epoch. The stamper must treat
+    // that as supersession: retire the paused/seeked-away producer (its samples get an expiry, a held
+    // old callback cannot re-enter) and admit the successor under a fresh ticket -- the same stale-
+    // reference case this PR removed for cloud answers, now pinned for the episode path.
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `an episode sink flush retires the paused producer and admits the successor epoch`() = runTest {
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+        // Install the controllable monotonic clock BEFORE any write so retirement deadlines are
+        // recorded on the same axis the test advances (default seam is uptime-scaled nanos).
+        var nowMs = 0L
+        recorder.monotonicNowMs = { nowMs }
+        val job = recorder.start(this)
+        runCurrent()
+
+        var anchorUs = 0L
+        fun emit(value: Short) {
+            tap.onSinkBuffer(presentationTimeUs = anchorUs)
+            anchorUs += 100_000
+            tap.onPcm(ByteBuffer.wrap(s16le(ShortArray(1_600) { value })), AudioProcessor.AudioFormat(16_000, 1, C.ENCODING_PCM_16BIT))
+        }
+
+        // Episode A plays.
+        emit(1_000)
+        runCurrent()
+        assertEquals("first emission recorded", 1_600, recorder.snapshot().size)
+
+        // A chunk emitted before the flush is still in flight when the user pauses/seeks the episode.
+        emit(-1_000)
+        tap.onSinkFlush()
+        runCurrent()
+        // Successor epoch B resumes playback after the pause.
+        emit(20_000)
+        runCurrent()
+
+        val snap = recorder.snapshot()
+        assertTrue(
+            "the successor epoch's audio must be admitted (loud positive samples present)",
+            snap.any { it > 0.2f },
+        )
+        // The pre-flush in-flight chunk carried A's emission-time ticket; A died at the flush, so any
+        // surviving A audio is a RETIRED tail and must expire from every consumer on elapsed time
+        // alone -- @reviewer's stopped-answer-only shape, applied to the episode path.
+        val retiredA = -1_000 / 32768f
+        assertTrue(
+            "episode B must be stored under its own fresh admission",
+            snap.count { it > 0.2f } >= 1_600,
+        )
+        // Advance the injected clock beyond the tail deadline WITHOUT another write.
+        nowMs = 60_000L
+        val expired = recorder.snapshot()
+        assertTrue(
+            "a retired episode-A tail must expire from snapshot with elapsed time alone",
+            expired.none { kotlin.math.abs(it - retiredA) < 0.01f },
+        )
+        // And matching later speech must be accepted through the filter-equivalent read path: the
+        // window after expiry contains only B.
+        val window = recorder.window()
+        assertTrue(
+            "the post-expiry window must hold only the successor epoch",
+            window.samples.none { kotlin.math.abs(it - retiredA) < 0.01f },
+        )
+        job.cancel()
+    }
 }

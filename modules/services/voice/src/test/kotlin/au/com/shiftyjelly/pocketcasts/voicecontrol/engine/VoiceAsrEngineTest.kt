@@ -3,10 +3,8 @@
 
 package au.com.shiftyjelly.pocketcasts.voicecontrol.engine
 
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import au.com.shiftyjelly.pocketcasts.sharedtest.MainCoroutineRule
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
@@ -32,7 +30,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizeResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.BluetoothCandidate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisitionPlatform
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult
 import java.util.Locale
@@ -41,11 +42,11 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.TestScope
-import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -78,9 +79,10 @@ class VoiceAsrEngineTest {
         // The engine reads the grace window to decide whether the user was addressing us, so the
         // mock has to answer. Default false = the window is shut: a capture from the room.
         `when`(gracePeriodSignal.isActive).thenReturn(kotlinx.coroutines.flow.MutableStateFlow(false))
+        // By default the native capture pipeline attaches. Tests that exercise a failed or
+        // cancelled start override this with false.
+        `when`(voiceAudioProcessor.attachCapture()).thenReturn(true)
     }
-
-    private var capturedReceiver: BroadcastReceiver? = null
 
     private val captureFlow: Flow<VoiceSegmenterResult> = MutableStateFlow(VoiceSegmenterResult.Silence)
 
@@ -100,16 +102,6 @@ class VoiceAsrEngineTest {
                     completionSample = 4000,
                 ),
             )
-        }
-
-        `when`(
-            context.registerReceiver(
-                any<BroadcastReceiver>(),
-                any<IntentFilter>(),
-            ),
-        ).thenAnswer { invocation ->
-            capturedReceiver = invocation.getArgument(0)
-            Intent()
         }
 
         engine = VoiceAsrEngine(
@@ -136,15 +128,46 @@ class VoiceAsrEngineTest {
         )
     }
 
-    private fun simulateScoState(state: Int) {
-        val intent = mock<Intent>()
-        `when`(
-            intent.getIntExtra(
-                AudioManager.EXTRA_SCO_AUDIO_STATE,
-                AudioManager.SCO_AUDIO_STATE_ERROR,
-            ),
-        ).thenReturn(state)
-        capturedReceiver?.onReceive(context, intent)
+    @Test
+    fun `a processing flow that ends reports termination`() = runTest {
+        createEngine()
+        // The pipeline exiting on its own (a backend failure, a stream that stops) must reach the
+        // service so it can clear capture state instead of reporting a listening engine forever.
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(flowOf(VoiceSegmenterResult.Silence))
+        var terminated = false
+
+        engine.start(
+            backend = backend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.WakeWord,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+            onTerminated = { terminated = true },
+        )
+        advanceUntilIdle()
+
+        assertTrue("the service must learn when the pipeline ends", terminated)
+    }
+
+    @Test
+    fun `a pipeline that never attaches reports termination`() = runTest {
+        createEngine()
+        `when`(voiceAudioProcessor.attachCapture()).thenReturn(false)
+        var terminated = false
+
+        engine.start(
+            backend = backend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.WakeWord,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+            onTerminated = { terminated = true },
+        )
+        advanceUntilIdle()
+
+        assertTrue("a start that ends before attaching must report termination", terminated)
     }
 
     // ── The backend must be prepared on every start, not just the first ──
@@ -233,96 +256,17 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
-    // ── Bluetooth route: SCO await ─────────────────────────────────────
+    // ── Bluetooth route: acquisition owns SCO; the engine captures the opened stream ──
 
     @Test
-    fun `start with BluetoothA2dpOnly awaits SCO connected before capture`() = runTest {
+    fun `start with BluetoothA2dpOnly starts capture`() = runTest {
         createEngine()
         startEngine(AudioRoute.BluetoothA2dpOnly)
-        // Do not advanceUntilIdle — that would fire the SCO timeout.
-        runCurrent()
-
-        verify(audioManager).startBluetoothSco()
-        verify(voiceAudioProcessor, never()).startProcessing()
-        assertTrue("Expected receiver registered", capturedReceiver != null)
-
-        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
         advanceUntilIdle()
 
         verify(voiceAudioProcessor).startProcessing()
 
         engine.stop()
-    }
-
-    @Test
-    fun `start with BluetoothA2dpOnly starts capture even when SCO disconnects`() = runTest {
-        createEngine()
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-
-        verify(audioManager).startBluetoothSco()
-        verify(voiceAudioProcessor, never()).startProcessing()
-
-        simulateScoState(AudioManager.SCO_AUDIO_STATE_DISCONNECTED)
-        advanceUntilIdle()
-
-        verify(voiceAudioProcessor).startProcessing()
-
-        engine.stop()
-    }
-
-    @Test
-    fun `start with BluetoothA2dpOnly falls back after SCO timeout`() = runTest {
-        createEngine()
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-
-        verify(audioManager).startBluetoothSco()
-        verify(voiceAudioProcessor, never()).startProcessing()
-
-        advanceTimeBy(3_001)
-        advanceUntilIdle()
-
-        verify(voiceAudioProcessor).startProcessing()
-
-        engine.stop()
-    }
-
-    // ── Cancellation / Stop ────────────────────────────────────────────
-
-    @Test
-    fun `stop during SCO await cancels wait and unregisters receiver`() = runTest {
-        createEngine()
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-
-        verify(audioManager).startBluetoothSco()
-        assertTrue("Expected receiver registered", capturedReceiver != null)
-
-        engine.stop()
-        advanceUntilIdle()
-
-        verify(context).unregisterReceiver(any<BroadcastReceiver>())
-        verify(voiceAudioProcessor, never()).startProcessing()
-    }
-
-    @Test
-    fun `stop after capture started closes SCO and keeps the backend warm`() = runTest {
-        createEngine()
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-
-        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
-        advanceUntilIdle()
-        verify(voiceAudioProcessor).startProcessing()
-
-        engine.stop()
-        advanceUntilIdle()
-
-        verify(audioManager).stopBluetoothSco()
-        // Deliberately not released: a listening pause must not cost a model reload on the
-        // next start. VoiceControlService releases the backend in its teardown.
-        verify(backend, never()).release()
     }
 
     @Test
@@ -1198,136 +1142,6 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
-    // ── SCO not reopened for subsequent starts ─────────────────────────
-
-    @Test
-    fun `stop then restart on Bluetooth re-opens SCO`() = runTest {
-        createEngine()
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-
-        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
-        advanceUntilIdle()
-
-        engine.stop()
-        advanceUntilIdle()
-        verify(audioManager).stopBluetoothSco()
-
-        // Restart — stop cleared scoStarted, so SCO must be re-opened
-        capturedReceiver = null
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
-        advanceUntilIdle()
-
-        verify(audioManager, times(2)).startBluetoothSco()
-        verify(voiceAudioProcessor, times(2)).startProcessing()
-
-        engine.stop()
-    }
-
-    // ── Route switching scenarios ──────────────────────────────────────
-
-    @Test
-    fun `restart from Speaker to Bluetooth triggers SCO await`() = runTest {
-        createEngine()
-        startEngine(AudioRoute.Speaker)
-        advanceUntilIdle()
-        verify(audioManager, never()).startBluetoothSco()
-
-        engine.stop()
-        capturedReceiver = null
-
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
-
-        verify(audioManager, times(1)).startBluetoothSco()
-        assertTrue("Expected receiver registered", capturedReceiver != null)
-
-        engine.stop()
-    }
-
-    @Test
-    fun `restart from Bluetooth to Speaker closes SCO`() = runTest {
-        createEngine()
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-
-        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
-        advanceUntilIdle()
-
-        engine.stop()
-        advanceUntilIdle()
-        verify(audioManager).stopBluetoothSco()
-
-        startEngine(AudioRoute.Speaker)
-        advanceUntilIdle()
-        verify(voiceAudioProcessor, times(2)).startProcessing()
-
-        verify(audioManager, times(1)).startBluetoothSco()
-        verify(audioManager, times(1)).stopBluetoothSco()
-
-        engine.stop()
-    }
-
-    @Test
-    fun `Bluetooth SCO setup exception falls back to phone mic capture`() = runTest {
-        createEngine()
-        `when`(
-            context.registerReceiver(
-                any<BroadcastReceiver>(),
-                any<IntentFilter>(),
-            ),
-        ).thenThrow(RuntimeException("registerReceiver failed"))
-
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
-
-        verify(voiceAudioProcessor).startProcessing()
-        verify(audioManager, never()).startBluetoothSco()
-
-        engine.stop()
-    }
-
-    @Test
-    fun `Bluetooth SCO startBluetoothSco exception unregisters receiver and restores audio mode`() = runTest {
-        createEngine()
-        `when`(audioManager.mode).thenReturn(AudioManager.MODE_IN_COMMUNICATION)
-        org.mockito.Mockito.doThrow(RuntimeException("startBluetoothSco failed"))
-            .`when`(audioManager).startBluetoothSco()
-
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
-
-        verify(voiceAudioProcessor).startProcessing()
-        assertTrue("Expected receiver to have been registered", capturedReceiver != null)
-        verify(context).unregisterReceiver(capturedReceiver!!)
-        verify(audioManager).setMode(AudioManager.MODE_IN_COMMUNICATION)
-        // Fallback path must not leave scoStarted set — stop should not call stopBluetoothSco.
-        engine.stop()
-        verify(audioManager, never()).stopBluetoothSco()
-    }
-
-    @Test
-    fun `Bluetooth SCO CancellationException after register rolls back receiver and mode`() = runTest {
-        createEngine()
-        `when`(audioManager.mode).thenReturn(AudioManager.MODE_IN_COMMUNICATION)
-        org.mockito.Mockito.doThrow(kotlinx.coroutines.CancellationException("sco cancelled"))
-            .`when`(audioManager).startBluetoothSco()
-
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
-
-        // Cancellation aborts the processing job before capture; rollback must still run.
-        verify(voiceAudioProcessor, never()).startProcessing()
-        assertTrue("Expected receiver to have been registered", capturedReceiver != null)
-        verify(context).unregisterReceiver(capturedReceiver!!)
-        verify(audioManager).setMode(AudioManager.MODE_IN_COMMUNICATION)
-
-        engine.stop()
-        verify(audioManager, never()).stopBluetoothSco()
-    }
-
     // ── Wake-word detection paths ──────────────────────────────────────
 
     private fun CoroutineScope.createEngineWithSpeech(
@@ -1463,6 +1277,109 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
+    // ── Capture attachment gates the stream hand-off ─────────────────
+    //
+    // A confirmed stream is only handed to the engine once the native VAD pipeline has
+    // attached. A start that ends before attaching (backend failure, cancellation) must
+    // leave the stream owned by the caller so it can be closed — never a live microphone
+    // with no consumer.
+
+    @Test
+    fun `a pipeline that fails to attach reports the stream was not taken`() = runTest {
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
+        `when`(voiceAudioProcessor.attachCapture()).thenReturn(false)
+
+        val attachment = engine.start(
+            backend = backend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+
+        assertFalse("the pipeline never attached capture", attachment.await())
+        verify(voiceAudioProcessor, never()).startProcessing()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `a pipeline that attaches reports the start took the stream`() = runTest {
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
+
+        val attachment = engine.start(
+            backend = backend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+
+        assertTrue("the pipeline attached capture", attachment.await())
+        verify(voiceAudioProcessor).attachCapture()
+
+        engine.stop()
+    }
+
+    @Test
+    fun `a start that fails to attach closes the confirmed stream and leaves no active capture`() = runTest {
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
+        `when`(voiceAudioProcessor.attachCapture()).thenReturn(false)
+        val platform = FakeAcquisitionPlatform()
+        val acquisition = RouteAcquisition(platform, timeoutMs = 1_000L, pollIntervalMs = 10L)
+
+        // The service sequence: confirm the external stream, start the engine, wait for attach.
+        assertTrue(acquisition.confirmCaptureStream())
+        val attachment = engine.start(
+            backend = backend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        assertFalse("the pipeline never attached capture", attachment.await())
+        verify(voiceAudioProcessor, never()).startProcessing()
+
+        // The engine never took the stream, so the service releases it and it must be closed.
+        acquisition.release()
+        assertEquals("the confirmed stream must be closed", 1, platform.closeCalls)
+        assertFalse("no capture stream is left open", acquisition.hasConfirmedStream)
+
+        engine.stop()
+    }
+
+    @Test
+    fun `a start that attaches hands the confirmed stream to the engine exactly once`() = runTest {
+        createEngine()
+        `when`(backend.ensureReady()).thenReturn(Result.success(Unit))
+        val platform = FakeAcquisitionPlatform()
+        val acquisition = RouteAcquisition(platform, timeoutMs = 1_000L, pollIntervalMs = 10L)
+
+        assertTrue(acquisition.confirmCaptureStream())
+        val attachment = engine.start(
+            backend = backend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        assertTrue("the pipeline attached capture", attachment.await())
+
+        acquisition.handOffStream()
+        acquisition.release()
+        // Handed off: the engine owns the live stream, so release must not close it.
+        assertEquals(0, platform.closeCalls)
+
+        engine.stop()
+    }
+
     /** A router that cannot load its model at all. */
     private class NotReadyRecognizer : VoiceRecognizer {
         var recognizes = 0
@@ -1561,5 +1478,42 @@ class VoiceAsrEngineTest {
         )
 
         override fun release() = Unit
+    }
+
+    /** A platform that opens and starts an external headset stream, so confirmation succeeds. */
+    private class FakeAcquisitionPlatform : RouteAcquisitionPlatform {
+        var openCalls = 0
+        var closeCalls = 0
+
+        override fun bluetoothCandidates(): List<BluetoothCandidate> = emptyList()
+
+        override fun startBluetoothSco() = Unit
+
+        override fun stopBluetoothSco() = Unit
+
+        override fun isBluetoothScoOn(): Boolean = false
+
+        override fun setCommunicationDevice(deviceId: Int): Boolean = false
+
+        override fun communicationDeviceId(): Int? = null
+
+        override fun clearCommunicationDevice() = Unit
+
+        override fun audioMode(): Int = AudioManager.MODE_NORMAL
+
+        override fun setAudioMode(mode: Int) = Unit
+
+        override fun deviceType(deviceId: Int): Int? = AudioDeviceInfo.TYPE_WIRED_HEADSET
+
+        override fun openInputStream(): Int {
+            openCalls++
+            return 21
+        }
+
+        override fun startInputStream(): Boolean = true
+
+        override fun closeInputStream() {
+            closeCalls++
+        }
     }
 }

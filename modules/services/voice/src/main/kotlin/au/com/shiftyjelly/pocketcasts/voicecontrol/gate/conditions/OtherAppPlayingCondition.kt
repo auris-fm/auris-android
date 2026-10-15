@@ -28,7 +28,7 @@ class OtherAppPlayingCondition(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) : VoiceControlRule {
 
-    override val id = "other_app_playing"
+    override val id = ID
     override val group = VoiceControlRuleGroup.Conflicts
 
     private val mutableState = MutableStateFlow<VoiceControlRuleState>(VoiceControlRuleState.Unknown("initializing"))
@@ -115,6 +115,10 @@ class OtherAppPlayingCondition(
         } else {
             VoiceControlRuleState.Allowed
         }
+    }
+
+    companion object {
+        const val ID = "other_app_playing"
     }
 }
 

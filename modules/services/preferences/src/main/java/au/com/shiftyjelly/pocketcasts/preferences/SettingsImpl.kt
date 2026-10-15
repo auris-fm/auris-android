@@ -41,7 +41,6 @@ import au.com.shiftyjelly.pocketcasts.preferences.model.PodcastGridLayoutType
 import au.com.shiftyjelly.pocketcasts.preferences.model.SelectedPlaylist
 import au.com.shiftyjelly.pocketcasts.preferences.model.ShelfItem
 import au.com.shiftyjelly.pocketcasts.preferences.model.ThemeSetting
-import au.com.shiftyjelly.pocketcasts.preferences.model.VoiceControlAudioRoutePolicy
 import au.com.shiftyjelly.pocketcasts.utils.AppPlatform
 import au.com.shiftyjelly.pocketcasts.utils.Util
 import au.com.shiftyjelly.pocketcasts.utils.config.FirebaseConfig
@@ -1224,14 +1223,6 @@ class SettingsImpl @Inject constructor(
         sharedPrefKey = "voiceControlSetupCompleted",
         defaultValue = false,
         sharedPrefs = sharedPreferences,
-    )
-
-    override val voiceControlAudioRoutePolicy = UserSetting.PrefFromString(
-        sharedPrefKey = "voiceControlAudioRoutePolicy",
-        defaultValue = VoiceControlAudioRoutePolicy.SpeakerExperimental,
-        sharedPrefs = sharedPreferences,
-        fromString = VoiceControlAudioRoutePolicy::fromValue,
-        toString = VoiceControlAudioRoutePolicy::value,
     )
 
     override val showArchivedDefault = UserSetting.BoolPref(

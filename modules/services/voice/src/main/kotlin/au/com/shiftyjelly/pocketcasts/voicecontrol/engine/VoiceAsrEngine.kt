@@ -1,11 +1,8 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.engine
 
 import android.Manifest
-import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.media.AudioManager
 import androidx.annotation.RequiresPermission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
@@ -35,18 +32,27 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import java.util.Locale
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withTimeoutOrNull
 import timber.log.Timber
 
 /** How close the completion band must sit to speech end for a capture to be the wake word alone. */
 private const val WAKE_ONLY_TOLERANCE_MS = 120
+
+/**
+ * Handle to a [VoiceAsrEngine.start] attempt. [await] returns true once the native capture
+ * pipeline is attached to the confirmed stream, or false when the attempt ended before
+ * attaching (backend not ready, native attach failure, or cancellation). The caller must not
+ * hand the stream to the engine until [await] returns true; until then the stream is still the
+ * caller's to close, so a start that never attaches cannot leave a hot microphone behind.
+ */
+class CaptureAttachment internal constructor(private val attached: CompletableDeferred<Boolean>) {
+    suspend fun await(): Boolean = attached.await()
+}
 
 @Singleton
 class VoiceAsrEngine @Inject constructor(
@@ -64,11 +70,8 @@ class VoiceAsrEngine @Inject constructor(
     private val translationStage: TranslationStage,
     @ApplicationContext private val context: Context,
 ) {
-    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var processingJob: Job? = null
-    private var scoStarted = false
-    private var savedAudioMode: Int? = null
     private var playbackBufferProvider: (() -> FloatArray)? = null
 
     private var backend: AsrBackend? = null
@@ -86,7 +89,11 @@ class VoiceAsrEngine @Inject constructor(
         playbackBufferProvider: () -> FloatArray,
         micExposureProvider: () -> MicExposure,
         onIntent: (VoiceIntent) -> Unit,
-    ) {
+        // Invoked when the processing job ends for any reason, so the service can clear capture
+        // state the pipeline no longer backs. The job ends on an intentional stop too; the caller
+        // scopes the reaction to its start generation so only an unexpected end is acted on.
+        onTerminated: () -> Unit = {},
+    ): CaptureAttachment {
         this.backend = backend
         this.currentMode = listeningMode
         this.playbackBufferProvider = playbackBufferProvider
@@ -94,8 +101,9 @@ class VoiceAsrEngine @Inject constructor(
         this.onIntent = onIntent
         utteranceFilter.reset()
 
+        val attached = CompletableDeferred<Boolean>()
         processingJob = scope.launch {
-            Timber.i("[VoicePipeline] start route=%s sco=%b", audioRoute, audioRoute is AudioRoute.BluetoothA2dpOnly)
+            Timber.i("[VoicePipeline] start route=%s bluetoothCandidate=%b", audioRoute, audioRoute is AudioRoute.BluetoothA2dpOnly)
             // Prepare the backend on every start. Not because a pause releases it — stop()
             // deliberately keeps it warm — but because the engine can be handed a backend that
             // was never prepared, and because a start that cannot be prepared must not run a
@@ -106,9 +114,19 @@ class VoiceAsrEngine @Inject constructor(
                 Timber.e(backendReady.exceptionOrNull(), "[VoicePipeline] ASR backend not ready — not listening")
                 return@launch
             }
-            if (audioRoute is AudioRoute.BluetoothA2dpOnly) {
-                awaitBluetoothSco()
+            // Attach the native VAD pipeline to the confirmed stream before reporting the start
+            // as attached. The caller hands the stream over only on a true signal, so a start
+            // that ends here leaves the stream owned by the caller and closed, never live with
+            // no consumer.
+            if (!voiceAudioProcessor.attachCapture()) {
+                Timber.e("[VoicePipeline] capture attach failed — not listening")
+                return@launch
             }
+            attached.complete(true)
+            // A Bluetooth candidate is acquired before the engine starts; the stream opened
+            // by acquisition is the one this pipeline attaches to. Opening SCO here would
+            // deadlock under the isolated-microphone rule (voice-control-core.md > Route
+            // acquisition).
             try {
                 voiceAudioProcessor.startProcessing().collect { result ->
                     when (result) {
@@ -137,7 +155,15 @@ class VoiceAsrEngine @Inject constructor(
                 Timber.e(e, "[VoicePipeline] audio processing failed")
             }
         }
-        Timber.i("[VoicePipeline] engine started backend=%s mode=%s", backend::class.simpleName, listeningMode)
+        // If the job ends without ever attaching (backend not ready, native attach failure, or
+        // cancellation before the body ran), report that the stream was never taken. Completing
+        // an already-completed true is a no-op.
+        processingJob?.invokeOnCompletion {
+            attached.complete(false)
+            onTerminated()
+        }
+        Timber.i("[VoicePipeline] engine start requested backend=%s mode=%s", backend::class.simpleName, listeningMode)
+        return CaptureAttachment(attached)
     }
 
     fun updateListeningMode(mode: ListeningMode) {
@@ -530,103 +556,16 @@ class VoiceAsrEngine @Inject constructor(
     fun stop() {
         processingJob?.cancel()
         processingJob = null
+        // Tear down native capture directly too: the processing job's flow `finally` only runs
+        // when the event loop was collected, and a capture attached but never collected must
+        // still be stopped. Idempotent with the flow's own teardown.
+        voiceAudioProcessor.stopProcessing()
         // Listening pauses are frequent (gate conflicts, route changes), so the backend is
         // deliberately kept warm here rather than released: releasing it would force a full
         // model reload on the next start, and everything spoken during that reload is lost.
         // The ASR backend is owned by VoiceControlService and released in its teardown.
         backend = null
-        closeBluetoothSco()
         Timber.i("[VoicePipeline] engine stopped")
-    }
-
-    @Suppress("DEPRECATION") // startBluetoothSco + SCO broadcast deprecated in API 33; no replacement
-    private suspend fun awaitBluetoothSco() {
-        if (scoStarted) return
-        var registeredReceiver: BroadcastReceiver? = null
-        var modeCaptured = false
-        try {
-            val connected = withTimeoutOrNull(SCO_CONNECT_TIMEOUT_MS) {
-                suspendCancellableCoroutine { cont ->
-                    val receiver = object : BroadcastReceiver() {
-                        override fun onReceive(ctx: Context, intent: Intent) {
-                            val state = intent.getIntExtra(
-                                AudioManager.EXTRA_SCO_AUDIO_STATE,
-                                AudioManager.SCO_AUDIO_STATE_ERROR,
-                            )
-                            Timber.i("[VoicePipeline] sco state=%d", state)
-                            if (state == AudioManager.SCO_AUDIO_STATE_CONNECTED ||
-                                state == AudioManager.SCO_AUDIO_STATE_DISCONNECTED
-                            ) {
-                                context.unregisterReceiver(this)
-                                if (cont.isActive) cont.resumeWith(Result.success(state == AudioManager.SCO_AUDIO_STATE_CONNECTED))
-                            }
-                        }
-                    }
-                    context.registerReceiver(
-                        receiver,
-                        IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED),
-                    )
-                    registeredReceiver = receiver
-                    savedAudioMode = audioManager.mode
-                    modeCaptured = true
-                    audioManager.mode = AudioManager.MODE_NORMAL
-                    audioManager.startBluetoothSco()
-                    scoStarted = true
-                    Timber.i("[VoicePipeline] sco requested, waiting")
-
-                    cont.invokeOnCancellation {
-                        try {
-                            context.unregisterReceiver(receiver)
-                        } catch (_: Exception) {
-                        }
-                        registeredReceiver = null
-                    }
-                }
-            }
-            if (connected != true) {
-                Timber.w("[VoicePipeline] sco timeout/fallback — proceeding without confirmed SCO")
-                // Leave scoStarted as set if startBluetoothSco was issued; closeBluetoothSco
-                // still cleans up on stop. Capture continues on the best available input.
-            }
-        } catch (e: CancellationException) {
-            // Cancellation can land after register/mode change but before scoStarted —
-            // rollback restores mode / clears savedAudioMode (unregister is idempotent).
-            rollbackFailedScoSetup(registeredReceiver, modeCaptured)
-            throw e
-        } catch (e: Exception) {
-            Timber.w(e, "[VoicePipeline] sco setup failed — falling back to phone mic")
-            rollbackFailedScoSetup(registeredReceiver, modeCaptured)
-        }
-    }
-
-    private fun rollbackFailedScoSetup(receiver: BroadcastReceiver?, modeCaptured: Boolean) {
-        if (receiver != null) {
-            try {
-                context.unregisterReceiver(receiver)
-            } catch (_: Exception) {
-            }
-        }
-        if (modeCaptured) {
-            try {
-                savedAudioMode?.let { audioManager.mode = it }
-            } catch (_: Exception) {
-            }
-            savedAudioMode = null
-        }
-        scoStarted = false
-    }
-
-    @Suppress("DEPRECATION") // stopBluetoothSco deprecated in API 33; no replacement
-    private fun closeBluetoothSco() {
-        if (!scoStarted) return
-        try {
-            audioManager.stopBluetoothSco()
-            savedAudioMode?.let { audioManager.mode = it }
-        } catch (e: Exception) {
-            Timber.w(e, "Failed to stop Bluetooth SCO")
-        } finally {
-            scoStarted = false
-        }
     }
 
     /**
@@ -638,7 +577,5 @@ class VoiceAsrEngine @Inject constructor(
     companion object {
         /** Client-owned wording, resolved through [SpokenLine] so a foreign locale hears the earcon. */
         private const val KEY_CLOUD_UNROUTED = "pipeline.unclear_command"
-
-        private const val SCO_CONNECT_TIMEOUT_MS = 3_000L
     }
 }

@@ -10,7 +10,7 @@ class BatteryOkCondition(
     private val isPowerSaveMode: Boolean = false,
 ) : VoiceControlRule {
 
-    override val id = "battery_ok"
+    override val id = ID
     override val group = VoiceControlRuleGroup.Conflicts
 
     private val mutableState = MutableStateFlow(evaluate())
@@ -28,5 +28,9 @@ class BatteryOkCondition(
         } else {
             VoiceControlRuleState.Allowed
         }
+    }
+
+    companion object {
+        const val ID = "battery_ok"
     }
 }

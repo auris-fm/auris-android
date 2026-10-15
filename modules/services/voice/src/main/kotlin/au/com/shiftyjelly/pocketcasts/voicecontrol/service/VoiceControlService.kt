@@ -8,6 +8,7 @@ import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import androidx.annotation.RequiresPermission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackendSelector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.CanaryFlashBackend
@@ -31,16 +32,23 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.PlaybackContextMonit
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.restoresAllowance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.playback.windowGenerationOf
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AcquisitionResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.keepsPendingAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
@@ -79,20 +87,39 @@ class VoiceControlService : Service() {
 
     @Inject lateinit var gracePeriodSignal: GracePeriodSignal
 
+    @Inject lateinit var routeAcquisition: RouteAcquisition
+
+    @Inject lateinit var captureStateHolder: VoiceControlCaptureStateHolder
+
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var modeJob: Job? = null
+    private var acquisitionJob: Job? = null
     private var lastIntentType: String? = null
     private var lastCommandTime: Long = 0L
-    private var engineStarted = false
+    private val engineStart = EngineStartState()
     private var wiredBackend: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend? = null
     private var captureWasEverActive = false
     private var acquisitionLogged = false
+    private var lastObserverDecision: String? = null
+
+    /** The automatic-restart cap, consulted by every start decision. */
+    private val captureRestartBudget = CaptureRestartBudget()
+
+    /**
+     * Bumped to ask the mode observer to re-evaluate capture after it ended on its own. The
+     * observer is the single owner of engine starts, so recovery signals it rather than starting
+     * the engine from another coroutine, which could race an in-flight start.
+     */
+    private val captureRestartSignal = MutableStateFlow(0L)
     private var mediaSession: MediaSession? = null
     private var currentMode: ListeningMode = ListeningMode.Off
 
     companion object {
         private const val COMMAND_DEBOUNCE_MS = 2000L
         internal const val STOP_ACTION = "au.com.shiftyjelly.pocketcasts.voicecontrol.action.STOP"
+
+        /** The spec's closed runtime-reason mapping for a pipeline that ended on its own. */
+        private const val REASON_CAPTURE_FAILURE = "capture_failure"
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -110,10 +137,12 @@ class VoiceControlService : Service() {
     }
 
     private fun startVoiceControl() {
-        if (engineStarted) {
+        if (engineStart.isStarted) {
             Timber.i("Voice control already started")
             return
         }
+        // A user-driven service start clears the automatic-restart cap left by a previous session.
+        captureRestartBudget.reset()
 
         if (!hasRequiredPermissions()) {
             Timber.w("Missing permissions, stopping")
@@ -147,28 +176,67 @@ class VoiceControlService : Service() {
                 modeJob = kotlinx.coroutines.flow.combine(
                     listeningModePolicy.mode,
                     audioRouteMonitor.route,
-                ) { mode, _ -> mode }.onEach { mode ->
+                    // The gate is a third source so a gate transition that leaves the mode `Off` — a
+                    // candidate route blocked only by the gate — still re-runs this observer. With
+                    // `mode` alone, `Off` is unchanged across such a transition, no emission
+                    // arrives, and acquisition is never attempted: the microphone stays shut after
+                    // the user starts playback, with nothing to retry it.
+                    gate.state,
+                    // Recovery from a capture that ended on its own is a signal, not a second
+                    // starter: this observer owns engine starts and re-runs on the bump.
+                    captureRestartSignal,
+                ) { mode, _, _, _ -> mode }.onEach { mode ->
                     val route = audioRouteMonitor.route.value
                     val micExposure = route.toMicExposure()
+                    // Transitions, not repeated evaluations: the gate also emits for changes that
+                    // leave this tuple alone (other rule state), and the composite decision — mode,
+                    // route, exposure, gate — is what capture depends on. Debug level, and no audio
+                    // or transcript content (voice-control-core.md > Privacy and UX).
+                    val decision = "mode=$mode route=$route exposure=$micExposure " +
+                        "gateAllowed=${gate.state.value.allowed} acquiring=${acquisitionJob != null}"
+                    if (decision != lastObserverDecision) {
+                        lastObserverDecision = decision
+                        Timber.d("[VoicePipeline] observer: %s", decision)
+                    }
+                    // A pending acquisition stays valid while its candidate is present or has
+                    // become the selected external microphone: the selection callbacks publish
+                    // `Headset` while acquisition is still confirming, and cancelling on any
+                    // non-candidate route would abort the acquisition that just succeeded and
+                    // release the routing it acquired. Only actual device loss ends it; a gate
+                    // blocker is handled by the gateAllows predicate inside acquisition.
+                    if (!route.keepsPendingAcquisition()) {
+                        acquisitionJob?.cancel()
+                        acquisitionJob = null
+                    }
                     when (mode) {
                         ListeningMode.Off -> {
-                            if (engineStarted) {
+                            // A gate loss, route change, or Off can arrive while a start is
+                            // still suspended in ensureReady(); the acquisition caller clears
+                            // its own job before that suspension, so nothing else can cancel
+                            // it. Bumping the generation makes the pending start abandon
+                            // itself instead of committing capture.
+                            engineStart.invalidatePendingStart()
+                            // The user turning voice control off is a fresh start, not a retry: clear
+                            // the automatic-restart cap so re-enabling it can capture again.
+                            if (gate.state.value.rules[EnabledByUserCondition.ID] is VoiceControlRuleState.Blocked) {
+                                captureRestartBudget.reset()
+                            }
+                            if (engineStart.isStarted) {
                                 // Active capture was ongoing, now stopping
-                                val gateState = gate.state.value
-                                val blockedRules = gateState.rules
+                                val blockedRules = gate.state.value.rules
                                     .filter { it.value !is VoiceControlRuleState.Allowed }
                                 val reasons = blockedRules.entries
                                     .joinToString(";") { "${it.key}=${it.value}" }
                                 val isUserRequested = blockedRules.keys.any {
                                     it == EnabledByUserCondition.ID
                                 }
-                                val msg = "mic_capture_stopped: reasons=%s setup=%b conflicts=%b context=%b micExposure=%s route=%s mode=%s priorCaptureActive=true"
-                                if (isUserRequested) {
-                                    Timber.i(msg, reasons, gateState.setupPassed, gateState.conflictsPassed, gateState.contextPassed, micExposure, route, mode)
-                                } else {
-                                    Timber.e(msg, reasons, gateState.setupPassed, gateState.conflictsPassed, gateState.contextPassed, micExposure, route, mode)
-                                }
+                                logCaptureStopped(reasons, isUserRequested)
                                 stopEngine()
+                            } else if (route is AudioRoute.BluetoothA2dpOnly && gate.state.value.allowed) {
+                                // The route is a candidate and every non-route gate question passes:
+                                // acquire the external microphone, then capture. Without this the route
+                                // stays Exposed and the mode never leaves Off — the deadlock.
+                                acquireCandidate(route)
                             } else if (!captureWasEverActive && !acquisitionLogged) {
                                 // Capture never started — log once, not on every recomputation
                                 acquisitionLogged = true
@@ -195,7 +263,11 @@ class VoiceControlService : Service() {
 
                         ListeningMode.Continuous, ListeningMode.WakeWord -> {
                             captureWasEverActive = true
-                            if (engineStarted) {
+                            // Track the mode the engine is actually running in and drive the media
+                            // session from it. Leaving the cache at the previous value skipped the
+                            // switch back to wake-word when grace expired, so commands stayed
+                            // accepted without a wake word.
+                            if (engineStart.isStarted) {
                                 if (mode != currentMode) {
                                     voiceAsrEngine.get().updateListeningMode(mode)
                                     // Keep the wake-word hint accurate as grace opens/expires
@@ -204,12 +276,17 @@ class VoiceControlService : Service() {
                                     )
                                     notificationManager.notify(notification)
                                 }
-                            } else {
+                                currentMode = mode
+                                updateListeningState()
+                            } else if (captureRestartBudget.allows()) {
                                 @Suppress("MissingPermission") // permission checked in hasRequiredPermissions() above
-                                startEngine(mode)
+                                if (startEngine(mode)) {
+                                    currentMode = mode
+                                    updateListeningState()
+                                }
+                            } else {
+                                Timber.w("[VoicePipeline] start skipped: automatic restart withheld (cap reached)")
                             }
-                            currentMode = mode
-                            updateListeningState()
                         }
                     }
                 }.launchIn(serviceScope)
@@ -293,60 +370,292 @@ class VoiceControlService : Service() {
         Timber.i("ASR model ready")
     }
 
+    /**
+     * Starts the engine. The mode-flow collector is the only caller, and a `StateFlow` collector is
+     * sequential, so one start cannot overlap another and no start lock is needed: serialization is
+     * a consequence of there being one caller, not of [EngineStartState]. A second caller would not
+     * be safe — two `VoiceAsrEngine.start` calls overwrite `processingJob` and attach two pipelines
+     * to one stream. Returns true when the engine is running afterwards.
+     */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    private suspend fun startEngine(mode: ListeningMode) {
-        if (engineStarted) return
-        val backend = asrBackendSelector.select()
-        if (backend == null) {
-            Timber.w(
-                "[VoicePipeline] ASR locale unsupported — refusing to start engine",
-            )
+    private suspend fun startEngine(mode: ListeningMode): Boolean {
+        // Captured before the attempt: validated after ensureReady() so a start that was
+        // invalidated while suspended (gate loss, stop) does not commit.
+        val generation = engineStart.generation()
+        val started = engineStart.startIfNotRunning(
+            start = {
+                val backend = asrBackendSelector.select()
+                if (backend == null) {
+                    Timber.w(
+                        "[VoicePipeline] ASR locale unsupported — refusing to start engine",
+                    )
+                    return@startIfNotRunning false
+                }
+
+                // Prepare the model before telling the user we are listening. The engine also checks
+                // this (it refuses to run a pipeline that would only ever return empty results), but
+                // by then the listening earcon and notification have already gone out, leaving the
+                // user told "listening" with a microphone that never opens.
+                if (backend.ensureReady().isFailure) {
+                    Timber.e("[VoicePipeline] engine not started: ASR backend not ready")
+                    return@startIfNotRunning false
+                }
+
+                // Eligibility is re-checked after the only suspension in this path. The mode-flow
+                // collector can run while the acquisition start is suspended here, and a start
+                // committed after the gate went Off would open a microphone the user is no
+                // longer eligible to have open.
+                if (!engineStart.isCurrent(generation)) {
+                    Timber.i("[VoicePipeline] engine not started: start was invalidated")
+                    return@startIfNotRunning false
+                }
+                if (!gate.state.value.allowed) {
+                    Timber.i("[VoicePipeline] engine not started: gate no longer allows capture")
+                    return@startIfNotRunning false
+                }
+                // Route eligibility. An Isolated route is directly eligible; a candidate route
+                // is eligible once acquisition has opened and confirmed its stream, because the
+                // (debounced) route monitor can still report BluetoothA2dpOnly at this point.
+                // The opened stream is confirmed below, so anything else fails closed there.
+                if (audioRouteMonitor.route.value.toMicExposure() != MicExposure.Isolated &&
+                    !routeAcquisition.hasConfirmedStream
+                ) {
+                    Timber.i("[VoicePipeline] engine not started: route is not an isolated headset")
+                    return@startIfNotRunning false
+                }
+
+                // Every capture start confirms the device the stream selected, not only
+                // acquisition. The route classification can be wrong (an enumerated BLE input
+                // is not a selected one), and native start must never open-and-start an
+                // unconfirmed stream: the opened stream is the authority. Fails closed.
+                if (!routeAcquisition.confirmCaptureStream()) {
+                    Timber.e("[VoicePipeline] engine not started: selected device is not an external microphone")
+                    return@startIfNotRunning false
+                }
+
+                val attachment = try {
+                    voiceAsrEngine.get().start(
+                        backend = backend,
+                        audioRoute = audioRouteMonitor.route.value,
+                        listeningMode = mode,
+                        playbackBufferProvider = playbackBufferRecorder::snapshot,
+                        micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
+                        onIntent = { intent -> handleIntent(intent) },
+                        onTerminated = {
+                            serviceScope.launch(Dispatchers.Main) { onPipelineTerminated(generation) }
+                        },
+                    )
+                } catch (e: Exception) {
+                    // The engine did not take the stream; it is still ours to close.
+                    routeAcquisition.release()
+                    Timber.e(e, "[VoicePipeline] engine start failed")
+                    return@startIfNotRunning false
+                }
+                // Wait for the native capture pipeline to attach to the confirmed stream before
+                // handing it over. Until then the stream is still ours: a start that ends before
+                // attaching (backend failure, cancellation) must be closed here, or it stays live
+                // with no consumer. Fail closed.
+                val attached = try {
+                    attachment.await()
+                } catch (e: CancellationException) {
+                    // The start caller was cancelled while the pipeline was attaching; the
+                    // stream is still ours to stop and close.
+                    voiceAsrEngine.get().stop()
+                    routeAcquisition.release()
+                    throw e
+                }
+                if (!attached) {
+                    routeAcquisition.release()
+                    Timber.e("[VoicePipeline] engine did not attach capture — confirmed stream closed")
+                    return@startIfNotRunning false
+                }
+                // A gate loss/Off can arrive while the pipeline is attaching; the engine is now
+                // running, so stop it rather than hand over a stream the user is no longer
+                // eligible to have open.
+                if (!engineStart.isCurrent(generation) || !gate.state.value.allowed) {
+                    voiceAsrEngine.get().stop()
+                    routeAcquisition.release()
+                    Timber.i("[VoicePipeline] engine stopped: start was invalidated while attaching")
+                    return@startIfNotRunning false
+                }
+                // The engine owns the confirmed stream from here; release() must not close it.
+                routeAcquisition.handOffStream()
+                true
+            },
+            // Post-start side effects run only after the coordinator has recorded the engine as
+            // started. They must not be able to un-set it: acquireCandidate hands the acquired
+            // stream to the engine based on this result, and a false would close a live stream.
+            onStarted = {
+                // Only when the microphone opens where the user cannot see it: the decision is
+                // shouldPlayListeningStartCue in ListeningModePolicy. The predicate it calls is
+                // covered in ListeningModePolicyTest.
+                if (shouldPlayListeningStartCue(mode, gate.state.value.rules)) {
+                    audioFeedbackRenderer.playEarcon(EarconId.LISTENING_START)
+                }
+
+                val notification = notificationManager.createListeningNotification(
+                    wakeWordRequired = mode == ListeningMode.WakeWord,
+                )
+                notificationManager.notify(notification)
+                Timber.i("[VoicePipeline] engine started mode=%s", mode)
+            },
+        )
+        // Publish whether capture is actually running: the mode reads WakeWord/Continuous whenever
+        // the route is eligible, including when a start fails, so settings must not equate the two.
+        captureStateHolder.update(started)
+        if (!started) {
+            // A start that failed before taking the stream leaves acquisition's opened stream
+            // unowned; close it rather than let it stay live with no consumer.
+            routeAcquisition.release()
+        }
+        return started
+    }
+
+    /**
+     * The processing pipeline can end on its own — a backend failure, or a stream that stops. Capture
+     * state must not stay `Active`: settings would report listening and a later start would be
+     * skipped as "already running". Scoped to the start generation, so an intentional stop (which
+     * bumps it) is ignored.
+     */
+    private fun onPipelineTerminated(generation: Int) {
+        if (!engineStart.isCurrent(generation) || !engineStart.isStarted) return
+        // Budget the automatic restarts before anything releases routing: the release fires
+        // selection callbacks that re-enter acquisition and the start path, and they consult the
+        // same budget.
+        captureRestartBudget.onTerminated()
+        if (!captureRestartBudget.allows()) {
+            Timber.w("[VoicePipeline] capture keeps ending — automatic restart withheld")
+        }
+        // A runtime stop, not a user request: the spec requires `mic_capture_stopped` at ERROR with
+        // the runtime reason `capture_failure`, so lifecycle monitoring sees it.
+        logCaptureStopped(REASON_CAPTURE_FAILURE, isUserRequested = false)
+        clearCaptureState()
+        recoverCapture()
+    }
+
+    /**
+     * Capture ended without the gate asking it to — an AAudio disconnect, a backend failure. The
+     * mode was not re-evaluated, so nothing else would re-run the observer: nudge it, if the rate
+     * cap still allows a restart, and it starts capture again on its own sequential turn.
+     *
+     * The nudge goes to the observer rather than starting the engine here: it is the single owner
+     * of engine starts, so a recovery cannot race an in-flight start that is still suspended.
+     */
+    private fun recoverCapture() {
+        if (!captureRestartBudget.allows()) return
+        captureRestartSignal.value = SystemClock.elapsedRealtime()
+    }
+
+    /**
+     * Teardown shared by every stop: clear the started state, release acquisition routing, and list
+     * the mode as Off. A caller that still holds a running engine stops it first.
+     */
+    private fun clearCaptureState() {
+        engineStart.onStopped()
+        captureStateHolder.update(false)
+        currentMode = ListeningMode.Off
+        routeAcquisition.release()
+        updateListeningState()
+    }
+
+    /**
+     * One `mic_capture_stopped` event for every way an active capture ends. The spec requires the
+     * full gate posture, route/exposure, mode and prior capture state, at `ERROR` unless the user
+     * directly asked for the stop.
+     */
+    private fun logCaptureStopped(reasons: String, isUserRequested: Boolean) {
+        val gateState = gate.state.value
+        val route = audioRouteMonitor.route.value
+        val msg = "mic_capture_stopped: reasons=%s setup=%b conflicts=%b context=%b micExposure=%s route=%s mode=%s priorCaptureActive=true"
+        if (isUserRequested) {
+            Timber.i(msg, reasons, gateState.setupPassed, gateState.conflictsPassed, gateState.contextPassed, route.toMicExposure(), route, currentMode)
+        } else {
+            Timber.e(msg, reasons, gateState.setupPassed, gateState.conflictsPassed, gateState.contextPassed, route.toMicExposure(), route, currentMode)
+        }
+    }
+
+    /**
+     * Acquires an external Bluetooth microphone for a candidate route, then starts capture.
+     * Acquisition is bounded and cancellable; when it fails or is cancelled no capture runs and
+     * routing is released.
+     */
+    private fun acquireCandidate(route: AudioRoute) {
+        if (acquisitionJob != null) return
+        if (!captureRestartBudget.allows()) {
+            Timber.w("[VoicePipeline] acquisition skipped: automatic restart withheld (cap reached)")
             return
         }
-
-        // Prepare the model before telling the user we are listening. The engine also checks
-        // this (it refuses to run a pipeline that would only ever return empty results), but
-        // by then the listening earcon and notification have already gone out, leaving the
-        // user told "listening" with a microphone that never opens.
-        if (backend.ensureReady().isFailure) {
-            Timber.e("[VoicePipeline] engine not started: ASR backend not ready")
-            return
+        Timber.i("[VoicePipeline] acquiring external microphone for route=%s", route)
+        val gateAllows = {
+            gate.state.value.allowed && audioRouteMonitor.route.value.keepsPendingAcquisition()
         }
+        acquisitionJob = serviceScope.launch {
+            try {
+                val result = routeAcquisition.acquire(route, gateAllows)
+                // Publish completion before starting the engine: the route monitor will flip to
+                // Headset while startEngine() suspends, and the route-change handling must not
+                // cancel the engine start as if it were still an acquisition.
+                acquisitionJob = null
+                when (result) {
+                    is AcquisitionResult.Acquired -> {
+                        // Publish the confirmed selection into the route state. The device list does
+                        // not change when a microphone is selected, so the monitor may still report
+                        // BluetoothA2dpOnly; without this the mode never leaves Off.
+                        //
+                        // Capture is started by the mode observer, the single owner of engine
+                        // starts: the published route flips the mode to WakeWord/Continuous and the
+                        // observer's startEngine reuses this attempt's already-opened stream.
+                        audioRouteMonitor.onExternalMicrophoneConfirmed()
+                        // The gate can block between acquisition's own check and this point. The
+                        // stream is still ours until the engine takes it, so release it rather than
+                        // leave it live with no consumer.
+                        if (!gate.state.value.allowed) {
+                            routeAcquisition.release()
+                        }
+                    }
 
-        try {
-            voiceAsrEngine.get().start(
-                backend = backend,
-                audioRoute = audioRouteMonitor.route.value,
-                listeningMode = mode,
-                playbackBufferProvider = playbackBufferRecorder::snapshot,
-                micExposureProvider = { audioRouteMonitor.route.value.toMicExposure() },
-                onIntent = { intent -> handleIntent(intent) },
-            )
-            engineStarted = true
+                    is AcquisitionResult.Failed -> {
+                        val gateState = gate.state.value
+                        val blockedRules = gateState.rules
+                            .filter { it.value !is VoiceControlRuleState.Allowed }
+                        val reasons = blockedRules.entries
+                            .joinToString(";") { "${it.key}=${it.value}" }
+                        Timber.e(
+                            "mic_acquisition_skipped: reasons=%s;%s setup=%b conflicts=%b context=%b micExposure=%s route=%s mode=%s priorCaptureActive=false",
+                            result.reason,
+                            reasons,
+                            gateState.setupPassed,
+                            gateState.conflictsPassed,
+                            gateState.contextPassed,
+                            route.toMicExposure(),
+                            route,
+                            currentMode,
+                        )
+                    }
 
-            // Only when the microphone opens where the user cannot see it: the decision is
-            // shouldPlayListeningStartCue in ListeningModePolicy. Nothing under test drives this
-            // service's start path, so this call site is untested by design — the predicate it
-            // calls is covered in ListeningModePolicyTest.
-            if (shouldPlayListeningStartCue(mode, gate.state.value.rules)) {
-                audioFeedbackRenderer.playEarcon(EarconId.LISTENING_START)
+                    AcquisitionResult.Cancelled, AcquisitionResult.NotNeeded -> Unit
+                }
+            } finally {
+                if (acquisitionJob === currentCoroutineContext()[Job]) {
+                    acquisitionJob = null
+                }
             }
-
-            val notification = notificationManager.createListeningNotification(
-                wakeWordRequired = mode == ListeningMode.WakeWord,
-            )
-            notificationManager.notify(notification)
-            Timber.i("[VoicePipeline] engine started mode=%s", mode)
-        } catch (e: Exception) {
-            Timber.e(e, "[VoicePipeline] engine start failed")
         }
     }
 
     private fun stopEngine() {
-        if (!engineStarted) return
-        voiceAsrEngine.get().stop()
-        engineStarted = false
-        Timber.i("[VoicePipeline] engine stopped")
+        acquisitionJob?.cancel()
+        acquisitionJob = null
+        // Stop the engine before releasing acquisition routing: the engine tears down the
+        // stream it owns in its own flow `finally`, and release() must never delete a live
+        // capture. After hand-off release() only undoes the acquired routing.
+        if (engineStart.isStarted) {
+            voiceAsrEngine.get().stop()
+            clearCaptureState()
+            Timber.i("[VoicePipeline] engine stopped")
+        } else {
+            routeAcquisition.release()
+        }
     }
 
     private fun handleIntent(

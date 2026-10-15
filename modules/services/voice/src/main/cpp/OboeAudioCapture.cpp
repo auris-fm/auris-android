@@ -85,7 +85,10 @@ OboeAudioCapture::~OboeAudioCapture() {
 oboe::AudioStreamBuilder OboeAudioCapture::buildStreamBuilder() {
     oboe::AudioStreamBuilder builder;
 
-    builder.setDirection(oboe::Direction::Input)
+    // AAudio is required: on OpenSL ES getDeviceId() is kUnspecified and confirms nothing
+    // (arch/android.md > Audio Route Detection, stream confirmation).
+    builder.setAudioApi(oboe::AudioApi::AAudio)
+           ->setDirection(oboe::Direction::Input)
            ->setSampleRate(mSampleRate)
            ->setChannelCount(mChannelCount)
            ->setFormat(oboe::AudioFormat::I16)
@@ -178,6 +181,14 @@ void OboeAudioCapture::close() {
     mChannelCount = kChannelCount;
 
     LOGI("Capture closed");
+}
+
+int32_t OboeAudioCapture::getDeviceId() {
+    std::lock_guard<std::mutex> lock(mStreamMutex);
+    if (mStream == nullptr) {
+        return -1;
+    }
+    return mStream->getDeviceId();
 }
 
 bool OboeAudioCapture::isActive() const {

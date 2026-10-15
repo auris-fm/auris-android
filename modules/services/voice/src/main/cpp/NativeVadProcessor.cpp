@@ -354,4 +354,16 @@ void NativeVadProcessor::runLoop() {
     }
 
     LOGI("VAD runLoop exited");
+
+    // The capture can end on its own — an AAudio disconnect makes readRingBuffer report the
+    // stream inactive and ends this loop. The Kotlin flow is still blocked in waitForVadEvent,
+    // which would then only ever time out, so publish the terminal -1 (the same event stop()
+    // sends) and wake the waiter: otherwise the flow never completes and the service keeps
+    // believing capture is running, with no restart.
+    {
+        std::lock_guard<std::mutex> lock(mEventMutex);
+        mPendingEvent = -1;
+        mEventReady = true;
+        mEventCv.notify_all();
+    }
 }

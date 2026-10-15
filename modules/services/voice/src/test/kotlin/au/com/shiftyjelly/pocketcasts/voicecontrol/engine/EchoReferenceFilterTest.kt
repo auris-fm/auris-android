@@ -66,14 +66,14 @@ class EchoReferenceFilterTest {
         assertTrue(routeMonitor.route.value !is au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute.Headset)
 
         val answer = FloatArray(8_000) { i -> (0.6 * sin(2 * PI * 220.0 * i / 16_000)).toFloat() }
-        recorder.write(answer, producerId = 41L)
+        recorder.write(answer, admission = admFor(recorder, 41L))
         val echoLikeSpeech = FloatArray(1_600) { i -> 0.3f * answer[i] }
         assertFalse(
             "precondition: while the answer is live its echo is bleed",
             filter.shouldProcess(echoLikeSpeech, hasSpeakerId = false, speakerIndex = 0, playbackBuffer = recorder.snapshot()),
         )
 
-        recorder.retireProducer(41L)
+        recorder.retireProducer(admFor(recorder, 41L))
         nowMs += PlaybackBufferRecorder.DELAY_TAIL_SAMPLES * 1_000 / PlaybackBufferRecorder.SAMPLE_RATE + 1
         assertTrue(
             "after expiry, speech resembling the STOPPED answer must be accepted, not suppressed forever",
@@ -230,4 +230,8 @@ class EchoReferenceFilterTest {
             headsetFilter.shouldProcessReference(delayedMic, hasSpeakerId = false, speakerIndex = 0, reference = recorder.reference()),
         )
     }
+
+    private val testAdmissions = HashMap<Pair<PlaybackBufferRecorder, Long>, PlaybackBufferRecorder.Admission>()
+
+    private fun admFor(recorder: PlaybackBufferRecorder, id: Long): PlaybackBufferRecorder.Admission = testAdmissions.getOrPut(recorder to id) { recorder.openAdmission(id) }
 }

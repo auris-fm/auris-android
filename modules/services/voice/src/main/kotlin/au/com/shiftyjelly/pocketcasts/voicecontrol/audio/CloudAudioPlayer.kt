@@ -240,9 +240,12 @@ class CloudAudioPlayer(
         }
     }
 
-    // This playback's recorder identity: base + the live track generation. A line comment here, not a
-    // second KDoc: the KDoc below belongs to play(), and two adjacent blocks trip ktlint standard:kdoc.
-    private fun currentAnswerProducerId(): Long = CLOUD_ANSWER_IDENTITY_BASE + trackGeneration
+    // This playback's recorder ADMISSION, minted when the track incarnation is created (below, where
+    // trackGeneration advances) and carried by every write and observation this player submits -- never
+    // obtained at execution time inside the recorder. A stop closes it; a held callback carrying the
+    // dead ticket cannot re-enter even before its first write ever landed, and a wholesale route
+    // retirement invalidates it by generation.
+    private var answerAdmission: au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.Admission? = null
 
     /**
      * Start (or resume) playback.
@@ -372,10 +375,10 @@ class CloudAudioPlayer(
      */
     fun stop() {
         if (released) return
-        val stoppedIncarnation: Long?
+        val stoppedIncarnation: au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.Admission? = answerAdmission
         synchronized(frameBuffer) {
             frameBuffer.clear()
-            stoppedIncarnation = if (playing) currentAnswerProducerId() else null
+            // (admission captured above; stop path retires it only if this instance was the player)
             if (playing) {
                 audioTrack?.stop()
                 playing = false
@@ -384,12 +387,17 @@ class CloudAudioPlayer(
                 stopAudibleHeartbeat()
             }
         }
+        // Retire THIS incarnation's stream on any stop -- including a stop before anything played, which
+        // closes admission for callbacks the player may still hold without removing audible audio (there
+        // was none). Previously only a playing stop retired; the stricter form matches the token contract.
         // The answer is no longer playing, so retire ITS stream completely: conversion state AND the
         // acoustic reference beyond the audible delay tail, so speech after the stop cannot match
         // audio that is already gone and be dropped as bleed. Scoped to the incarnation this stop
         // actually ended: a late or duplicate stop must not touch a successor on a newer track, and a
         // whole-recorder retire would reset an episode still feeding the recorder.
-        stoppedIncarnation?.let { playbackBufferRecorder?.retireProducer(it) }
+        if (stoppedIncarnation != null) {
+            playbackBufferRecorder?.retireProducer(stoppedIncarnation)
+        }
         // And withdraw the routed observation. The contract is that the published route describes a
         // live reporting stream: this stream has stopped, so leaving the route published would keep
         // answering for a stream that is gone. Nulling it as well lets a later playback on this same
@@ -490,9 +498,12 @@ class CloudAudioPlayer(
 
         audioTrack = track
         // A new track's frame index starts at zero, so the track-side counter restarts with it, and
-        // everything recorded against the previous track is now from another incarnation.
+        // everything recorded against the previous track is now from another incarnation. The admission
+        // for the NEW incarnation opens HERE, at owner creation -- an epoch change is a new producer,
+        // not a migration of the old one's audio.
         trackFrames = 0L
         trackGeneration += 1L
+        answerAdmission = playbackBufferRecorder?.openAdmission(CLOUD_ANSWER_IDENTITY_BASE + trackGeneration)
     }
 
     private fun drainFrames() {
@@ -583,7 +594,7 @@ class CloudAudioPlayer(
                     }
                     playbackBufferRecorder?.write(
                         pcm = referenceFloats,
-                        producerId = currentAnswerProducerId(),
+                        admission = answerAdmission,
                         // The chunk's frame range on the track's index, recorded so a render
                         // observation can later select THIS block -- or the block it truly names --
                         // by frame identity rather than by extrapolated time. The rendered-block
@@ -619,7 +630,7 @@ class CloudAudioPlayer(
                             observation.nanoTime,
                             currentSampleRate,
                             trackGeneration,
-                            currentAnswerProducerId(),
+                            answerAdmission,
                         )
                     }
                     offset += written

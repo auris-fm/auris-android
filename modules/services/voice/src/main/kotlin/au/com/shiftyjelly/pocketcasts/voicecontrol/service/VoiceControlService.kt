@@ -258,6 +258,10 @@ class VoiceControlService : Service() {
 
                         ListeningMode.Continuous, ListeningMode.WakeWord -> {
                             captureWasEverActive = true
+                            // Track the mode the engine is actually running in and drive the media
+                            // session from it. Leaving the cache at the previous value skipped the
+                            // switch back to wake-word when grace expired, so commands stayed
+                            // accepted without a wake word.
                             if (engineStart.isStarted) {
                                 if (mode != currentMode) {
                                     voiceAsrEngine.get().updateListeningMode(mode)
@@ -267,11 +271,14 @@ class VoiceControlService : Service() {
                                     )
                                     notificationManager.notify(notification)
                                 }
-                            } else if (captureRestartBudget.allows()) {
-                                @Suppress("MissingPermission") // permission checked in hasRequiredPermissions() above
-                                startEngine(mode)
                                 currentMode = mode
                                 updateListeningState()
+                            } else if (captureRestartBudget.allows()) {
+                                @Suppress("MissingPermission") // permission checked in hasRequiredPermissions() above
+                                if (startEngine(mode)) {
+                                    currentMode = mode
+                                    updateListeningState()
+                                }
                             } else {
                                 Timber.w("[VoicePipeline] start skipped: capture restart cooling down")
                             }

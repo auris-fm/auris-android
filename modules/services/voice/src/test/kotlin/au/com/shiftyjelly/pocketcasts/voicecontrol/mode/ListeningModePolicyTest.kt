@@ -1,9 +1,17 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.mode
 
+import app.cash.turbine.test
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGateState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.AppInForegroundCondition
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
+import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -129,5 +137,34 @@ class ListeningModePolicyTest {
             "an unknown foreground state is not evidence of a background start",
             shouldPlayListeningStartCue(ListeningMode.WakeWord, emptyMap()),
         )
+    }
+
+    // --- Live mode flow ---
+
+    // The core spec's integration case: unplugging the headset moves the route to the built-in
+    // microphone, which is `Exposed`, so capture stops instead of continuing on it.
+    @Test
+    fun `a headset that unplugs stops capture`() = runTest {
+        val routeFlow = MutableStateFlow<AudioRoute>(AudioRoute.Headset(hasMicrophone = true))
+        val policy = ListeningModePolicy(
+            gate = VoiceControlGate(rules = emptyList(), scope = backgroundScope),
+            audioRouteMonitor = object : AudioRouteMonitor {
+                override val route: StateFlow<AudioRoute> = routeFlow
+            },
+            gracePeriodSignal = GracePeriodSignal(),
+            scope = backgroundScope,
+        )
+
+        policy.mode.test {
+            assertEquals(ListeningMode.WakeWord, awaitItem())
+
+            routeFlow.value = AudioRoute.Speaker
+
+            assertEquals(
+                "the route falls back to the built-in microphone, which does not listen",
+                ListeningMode.Off,
+                awaitItem(),
+            )
+        }
     }
 }

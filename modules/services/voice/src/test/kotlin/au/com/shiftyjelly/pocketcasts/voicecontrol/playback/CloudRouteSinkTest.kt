@@ -3293,7 +3293,10 @@ class CloudRouteSinkTest {
         // The guard is scoped to whether the window is closed NOW, not to whether it ever was: a
         // stale flag must not become a blanket ban on an unrelated later turn's cleanup.
         val deps = TestDeps(hostPlaying = true, routeInvoker = withHold(flowOf(CloudRouteEvent.Done(1, 0))))
-        // The closure was earlier and privacy has since reopened (a wake clears it).
+        // The closure was EARLIER -- a real closure history the count records -- and privacy has
+        // since reopened (a wake clears the flag). Setting only the flag false here would make the
+        // case indistinguishable from never-closed; the count is what gives "reopened" a past.
+        deps.playbackStopClosures = 1
         deps.privacyClosed = false
 
         deps.sink().routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback

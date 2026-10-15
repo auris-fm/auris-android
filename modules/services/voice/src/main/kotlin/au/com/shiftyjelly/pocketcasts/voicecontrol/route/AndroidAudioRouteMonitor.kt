@@ -115,15 +115,12 @@ class AndroidAudioRouteMonitor @Inject constructor(
     internal fun onDevicesChanged() = scheduleRouteUpdate()
 
     private fun scheduleRouteUpdate() {
-        // The privacy closure is the owning transition and must not wait on the debounce: grace ends
-        // when the device event arrives, not 500ms later when the route has stabilised. Taking it here
-        // also means a burst of events cannot defer it, and it is taken against the window that was
-        // current when the event arrived.
         // The event is the fact; the route read is the derived value. Bluetooth devices enumerate
         // incrementally, so reading immediately can catch a transient Headset(noMic) — that is what the
-        // debounce is for. Ending grace is not derived from the read, so it is taken here, once, on
-        // arrival: waiting would defer the owning transition, and a burst of events would defer it
-        // further, since each new event cancels the pending job.
+        // debounce is for. Ending grace is not derived from the read: the privacy closure is the owning
+        // transition and is taken here, once per event, against the window current when that event
+        // arrived — waiting on the debounce would defer it, and a burst cancels the pending job, so a
+        // burst cannot defer it either.
         gracePeriodSignal.onAudioRouteChanged()
 
         debounceJob?.cancel()

@@ -58,7 +58,10 @@ class PlaybackContextActiveConditionTest {
         // The sink reads privacy through the monitor, so this forwarding is part of the production
         // connection the guard depends on. Driven through a REAL signal so the value has a producer.
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal()
-        val monitor = PlaybackContextMonitor(mock(), signal, backgroundScope)
+        val playbackManager: PlaybackManager = mock {
+            on { playbackStateFlow } doReturn MutableStateFlow(PlaybackState())
+        }
+        val monitor = PlaybackContextMonitor(playbackManager, signal, backgroundScope)
 
         assertFalse("an open window reports no privacy closure", monitor.isPrivacyClosed())
         val before = monitor.privacyClosureCount()

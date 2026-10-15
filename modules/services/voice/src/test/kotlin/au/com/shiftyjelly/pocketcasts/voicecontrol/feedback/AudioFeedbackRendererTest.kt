@@ -836,7 +836,7 @@ class AudioFeedbackRendererTest {
         }
         val feedbackPlayer = mock<EarconPlayer>()
         val renderer = AudioFeedbackRenderer(feedbackPlayer, failing)
-        // Mirrors VoiceControlService.onSpokenReplyNotDelivered.
+        // Mirrors VoiceControlServiceWiring.attachPlaybackFailureHandling, which now holds that body.
         renderer.onPlaybackFailure = { renderer.playEarcon(EarconId.ERROR) }
 
         renderer.render(VoiceResponse.Spoken("a reply that will not finish"))

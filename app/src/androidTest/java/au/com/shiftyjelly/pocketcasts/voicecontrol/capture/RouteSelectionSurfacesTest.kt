@@ -34,7 +34,14 @@ class RouteSelectionSurfacesTest {
         // (b) A per-stream query would answer "where is THIS stream routed", which is the candidate for
         // "selected". getDevicesForAttributes is not in this project's SDK, so it is not a surface this
         // app can read today — recorded as such rather than assumed available.
-        val musicRoute = "not available in this SDK (getDevicesForAttributes absent)"
+        // Read the real surface; the sibling RoutedDeviceObservationTest proved it answers on device.
+        val audioManager = ctx.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+        val musicRoute = runCatching {
+            audioManager.getAudioDevicesForAttributes(
+                android.media.AudioAttributes.Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_MEDIA).build(),
+            ).joinToString(",") { "type=${it.type}" }
+        }.getOrDefault("query failed")
         // (c) The communication route: a third question, and not media.
         val communication = manager.communicationDevice?.let { describe(it.type) }
 

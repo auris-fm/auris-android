@@ -7,6 +7,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.rule.GrantPermissionRule
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeCaptureHardware
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackCrossCorrelator
@@ -52,7 +53,7 @@ class EchoRejectionDeviceTest {
     fun appSpeechHeardByTheMicIsRejected() = runBlocking<Unit> {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
-        val capture = MicrophoneCapture(ctx)
+        val capture = MicrophoneCapture(ctx, OboeCaptureHardware())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
         val segments = mutableListOf<FloatArray>()

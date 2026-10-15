@@ -34,8 +34,11 @@ import timber.log.Timber
  *
  * Unknown or empty codecs default to PCM with the provided sample rate and channel config.
  */
-// Producer identity of the cloud answer stream through the shared reference recorder.
-const val CLOUD_ANSWER_PRODUCER_ID: Long = -2L
+// Base of the cloud answer's producer identities through the shared reference recorder. Each track
+// incarnation gets its OWN identity (base + generation): a stale stop or late write callback can
+// retire or tag only the incarnation it names, never a successor already on a newer track. The space
+// is negative so it cannot collide with the episode tap's non-negative stream epochs.
+const val CLOUD_ANSWER_IDENTITY_BASE: Long = Long.MIN_VALUE / 2
 
 class CloudAudioPlayer(
     private val context: Context,
@@ -237,6 +240,10 @@ class CloudAudioPlayer(
         }
     }
 
+    // This playback's recorder identity: base + the live track generation. A line comment here, not a
+    // second KDoc: the KDoc below belongs to play(), and two adjacent blocks trip ktlint standard:kdoc.
+    private fun currentAnswerProducerId(): Long = CLOUD_ANSWER_IDENTITY_BASE + trackGeneration
+
     /**
      * Start (or resume) playback.
      *
@@ -365,8 +372,10 @@ class CloudAudioPlayer(
      */
     fun stop() {
         if (released) return
+        val stoppedIncarnation: Long?
         synchronized(frameBuffer) {
             frameBuffer.clear()
+            stoppedIncarnation = if (playing) currentAnswerProducerId() else null
             if (playing) {
                 audioTrack?.stop()
                 playing = false
@@ -375,11 +384,12 @@ class CloudAudioPlayer(
                 stopAudibleHeartbeat()
             }
         }
-        // The answer is no longer playing, so retire ITS stream only. A whole-recorder retire here
-        // would also reset an episode still feeding the recorder (its resampling phase -- cumulative
-        // truncation on the next episode chunk). The answer's samples age out through the recorder's
-        // own delay window; the episode's reference is untouched.
-        playbackBufferRecorder?.retireProducer(CLOUD_ANSWER_PRODUCER_ID)
+        // The answer is no longer playing, so retire ITS stream completely: conversion state AND the
+        // acoustic reference beyond the audible delay tail, so speech after the stop cannot match
+        // audio that is already gone and be dropped as bleed. Scoped to the incarnation this stop
+        // actually ended: a late or duplicate stop must not touch a successor on a newer track, and a
+        // whole-recorder retire would reset an episode still feeding the recorder.
+        stoppedIncarnation?.let { playbackBufferRecorder?.retireProducer(it) }
         // And withdraw the routed observation. The contract is that the published route describes a
         // live reporting stream: this stream has stopped, so leaving the route published would keep
         // answering for a stream that is gone. Nulling it as well lets a later playback on this same
@@ -573,7 +583,7 @@ class CloudAudioPlayer(
                     }
                     playbackBufferRecorder?.write(
                         pcm = referenceFloats,
-                        producerId = CLOUD_ANSWER_PRODUCER_ID,
+                        producerId = currentAnswerProducerId(),
                         // The chunk's frame range on the track's index, recorded so a render
                         // observation can later select THIS block -- or the block it truly names --
                         // by frame identity rather than by extrapolated time. The rendered-block
@@ -609,6 +619,7 @@ class CloudAudioPlayer(
                             observation.nanoTime,
                             currentSampleRate,
                             trackGeneration,
+                            currentAnswerProducerId(),
                         )
                     }
                     offset += written

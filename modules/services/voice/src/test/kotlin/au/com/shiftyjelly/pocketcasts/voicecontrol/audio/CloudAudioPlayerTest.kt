@@ -257,6 +257,85 @@ class CloudAudioPlayerTest {
         wired.release()
     }
 
+    // REAL stop(), ACOUSTIC SCOPE. The answer plays through the production drain path, so its samples
+    // sit in the shared reference ring tagged with THIS playback's incarnation. stop() must retire them
+    // beyond the audible delay tail -- a stale answer cannot make later user speech look like bleed --
+    // while an episode feeding the same recorder keeps its reference unchanged. Falsified by a
+    // retireProducer that only drops conversion state (samples stay matchable) and by one that trims
+    // the whole ring (the episode loses audio it is still playing).
+    @Test
+    @org.robolectric.annotation.Config(sdk = [34])
+    fun `a stopped answer cannot reject later speech while the episode's reference survives`() {
+        val recorder = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder(
+            au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap(),
+        )
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+            playbackBufferRecorder = recorder,
+        )
+        // An episode contributes BEFORE and AFTER the answer: both must survive the answer's stop.
+        val episodeEarly = FloatArray(6_000) { (0.8f * kotlin.math.sin(2 * kotlin.math.PI * 111.0 * it / 16_000)).toFloat() }
+        val episodeLate = FloatArray(6_000) { (0.8f * kotlin.math.sin(2 * kotlin.math.PI * 222.0 * it / 16_000)).toFloat() }
+        recorder.write(episodeEarly, producerId = 7L)
+
+        // The answer: one loud PCM frame LONGER than the delay tail, drained through the real path.
+        val tail = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.DELAY_TAIL_SAMPLES
+        val answerFrames = tail + 4_000
+        val answerTone = FloatArray(answerFrames) { (0.9 * kotlin.math.sin(2 * kotlin.math.PI * 440.0 * it / 16_000)).toFloat() }
+        val pcm = ByteArray(answerFrames * 2) { i -> (answerTone[i / 2] * 32767f).toInt().coerceIn(-32768, 32767).let { v -> if (i % 2 == 0) v else v shr 8 }.toByte() }
+        wired.submitFrame(pcm)
+        wired.play()
+        recorder.write(episodeLate, producerId = 7L)
+
+        // Precondition: the answer's audio reached the shared reference through the production path.
+        // A 0.9-amplitude sine exceeds 0.5 for ~63% of its samples; the episode tone is 0.8 amplitude.
+        val beforeStop = recorder.snapshot().toList()
+        val loudBefore = beforeStop.count { kotlin.math.abs(it) > 0.5f }
+        val episodeLoud = episodeEarly.count { kotlin.math.abs(it) > 0.5f } + episodeLate.count { kotlin.math.abs(it) > 0.5f }
+        val answerLoudBefore = loudBefore - episodeLoud
+        assertTrue(
+            "precondition: the played answer contributed loud samples beyond the surviving tail",
+            answerLoudBefore > (answerFrames - tail) / 2,
+        )
+
+        wired.stop()
+
+        // Post-stop: early answer samples (beyond the surviving tail) are gone from the reference.
+        val afterStop = recorder.snapshot().toList()
+        val loudAfter = afterStop.count { kotlin.math.abs(it) > 0.5f }
+        // The retired portion held roughly (answerFrames - tail) answer samples; most exceed 0.5.
+        assertTrue(
+            "stop must retire the stale answer's own samples beyond the delay tail (before=$loudBefore after=$loudAfter)",
+            loudBefore - loudAfter >= (answerFrames - tail) / 3,
+        )
+        // Rebuild what the microphone could hear of the ANSWER EARLY part: a delayed copy of the first
+        // 1_600 samples of the tone. Those slots were retired; correlating them against the ring must
+        // find no echo, so this segment stays user speech.
+        val speechLikeEarlyAnswer = FloatArray(1_600) { 0.3f * answerTone[it] }
+        val routeMonitor = au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            gracePeriodSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(),
+        )
+        val filter = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.UtteranceFilter(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackCrossCorrelator(),
+            routeMonitor,
+        )
+        assertTrue(
+            "route precondition for the correlator",
+            routeMonitor.route.value !is au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute.Headset,
+        )
+        assertTrue(
+            "speech matching the STOPPED answer's retired portion must not be dropped as bleed",
+            filter.shouldProcess(speechLikeEarlyAnswer, hasSpeakerId = false, speakerIndex = 0, playbackBuffer = recorder.snapshot()),
+        )
+
+        // The episode's reference survived its stop untouched: late contribution still present.
+        val stillHoldsEpisode = afterStop.count { s2 -> kotlin.math.abs(s2) > 0.3f }
+        assertTrue("the live episode's reference must survive the answer's stop", stillHoldsEpisode >= episodeLate.size)
+        wired.release()
+    }
+
     @Test
     fun `stopping the player withdraws its routed observation`() {
         // The published route must not outlive the stream that reported it. stop() ends the answer,

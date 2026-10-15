@@ -295,17 +295,9 @@ class VoiceControlService : Service() {
                                 }
                                 logCaptureStopped(reasons, isUserRequested)
                                 stopEngine()
-                            } else if (audioRouteMonitor.availability.value is AudioRoute.BluetoothA2dpOnly &&
-                                gate.state.value.allowed
+                            } else if (!acquireExternalMicrophoneIfCandidate() &&
+                                !captureWasEverActive && !acquisitionLogged
                             ) {
-                                // THE CANDIDATE COMES FROM AVAILABILITY, not the observation: with the
-                                // observation-first readRoute, connected-but-unrouted AirPods are Unknown
-                                // here while the enumeration surface still reports the A2DP candidate.
-                                // Acquire that candidate, then capture. Reading the observed route would
-                                // deadlock: SCO opens only after acquisition, and the observation only
-                                // after SCO.
-                                acquireCandidate(route)
-                            } else if (!captureWasEverActive && !acquisitionLogged) {
                                 // Capture never started — log once, not on every recomputation
                                 acquisitionLogged = true
                                 val gateState = gate.state.value
@@ -667,6 +659,24 @@ class VoiceControlService : Service() {
     }
 
     /**
+     * THE OFF BRANCH'S CANDIDATE IS AVAILABILITY'S (owner-reported regression, 2026-10-16): the branch
+     * fires because `availability` answers `BluetoothA2dpOnly`, but the OBSERVED route is `Unknown`
+     * until SCO opens -- and [RouteAcquisition.acquire] refuses any route that is not
+     * `BluetoothA2dpOnly`. Passing the observation turned acquisition into a SILENT `NotNeeded`
+     * no-op: the microphone never opened and nothing logged. The candidate must reach `acquire` from
+     * the same surface that triggered the branch.
+     *
+     * @return whether an acquisition attempt was started (the caller logs a skip only when it was not).
+     */
+    internal fun acquireExternalMicrophoneIfCandidate(): Boolean {
+        val candidateRoute = audioRouteMonitor.availability.value
+        if (candidateRoute !is AudioRoute.BluetoothA2dpOnly) return false
+        if (!gate.state.value.allowed) return false
+        acquireCandidate(candidateRoute)
+        return true
+    }
+
+    /**
      * Acquires an external Bluetooth microphone for a candidate route, then starts capture.
      * Acquisition is bounded and cancellable; when it fails or is cancelled no capture runs and
      * routing is released.
@@ -725,7 +735,15 @@ class VoiceControlService : Service() {
                         )
                     }
 
-                    AcquisitionResult.Cancelled, AcquisitionResult.NotNeeded -> Unit
+                    AcquisitionResult.Cancelled -> Unit
+
+                    // A silent NotNeeded is what hid the route/availability divergence: the branch
+                    // decided to acquire and acquisition answered "not needed" without a trace.
+                    AcquisitionResult.NotNeeded -> Timber.w(
+                        "[VoicePipeline] acquisition not needed for route=%s (availability=%s)",
+                        route,
+                        audioRouteMonitor.availability.value,
+                    )
                 }
             } finally {
                 if (acquisitionJob === currentCoroutineContext()[Job]) {

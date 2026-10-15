@@ -892,6 +892,23 @@ class PlaybackBufferRecorder @Inject constructor(
         snapshotLocked()
     }
 
+    // Test-visible INCARNATION tags for the ring slots in [snapshot] order (oldest first), so a
+    // control can assert WHICH admission wrote which audio -- presence alone cannot tell an old
+    // stream's own-tagged tail from contamination under a successor's ticket (@reviewer).
+    fun ownerTagIdsForTest(): LongArray = synchronized(lock) {
+        if (!filled && writePos == 0) return LongArray(0)
+        val size = if (filled) buffer.size else writePos
+        val result = LongArray(size)
+        if (filled) {
+            val tail = buffer.size - writePos
+            System.arraycopy(ownerTags, writePos, result, 0, tail)
+            System.arraycopy(ownerTags, 0, result, tail, writePos)
+        } else {
+            System.arraycopy(ownerTags, 0, result, 0, writePos)
+        }
+        result
+    }
+
     /** The window's samples. Callers must hold [lock] so the read is one coherent step. */
     private fun snapshotLocked(): FloatArray {
         if (!filled && writePos == 0) return FloatArray(0)

@@ -309,7 +309,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
                     // ownership, which is the case cancellation most needs to interrupt.
                     track.runCatching { stop() }
                     ownedTrackStopsForTest += 1
-                    clearOwnedTrack(track)
+                    clearOwnedTrack(track, utteranceAdmission)
                     // The SHARED engine is stopped only while this utterance still owns it, and the
                     // comparison happens INSIDE the same lock that stops it: checking first and
                     // stopping after would let a successor claim the engine in between and be
@@ -346,7 +346,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
                     // shared engine is guarded by the generation for the same reason.
                     track.runCatching { stop() }
                     ownedTrackStopsForTest += 1
-                    clearOwnedTrack(track)
+                    clearOwnedTrack(track, utteranceAdmission)
                     // Same in-lock comparison as the watcher: the check and the stop are one
                     // critical section, so a successor cannot claim between them.
                     synthesisLock.withLock {
@@ -377,6 +377,10 @@ class AndroidPlatformTtsEngine @Inject constructor(
                     sampleRateHz = clip.sampleRateHz,
                     startSample = offset,
                     count = written,
+                    // THE IMMUTABLE ADMISSION CAPTURED WITH THIS UTTERANCE'S LOCAL TRACK (@reviewer):
+                    // reading the shared field here would attribute old audio to a successor that has
+                    // since published its own -- the write must carry the identity of the stream it is.
+                    admission = utteranceAdmission,
                 )
                 offset += written
             }
@@ -427,21 +431,26 @@ class AndroidPlatformTtsEngine @Inject constructor(
             }
             // Clear the shared field only if it still points at THIS utterance's track: a successor
             // may have replaced it, and nulling the field would orphan the successor's stop path.
-            clearOwnedTrack(track)
+            clearOwnedTrack(track, utteranceAdmission)
             runCatching { track.stop() }
             runCatching { track.release() }
         }
     }
 
-    /** Clears [activeTrack] only when it still refers to [track] -- this utterance's own instance. */
-    private fun clearOwnedTrack(track: AudioTrack) {
+    /**
+     * Clears [activeTrack] only when it still refers to [track] -- this utterance's own instance --
+     * but ALWAYS retires [admission], the immutable admission captured with this utterance's local
+     * track (@reviewer/@spec). Ownership of the shared slot may have passed to a successor; the
+     * ENDED stream is still this one's, and leaving its admission open would keep its tail matchable
+     * with no owner left to close it. Clearing the shared field stays ownership-guarded.
+     */
+    private fun clearOwnedTrack(track: AudioTrack, admission: au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.Admission) {
         synthesisLock.withLock {
             if (activeTrack === track) {
                 activeTrack = null
-                val admission = currentUtteranceAdmission
-                currentUtteranceAdmission = null
-                if (admission != null) playbackBufferRecorder.retireProducer(admission)
+                if (currentUtteranceAdmission === admission) currentUtteranceAdmission = null
             }
+            playbackBufferRecorder.retireProducer(admission)
         }
     }
 
@@ -504,6 +513,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
         sampleRateHz: Int,
         startSample: Int,
         count: Int,
+        admission: au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.Admission,
     ) {
         if (count <= 0) return
         val forReference = EarconAudio.resampleRange(
@@ -513,11 +523,9 @@ class AndroidPlatformTtsEngine @Inject constructor(
             startSample = startSample,
             count = count,
         )
-        // OWNED like every other reference writer (@spec): the utterance carries the admission minted
-        // when its track started, so its retained tail gets a deadline and stale callbacks cannot re-enter.
-        // The utterance's own admission; a stale call after retirement has nothing to record and must
-        // not clear a successor's state -- retire by identity happened at the stop boundary already.
-        val admission = currentUtteranceAdmission ?: return
+        // OWNED like every other reference writer (@spec): the caller passes the admission minted with
+        // THIS utterance's track, so its retained tail gets a deadline and stale callbacks cannot
+        // re-enter -- and a held old write can never append under a successor's ticket either.
         playbackBufferRecorder.write(
             FloatArray(forReference.size) { forReference[it] / 32768f },
             admission = admission,

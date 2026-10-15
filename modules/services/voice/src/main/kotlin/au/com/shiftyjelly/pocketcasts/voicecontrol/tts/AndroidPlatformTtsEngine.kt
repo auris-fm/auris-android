@@ -388,12 +388,21 @@ class AndroidPlatformTtsEngine @Inject constructor(
             // outcome is recorded so a test can assert it happened, rather than inferring it from
             // elapsed time — synthesis, startup and waiting can all consume time without draining.
             var waited = 0L
-            while (track.playbackHeadPosition < offset && waited < drainWaitMs) {
+            // The drain observes the LOCAL track through runCatching: engine-level release() STOPS
+            // this track from another thread (@reviewer), and a stopped-or-released instance may
+            // refuse position reads. A refused read ends the wait as an incomplete outcome below --
+            // it never becomes evidence that audio played, and it cannot crash the shutdown path.
+            var positionBroken = false
+            fun headPosition(): Int = track.runCatching { playbackHeadPosition }.getOrElse {
+                positionBroken = true
+                offset // end the wait; the shortfall decision uses framesPlayedAtReturn below
+            }
+            while (headPosition() < offset && waited < drainWaitMs && !positionBroken) {
                 delay(10)
                 waited += 10
             }
             framesWritten = offset
-            framesPlayedAtReturn = track.playbackHeadPosition
+            framesPlayedAtReturn = if (positionBroken) 0 else headPosition()
             // Surface the truncation through the same channel the cloud path uses, so a caller can
             // avoid reporting a completed answer that was actually cut short.
             if (writeRefused) {
@@ -434,6 +443,7 @@ class AndroidPlatformTtsEngine @Inject constructor(
             clearOwnedTrack(track, utteranceAdmission)
             runCatching { track.stop() }
             runCatching { track.release() }
+            ownedTrackReleasesForTest += 1
         }
     }
 
@@ -461,6 +471,20 @@ class AndroidPlatformTtsEngine @Inject constructor(
      */
     @Volatile
     var ownedTrackStopsForTest: Int = 0
+        private set
+
+    /**
+     * How many utterances RELEASED their own local track (in the utterance's finally). Test
+     * visibility for the release-ownership contract (@reviewer 4236364948): releasing the native
+     * object belongs to the owner whose loops read it; engine-level release() only silences.
+     */
+    @Volatile
+    var ownedTrackReleasesForTest: Int = 0
+        private set
+
+    /** How many times engine-level release() silenced the currently published track. */
+    @Volatile
+    var silencesByEngineReleaseForTest: Int = 0
         private set
 
     /**
@@ -567,9 +591,16 @@ class AndroidPlatformTtsEngine @Inject constructor(
             activeTrack = null
             current
         }
+        // STOP ONLY (@reviewer 4236364948): this method runs while the utterance coroutine may be
+        // blocked in track.write or reading playbackHeadPosition on another thread. Releasing the
+        // AudioTrack here frees the native object underneath those reads -- playbackHeadPosition on
+        // a released track throws IllegalStateException, turning a clean shutdown into a failure.
+        // Ownership of the track's RELEASE stays with the local track's own cleanup: the utterance's
+        // finally releases exactly the instance it created, after its loops have exited. Stopping is
+        // enough to silence immediately; releasing can wait for the owner.
         owned?.runCatching {
             stop()
-            release()
+            silencesByEngineReleaseForTest += 1
         }
         tts?.stop()
         tts?.shutdown()

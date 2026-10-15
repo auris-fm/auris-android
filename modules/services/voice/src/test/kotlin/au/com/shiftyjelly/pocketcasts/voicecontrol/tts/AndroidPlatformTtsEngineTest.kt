@@ -13,6 +13,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -875,6 +876,101 @@ class AndroidPlatformTtsEngineTest {
         } finally {
             scope.cancel()
         }
+    }
+
+    @Test
+    fun `engine release during a blocked write never queries a released track`() {
+        // @reviewer 4236364948: AudioFeedbackRenderer.release() calls engine release() while this
+        // utterance is BLOCKED in track.write on IO -- and the old release() stopped AND RELEASED the
+        // same AudioTrack. The loop then resumed, evaluated playbackHeadPosition on the released
+        // instance, and threw IllegalStateException: stopping voice control mid-answer turned speak()
+        // into a crash-shaped failure instead of a clean shutdown.
+        //
+        // Contract now: release() only STOPS the local track (silencing immediately); releasing the
+        // native object belongs to the utterance's own finally, which runs after its loops exit. A
+        // stopped-or-broken position read ends the drain as an INCOMPLETE outcome -- never evidence
+        // that audio played, never an uncaught IllegalStateException.
+        val (wired, fake, _) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        fake.emitRealWav = true
+        wired.drainWaitMs = 50
+
+        val enteredWrite = java.util.concurrent.CountDownLatch(1)
+        val releaseWrite = java.util.concurrent.CountDownLatch(1)
+        wired.writeToSink = { _, _, _, count ->
+            enteredWrite.countDown()
+            releaseWrite.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            count
+        }
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        var thrown: Throwable? = null
+        val job = scope.launch {
+            try {
+                wired.speak("a long reply", "en")
+            } catch (t: Throwable) {
+                thrown = t
+            }
+        }
+        val queued = (0 until 50).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            fake.synthesizeCount > 0
+        }
+        assertTrue("the utterance must reach synthesis", queued)
+        fake.listener?.onDone(fake.lastUtteranceId)
+        assertTrue("the reply must reach its first write", enteredWrite.await(5, java.util.concurrent.TimeUnit.SECONDS))
+
+        // Release the ENGINE while the write is still blocked -- the exact interleaving from the
+        // finding (renderer teardown on another thread).
+        wired.release()
+        // Sample the LOCAL track's state BEFORE unblocking the write. Ownership contract: engine
+        // release() silences (stop) but does NOT free the native object -- release belongs to the
+        // utterance's own finally, which has not run yet. A released instance reports an
+        // uninitialized state; a merely stopped one keeps reporting STOPPED. This is the observable
+        // JVM proxy for "the drain cannot be handed a released track".
+        val stateWhileBlocked = wired.ownedTrackPlaybackStateForTest()
+        assertTrue(
+            "engine release() must stop the owned track immediately (state=$stateWhileBlocked)",
+            stateWhileBlocked == android.media.AudioTrack.PLAYSTATE_STOPPED ||
+                stateWhileBlocked == android.media.AudioTrack.PLAYSTATE_PAUSED,
+        )
+        assertNotEquals(
+            "engine release() must NOT release the native track while the utterance still owns it " +
+                "(a released AudioTrack reports state 0 / uninitialized)",
+            0,
+            stateWhileBlocked,
+        )
+        releaseWrite.countDown()
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(5_000) { job.join() } ?: fail("speak() hung after engine release")
+        }
+        scope.cancel()
+
+        val ise = generateSequence(thrown) { it.cause }
+            .firstOrNull { it is IllegalStateException }
+        assertNull(
+            "release during a blocked write/drain must not surface IllegalStateException from a " +
+                "released track (thrown=$thrown)",
+            ise,
+        )
+        // Clean shutdown means EITHER a normal return or the explicit incomplete-playback outcome --
+        // the caller can act on a decision; it must not be a crash.
+        if (thrown != null) {
+            assertTrue(
+                "a non-null failure after release must be the declared incomplete-playback outcome, " +
+                    "got ${thrown::class.simpleName}",
+                thrown is au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsPlaybackIncompleteException ||
+                    thrown is kotlinx.coroutines.CancellationException,
+            )
+        }
+        // Ownership closes in the owner: exactly one cleanup release by the utterance itself, AFTER
+        // its loops exited -- never while another thread could still read the instance.
+        assertEquals(
+            "the utterance's own finally must release its local track once",
+            1,
+            wired.ownedTrackReleasesForTest,
+        )
     }
 }
 

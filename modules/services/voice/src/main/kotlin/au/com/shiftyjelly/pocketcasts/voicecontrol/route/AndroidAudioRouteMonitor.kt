@@ -223,7 +223,10 @@ class AndroidAudioRouteMonitor @Inject constructor(
             // Classified through the same function so the observed capture input and the enumerated
             // input set are both accounted for rather than hard-coded here.
             return classifyRoute(
-                outputDeviceTypes = devices.outputs,
+                // The OBSERVED fact is the SCO link itself. Passing the ENUMERATED outputs here would
+                // let an available wired/BLE output out-rank the live link, which is enumeration posing
+                // as routing evidence -- the substitution this surface exists to prevent.
+                outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_SCO),
                 inputDeviceTypes = devices.inputs,
                 bluetoothScoActive = true,
                 captureInputType = captureRoutedDeviceId?.invoke()?.let { devices.typeOfInput(it) },
@@ -276,32 +279,39 @@ class AndroidAudioRouteMonitor @Inject constructor(
          */
         private fun classifyObservedRoute(
             outputDeviceTypes: List<Int>,
-            bluetoothScoActive: Boolean,
             captureInputType: Int?,
         ): AudioRoute {
             val hasWiredOutput = outputDeviceTypes.any { it.isWiredHeadsetOutput() }
             val hasBleOutput = outputDeviceTypes.any { it.isBleHeadset() }
-            val observedCaptureIsHeadset = captureInputType?.isWiredOrBleHeadsetInput() == true
+            // The OBSERVED capture input is external when it is wired, BLE or SCO: an observed
+            // TYPE_BLUETOOTH_SCO capture IS the headset microphone, not a contradiction of it.
+            val observedCaptureIsExternal = captureInputType?.isScoOrHeadsetInput() == true
             return when {
                 // The observed output names the route; the observed capture input alone decides whether
                 // its microphone is usable.
                 hasWiredOutput || hasBleOutput ->
-                    AudioRoute.Headset(hasMicrophone = observedCaptureIsHeadset)
+                    AudioRoute.Headset(hasMicrophone = observedCaptureIsExternal)
 
-                // An open SCO link IS the observed acquisition: the headset microphone is in use unless
-                // a capture observation contradicts it.
-                bluetoothScoActive ->
-                    AudioRoute.Headset(
-                        hasMicrophone = captureInputType?.let { it.isWiredOrBleHeadsetInput() } ?: true,
-                    )
-
+                // LIVE-OUTPUT PRECEDENCE: an explicitly observed speaker or A2DP output keeps its own
+                // route even while the SCO link is open -- the SCO fact arrives as an observed OUTPUT
+                // type, never as a global override, so it cannot out-rank what a stream reports.
                 outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER } -> AudioRoute.Speaker
 
                 // An observed A2DP output keeps its own output even when a headset capture input is
                 // observed: the route is what is routed, not what the input implies.
-                outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP } ||
-                    outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO } ->
+                outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP } ->
                     AudioRoute.BluetoothA2dpOnly
+
+                // An observed SCO output (the open-SCO fallback passes exactly this) IS the observed
+                // acquisition: the headset microphone is in use unless a capture observation contradicts
+                // it.
+                outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO } ->
+                    AudioRoute.Headset(
+                        // An observed SCO capture (wired, BLE or SCO) decides; with NO capture
+                        // observation the open link itself is the acquisition evidence, as main
+                        // treated live SCO.
+                        hasMicrophone = captureInputType?.let { it.isScoOrHeadsetInput() } ?: true,
+                    )
 
                 else -> AudioRoute.Unknown
             }
@@ -330,7 +340,6 @@ class AndroidAudioRouteMonitor @Inject constructor(
             if (outputIsObserved) {
                 return classifyObservedRoute(
                     outputDeviceTypes = outputDeviceTypes,
-                    bluetoothScoActive = bluetoothScoActive,
                     captureInputType = captureInputType,
                 )
             }

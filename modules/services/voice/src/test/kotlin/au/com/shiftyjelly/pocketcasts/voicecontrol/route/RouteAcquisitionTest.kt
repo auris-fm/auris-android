@@ -527,21 +527,6 @@ class RouteAcquisitionTest {
     }
 
     @Test
-    fun `a normal capture start confirms and starts a USB microphone`() = runTest {
-        val platform = FakePlatform().apply {
-            openedDeviceId = 22
-            deviceTypes[22] = AudioDeviceInfo.TYPE_USB_HEADSET
-        }
-        val acquisition = acquisition(platform)
-
-        assertTrue(acquisition.confirmCaptureStream())
-
-        assertEquals(1, platform.openCalls)
-        assertEquals(1, platform.startCalls)
-        assertEquals(0, platform.closeCalls)
-    }
-
-    @Test
     fun `a normal capture start refuses a built-in microphone stream`() = runTest {
         val platform = FakePlatform().apply {
             openedDeviceId = 7

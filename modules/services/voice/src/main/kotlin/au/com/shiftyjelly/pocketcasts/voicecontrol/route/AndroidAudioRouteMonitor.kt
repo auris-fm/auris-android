@@ -139,7 +139,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
             bluetoothScoActive: Boolean = false,
             bleCommunicationDeviceSelected: Boolean = false,
         ): AudioRoute {
-            val hasWiredOrUsbInput = inputDeviceTypes.any { it.isAutoSelectedExternalMicrophone() }
+            val hasWiredInput = inputDeviceTypes.any { it.isAutoSelectedExternalMicrophone() }
             val hasBleInput = inputDeviceTypes.any { it.isBleHeadset() }
             val hasWiredOutput = outputDeviceTypes.any { it.isWiredHeadsetOutput() }
             val hasBleOutput = outputDeviceTypes.any { it.isBleHeadset() }
@@ -149,18 +149,16 @@ class AndroidAudioRouteMonitor @Inject constructor(
                 inputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
 
             return when {
-                // A wired or USB input is auto-selected by the platform.
-                hasWiredOrUsbInput -> AudioRoute.Headset(hasMicrophone = true)
+                // A wired input is auto-selected by the platform.
+                hasWiredInput -> AudioRoute.Headset(hasMicrophone = true)
 
                 // For BLE only getCommunicationDevice() proves selection; an enumerated input
                 // is not a selected one.
                 hasBleDevice && bleCommunicationDeviceSelected ->
                     AudioRoute.Headset(hasMicrophone = true)
 
-                // A wired output with no matching microphone (headphones) exposes no mic and
-                // cannot be acquired; it stays NoMic. A USB output is not treated here: a USB DAC
-                // carries no microphone, and treating its presence as NoMic would preempt a
-                // connected Bluetooth headset's candidate.
+                // A wired output with no wired microphone (headphones) exposes no mic and
+                // cannot be acquired; it stays NoMic.
                 hasWiredOutput -> AudioRoute.Headset(hasMicrophone = false)
 
                 // A BLE device whose microphone the session has not selected yet is an

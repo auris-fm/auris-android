@@ -972,6 +972,196 @@ class AndroidPlatformTtsEngineTest {
             wired.ownedTrackReleasesForTest,
         )
     }
+
+    @Test
+    @Suppress("DEPRECATION")
+    fun `engine release silences the owned track without freeing it while the owner still reads`() {
+        // @reviewer ca0a39554 review: the ownership contract must be observable at the instance
+        // boundary, not inferred from counters that stay green when the forbidden release returns.
+        // The injected track records release() and refuses position reads afterwards -- exactly the
+        // native hazard shape (IllegalStateException on a freed AudioTrack) -- so premature
+        // engine-level release is falsifiable on the JVM.
+        class RecordingTrack(sampleRateHz: Int) :
+            android.media.AudioTrack(
+                android.media.AudioManager.STREAM_MUSIC,
+                sampleRateHz,
+                android.media.AudioFormat.CHANNEL_OUT_MONO,
+                android.media.AudioFormat.ENCODING_PCM_16BIT,
+                4096,
+                android.media.AudioTrack.MODE_STREAM,
+            ) {
+            var releases = 0
+                private set
+            var released = false
+                private set
+            override fun release() {
+                releases += 1
+                released = true
+                super.release()
+            }
+
+            override fun getPlaybackHeadPosition(): Int {
+                if (released) throw IllegalStateException("playback head position on a released AudioTrack")
+                return super.getPlaybackHeadPosition()
+            }
+        }
+
+        val (wired, fake, _) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        fake.emitRealWav = true
+        wired.drainWaitMs = 200
+        var created: RecordingTrack? = null
+        wired.trackFactoryForTest = { rate -> RecordingTrack(rate).also { created = it } }
+
+        val enteredWrite = java.util.concurrent.CountDownLatch(1)
+        val releaseWrite = java.util.concurrent.CountDownLatch(1)
+        wired.writeToSink = { _, _, _, count ->
+            enteredWrite.countDown()
+            releaseWrite.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            count
+        }
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        var thrown: Throwable? = null
+        val job = scope.launch {
+            try {
+                wired.speak("a long reply", "en")
+            } catch (t: Throwable) {
+                thrown = t
+            }
+        }
+        val queued = (0 until 50).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            fake.synthesizeCount > 0
+        }
+        assertTrue("the utterance must reach synthesis", queued)
+        fake.listener?.onDone(fake.lastUtteranceId)
+        assertTrue("the reply must reach its first write", enteredWrite.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        val track = created ?: error("the utterance must have built its local track")
+
+        // Engine-level release during the blocked write: silence NOW, free NEVER while the owner reads.
+        wired.release()
+        assertEquals(
+            "engine release() must not call AudioTrack.release() while the utterance owns the track",
+            0,
+            track.releases,
+        )
+
+        releaseWrite.countDown()
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(5_000) { job.join() } ?: fail("speak() hung after engine release")
+        }
+        scope.cancel()
+
+        // Any failure escaping speak() must be the declared incomplete outcome or cancellation -- and
+        // specifically NOT the released-track IllegalStateException the injected track would raise if
+        // the drain read a position after a premature free.
+        val ise = generateSequence(thrown) { it.cause }
+            .firstOrNull { it is IllegalStateException }
+        assertNull("drain must never read position from a prematurely released track (thrown=$thrown)", ise)
+        if (thrown != null) {
+            assertTrue(
+                "a non-null failure after release must be the declared incomplete-playback outcome, got ${thrown::class.simpleName}",
+                thrown is au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsPlaybackIncompleteException ||
+                    thrown is kotlinx.coroutines.CancellationException,
+            )
+        }
+        assertEquals(
+            "the owner's finally must release its own track exactly once, after its loops exited",
+            1,
+            track.releases,
+        )
+        wired.trackFactoryForTest = null
+    }
+
+    @Test
+    @Suppress("DEPRECATION")
+    fun `a throwing final position read cannot become successful completion`() {
+        // @reviewer ca0a39554 review: `if (positionBroken) 0 else headPosition()` consulted the flag
+        // BEFORE the final read, so a final read that threw AFTER earlier successful reads returned
+        // the fallback == framesWritten and could pass the shortfall check as success. The fix reads
+        // once, then checks the flag. The injected track throws only from the second position read,
+        // pinning that exact sequence.
+        val (wired, fake, _) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        fake.emitRealWav = true
+        wired.drainWaitMs = 200
+
+        // Sequence pinned to the defect: in-loop reads SUCCEED but never reach `offset`, so the
+        // while-condition exits on the timeout -- positionBroken is still false at that point. Only
+        // the FINAL read (the one the buggy ordering evaluated inside `if (positionBroken) 0 else
+        // headPosition()`) throws. Pre-flag checking then stores headPosition()'s fallback == offset
+        // into framesPlayedAtReturn, the shortfall check passes, and speak() returns "success" for an
+        // utterance whose real playback state is unknown.
+        // drainWaitMs=200 with a 10 ms step allows at most ~20 condition reads plus the entry read;
+        // succeeding through all of them keeps positionBroken false when the timeout exits the loop,
+        // so ONLY the post-loop final read can fail -- the exact ordering the fix pins.
+        // Measured boundary (probe run): with drainWaitMs=200 and a 10 ms step the utterance makes
+        // 21 in-loop condition reads before the timeout exits the loop; the 22nd read is the FINAL
+        // post-loop read. Succeeding through 21 keeps positionBroken false at the ordering site, so
+        // ONLY the final read can fail -- exactly what the fix pins. Assert the boundary holds below.
+        val maxInLoopReads = 21
+        var positionReads = 0
+        class FlakyTrack(sampleRateHz: Int) :
+            android.media.AudioTrack(
+                android.media.AudioManager.STREAM_MUSIC,
+                sampleRateHz,
+                android.media.AudioFormat.CHANNEL_OUT_MONO,
+                android.media.AudioFormat.ENCODING_PCM_16BIT,
+                4096,
+                android.media.AudioTrack.MODE_STREAM,
+            ) {
+            override fun getPlaybackHeadPosition(): Int {
+                positionReads += 1
+                // Throw from every read at or after the drain-timeout boundary: the loop's own
+                // condition read may still succeed (returning a stalled 0 < offset); the read made
+                // after the loop has exited must fail and force the incomplete outcome.
+                if (positionReads > maxInLoopReads) throw IllegalStateException("simulated late position failure")
+                return 0
+            }
+        }
+        wired.trackFactoryForTest = { rate -> FlakyTrack(rate) }
+
+        // Writes succeed fully; only the FINAL drain read fails.
+        wired.writeToSink = { _, _, _, count -> count }
+        val scope = CoroutineScope(Dispatchers.Default)
+        var thrown: Throwable? = null
+        val job = scope.launch {
+            try {
+                wired.speak("a reply", "en")
+            } catch (t: Throwable) {
+                thrown = t
+            }
+        }
+        val queued = (0 until 50).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            fake.synthesizeCount > 0
+        }
+        assertTrue("the utterance must reach synthesis", queued)
+        fake.listener?.onDone(fake.lastUtteranceId)
+        kotlinx.coroutines.runBlocking {
+            kotlinx.coroutines.withTimeoutOrNull(8_000) { job.join() } ?: fail("speak() hung with a failing final read")
+        }
+        scope.cancel()
+        wired.trackFactoryForTest = null
+
+        assertTrue(
+            "a failed final position read must produce the explicit incomplete outcome, got thrown=$thrown " +
+                "framesPlayed=${wired.framesPlayedAtReturn()} framesWritten=${wired.framesWritten()}",
+            thrown is au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsPlaybackIncompleteException,
+        )
+        assertTrue(
+            "the control must actually have written frames before the failing final read",
+            wired.framesWritten() > 0,
+        )
+        assertEquals(
+            "the fixture must make exactly the measured in-loop reads plus one final failing read",
+            22,
+            positionReads,
+        )
+    }
 }
 
 private fun java.io.DataOutputStream.writeIntLE(value: Int) {

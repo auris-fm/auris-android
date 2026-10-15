@@ -195,6 +195,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
                 bleCommunicationDeviceSelected = audioManager.communicationDevice?.type ==
                     AudioDeviceInfo.TYPE_BLE_HEADSET,
                 captureInputType = captureType,
+                outputIsObserved = true,
             )
         }
         // A SELECTED COMMUNICATION DEVICE IS AN OBSERVATION TOO. The platform established that routing
@@ -210,6 +211,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
                 bluetoothScoActive = audioManager.isBluetoothScoOn,
                 bleCommunicationDeviceSelected = selected.type == AudioDeviceInfo.TYPE_BLE_HEADSET,
                 captureInputType = captureRoutedDeviceId?.invoke()?.let { devices.typeOfInput(it) },
+                outputIsObserved = true,
             )
         }
         // AN OPEN SCO LINK IS AN OBSERVED ACQUISITION, NOT AN ENUMERATION. BluetoothScoOn is the
@@ -225,6 +227,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
                 inputDeviceTypes = devices.inputs,
                 bluetoothScoActive = true,
                 captureInputType = captureRoutedDeviceId?.invoke()?.let { devices.typeOfInput(it) },
+                outputIsObserved = true,
             )
         }
         // NO OBSERVATION, NO ANSWER. With no live routed stream, no selected communication device and no
@@ -264,10 +267,46 @@ class AndroidAudioRouteMonitor @Inject constructor(
 
     internal companion object {
         /**
-         * @param captureInputType the TYPE of the device the live capture stream is observed on, or
-         * null when no capture route is observed. PR124: a headset output reports a usable microphone
-         * only when a routed capture input is observed; an available but unrouted input does not.
+         * The OBSERVED-ROUTE classifier: the observation of what is routed decides, and enumeration is
+         * not consulted as routing evidence. The output types here are the observed ones (a live routed
+         * stream, a selected communication device, or an open SCO link), so the first matching observed
+         * output names the route; whether its microphone is usable is answered by the OBSERVED capture
+         * input alone -- an enumerated wired input must not promote an observed speaker or A2DP route to
+         * a headset, which is the availability-as-acquisition inference PR #56 removed.
          */
+        private fun classifyObservedRoute(
+            outputDeviceTypes: List<Int>,
+            bluetoothScoActive: Boolean,
+            captureInputType: Int?,
+        ): AudioRoute {
+            val hasWiredOutput = outputDeviceTypes.any { it.isWiredHeadsetOutput() }
+            val hasBleOutput = outputDeviceTypes.any { it.isBleHeadset() }
+            val observedCaptureIsHeadset = captureInputType?.isWiredOrBleHeadsetInput() == true
+            return when {
+                // The observed output names the route; the observed capture input alone decides whether
+                // its microphone is usable.
+                hasWiredOutput || hasBleOutput ->
+                    AudioRoute.Headset(hasMicrophone = observedCaptureIsHeadset)
+
+                // An open SCO link IS the observed acquisition: the headset microphone is in use unless
+                // a capture observation contradicts it.
+                bluetoothScoActive ->
+                    AudioRoute.Headset(
+                        hasMicrophone = captureInputType?.let { it.isWiredOrBleHeadsetInput() } ?: true,
+                    )
+
+                outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER } -> AudioRoute.Speaker
+
+                // An observed A2DP output keeps its own output even when a headset capture input is
+                // observed: the route is what is routed, not what the input implies.
+                outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP } ||
+                    outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO } ->
+                    AudioRoute.BluetoothA2dpOnly
+
+                else -> AudioRoute.Unknown
+            }
+        }
+
         fun classifyRoute(
             outputDeviceTypes: List<Int>,
             inputDeviceTypes: List<Int>,
@@ -279,7 +318,22 @@ class AndroidAudioRouteMonitor @Inject constructor(
              * when it is present it decides whether a headset route has a USABLE microphone.
              */
             captureInputType: Int? = null,
+            /**
+             * Whether the OUTPUT types were OBSERVED (a live routed stream, a selected communication
+             * device, or an open SCO link) rather than enumerated. The two classifications are
+             * SEPARATE: with an observation the output names the route and enumeration is never
+             * routing evidence; without one this function is the availability classifier and main's
+             * enumeration rules stand.
+             */
+            outputIsObserved: Boolean = false,
         ): AudioRoute {
+            if (outputIsObserved) {
+                return classifyObservedRoute(
+                    outputDeviceTypes = outputDeviceTypes,
+                    bluetoothScoActive = bluetoothScoActive,
+                    captureInputType = captureInputType,
+                )
+            }
             val hasWiredInput = inputDeviceTypes.any { it.isAutoSelectedExternalMicrophone() }
             val hasBleInput = inputDeviceTypes.any { it.isBleHeadset() }
             val hasWiredOutput = outputDeviceTypes.any { it.isWiredHeadsetOutput() }

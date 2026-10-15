@@ -139,9 +139,9 @@ class AndroidAudioRouteMonitor @Inject constructor(
             bluetoothScoActive: Boolean = false,
             bleCommunicationDeviceSelected: Boolean = false,
         ): AudioRoute {
-            val hasWiredOrUsbInput = inputDeviceTypes.any { it.isWiredOrUsbHeadsetInput() }
+            val hasWiredOrUsbInput = inputDeviceTypes.any { it.isAutoSelectedExternalMicrophone() }
             val hasBleInput = inputDeviceTypes.any { it.isBleHeadset() }
-            val hasWiredOrUsbOutput = outputDeviceTypes.any { it.isWiredOrUsbHeadsetOutput() }
+            val hasWiredOutput = outputDeviceTypes.any { it.isWiredHeadsetOutput() }
             val hasBleOutput = outputDeviceTypes.any { it.isBleHeadset() }
             val hasBleDevice = hasBleInput || hasBleOutput
             val hasA2dp = outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
@@ -157,9 +157,11 @@ class AndroidAudioRouteMonitor @Inject constructor(
                 hasBleDevice && bleCommunicationDeviceSelected ->
                     AudioRoute.Headset(hasMicrophone = true)
 
-                // A wired or USB output with no matching microphone (headphones, a USB DAC)
-                // exposes no mic and cannot be acquired; it stays NoMic.
-                hasWiredOrUsbOutput -> AudioRoute.Headset(hasMicrophone = false)
+                // A wired output with no matching microphone (headphones) exposes no mic and
+                // cannot be acquired; it stays NoMic. A USB output is not treated here: a USB DAC
+                // carries no microphone, and treating its presence as NoMic would preempt a
+                // connected Bluetooth headset's candidate.
+                hasWiredOutput -> AudioRoute.Headset(hasMicrophone = false)
 
                 // A BLE device whose microphone the session has not selected yet is an
                 // acquirable candidate: LE Audio selection (setCommunicationDevice) turns
@@ -180,19 +182,9 @@ class AndroidAudioRouteMonitor @Inject constructor(
             }
         }
 
-        private fun Int.isWiredOrUsbHeadsetInput(): Boolean {
-            // USB audio (a USB-C headset or a USB mic) is a selected external input just as a
-            // wired headset is; omitting it would classify the route Unknown and block capture.
+        private fun Int.isWiredHeadsetOutput(): Boolean {
             return this == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
-                this == AudioDeviceInfo.TYPE_USB_HEADSET ||
-                this == AudioDeviceInfo.TYPE_USB_DEVICE
-        }
-
-        private fun Int.isWiredOrUsbHeadsetOutput(): Boolean {
-            return this == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
-                this == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
-                this == AudioDeviceInfo.TYPE_USB_HEADSET ||
-                this == AudioDeviceInfo.TYPE_USB_DEVICE
+                this == AudioDeviceInfo.TYPE_WIRED_HEADPHONES
         }
 
         private fun Int.isBleHeadset(): Boolean {

@@ -1,6 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.route
 
-import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
@@ -319,8 +318,6 @@ class RouteAcquisition(
          * Only a wired, BLE, or classic `SCO` headset microphone confirms acquisition.
          * `TYPE_BUILTIN_MIC`, a null (unresolvable) id, and every other type are unconfirmed.
          */
-        internal fun isConfirmedExternalMicrophone(deviceType: Int?): Boolean = deviceType == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
-            deviceType == AudioDeviceInfo.TYPE_BLE_HEADSET ||
-            deviceType == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+        internal fun isConfirmedExternalMicrophone(deviceType: Int?): Boolean = deviceType?.isExternalMicrophone() == true
     }
 }

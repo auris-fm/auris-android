@@ -261,13 +261,13 @@ class VoiceControlService : Service() {
                         lastObserverDecision = decision
                         Timber.d("[VoicePipeline] observer: %s", decision)
                     }
-                    // A pending acquisition stays valid while its candidate is present or has
-                    // become the selected external microphone: the selection callbacks publish
-                    // `Headset` while acquisition is still confirming, and cancelling on any
-                    // non-candidate route would abort the acquisition that just succeeded and
-                    // release the routing it acquired. Only actual device loss ends it; a gate
-                    // blocker is handled by the gateAllows predicate inside acquisition.
-                    if (!route.keepsPendingAcquisition()) {
+                    // WHICH SURFACE KEEPS AN ACQUISITION ALIVE IS A SEPARATE QUESTION FROM WHAT ROUTE
+                    // IS OBSERVED. `availability` is the enumeration-based surface: it answers "is the
+                    // candidate still present, or has it become the selected external microphone", which
+                    // is what a pending acquisition needs. `route` is the OBSERVATION and stays Unknown
+                    // without one; reading it here would either abort a succeeding acquisition or force
+                    // the observation to carry availability, which is the inference PR #56 removed.
+                    if (!audioRouteMonitor.availability.value.keepsPendingAcquisition()) {
                         acquisitionJob?.cancel()
                         acquisitionJob = null
                     }
@@ -674,7 +674,7 @@ class VoiceControlService : Service() {
         }
         Timber.i("[VoicePipeline] acquiring external microphone for route=%s", route)
         val gateAllows = {
-            gate.state.value.allowed && audioRouteMonitor.route.value.keepsPendingAcquisition()
+            gate.state.value.allowed && audioRouteMonitor.availability.value.keepsPendingAcquisition()
         }
         acquisitionJob = serviceScope.launch {
             try {

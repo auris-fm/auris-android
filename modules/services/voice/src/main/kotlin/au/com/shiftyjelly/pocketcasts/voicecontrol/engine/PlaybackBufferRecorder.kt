@@ -358,6 +358,13 @@ class PlaybackBufferRecorder @Inject constructor(
         // The collector no longer owns an episode stream: stop stamping emissions so a later start()
         // (or another recorder instance sharing the tap singleton) does not inherit this owner's state.
         fingerprintPcmTap.admissionStamper = null
+        // SESSION BOUNDARY RETIREMENT (@reviewer 4235702596): leaving up to the whole retained window
+        // of audio behind let the FIRST utterance of a new capture session correlate against PCM the
+        // PREVIOUS session submitted -- the same stale-reference case retirement exists for. This is
+        // the recorder's own boundary (its only production caller is the service teardown, where no
+        // producer outlives the call), so the reset is global and happens on the same lock every other
+        // mutation uses.
+        retire()
     }
 
     /**

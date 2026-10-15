@@ -1678,4 +1678,55 @@ class PlaybackBufferRecorderTest {
         )
         job.cancel()
     }
+
+    // CONTROL @reviewer 4235702596: the capture-session boundary must retire, not merely cancel the
+    // tap. Before this, stop() left up to the whole retained window in the ring and a later start()
+    // subscribed on top of it -- so the FIRST utterance of a NEW session could correlate against PCM
+    // the PREVIOUS session submitted. stop() is the recorder's own session boundary (its only
+    // production caller is service teardown), so it retires globally: at most the delay-plausible
+    // tail survives, and it carries an expiry like every other retired tail.
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `stop retires the session so a later start cannot correlate previous-session audio`() = runTest {
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+        val job = recorder.start(this)
+        runCurrent()
+
+        // ~1.5 s of distinctive loud audio at 16 kHz mono through the REAL tap path.
+        val frames = 24_000
+        val data = ShortArray(frames) { 20_000 }
+        val format = AudioProcessor.AudioFormat(16_000, 1, C.ENCODING_PCM_16BIT)
+        tap.onSinkBuffer(presentationTimeUs = 0)
+        tap.onPcm(ByteBuffer.wrap(s16le(data)), format)
+        runCurrent()
+
+        assertTrue(
+            "precondition: the session recorded well past the delay tail",
+            recorder.snapshot().count { it > 0.5f } > 8_000,
+        )
+
+        recorder.stop()
+        val afterStop = recorder.snapshot()
+        assertTrue(
+            "a retired session keeps at most the delay tail (500 ms = 8000 samples), got ${'$'}{afterStop.size}",
+            afterStop.size <= 8_000,
+        )
+        assertEquals("retained samples are the newest ones", afterStop.size, afterStop.count { it > 0.5f })
+
+        // A new session records afresh; the old bulk cannot be part of its reference.
+        val job2 = recorder.start(this)
+        runCurrent()
+        val newData = ShortArray(16_000) { -18_000 }
+        tap.onSinkBuffer(presentationTimeUs = 5_000_000)
+        tap.onPcm(ByteBuffer.wrap(s16le(newData)), format)
+        runCurrent()
+        job2.cancel()
+        val nextSession = recorder.snapshot()
+        assertTrue("the new session's own audio is present", nextSession.any { it < -0.4f })
+        assertTrue(
+            "previous-session bulk audio is gone: positives=${'$'}{nextSession.count { it > 0.5f }} of ${'$'}{nextSession.size}",
+            nextSession.count { it > 0.5f } <= 8_000,
+        )
+    }
 }

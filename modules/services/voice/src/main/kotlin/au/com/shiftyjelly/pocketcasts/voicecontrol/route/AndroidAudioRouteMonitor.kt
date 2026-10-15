@@ -139,9 +139,9 @@ class AndroidAudioRouteMonitor @Inject constructor(
             bluetoothScoActive: Boolean = false,
             bleCommunicationDeviceSelected: Boolean = false,
         ): AudioRoute {
-            val hasWiredInput = inputDeviceTypes.any { it == AudioDeviceInfo.TYPE_WIRED_HEADSET }
+            val hasWiredOrUsbInput = inputDeviceTypes.any { it.isWiredOrUsbHeadsetInput() }
             val hasBleInput = inputDeviceTypes.any { it.isBleHeadset() }
-            val hasWiredOutput = outputDeviceTypes.any { it.isWiredHeadsetOutput() }
+            val hasWiredOrUsbOutput = outputDeviceTypes.any { it.isWiredOrUsbHeadsetOutput() }
             val hasBleOutput = outputDeviceTypes.any { it.isBleHeadset() }
             val hasBleDevice = hasBleInput || hasBleOutput
             val hasA2dp = outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
@@ -149,17 +149,17 @@ class AndroidAudioRouteMonitor @Inject constructor(
                 inputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
 
             return when {
-                // A wired input is auto-selected by the platform.
-                hasWiredInput -> AudioRoute.Headset(hasMicrophone = true)
+                // A wired or USB input is auto-selected by the platform.
+                hasWiredOrUsbInput -> AudioRoute.Headset(hasMicrophone = true)
 
                 // For BLE only getCommunicationDevice() proves selection; an enumerated input
                 // is not a selected one.
                 hasBleDevice && bleCommunicationDeviceSelected ->
                     AudioRoute.Headset(hasMicrophone = true)
 
-                // A wired output with no wired microphone (headphones) exposes no mic and
-                // cannot be acquired; it stays NoMic.
-                hasWiredOutput -> AudioRoute.Headset(hasMicrophone = false)
+                // A wired or USB output with no matching microphone (headphones, a USB DAC)
+                // exposes no mic and cannot be acquired; it stays NoMic.
+                hasWiredOrUsbOutput -> AudioRoute.Headset(hasMicrophone = false)
 
                 // A BLE device whose microphone the session has not selected yet is an
                 // acquirable candidate: LE Audio selection (setCommunicationDevice) turns
@@ -180,9 +180,19 @@ class AndroidAudioRouteMonitor @Inject constructor(
             }
         }
 
-        private fun Int.isWiredHeadsetOutput(): Boolean {
+        private fun Int.isWiredOrUsbHeadsetInput(): Boolean {
+            // USB audio (a USB-C headset or a USB mic) is a selected external input just as a
+            // wired headset is; omitting it would classify the route Unknown and block capture.
             return this == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
-                this == AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+                this == AudioDeviceInfo.TYPE_USB_HEADSET ||
+                this == AudioDeviceInfo.TYPE_USB_DEVICE
+        }
+
+        private fun Int.isWiredOrUsbHeadsetOutput(): Boolean {
+            return this == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                this == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                this == AudioDeviceInfo.TYPE_USB_HEADSET ||
+                this == AudioDeviceInfo.TYPE_USB_DEVICE
         }
 
         private fun Int.isBleHeadset(): Boolean {

@@ -25,6 +25,15 @@ class AndroidAudioRouteMonitorTest {
     }
 
     @Test
+    fun `usb-c headset with mic`() {
+        val route = AndroidAudioRouteMonitor.classifyRoute(
+            outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_USB_HEADSET),
+            inputDeviceTypes = listOf(AudioDeviceInfo.TYPE_USB_HEADSET),
+        )
+        assertEquals(AudioRoute.Headset(hasMicrophone = true), route)
+    }
+
+    @Test
     fun `bluetooth sco headset with active sco is headset with mic`() {
         val route = AndroidAudioRouteMonitor.classifyRoute(
             outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_SCO),
@@ -119,7 +128,7 @@ class AndroidAudioRouteMonitorTest {
     @Test
     fun `unknown devices`() {
         val route = AndroidAudioRouteMonitor.classifyRoute(
-            outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_USB_DEVICE),
+            outputDeviceTypes = listOf(AudioDeviceInfo.TYPE_LINE_ANALOG),
             inputDeviceTypes = emptyList(),
         )
         assertEquals(AudioRoute.Unknown, route)

@@ -298,21 +298,26 @@ class PlaybackBufferRecorder @Inject constructor(
         var currentAdmission: Admission? = null
         fingerprintPcmTap.admissionStamper = { epoch, carried ->
             synchronized(lock) {
-                val carriedAdmission = carried?.let { liveByTicket[it] }
+                val owner = currentAdmission
                 when {
-                    carried == null -> {
-                        // New stream epoch: the previous incarnation (if any) is superseded and retired;
-                        // a seek or new episode is a NEW producer identity, audio never migrates.
-                        currentAdmission?.let { retireProducerLocked(it) }
+                    // New stream epoch -- or the owner's held admission no longer matches the carried
+                    // ticket: the previous incarnation (if any) is superseded and retired; a seek or new
+                    // episode is a NEW producer identity, audio never migrates.
+                    carried == null || (owner != null && owner.ticket != carried) -> {
+                        owner?.let { retireProducerLocked(it) }
                         val opened = newAdmissionLocked(epoch)
                         currentAdmission = opened
                         opened.ticket
                     }
 
-                    carriedAdmission != null && !isAdmissionLiveLocked(carriedAdmission) -> {
-                        // The live owner's carried ticket died (wholesale retirement): renew for future
-                        // emissions only. Queued chunks keep the dead ticket.
-                        val renewed = renewAdmissionLocked(carriedAdmission)
+                    // The ACTIVE OWNER decides renewal from its RETAINED Admission (@reviewer): after a
+                    // wholesale retire() the ticket registry is intentionally empty, so ownership cannot
+                    // be recovered by looking the carried ticket up there -- that made renewal
+                    // unreachable and every same-epoch emission dead forever. The owner still drives
+                    // this live episode; if its held ticket died with the generation, renew for FUTURE
+                    // emissions only. Queued chunks keep the dead ticket and stay refused.
+                    owner != null && !isAdmissionLiveLocked(owner) -> {
+                        val renewed = renewAdmissionLocked(owner)
                         currentAdmission = renewed
                         renewed.ticket
                     }
@@ -326,7 +331,11 @@ class PlaybackBufferRecorder @Inject constructor(
                 // A chunk emitted with no stamper installed carries no ticket; a queued chunk whose
                 // ticket died carries one that is no longer registered. Neither is accepted -- the
                 // recorder refuses by construction, and nothing here mints or renews admission.
-                val admission = chunk.admissionTicket?.let { liveByTicket[it] } ?: return@onEach
+                // Registry access is under the SAME lock as stamping and retirement (@reviewer): the
+                // HashMap must never be read while another thread mutates it. Write-time staleness
+                // validation stays as the final guard.
+                val admission = synchronized(lock) { chunk.admissionTicket?.let { liveByTicket[it] } }
+                    ?: return@onEach
                 write(
                     pcm = chunkToFloats(chunk),
                     // The tap's position is seconds of media time; the reference tracks milliseconds.

@@ -1560,10 +1560,15 @@ class PlaybackBufferRecorderTest {
         )
         assertTrue("the retired tail of accepted audio remains", afterRetire.any { it > 0f })
 
-        // And the NEXT emission renews at the owner: future audio flows again.
-        tap.onPcm(ByteBuffer.wrap(s16le(ShortArray(1_600) { 500 })), AudioProcessor.AudioFormat(16_000, 1, C.ENCODING_PCM_16BIT))
+        // And the NEXT emission renews at the owner: future audio flows again. Amplitude ~0.61 is
+        // distinguishable from the retained tail of the first chunk (~0.03).
+        tap.onPcm(ByteBuffer.wrap(s16le(ShortArray(1_600) { 20_000 })), AudioProcessor.AudioFormat(16_000, 1, C.ENCODING_PCM_16BIT))
         runCurrent()
-        assertEquals("future emissions from the live owner are admitted", 1_600, recorder.snapshot().size)
+        val future = recorder.snapshot()
+        assertTrue(
+            "future emissions from the live owner are admitted under a fresh ticket",
+            future.any { it > 0.2f && it < 0.8f },
+        )
         job.cancel()
     }
 
@@ -1629,5 +1634,48 @@ class PlaybackBufferRecorderTest {
             "the renewed incarnation keeps its anchor; old-ticket retirement touched only old state",
             recorder.renderedReference(),
         )
+    }
+
+    // CONTROLS @reviewer: the ACTUAL tap sequence, not a recorder-shaped proxy. Emit/drain under the
+    // owner's first ticket -> global retire (registry intentionally emptied) -> emit/drain the SAME
+    // epoch. The active emission owner must renew future emissions from its RETAINED Admission; if
+    // renewal recovered ownership from the cleared registry, every later chunk would be dead forever
+    // until a seek changed the epoch. Meanwhile a chunk held in flight across the reset stays refused.
+    @Test
+    fun `the same episode epoch resumes recording after global retirement via the tap path`() = runTest {
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+        val job = recorder.start(this)
+        runCurrent()
+
+        fun emit(value: Short) {
+            tap.onSinkBuffer(presentationTimeUs = 0)
+            tap.onPcm(ByteBuffer.wrap(s16le(ShortArray(1_600) { value })), AudioProcessor.AudioFormat(16_000, 1, C.ENCODING_PCM_16BIT))
+        }
+
+        emit(1_000)
+        runCurrent()
+        assertEquals("first emission recorded", 1_600, recorder.snapshot().size)
+
+        // In-flight across the reset: emitted now, delivered after retire().
+        emit(-1_000)
+        recorder.retire()
+        runCurrent()
+        val afterReset = recorder.snapshot()
+        assertTrue(
+            "the queued chunk kept its emission-time ticket, which died with the generation",
+            afterReset.none { it < 0f },
+        )
+
+        // SAME epoch continues (no seek, no flush): the live owner renews at emission, so this lands.
+        // Amplitude chosen so the stored float (~0.61) is distinguishable from the retained tail (~0.03).
+        emit(20_000)
+        runCurrent()
+        val resumed = recorder.snapshot()
+        assertTrue(
+            "future emissions of the unchanged episode epoch are admitted under a fresh ticket",
+            resumed.any { it > 0.2f && it < 0.8f },
+        )
+        job.cancel()
     }
 }

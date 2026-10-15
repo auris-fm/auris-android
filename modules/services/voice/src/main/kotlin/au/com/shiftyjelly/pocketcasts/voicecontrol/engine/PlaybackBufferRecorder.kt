@@ -95,6 +95,54 @@ class PlaybackBufferRecorder @Inject constructor(
     private var lastPositionMs: Long? = null
 
     /**
+     * Resampling continuation for the streaming source ([resampleSourceRateHz]). Decoder chunks are
+     * ordinary-sized; converting each chunk independently floors its output length and restarts
+     * interpolation at source index zero, so the SAME stream split differently would store a
+     * different duration and accumulate drift. [resamplePhase] carries the unconsumed fractional
+     * source position across chunks; the rate field invalidates it when the producer's clock changes.
+     * Only ever touched inside `synchronized(lock)` via [write].
+     */
+    private var resampleCarry = FloatArray(0)
+    private var resampleOffsetFrac = 0.0
+    private var resampleSourceRateHz: Int? = null
+
+    /**
+     * Downmix + phase-carrying linear resample to [SAMPLE_RATE]. [resampleCarry] holds the source
+     * samples the previous chunk left unconsumed and [resampleOffsetFrac] the fractional position
+     * inside them where the next output sample begins, so the stored stream is a function of the
+     * SOURCE, not of how the producer partitioned it. Linear interpolation needs the sample AFTER
+     * each position, hence the `- 1` capacity.
+     */
+    private fun normalizeStream(pcm: FloatArray, sourceSampleRateHz: Int, sourceChannels: Int): FloatArray {
+        if (sourceChannels == 1 && sourceSampleRateHz == SAMPLE_RATE) return pcm
+        val mono = downmixToMono(pcm, sourceChannels)
+        if (sourceSampleRateHz == SAMPLE_RATE) return mono
+        val input = if (resampleCarry.isEmpty()) mono else resampleCarry + mono
+        val ratio = sourceSampleRateHz.toDouble() / SAMPLE_RATE
+        // Capacity WITHOUT the interpolation headroom: the final position may clamp its neighbour to
+        // itself (bounded edge error of at most one sample) rather than being dropped -- dropping it
+        // would lose up to one OUTPUT at EVERY chunk boundary, which is exactly the partition-dependence
+        // this carry state exists to remove.
+        val outFrames = ((input.size - resampleOffsetFrac) / ratio).toInt().coerceAtLeast(0)
+        val out = FloatArray(outFrames)
+        for (o in 0 until outFrames) {
+            val srcPos = resampleOffsetFrac + o * ratio
+            val i = srcPos.toInt()
+            val frac = (srcPos - i).toFloat()
+            val a = input[i]
+            val b = if (i + 1 < input.size) input[i + 1] else a
+            out[o] = a + (b - a) * frac
+        }
+        // Rebase onto the next chunk: everything from floor(last consumed position) onward carries,
+        // and the fractional remainder becomes the new origin.
+        val consumed = resampleOffsetFrac + outFrames * ratio
+        val cut = consumed.toInt().coerceAtMost(input.size)
+        resampleCarry = input.copyOfRange(cut, input.size)
+        resampleOffsetFrac = consumed - cut
+        return out
+    }
+
+    /**
      * Whether the retained samples are still CONTIGUOUS on the reported axis.
      *
      * `reference()` derives the window's start by subtracting its duration from the newest position --
@@ -161,6 +209,11 @@ class PlaybackBufferRecorder @Inject constructor(
      */
     fun retire() {
         synchronized(lock) {
+            // A new incarnation's source may differ (episode -> cloud answer): the carried fractional
+            // position belongs to the retired producer clock.
+            resampleCarry = FloatArray(0)
+            resampleOffsetFrac = 0.0
+            resampleSourceRateHz = null
             // THE SURVIVING TAIL KEEPS ITS CONTINUITY METADATA. Clearing `expectedNextPositionMs` while
             // samples survive would forget where the tail ENDS, so the FIRST contribution after the
             // retirement could not be compared against it -- and a contribution that does not meet the
@@ -396,7 +449,14 @@ class PlaybackBufferRecorder @Inject constructor(
         // and no correlation in the correlator can undo that.
         require(sourceSampleRateHz > 0) { "sourceSampleRateHz must be positive" }
         require(sourceChannels > 0) { "sourceChannels must be positive" }
-        val samples = normalizeToReferenceFormat(pcm, sourceSampleRateHz, sourceChannels)
+        if (sourceSampleRateHz != resampleSourceRateHz) {
+            // A different source rate is a different producer clock: the fractional position a
+            // previous stream consumed means nothing to this one.
+            resampleSourceRateHz = sourceSampleRateHz
+            resampleCarry = FloatArray(0)
+            resampleOffsetFrac = 0.0
+        }
+        val samples = normalizeStream(pcm, sourceSampleRateHz, sourceChannels)
         val axisClaimed = axis != null
         synchronized(lock) {
             totalWritten += samples.size
@@ -555,35 +615,13 @@ class PlaybackBufferRecorder @Inject constructor(
          * is far below the acoustic variance it already absorbs. Duration, not fidelity, is the
          * invariant: N seconds of source must become N * [SAMPLE_RATE] stored samples.
          */
-        internal fun normalizeToReferenceFormat(
-            pcm: FloatArray,
-            sourceSampleRateHz: Int,
-            sourceChannels: Int,
-        ): FloatArray {
-            if (sourceChannels == 1 && sourceSampleRateHz == SAMPLE_RATE) return pcm
-            val mono = if (sourceChannels == 1) {
-                pcm
-            } else {
-                run {
-                    val frames = pcm.size / sourceChannels
-                    FloatArray(frames) { frame ->
-                        var sum = 0f
-                        for (ch in 0 until sourceChannels) sum += pcm[frame * sourceChannels + ch]
-                        sum / sourceChannels
-                    }
-                }
-            }
-            if (sourceSampleRateHz == SAMPLE_RATE) return mono
-            val outFrames = (mono.size.toLong() * SAMPLE_RATE / sourceSampleRateHz).toInt()
-            if (outFrames <= 0) return FloatArray(0)
-            val ratio = sourceSampleRateHz.toDouble() / SAMPLE_RATE
-            return FloatArray(outFrames) { out ->
-                val srcPos = out * ratio
-                val i = srcPos.toInt()
-                val frac = (srcPos - i).toFloat()
-                val a = mono[i]
-                val b = if (i + 1 < mono.size) mono[i + 1] else a
-                a + (b - a) * frac
+        internal fun downmixToMono(pcm: FloatArray, sourceChannels: Int): FloatArray {
+            if (sourceChannels == 1) return pcm
+            val frames = pcm.size / sourceChannels
+            return FloatArray(frames) { frame ->
+                var sum = 0f
+                for (ch in 0 until sourceChannels) sum += pcm[frame * sourceChannels + ch]
+                sum / sourceChannels
             }
         }
 

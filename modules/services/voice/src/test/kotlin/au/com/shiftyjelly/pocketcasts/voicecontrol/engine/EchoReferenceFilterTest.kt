@@ -98,10 +98,17 @@ class EchoReferenceFilterTest {
         runCurrent()
         job.cancel()
 
-        // The mic hears a delayed (200 ms), quieter copy of what sounded -- 16 kHz mono, as captured.
-        val reference = recorder.snapshot()
-        val delay16k = 200 * sampleRate / 1_000
-        val echoOnly = FloatArray(1600) { i -> 0.3f * reference[delay16k + i] }
+        // THE MIC IS ITS OWN WAVEFORM, NOT A PROJECTION OF THE REFERENCE. Deriving the microphone
+        // from recorder.snapshot() would inherit whatever conversion the recorder produced and could
+        // never catch a wrong one. The episode plays a continuous 220 Hz tone; the microphone hears
+        // that SAME continuous waveform, delayed 200 ms and attenuated, sampled at its own 16 kHz
+        // capture rate. Correlation then tests the recorder against an independent truth.
+        val delaySeconds = 0.2
+        val echoOnly = FloatArray(1600) { i ->
+            // Double arithmetic: Int/Int would truncate to zero and silently flatten the waveform.
+            val t = i.toDouble() / sampleRate + delaySeconds
+            (0.3 * 0.6 * sin(2 * PI * 220.0 * t)).toFloat()
+        }
 
         assertFalse(
             "the episode's own audio, heard by the microphone, must be rejected as bleed",

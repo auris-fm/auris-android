@@ -1715,15 +1715,24 @@ class PlaybackBufferRecorderTest {
         assertEquals("retained samples are the newest ones", afterStop.size, afterStop.count { it > 0.5f })
 
         // A new session records afresh; the old bulk cannot be part of its reference.
+        // SAME-EPOCH RESTART (@reviewer/@spec): no seek/flush happened, so the tap still carries the
+        // previous collector's (now dead) ticket for an unchanged epoch. Ownership must transfer at
+        // stamper installation -- otherwise the first emission after restart returns the dead ticket
+        // and the new session records NOTHING while appearing healthy.
         val job2 = recorder.start(this)
         runCurrent()
         val newData = ShortArray(16_000) { -18_000 }
-        tap.onSinkBuffer(presentationTimeUs = 5_000_000)
+        // CONTINUATION OF THE SAME STREAM (@reviewer): no new anchor, so no epoch bump -- the tap is
+        // still on lastEmittedEpoch with the previous collector's dead carried ticket. This is exactly
+        // the same-epoch stop->start shape where ownership must transfer at stamper installation.
         tap.onPcm(ByteBuffer.wrap(s16le(newData)), format)
         runCurrent()
         job2.cancel()
         val nextSession = recorder.snapshot()
-        assertTrue("the new session's own audio is present", nextSession.any { it < -0.4f })
+        assertTrue(
+            "same-epoch restart on the REAL tap/start path must record new audio, not silently drop it",
+            nextSession.count { it < -0.4f } > 8_000,
+        )
         assertTrue(
             "previous-session bulk audio is gone: positives=${'$'}{nextSession.count { it > 0.5f }} of ${'$'}{nextSession.size}",
             nextSession.count { it > 0.5f } <= 8_000,

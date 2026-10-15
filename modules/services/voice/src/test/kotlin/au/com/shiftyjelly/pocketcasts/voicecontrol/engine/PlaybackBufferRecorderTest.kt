@@ -154,39 +154,94 @@ class PlaybackBufferRecorderTest {
         assertTrue("inheriting the predecessor's phase would shift every sample: max abs diff=$maxDiff", maxDiff < 0.001f)
     }
 
-    // INTERLEAVED PRODUCERS AT THE SAME RATE (episode audio while a same-rate cloud answer plays):
-    // each writer's continuation survives the other's chunks.
-    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    // CONTINUATION IS PER PRODUCER, NOT PER SLOT. Producers interleave in reality (an episode while a
+    // same-rate cloud answer plays), and a single shared carry cleared on every switch re-introduces
+    // exactly the per-boundary loss the carry exists to remove: A->B->A must RESUME A where A left off.
+    // The falsifiable form: over many IRREGULAR alternations, each producer's demultiplexed output is
+    // compared -- content AND duration -- against that producer's own solo baseline. A shared slot with
+    // switch-resets drifts low immediately; total-length tolerance cannot see it.
     @Test
-    fun `interleaved same-rate producers keep independent continuations`() {
+    fun `many irregular A-B-A alternations reproduce each producer's solo content and duration`() {
         val srcRate = 44_100
-        fun mono(frames: Int, seed: Double): FloatArray = FloatArray(frames) { (0.4 * sin(2 * PI * seed * it.toDouble() / srcRate)).toFloat() }
-        val x = mono(3_000, 220.0)
-        val y = mono(3_000, 330.0)
+        fun mono(frames: Int, freqHz: Double): FloatArray = FloatArray(frames) { (0.45 * sin(2 * PI * freqHz * it.toDouble() / srcRate)).toFloat() }
+        fun stereo(m: FloatArray): FloatArray = FloatArray(m.size * 2) { m[it / 2] }
+        val xFull = mono(9_000, 220.0)
+        val yFull = mono(9_000, 330.0)
+        // Irregular partition sizes summing EXACTLY to each stream.
+        val parts = listOf(733, 1_013, 491, 1_207, 853, 1_499, 601, 1_103, 1_500)
+        assertEquals("the partitioning covers X exactly", xFull.size, parts.sum())
+        assertEquals("the partitioning covers Y exactly", yFull.size, parts.sum())
 
-        // Reference: each producer streamed contiguously.
+        // Solo baselines: each producer streamed contiguously in the SAME part order.
         val soloX = PlaybackBufferRecorder(FingerprintPcmTap())
         val soloY = PlaybackBufferRecorder(FingerprintPcmTap())
-        for (part in listOf(x.slice(0 until 1500), x.slice(1500 until 3000))) {
-            soloX.write(FloatArray(part.size * 2) { part[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 10L)
+        var cx = 0
+        for (n in parts) {
+            soloX.write(stereo(xFull.copyOfRange(cx, cx + n)), sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 1L)
+            cx += n
         }
-        for (part in listOf(y.slice(0 until 1500), y.slice(1500 until 3000))) {
-            soloY.write(FloatArray(part.size * 2) { part[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 20L)
+        var cy = 0
+        for (n in parts) {
+            soloY.write(stereo(yFull.copyOfRange(cy, cy + n)), sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 2L)
+            cy += n
         }
+        val sx = soloX.snapshot().toList()
+        val sy = soloY.snapshot().toList()
 
-        // Interleaved: half of X, half of Y, rest of X, rest of Y.
+        // Interleaved recorder: writes alternate A,B,A,B... with the same part sizes.
         val mixed = PlaybackBufferRecorder(FingerprintPcmTap())
-        mixed.write(FloatArray(1500 * 2) { x.slice(0 until 1500)[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 10L)
-        mixed.write(FloatArray(1500 * 2) { y.slice(0 until 1500)[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 20L)
-        mixed.write(FloatArray(1500 * 2) { x.slice(1500 until 3000)[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 10L)
-        mixed.write(FloatArray(1500 * 2) { y.slice(1500 until 3000)[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 20L)
+        val xWriteCount = parts.size
+        val yWriteCount = parts.size
+        cx = 0
+        cy = 0
+        val xRanges = ArrayList<IntRange>()
+        val yRanges = ArrayList<IntRange>()
+        var writtenX = 0
+        var writtenY = 0
+        for (i in 0 until xWriteCount) {
+            val nx = parts[i]
+            val before = mixed.snapshot().size
+            mixed.write(stereo(xFull.copyOfRange(cx, cx + nx)), sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 1L)
+            xRanges.add(before until mixed.snapshot().size)
+            writtenX += nx
+            cx += nx
+            val ny = parts[i]
+            val beforeY = mixed.snapshot().size
+            mixed.write(stereo(yFull.copyOfRange(cy, cy + ny)), sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 2L)
+            yRanges.add(beforeY until mixed.snapshot().size)
+            writtenY += ny
+            cy += ny
+        }
 
-        val stored = mixed.snapshot()
-        val totalExpected = soloX.snapshot().size + soloY.snapshot().size
-        assertTrue(
-            "interleaving must not lose outputs at producer switches: stored=${'$'}{stored.size} expected~${'$'}totalExpected",
-            kotlin.math.abs(stored.size - totalExpected) <= 2,
-        )
+        // Duration: each producer's contribution in the mixed recorder equals its solo length.
+        val mixedXLen = xRanges.sumOf { it.last - it.first + 1 }
+        val mixedYLen = yRanges.sumOf { it.last - it.first + 1 }
+        assertEquals("X keeps its solo duration across switches", sx.size, mixedXLen)
+        assertEquals("Y keeps its solo duration across switches", sy.size, mixedYLen)
+
+        // Content: each write's slice in the mixed recorder must equal the matching slice of that
+        // producer's solo recording, in order -- phase continuation across switches, not resets.
+        val all = mixed.snapshot().toList()
+        var sxOff = 0
+        for (r in xRanges) {
+            val len = r.last - r.first + 1
+            for (k in 0 until len) {
+                val a = all[r.first + k]
+                val b = sx[sxOff + k]
+                assertTrue("X sample $k differs: mixed=$a solo=$b", kotlin.math.abs(a - b) < 1e-4f)
+            }
+            sxOff += len
+        }
+        var syOff = 0
+        for (r in yRanges) {
+            val len = r.last - r.first + 1
+            for (k in 0 until len) {
+                val a = all[r.first + k]
+                val b = sy[syOff + k]
+                assertTrue("Y sample $k differs: mixed=$a solo=$b", kotlin.math.abs(a - b) < 1e-4f)
+            }
+            syOff += len
+        }
     }
 
     // THE CARRY MUST BE ATOMIC WITH THE WRITE THAT CONSUMES IT. Probe design: two producers stream

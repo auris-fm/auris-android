@@ -95,30 +95,43 @@ class PlaybackBufferRecorder @Inject constructor(
     private var lastPositionMs: Long? = null
 
     /**
-     * Resampling continuation for the current streaming producer. Decoder chunks are ordinary-sized;
-     * converting each chunk independently floors its output length and restarts interpolation at
-     * source index zero, so the SAME stream split differently would store a different duration and
-     * accumulate drift. [resampleCarry] plus [resampleOffsetFrac] carry the unconsumed fractional
-     * source position across chunks; the pair is invalidated whenever [resampleProducerId] or
-     * [resampleSourceRateHz] changes -- a same-rate successor is a new producer and starts fresh.
-     * Touched only inside `synchronized(lock)` via [write], and cleared by [retire].
+     * Per-producer resampling continuation. Decoder chunks are ordinary-sized; converting each chunk
+     * independently floors its output length and restarts interpolation at source index zero, so the
+     * SAME stream split differently would store a different duration and accumulate drift. A single
+     * shared slot does not suffice either: producers interleave (episode while a same-rate answer
+     // plays), and clearing on every switch re-introduces exactly that per-boundary loss. The state is
+     * therefore keyed by (producerId, sourceSampleRateHz): an A->B->A alternation resumes A where A
+     * left off. Entries are retired with their producer identity, never wholesale.
+     * Touched only inside `synchronized(lock)` via [write]; cleared by [retire].
      */
-    private var resampleCarry = FloatArray(0)
-    private var resampleOffsetFrac = 0.0
-    private var resampleSourceRateHz: Int? = null
-    private var resampleProducerId: Long? = null
+    private class Continuation {
+        var carry = FloatArray(0)
+        var offsetFrac = 0.0
+    }
+
+    private val continuations = HashMap<ProducerClockKey, Continuation>()
+
+    /** Producer identity paired with its source clock: a same-rate successor is a DIFFERENT key. */
+    private data class ProducerClockKey(val producerId: Long?, val sampleRateHz: Int)
 
     /**
-     * Downmix + phase-carrying linear resample to [SAMPLE_RATE]. [resampleCarry] holds the source
-     * samples the previous chunk left unconsumed and [resampleOffsetFrac] the fractional position
+     * Downmix + phase-carrying linear resample to [SAMPLE_RATE]. [Continuation.carry] holds the source
+     * samples the previous chunk left unconsumed and [Continuation.offsetFrac] the fractional position
      * inside them where the next output sample begins, so the stored stream is a function of the
      * SOURCE, not of how the producer partitioned it. Touched only inside `synchronized(lock)` via
      * [write], and retired with its producer identity.
      */
-    private fun normalizeStream(pcm: FloatArray, sourceSampleRateHz: Int, sourceChannels: Int): FloatArray {
+    private fun normalizeStream(
+        pcm: FloatArray,
+        sourceSampleRateHz: Int,
+        sourceChannels: Int,
+        continuation: Continuation,
+    ): FloatArray {
         if (sourceChannels == 1 && sourceSampleRateHz == SAMPLE_RATE) return pcm
         val mono = downmixToMono(pcm, sourceChannels)
         if (sourceSampleRateHz == SAMPLE_RATE) return mono
+        val resampleCarry = continuation.carry
+        val resampleOffsetFrac = continuation.offsetFrac
         val input = if (resampleCarry.isEmpty()) mono else resampleCarry + mono
         val ratio = sourceSampleRateHz.toDouble() / SAMPLE_RATE
         // Capacity WITHOUT the interpolation headroom: the final position may clamp its neighbour to
@@ -139,8 +152,8 @@ class PlaybackBufferRecorder @Inject constructor(
         // and the fractional remainder becomes the new origin.
         val consumed = resampleOffsetFrac + outFrames * ratio
         val cut = consumed.toInt().coerceAtMost(input.size)
-        resampleCarry = input.copyOfRange(cut, input.size)
-        resampleOffsetFrac = consumed - cut
+        continuation.carry = input.copyOfRange(cut, input.size)
+        continuation.offsetFrac = consumed - cut
         return out
     }
 
@@ -216,10 +229,8 @@ class PlaybackBufferRecorder @Inject constructor(
         synchronized(lock) {
             // A new incarnation's source may differ (episode -> cloud answer): the carried fractional
             // position belongs to the retired producer clock.
-            resampleCarry = FloatArray(0)
-            resampleOffsetFrac = 0.0
-            resampleSourceRateHz = null
-            resampleProducerId = null
+            // Retirement ends every producer's stream through this recorder, so all continuations go.
+            continuations.clear()
             // THE SURVIVING TAIL KEEPS ITS CONTINUITY METADATA. Clearing `expectedNextPositionMs` while
             // samples survive would forget where the tail ENDS, so the FIRST contribution after the
             // retirement could not be compared against it -- and a contribution that does not meet the
@@ -467,16 +478,11 @@ class PlaybackBufferRecorder @Inject constructor(
         synchronized(lock) {
             // ONE OWNERSHIP BOUNDARY. Normalization mutates continuation state, so it runs under the
             // same lock that orders the ring write: concurrent writers cannot mix carry/phase, and a
-            // concurrent retire() cannot clear the carry mid-chunk.
-            if (producerId != resampleProducerId || sourceSampleRateHz != resampleSourceRateHz) {
-                // A new producer OR a new clock for the same producer invalidates the continuation:
-                // the fractional position some earlier stream consumed means nothing to this stream.
-                resampleProducerId = producerId
-                resampleSourceRateHz = sourceSampleRateHz
-                resampleCarry = FloatArray(0)
-                resampleOffsetFrac = 0.0
+            // concurrent retire() cannot clear continuations mid-chunk.
+            val continuation = continuations.getOrPut(ProducerClockKey(producerId, sourceSampleRateHz)) {
+                Continuation()
             }
-            val samples = normalizeStream(pcm, sourceSampleRateHz, sourceChannels)
+            val samples = normalizeStream(pcm, sourceSampleRateHz, sourceChannels, continuation)
             totalWritten += samples.size
             for (sample in samples) {
                 buffer[writePos] = sample

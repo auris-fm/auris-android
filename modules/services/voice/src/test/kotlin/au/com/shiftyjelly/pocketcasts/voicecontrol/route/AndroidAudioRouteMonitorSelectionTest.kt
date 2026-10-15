@@ -288,6 +288,60 @@ class AndroidAudioRouteMonitorSelectionTest {
         assertEquals(AudioRoute.Speaker, monitor.availability.value)
     }
 
+    @Test
+    @Suppress("DEPRECATION") // ACTION_SCO_AUDIO_STATE_UPDATED drives the live SCO signal
+    fun `a live sco link with enumerated wired outputs and an observed sco capture stays the headset`() {
+        // FINDING 1+2 COMBINED: only the SCO link is live; wired and BLE outputs are merely enumerated.
+        // The observed SCO capture (a real TYPE_BLUETOOTH_SCO input id) IS the headset microphone -- the
+        // route must not be stolen by the enumerated outputs, and the SCO capture must not be rejected
+        // as a microphone. Availability is the enumeration's answer, read separately.
+        val scoCaptureId = 41
+        val observer = RoutedOutputObserver().also {
+            it.observe().publishType(AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
+        }
+        val monitor = AndroidAudioRouteMonitor(
+            context = context,
+            gracePeriodSignal = GracePeriodSignal(),
+            routedOutputObserver = observer,
+            enumeratedDeviceTypes = {
+                AndroidAudioRouteMonitor.EnumeratedDevices(
+                    outputs = listOf(AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_BLE_HEADSET),
+                    inputs = listOf(AudioDeviceInfo.TYPE_BLUETOOTH_SCO),
+                    inputIds = listOf(scoCaptureId),
+                )
+            },
+            captureRoutedDeviceId = { scoCaptureId },
+        )
+
+        assertEquals(AudioRoute.Headset(hasMicrophone = true), monitor.route.value)
+    }
+
+    @Test
+    @Suppress("DEPRECATION") // ACTION_SCO_AUDIO_STATE_UPDATED drives the live SCO signal
+    fun `an explicitly observed speaker output keeps its route while the sco link is open`() {
+        // LIVE-OUTPUT PRECEDENCE: the stream reports the SPEAKER; the SCO link is open besides it. The
+        // SCO fact is an observed output type, never a global override, so the observed speaker keeps
+        // its own route -- and availability stays the enumeration's separate answer.
+        setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+        val monitor = AndroidAudioRouteMonitor(context, GracePeriodSignal())
+        assertEquals(AudioRoute.Speaker, monitor.availability.value)
+
+        val observer = RoutedOutputObserver().also {
+            it.observe().publishType(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+        }
+        val observed = AndroidAudioRouteMonitor(
+            context = context,
+            gracePeriodSignal = GracePeriodSignal(),
+            routedOutputObserver = observer,
+        )
+        setBluetoothScoOn(true)
+        context.sendBroadcast(Intent(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED))
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(AudioRoute.Speaker, observed.route.value)
+        assertEquals(AudioRoute.Speaker, monitor.availability.value)
+    }
+
     private fun setOutputDevices(vararg types: Int) {
         shadowOf(audioManager).setOutputDevices(types.map { device(it) })
     }

@@ -6,6 +6,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.PI
+import kotlin.math.sin
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -34,6 +35,7 @@ class PlaybackBufferRecorderTest {
         sampleRate = 16_000,
         channelCount = 1,
         positionSec = 0.0,
+        streamEpoch = 0L,
     )
 
     // THE DECODER FORMAT IS NOT THE RECORDER FORMAT. The tap delivers chunks at the decoder's own
@@ -121,6 +123,126 @@ class PlaybackBufferRecorderTest {
         // The total is the stream's true duration, not a sum of floored chunks.
         val expected = (frames.toLong() * 16_000 / srcRate).toInt()
         assertTrue("stored samples must cover the source duration: ${whole.size} vs $expected", kotlin.math.abs(whole.size - expected) <= 1)
+    }
+
+    // CONTINUATION IS KEYED TO THE PRODUCER, NOT JUST THE CLOCK. Two 44.1 kHz streams -- an episode
+    // followed by another episode at the same rate, no retire between them -- must not inherit each
+    // other's fractional position: stream B stores exactly what stream B played.
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a same-rate successor producer starts its own continuation instead of inheriting the previous stream`() {
+        val srcRate = 44_100
+        fun tone(frames: Int, freqHz: Double): FloatArray = FloatArray(frames) { (0.5 * sin(2 * PI * freqHz * it.toDouble() / srcRate)).toFloat() }
+
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        // Feed write() directly with the tap's real formats; producerId is the tap's stream epoch.
+        val a = tone(977, 220.0)
+        val b = tone(977, 440.0)
+        recorder.write(FloatArray(a.size * 2) { a[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 1L)
+        val afterA = recorder.snapshot().toList()
+        recorder.write(FloatArray(b.size * 2) { b[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 2L)
+        val all = recorder.snapshot()
+
+        // Recompute B alone on a fresh recorder: identical input format, no predecessor.
+        val fresh = PlaybackBufferRecorder(FingerprintPcmTap())
+        fresh.write(FloatArray(b.size * 2) { b[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 2L)
+        val bAlone = fresh.snapshot()
+
+        val bStored = all.toList().subList(afterA.size, all.size)
+        assertEquals("successor stream length must equal the same stream recorded alone", bAlone.size, bStored.size)
+        val maxDiff = bStored.indices.maxOf { kotlin.math.abs(bStored[it] - bAlone[it]) }
+        assertTrue("inheriting the predecessor's phase would shift every sample: max abs diff=$maxDiff", maxDiff < 0.001f)
+    }
+
+    // INTERLEAVED PRODUCERS AT THE SAME RATE (episode audio while a same-rate cloud answer plays):
+    // each writer's continuation survives the other's chunks.
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `interleaved same-rate producers keep independent continuations`() {
+        val srcRate = 44_100
+        fun mono(frames: Int, seed: Double): FloatArray = FloatArray(frames) { (0.4 * sin(2 * PI * seed * it.toDouble() / srcRate)).toFloat() }
+        val x = mono(3_000, 220.0)
+        val y = mono(3_000, 330.0)
+
+        // Reference: each producer streamed contiguously.
+        val soloX = PlaybackBufferRecorder(FingerprintPcmTap())
+        val soloY = PlaybackBufferRecorder(FingerprintPcmTap())
+        for (part in listOf(x.slice(0 until 1500), x.slice(1500 until 3000))) {
+            soloX.write(FloatArray(part.size * 2) { part[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 10L)
+        }
+        for (part in listOf(y.slice(0 until 1500), y.slice(1500 until 3000))) {
+            soloY.write(FloatArray(part.size * 2) { part[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 20L)
+        }
+
+        // Interleaved: half of X, half of Y, rest of X, rest of Y.
+        val mixed = PlaybackBufferRecorder(FingerprintPcmTap())
+        mixed.write(FloatArray(1500 * 2) { x.slice(0 until 1500)[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 10L)
+        mixed.write(FloatArray(1500 * 2) { y.slice(0 until 1500)[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 20L)
+        mixed.write(FloatArray(1500 * 2) { x.slice(1500 until 3000)[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 10L)
+        mixed.write(FloatArray(1500 * 2) { y.slice(1500 until 3000)[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 20L)
+
+        val stored = mixed.snapshot()
+        val totalExpected = soloX.snapshot().size + soloY.snapshot().size
+        assertTrue(
+            "interleaving must not lose outputs at producer switches: stored=${'$'}{stored.size} expected~${'$'}totalExpected",
+            kotlin.math.abs(stored.size - totalExpected) <= 2,
+        )
+    }
+
+    // THE CARRY MUST BE ATOMIC WITH THE WRITE THAT CONSUMES IT. Probe design: two producers stream
+    // MONOTONIC RAMPS through disjoint value bands -- A rises through [0.0, 0.40], B through
+    // [0.60, 1.00]. Linear interpolation between equal-neighbour monotone data stays monotone, so
+    // each producer's stored subsequence (selected by band) must never decrease. If normalization ran
+    // outside the lock, a concurrent producer switch could replace the carry between another thread's
+    // read and write, restarting that stream mid-ramp -- a DECREASE inside its own band. Retiring
+    // concurrently exercises the other half of the same boundary.
+    @Test
+    fun `concurrent producers and retirement never splice a replaced carry into an in-flight write`() {
+        val srcRate = 44_100
+        val framesPerChunk = 977
+        // A GLOBAL monotone ramp over many chunks, holding at the band ceiling once climbed: cycling a
+        // short list would restart the stream legitimately and read as a decrease.
+        val totalChunks = 4_000
+        fun rampChunk(base: Float, span: Float, c: Int): FloatArray {
+            val startV = minOf(base + span * c / totalChunks, base + span)
+            val endV = minOf(base + span * (c + 1) / totalChunks, base + span)
+            return FloatArray(framesPerChunk * 2) { i -> (startV + (endV - startV) * ((i / 2) / framesPerChunk.toDouble())).toFloat() }
+        }
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val stop = java.util.concurrent.atomic.AtomicBoolean(false)
+        val violation = java.util.concurrent.atomic.AtomicReference<String?>(null)
+
+        fun bandCheck(list: FloatArray, lo: Float, hi: Float, name: String) {
+            val seq = list.filter { it in lo..hi }
+            for (i in 1 until seq.size) {
+                if (seq[i] < seq[i - 1] - 1e-3f) {
+                    violation.compareAndSet(null, "$name decreased at $i: ${seq[i - 1]} -> ${seq[i]}")
+                    return
+                }
+            }
+        }
+        fun writer(base: Float, span: Float, rate: Int, id: Long, lo: Float, hi: Float, name: String) = Thread {
+            var i = 0
+            while (!stop.get() && i < totalChunks) {
+                recorder.write(rampChunk(base, span, i), sourceSampleRateHz = rate, sourceChannels = 2, producerId = id)
+                i++
+                bandCheck(recorder.snapshot(), lo, hi, name)
+            }
+        }
+        val ta = writer(0.0f, 0.40f, srcRate, 1L, 0.0f, 0.45f, "A")
+        val tb = writer(0.60f, 0.40f, 48_000, 2L, 0.55f, 1.01f, "B")
+        val retirer = Thread {
+            while (!stop.get()) {
+                recorder.retire()
+                Thread.sleep(0, 200_000)
+            }
+        }
+        listOf(ta, tb, retirer).forEach { it.start() }
+        Thread.sleep(900)
+        stop.set(true)
+        listOf(ta, tb, retirer).forEach { it.join(5_000) }
+        violation.get()?.let { throw AssertionError("torn normalization state: $it") }
+        assertTrue("writers must have run", ta.state == Thread.State.TERMINATED && tb.state == Thread.State.TERMINATED)
     }
 
     @Test

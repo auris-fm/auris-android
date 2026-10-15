@@ -28,6 +28,8 @@ class FingerprintPcmTap @Inject constructor() {
         val sampleRate: Int,
         val channelCount: Int,
         val positionSec: Double,
+        /** [streamEpoch] at emission: identity of the media stream these chunks belong to. */
+        val streamEpoch: Long,
     )
 
     private val chunkFlow = MutableSharedFlow<PcmChunk>(
@@ -40,6 +42,13 @@ class FingerprintPcmTap @Inject constructor() {
     private var anchorUs = C.TIME_UNSET
     private var framesSinceAnchor = 0L
 
+    /**
+     * Identifies the media stream the anchor describes. Increments every time the anchor is (re)set to
+     * a new presentation position -- a seek, a flush, or a new episode -- so consumers can tell two
+     * same-rate streams apart instead of inheriting each other's position-derived state.
+     */
+    private var streamEpoch = 0L
+
     fun onSinkBuffer(presentationTimeUs: Long) {
         pendingAnchorUs = presentationTimeUs
     }
@@ -48,6 +57,7 @@ class FingerprintPcmTap @Inject constructor() {
         pendingAnchorUs = C.TIME_UNSET
         anchorUs = C.TIME_UNSET
         framesSinceAnchor = 0
+        streamEpoch++
     }
 
     fun onPcm(buffer: ByteBuffer, format: AudioProcessor.AudioFormat) {
@@ -59,10 +69,12 @@ class FingerprintPcmTap @Inject constructor() {
             if (pending == C.TIME_UNSET) return
             anchorUs = pending
             framesSinceAnchor = 0
+            streamEpoch++
         } else if (pending != C.TIME_UNSET) {
             if (abs(pending - positionUs(format.sampleRate)) > REANCHOR_TOLERANCE_US) {
                 anchorUs = pending
                 framesSinceAnchor = 0
+                streamEpoch++
             }
         }
         val positionSec = positionUs(format.sampleRate) / 1_000_000.0
@@ -77,6 +89,7 @@ class FingerprintPcmTap @Inject constructor() {
                 sampleRate = format.sampleRate,
                 channelCount = format.channelCount,
                 positionSec = positionSec,
+                streamEpoch = streamEpoch,
             ),
         )
     }

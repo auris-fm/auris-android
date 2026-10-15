@@ -76,14 +76,24 @@ class PlaybackBufferRecorder @Inject constructor(
     private var filled = false
 
     /**
-     * Producers whose retirement CLOSED ADMISSION: a write or render observation naming one of these
-     * identities is refused, so a callback held across the stop cannot resurrect retired audio or
-     * re-enter state the successor already owns. Entries clear when the producer's tail expires.
+     * Tickets whose producer ended THEIR OWN stream ([retireProducer]): a write or render observation
+     * carrying a closed ticket is refused, so a callback held across the stop cannot resurrect audio
+     * the identity no longer owns nor re-enter state the successor already holds.
      */
-    private val retiredProducers = HashSet<Long>()
+    private val closedTickets = HashSet<Long>()
 
-    /** Every producer identity ever admitted; global retirement CLOSES these instead of clearing them. */
-    private val admittedProducers = HashSet<Long>()
+    /** Identities whose acoustic tail is still owed expiry; admission closure itself is ticket-based. */
+    private val retiredProducerIds = HashSet<Long>()
+
+    /**
+     * Admission GENERATION. Every ticket embeds the generation it was minted under; [retire] bumps it,
+     * which invalidates EVERY outstanding admission atomically -- including a callback from a producer
+     * whose FIRST write was still held, the case a historical id-ledger cannot distinguish from a new
+     * successor. A continuing owner (a live episode across a route reset) renews explicitly through
+     * [renewAdmission]; a stale holder cannot, because it carries only a dead ticket.
+     */
+    private var admissionGeneration = 0L
+    private var ticketSequence = 0L
 
     /**
      * When each retired producer's surviving tail stops being plausible playback: retirement instant
@@ -91,6 +101,42 @@ class PlaybackBufferRecorder @Inject constructor(
      * tail ages out on elapsed TIME even if no later write ever arrives.
      */
     private val tailExpiryMs = HashMap<Long, Long>()
+
+    /**
+     * A producer's RIGHT TO WRITE, captured when the producer/callback is CREATED and carried by every
+     * write and render observation. The recorder alone decides whether a ticket is live, so no held
+     * callback can present an "old" identity as a future one: validity requires BOTH the current
+     * admission generation and a ticket its owner has not closed.
+     */
+    class Admission internal constructor(val producerId: Long, val ticket: Long) {
+        /** Generation this ticket was minted under; compared against the recorder's current one. */
+        internal val generation: Long get() = ticket ushr 32
+    }
+
+    /** Opens admission for a NEW producer identity at the current generation. Call at producer creation. */
+    fun openAdmission(producerId: Long): Admission = synchronized(lock) { newAdmissionLocked(producerId) }
+
+    /**
+     * Renews a CONTINUING owner after its ticket was invalidated by a wholesale [retire] (route change,
+     * service stop). This is an active-owner act: the caller demonstrably still drives live audio. A
+     * held callback cannot renew -- it possesses only the dead ticket and gets no reference here.
+     * The previous ticket is closed so anything released with it stays refused.
+     */
+    fun renewAdmission(previous: Admission): Admission = synchronized(lock) {
+        closedTickets += previous.ticket
+        newAdmissionLocked(previous.producerId)
+    }
+
+    private fun newAdmissionLocked(producerId: Long): Admission {
+        ticketSequence += 1L
+        return Admission(producerId, (admissionGeneration shl 32) or (ticketSequence and 0xFFFFFFFFL))
+    }
+
+    /** Current admission generation, for owners deciding whether their ticket survived a reset. */
+    fun admissionGenerationSnapshot(): Long = synchronized(lock) { admissionGeneration }
+
+    /** Caller holds [lock]: is this ticket still entitled to write? */
+    private fun isAdmissionLiveLocked(admission: Admission): Boolean = admission.generation == admissionGeneration && admission.ticket !in closedTickets
 
     /**
      * Guards [buffer], [writePos], [filled] and [lastPositionMs].
@@ -230,16 +276,29 @@ class PlaybackBufferRecorder @Inject constructor(
     fun start(scope: CoroutineScope): Job {
         tapJob?.cancel()
         var lastEpoch: Long? = null
+        var lastAdmission: Admission? = null
         return fingerprintPcmTap.chunks
             .onEach { chunk ->
                 // EXPLICIT EPOCH SUPERSESSION at its owner site: a seek or new episode bumps the tap's
                 // streamEpoch, which makes the previous epoch dead -- retire it here rather than let
                 // its entry linger until an unrelated global retirement or map pressure approximates it.
+                // @reviewer: an epoch change is a NEW INCARNATION, so the old admission is retired and a
+                // fresh one opened; audio never migrates into the successor's ticket.
                 val epoch = chunk.streamEpoch
                 if (lastEpoch != null && epoch != lastEpoch) {
-                    retireProducer(lastEpoch)
+                    retireProducer(lastAdmission)
+                    lastAdmission = null
                 }
                 lastEpoch = epoch
+                // The collector is the ACTIVE OWNER of the episode stream: after a wholesale retire()
+                // (route change) its ticket died with the generation, and continuing to play the SAME
+                // live episode renews admission explicitly -- renewal happens here at the owner, before
+                // any new callback, never inside write().
+                var admission = lastAdmission
+                if (admission == null || admission.generation != admissionGenerationSnapshot()) {
+                    admission = if (admission != null) renewAdmission(admission) else openAdmission(epoch)
+                    lastAdmission = admission
+                }
                 write(
                     pcm = chunkToFloats(chunk),
                     // The tap's position is seconds of media time; the reference tracks milliseconds.
@@ -249,7 +308,7 @@ class PlaybackBufferRecorder @Inject constructor(
                     sourceChannels = chunk.channelCount,
                     // Identity of the media stream being decoded; a seek/new episode at the SAME rate is
                     // a new producer and must not inherit this stream's resampling continuation.
-                    producerId = chunk.streamEpoch,
+                    admission = admission,
                 )
             }
             .launchIn(scope)
@@ -304,13 +363,12 @@ class PlaybackBufferRecorder @Inject constructor(
      * Nothing another producer owns is touched -- a cloud answer stopping under a live episode must
      * not reset the episode's phase or trim its reference.
      */
-    fun retireProducer(producerId: Long?) {
-        if (producerId == null) return
+    fun retireProducer(admission: Admission?) {
+        if (admission == null) return
+        val producerId = admission.producerId
         synchronized(lock) {
-            // Admission CLOSES with retirement, in this one boundary: from here on, writes and render
-            // observations naming this identity are refused, so a callback admitted BEFORE the stop but
-            // released AFTER it cannot resurrect audio this producer no longer owns.
-            retiredProducers += producerId
+            closedTickets += admission.ticket
+            retiredProducerIds += producerId
             // IDEMPOTENT IN TIME (@reviewer): a duplicate stop must NOT restart the deadline -- a stale
             // second call would extend the retired tail's matchable lifetime. putIfAbsent keeps the
             // ORIGINAL expiry; the refusal flag is already closed.
@@ -355,20 +413,23 @@ class PlaybackBufferRecorder @Inject constructor(
             // Whole-recorder retirement (stop or route change) ends EVERY producer's stream through
             // this recorder, so all continuations go. A single stream ending is [retireProducer].
             continuations.clear()
-            // GLOBAL RETIREMENT CLOSES ADMISSION, IT DOES NOT REOPEN IT (@spec/@reviewer). Clearing the
-            // ledger handed every previously-retired id back to a held callback and deleted the deadline
-            // from any surviving tail -- a route change after a cloud stop could resurrect old audio or
-            // leave its retained tail indefinitely matchable again. Instead EVERY producer this recorder
-            // has ever admitted is closed NOW. Producer ids are monotonic stream incarnations, so a
-            // successor's FUTURE identity is unaffected: never admitted, therefore not in the ledger.
-            // Deadlines self-remove as tails expire; closure persists until the next global reset.
+            // GLOBAL RETIREMENT INVALIDATES EVERY OUTSTANDING ADMISSION ATOMICALLY (@spec/@reviewer).
+            // Bumping the admission generation kills all tickets minted before this instant -- including
+            // a callback from a producer whose FIRST write was still held, which no historical id-ledger
+            // could distinguish from a genuinely new successor. Continuing owners renew explicitly via
+            // [renewAdmission]; stale holders cannot. Ticket bookkeeping resets because old-generation
+            // tickets are dead by generation alone.
+            admissionGeneration += 1L
+            closedTickets.clear()
+            // DEADLINES SURVIVE THE RESET FOR RETAINED TAILS (@reviewer): any producer whose samples are
+            // still retained keeps (or receives) an expiry measured from THIS retirement -- the hardware
+            // path they were heard through is being torn down, but the acoustic tail may still reach the
+            // microphone briefly and must age out on elapsed time, not linger matchable forever.
             val nowMs = monotonicNowMs()
-            for (known in admittedProducers) {
-                retiredProducers += known
-                // Preserve or REPLACE the deadline for retained acoustic tails: whichever owner's samples
-                // survive age out from THIS retirement, since the hardware path they were heard through
-                // is being torn down and rebuilt.
-                tailExpiryMs.putIfAbsent(known, nowMs + DELAY_TAIL_SAMPLES * 1_000L / SAMPLE_RATE)
+            for (retainedId in ownerTags.toHashSet()) {
+                if (retainedId == UNTAGGED) continue
+                tailExpiryMs.putIfAbsent(retainedId, nowMs + DELAY_TAIL_SAMPLES * 1_000L / SAMPLE_RATE)
+                retiredProducerIds += retainedId
             }
 
             // THE SURVIVING TAIL KEEPS ITS CONTINUITY METADATA. Clearing `expectedNextPositionMs` while
@@ -508,16 +569,18 @@ class PlaybackBufferRecorder @Inject constructor(
         timeMs: Long,
         trackRateHz: Int,
         trackGeneration: Long,
-        producerId: Long?,
+        admission: Admission?,
     ) {
+        val producerId = admission?.producerId
         synchronized(lock) {
             expireRetiredTailsLocked(monotonicNowMs())
             // Same admission rule as [write]: a late observation naming a retired incarnation cannot
             // re-anchor the correlator to audio that is expiring or gone. It is DROPPED, not applied --
             // and it must not clear a SUCCESSOR's live anchor either: withdrawal belongs to the
             // retirement boundary, not to a refused callback.
-            if (producerId != null && producerId in retiredProducers) {
-                if (renderObservation?.producerId == producerId) renderObservation = null
+            if (admission != null && !isAdmissionLiveLocked(admission)) {
+                val pid = admission.producerId
+                if (renderObservation?.producerId == pid) renderObservation = null
                 return
             }
             // The observation is matched only against blocks of ITS OWN track incarnation: after a
@@ -625,7 +688,7 @@ class PlaybackBufferRecorder @Inject constructor(
          * NOT inherit each other's fractional position, and no external retire is required between
          * them. Omitted by sources already in the reference format, which need no continuation.
          */
-        producerId: Long? = null,
+        admission: Admission? = null,
     ) {
         // THE RECORDER IS THE FORMAT BOUNDARY. Sources deliver the decoder's own PCM (the episode tap
         // runs at 44.1 kHz stereo for ordinary episodes); the ring, the window duration and every
@@ -642,8 +705,8 @@ class PlaybackBufferRecorder @Inject constructor(
             // after it must not store audio this identity no longer owns, nor open a continuation the
             // successor may already hold under the same key. Refusing the WHOLE write -- samples and
             // position alike -- is the atomic form; nothing about a retired id re-enters the recorder.
-            if (producerId != null && producerId in retiredProducers) return
-            if (producerId != null) admittedProducers += producerId
+            if (admission != null && !isAdmissionLiveLocked(admission)) return
+            val producerId = admission?.producerId
             // ONE OWNERSHIP BOUNDARY. Normalization mutates continuation state, so it runs under the
             // same lock that orders the ring write: concurrent writers cannot mix carry/phase, and a
             // concurrent retire() cannot clear continuations mid-chunk.

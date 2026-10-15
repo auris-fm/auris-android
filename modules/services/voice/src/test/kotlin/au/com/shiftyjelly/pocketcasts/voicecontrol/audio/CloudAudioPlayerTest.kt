@@ -277,7 +277,7 @@ class CloudAudioPlayerTest {
         // An episode contributes BEFORE and AFTER the answer: both must survive the answer's stop.
         val episodeEarly = FloatArray(6_000) { (0.8f * kotlin.math.sin(2 * kotlin.math.PI * 111.0 * it / 16_000)).toFloat() }
         val episodeLate = FloatArray(6_000) { (0.8f * kotlin.math.sin(2 * kotlin.math.PI * 222.0 * it / 16_000)).toFloat() }
-        recorder.write(episodeEarly, producerId = 7L)
+        recorder.write(episodeEarly, admission = admFor(recorder, 7L))
 
         // The answer: one loud PCM frame LONGER than the delay tail, drained through the real path.
         val tail = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.DELAY_TAIL_SAMPLES
@@ -286,7 +286,7 @@ class CloudAudioPlayerTest {
         val pcm = ByteArray(answerFrames * 2) { i -> (answerTone[i / 2] * 32767f).toInt().coerceIn(-32768, 32767).let { v -> if (i % 2 == 0) v else v shr 8 }.toByte() }
         wired.submitFrame(pcm)
         wired.play()
-        recorder.write(episodeLate, producerId = 7L)
+        recorder.write(episodeLate, admission = admFor(recorder, 7L))
 
         // Precondition: the answer's audio reached the shared reference through the production path.
         // A 0.9-amplitude sine exceeds 0.5 for ~63% of its samples; the episode tone is 0.8 amplitude.
@@ -1165,4 +1165,14 @@ class CloudAudioPlayerTest {
         )
         wired.release()
     }
+
+    private val testAdmissions = HashMap<
+        Pair<au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder, Long>,
+        au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.Admission,
+        >()
+
+    private fun admFor(
+        recorder: au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder,
+        id: Long,
+    ): au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.Admission = testAdmissions.getOrPut(recorder to id) { recorder.openAdmission(id) }
 }

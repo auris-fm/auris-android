@@ -6,6 +6,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.MediaPlayer
+import androidx.annotation.VisibleForTesting
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import java.io.InputStream
 import javax.inject.Inject
@@ -199,6 +200,10 @@ class EarconPlayer(
             return null
         }
         return try {
+            // A new cue supersedes the previous one's recorder ownership; the old cue's retained tail
+            // keeps its expiry deadline and stays matchable until elapsed time retires it.
+            closeRecorderAdmission()
+            currentRecorderAdmission = openRecorderAdmission(playbackBufferRecorder)
             var offset = 0
             while (offset < clip.samples.size) {
                 val written = audioTrack.write(clip.samples, offset, clip.samples.size - offset)
@@ -213,9 +218,10 @@ class EarconPlayer(
                     // them. The cue itself FAILED, which is reported to the caller, and that is a
                     // separate fact from how much audio the track now owes.
                     acceptedFramesTotal += offset
+                    closeRecorderAdmission()
                     return null
                 }
-                clip.recordAccepted(offset, written, playbackBufferRecorder)
+                clip.recordAccepted(offset, written, playbackBufferRecorder, currentRecorderAdmission)
                 offset += written
             }
             lastPlayedId = id
@@ -248,6 +254,7 @@ class EarconPlayer(
             admitted
         } catch (e: Exception) {
             Timber.w(e, "[Earcon] play failed")
+            closeRecorderAdmission()
             null
         }
     }
@@ -394,6 +401,9 @@ class EarconPlayer(
             // A DIFFERENT ADMISSION IS NOT THIS STOP'S SUBJECT, even when it is the SAME earcon: the
             // successor's audio is not what this stop was issued for.
             if (expectedAdmission != null && currentAdmission != expectedAdmission) return@onPlayerThread
+            // The discarded cue's recorder stream ends with it: close its admission and owe expiry to
+            // whatever tail the hardware still plays.
+            closeRecorderAdmission()
             // DISCARDING A TRACK MEANS DISCARDING EVERYTHING IT OWNS, in one step. Nulling the reference
             // after `stop()` alone LEFT THE RESOURCE UNRELEASED -- nothing could release it afterwards,
             // because the only reference was gone -- AND LEFT the track's cumulative frontier standing:
@@ -418,6 +428,24 @@ class EarconPlayer(
     }
 
     /** The admission currently owning the track, or null when nothing has been admitted. */
+    // The recorder-side admission for the cue currently holding the track. Minted with the cue, closed
+    // when the cue finishes or is stopped -- an earcon is a short-lived producer identity.
+    @VisibleForTesting
+    internal var currentRecorderAdmission: PlaybackBufferRecorder.Admission? = null
+    private var earconProducerSequence = 0L
+
+    private fun openRecorderAdmission(recorder: PlaybackBufferRecorder?): PlaybackBufferRecorder.Admission? {
+        if (recorder == null) return null
+        earconProducerSequence += 1L
+        return recorder.openAdmission(EARCON_PRODUCER_BASE + earconProducerSequence)
+    }
+
+    private fun closeRecorderAdmission() {
+        val admission = currentRecorderAdmission ?: return
+        currentRecorderAdmission = null
+        playbackBufferRecorder?.retireProducer(admission)
+    }
+
     private var currentAdmission: AdmissionToken? = null
 
     /**
@@ -451,7 +479,7 @@ class EarconPlayer(
      */
     fun release() {
         onPlayerThread {
-            // RELEASE IS ATTEMPTED INDEPENDENTLY OF STOP. In one `runCatching` block a THROWING `stop()`
+            closeRecorderAdmission() // RELEASE IS ATTEMPTED INDEPENDENTLY OF STOP. In one `runCatching` block a THROWING `stop()`
             // skips the release, and the reference is dropped anyway -- so the resource is leaked by
             // exactly the case that most needs releasing. ONE RULE, EVERY CALL SITE.
             track?.runCatching { stop() }
@@ -540,7 +568,12 @@ class EarconPlayer(
          * The accepted slice is converted to the reference rate, so a partial write leaves the
          * reference holding exactly the audio that was submitted, not the whole clip.
          */
-        fun recordAccepted(startSample: Int, count: Int, recorder: PlaybackBufferRecorder?) {
+        fun recordAccepted(
+            startSample: Int,
+            count: Int,
+            recorder: PlaybackBufferRecorder?,
+            admission: PlaybackBufferRecorder.Admission?,
+        ) {
             if (recorder == null || count <= 0) return
             val forReference = EarconAudio.resampleRange(
                 samples = samples,
@@ -549,7 +582,10 @@ class EarconPlayer(
                 startSample = startSample,
                 count = count,
             )
-            recorder.write(FloatArray(forReference.size) { forReference[it] / 32768f })
+            // OWNED like every other reference writer (@spec): the earcon's samples carry the admission
+            // minted when this cue took the track, so global retirement gives them a deadline and stale
+            // cues cannot re-enter.
+            recorder.write(FloatArray(forReference.size) { forReference[it] / 32768f }, admission = admission)
         }
     }
 
@@ -570,6 +606,10 @@ class EarconPlayer(
 
         /** The rate the shared echo reference and the correlator work at. */
         const val REFERENCE_RATE_HZ = 16_000
+
+        // Distinct producer-id namespace for earcon cues, disjoint from cloud answers
+        // (CLOUD_ANSWER_IDENTITY_BASE) and media tap epochs.
+        const val EARCON_PRODUCER_BASE: Long = Long.MIN_VALUE / 4
 
         /**
          * The stream earcons ride.

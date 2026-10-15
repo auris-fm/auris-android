@@ -138,14 +138,14 @@ class PlaybackBufferRecorderTest {
         // Feed write() directly with the tap's real formats; producerId is the tap's stream epoch.
         val a = tone(977, 220.0)
         val b = tone(977, 440.0)
-        recorder.write(FloatArray(a.size * 2) { a[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 1L)
+        recorder.write(FloatArray(a.size * 2) { a[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, admission = admFor(recorder, 1L))
         val afterA = recorder.snapshot().toList()
-        recorder.write(FloatArray(b.size * 2) { b[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 2L)
+        recorder.write(FloatArray(b.size * 2) { b[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, admission = admFor(recorder, 2L))
         val all = recorder.snapshot()
 
         // Recompute B alone on a fresh recorder: identical input format, no predecessor.
         val fresh = PlaybackBufferRecorder(FingerprintPcmTap())
-        fresh.write(FloatArray(b.size * 2) { b[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 2L)
+        fresh.write(FloatArray(b.size * 2) { b[it / 2] }, sourceSampleRateHz = srcRate, sourceChannels = 2, admission = admFor(fresh, 2L))
         val bAlone = fresh.snapshot()
 
         val bStored = all.toList().subList(afterA.size, all.size)
@@ -177,12 +177,12 @@ class PlaybackBufferRecorderTest {
         val soloY = PlaybackBufferRecorder(FingerprintPcmTap())
         var cx = 0
         for (n in parts) {
-            soloX.write(stereo(xFull.copyOfRange(cx, cx + n)), sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 1L)
+            soloX.write(stereo(xFull.copyOfRange(cx, cx + n)), sourceSampleRateHz = srcRate, sourceChannels = 2, admission = admFor(soloX, 1L))
             cx += n
         }
         var cy = 0
         for (n in parts) {
-            soloY.write(stereo(yFull.copyOfRange(cy, cy + n)), sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 2L)
+            soloY.write(stereo(yFull.copyOfRange(cy, cy + n)), sourceSampleRateHz = srcRate, sourceChannels = 2, admission = admFor(soloY, 2L))
             cy += n
         }
         val sx = soloX.snapshot().toList()
@@ -201,13 +201,13 @@ class PlaybackBufferRecorderTest {
         for (i in 0 until xWriteCount) {
             val nx = parts[i]
             val before = mixed.snapshot().size
-            mixed.write(stereo(xFull.copyOfRange(cx, cx + nx)), sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 1L)
+            mixed.write(stereo(xFull.copyOfRange(cx, cx + nx)), sourceSampleRateHz = srcRate, sourceChannels = 2, admission = admFor(mixed, 1L))
             xRanges.add(before until mixed.snapshot().size)
             writtenX += nx
             cx += nx
             val ny = parts[i]
             val beforeY = mixed.snapshot().size
-            mixed.write(stereo(yFull.copyOfRange(cy, cy + ny)), sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 2L)
+            mixed.write(stereo(yFull.copyOfRange(cy, cy + ny)), sourceSampleRateHz = srcRate, sourceChannels = 2, admission = admFor(mixed, 2L))
             yRanges.add(beforeY until mixed.snapshot().size)
             writtenY += ny
             cy += ny
@@ -256,10 +256,10 @@ class PlaybackBufferRecorderTest {
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
         val answer = FloatArray(tail + 4_000) { 0.9f }
         val episode = FloatArray(2_000) { 0.7f }
-        recorder.write(answer, producerId = 11L)
-        recorder.write(episode, producerId = 12L)
+        recorder.write(answer, admission = admFor(recorder, 11L))
+        recorder.write(episode, admission = admFor(recorder, 12L))
 
-        recorder.retireProducer(11L)
+        recorder.retireProducer(admFor(recorder, 11L))
 
         val snap = recorder.snapshot().toList()
         // Newest 8000 of the answer may survive; anything older from producer 11 is zero.
@@ -268,7 +268,7 @@ class PlaybackBufferRecorderTest {
         assertEquals("episode samples must be untouched by the answer's retirement", 2_000, snap.count { kotlin.math.abs(it - 0.7f) < 1e-6f })
         // Retired slots became UNTAGGED: writing the SAME identity again starts a fresh run, and a
         // second retirement of an already-retired id is harmless.
-        recorder.retireProducer(11L)
+        recorder.retireProducer(admFor(recorder, 11L))
         assertEquals("double retirement changes nothing further", 2_000, recorder.snapshot().count { kotlin.math.abs(it - 0.7f) < 1e-6f })
     }
 
@@ -284,17 +284,17 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 0L,
             trackEndFrame = 9_600L,
             trackGeneration = 0L,
-            producerId = 21L,
+            admission = admFor(recorder, 21L),
         )
-        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 5_000_000L, trackRateHz = 16_000, trackGeneration = 0L, producerId = 21L)
+        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 5_000_000L, trackRateHz = 16_000, trackGeneration = 0L, admission = admFor(recorder, 21L))
         assertNotNull("precondition: same-generation observation anchors", recorder.renderedReference())
-        recorder.retireProducer(22L)
+        recorder.retireProducer(admFor(recorder, 22L))
         assertNotNull("another producer's retirement keeps this observation", recorder.renderedReference())
-        recorder.retireProducer(21L)
+        recorder.retireProducer(admFor(recorder, 21L))
         assertNull("the retired stream's observation must go with its audio", recorder.renderedReference())
     }
 
-    // PRODUCER RETIREMENT IS SCOPED.    // PRODUCER RETIREMENT IS SCOPED. A cloud answer stopping calls retireProducer(its id) -- NOT the
+    // PRODUCER RETIREMENT IS SCOPED. A cloud answer stopping calls retireProducer(its id) -- NOT the
     // whole-recorder retire(). Falsifiable form: stream an episode partway at 44.1 kHz, interleave a
     // real-format cloud answer (16 kHz mono), stop the answer through the SCOPED call, then finish the
     // episode. The episode's full output must equal its uninterrupted solo baseline sample-by-sample;
@@ -311,7 +311,7 @@ class PlaybackBufferRecorderTest {
 
         // Uninterrupted baseline: the whole episode with no cloud interference.
         val solo = PlaybackBufferRecorder(FingerprintPcmTap())
-        solo.write(stereo(xFull), sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 1L)
+        solo.write(stereo(xFull), sourceSampleRateHz = srcRate, sourceChannels = 2, admission = admFor(solo, 1L))
         val baseline = solo.snapshot().toList()
 
         // Interrupted run: half the episode, the answer, scoped stop, remainder.
@@ -322,15 +322,15 @@ class PlaybackBufferRecorderTest {
         var writeCount = 0
         fun episodeWrite(n: Int) {
             val before = mixed.snapshot().size
-            mixed.write(stereo(xFull.copyOfRange(xOff, xOff + n)), sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 1L)
+            mixed.write(stereo(xFull.copyOfRange(xOff, xOff + n)), sourceSampleRateHz = srcRate, sourceChannels = 2, admission = admFor(mixed, 1L))
             xRanges.add(before until mixed.snapshot().size)
             xOff += n
             writeCount++
         }
         episodeWrite(half)
         // The answer streams two real-format chunks, then its stop path runs.
-        repeat(2) { mixed.write(cloudChunk, sourceSampleRateHz = 16_000, sourceChannels = 1, producerId = cloudId) }
-        mixed.retireProducer(cloudId)
+        repeat(2) { mixed.write(cloudChunk, sourceSampleRateHz = 16_000, sourceChannels = 1, admission = admFor(mixed, cloudId)) }
+        mixed.retireProducer(admFor(mixed, cloudId))
         episodeWrite(xFull.size - half)
 
         // Episode content identical to baseline across the stop, part boundaries included.
@@ -355,10 +355,10 @@ class PlaybackBufferRecorderTest {
         // resets the recorder. Falsified by an implementation that reopens continuations on late writes.
         val resampledChunk = FloatArray(4_096 * 2) { (0.3 * sin(2 * PI * 600.0 * (it / 2).toDouble() / srcRate)).toFloat() }
         val retiredRun = PlaybackBufferRecorder(FingerprintPcmTap())
-        retiredRun.write(resampledChunk, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = cloudId)
-        retiredRun.retireProducer(cloudId)
+        retiredRun.write(resampledChunk, sourceSampleRateHz = srcRate, sourceChannels = 2, admission = admFor(retiredRun, cloudId))
+        retiredRun.retireProducer(admFor(retiredRun, cloudId))
         val afterRetire = retiredRun.snapshot().toList()
-        retiredRun.write(resampledChunk, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = cloudId)
+        retiredRun.write(resampledChunk, sourceSampleRateHz = srcRate, sourceChannels = 2, admission = admFor(retiredRun, cloudId))
         assertEquals(
             "a held old write for the retired identity stores nothing beyond what retirement left",
             afterRetire,
@@ -366,7 +366,7 @@ class PlaybackBufferRecorderTest {
         )
         // The successor under a DIFFERENT id is unaffected by either the retirement or the refused write.
         val successorChunk = FloatArray(3_200) { 0.25f }
-        retiredRun.write(successorChunk, producerId = 99L)
+        retiredRun.write(successorChunk, admission = admFor(retiredRun, 99L))
         assertEquals("the successor's contribution lands whole", 3_200, retiredRun.snapshot().count { it == 0.25f })
     }
 
@@ -381,9 +381,9 @@ class PlaybackBufferRecorderTest {
         var nowMs = 1_000_000L
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap(), monotonicNowMs = { nowMs })
         val tail = PlaybackBufferRecorder.DELAY_TAIL_SAMPLES
-        recorder.write(FloatArray(tail + 4_000) { 0.9f }, producerId = 31L)
+        recorder.write(FloatArray(tail + 4_000) { 0.9f }, admission = admFor(recorder, 31L))
 
-        recorder.retireProducer(31L)
+        recorder.retireProducer(admFor(recorder, 31L))
         // Within the plausible playback window the tail legitimately survives.
         assertEquals("tail survives inside its expiry window", tail.toLong(), recorder.snapshot().count { it == 0.9f }.toLong())
 
@@ -409,30 +409,30 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 0L,
             trackEndFrame = 9_600L,
             trackGeneration = 1L,
-            producerId = 51L,
+            admission = admFor(recorder, 51L),
         )
-        recorder.retireProducer(51L)
+        recorder.retireProducer(admFor(recorder, 51L))
         // Successor incarnation anchors normally.
         recorder.write(
             FloatArray(9_600) { 0.6f },
             trackStartFrame = 0L,
             trackEndFrame = 9_600L,
             trackGeneration = 2L,
-            producerId = 52L,
+            admission = admFor(recorder, 52L),
         )
-        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 7_000_000L, trackRateHz = 16_000, trackGeneration = 2L, producerId = 52L)
+        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 7_000_000L, trackRateHz = 16_000, trackGeneration = 2L, admission = admFor(recorder, 52L))
         val successorRef = recorder.renderedReference()
         assertNotNull("successor keeps its own observation", successorRef)
 
         // The OLD callback arrives late.
-        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 5_000_000L, trackRateHz = 16_000, trackGeneration = 1L, producerId = 51L)
+        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 5_000_000L, trackRateHz = 16_000, trackGeneration = 1L, admission = admFor(recorder, 51L))
         assertNotNull("a retired id's late observation cannot clear the successor's anchor", recorder.renderedReference())
         // And a retired id names no live audio: an observation without a prior write is refused anyway;
         // assert the retired id never re-enters through write either.
         // The retired producer's own not-yet-expired tail legitimately remains; what must NOT change
         // is anything at all: a refused write contributes zero samples and shifts no cursor.
         val before = recorder.snapshot().toList()
-        recorder.write(FloatArray(1_600) { 0.45f }, producerId = 51L)
+        recorder.write(FloatArray(1_600) { 0.45f }, admission = admFor(recorder, 51L))
         assertEquals("a retired identity stores nothing -- the reference is byte-identical", before, recorder.snapshot().toList())
     }
 
@@ -446,17 +446,17 @@ class PlaybackBufferRecorderTest {
     fun `a callback held across a global retirement cannot repopulate the next incarnation`() {
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
         // Producer 61 stops normally (per-producer closure already correct).
-        recorder.write(FloatArray(9_600) { 0.7f }, producerId = 61L)
-        recorder.retireProducer(61L)
+        recorder.write(FloatArray(9_600) { 0.7f }, admission = admFor(recorder, 61L))
+        recorder.retireProducer(admFor(recorder, 61L))
         // Route change: whole-recorder retirement. Previously this reopened id 61.
         recorder.retire()
         // Successor incarnation on the new route writes under a NEW id.
-        recorder.write(FloatArray(4_800) { 0.8f }, producerId = 62L)
+        recorder.write(FloatArray(4_800) { 0.8f }, admission = admFor(recorder, 62L))
         val successorSnap = recorder.snapshot().toList()
 
         // The stale callbacks from BEFORE everything happened are released now.
-        recorder.write(FloatArray(1_600) { 0.7f }, producerId = 61L)
-        recorder.onRenderObservation(frameOnTrack = 1_000L, timeMs = 9_000_000L, trackRateHz = 16_000, trackGeneration = 61L, producerId = 61L)
+        recorder.write(FloatArray(1_600) { 0.7f }, admission = admFor(recorder, 61L))
+        recorder.onRenderObservation(frameOnTrack = 1_000L, timeMs = 9_000_000L, trackRateHz = 16_000, trackGeneration = 61L, admission = admFor(recorder, 61L))
 
         assertEquals(
             "the held old write reintroduces nothing after global retirement",
@@ -474,7 +474,7 @@ class PlaybackBufferRecorderTest {
         var nowMs = 500_000L
         val tail = PlaybackBufferRecorder.DELAY_TAIL_SAMPLES
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap(), monotonicNowMs = { nowMs })
-        recorder.write(FloatArray(tail + 4_000) { 0.35f }, producerId = 71L)
+        recorder.write(FloatArray(tail + 4_000) { 0.35f }, admission = admFor(recorder, 71L))
         recorder.retire()
         assertEquals("global retirement keeps exactly the delay tail", tail.toLong(), recorder.snapshot().count { it == 0.35f }.toLong())
 
@@ -495,10 +495,10 @@ class PlaybackBufferRecorderTest {
         var nowMs = 0L
         val tail = PlaybackBufferRecorder.DELAY_TAIL_SAMPLES
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap(), monotonicNowMs = { nowMs })
-        recorder.write(FloatArray(tail + 2_000) { 0.62f }, producerId = 81L)
-        recorder.retireProducer(81L) // deadline fixed at 0 + 500 ms
+        recorder.write(FloatArray(tail + 2_000) { 0.62f }, admission = admFor(recorder, 81L))
+        recorder.retireProducer(admFor(recorder, 81L)) // deadline fixed at 0 + 500 ms
         nowMs += tail * 1_000 / PlaybackBufferRecorder.SAMPLE_RATE / 2 // half the window elapses
-        recorder.retireProducer(81L) // stale duplicate stop
+        recorder.retireProducer(admFor(recorder, 81L)) // stale duplicate stop
         nowMs += tail * 1_000 / PlaybackBufferRecorder.SAMPLE_RATE / 2 + 1 // PAST the ORIGINAL deadline
         assertEquals(
             "the duplicate stop must not have extended the tail's matchable lifetime",
@@ -542,7 +542,7 @@ class PlaybackBufferRecorderTest {
         fun writer(base: Float, span: Float, rate: Int, id: Long, lo: Float, hi: Float, name: String) = Thread {
             var i = 0
             while (!stop.get() && i < totalChunks) {
-                recorder.write(rampChunk(base, span, i), sourceSampleRateHz = rate, sourceChannels = 2, producerId = id)
+                recorder.write(rampChunk(base, span, i), sourceSampleRateHz = rate, sourceChannels = 2, admission = admFor(recorder, id))
                 i++
                 bandCheck(recorder.snapshot(), lo, hi, name)
             }
@@ -1212,7 +1212,7 @@ class PlaybackBufferRecorderTest {
 
         // The observation: frame 8_000 sounded at 5_000_000 ms. Frame 8_000 is inside block 2, so
         // block 2 has NOT fully sounded; the newest fully-rendered block is block 1 (end 4800).
-        recorder.onRenderObservation(frameOnTrack = 8_000L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, producerId = null)
+        recorder.onRenderObservation(frameOnTrack = 8_000L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, admission = null)
 
         val rendered = recorder.renderedReference()
         assertNotNull("a fully rendered block exists", rendered)
@@ -1244,7 +1244,7 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
         )
-        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, producerId = null)
+        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, admission = null)
         assertNotNull("the block is selectable while retained", recorder.renderedReference())
 
         // More than the ring's capacity, with no frame identity of its own (e.g. an untimed source).
@@ -1271,7 +1271,7 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
         )
-        recorder.onRenderObservation(frameOnTrack = 99_999L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, producerId = null)
+        recorder.onRenderObservation(frameOnTrack = 99_999L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, admission = null)
 
         assertNull(
             "an observation ahead of the write head names nothing written here",
@@ -1294,7 +1294,7 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
         )
-        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, producerId = null)
+        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, admission = null)
         assertNotNull("anchored before the untimed contribution", recorder.renderedReference())
 
         // Untimed audio joins (no frame range, no observation change), then retires.
@@ -1310,7 +1310,7 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 4_800L,
             trackEndFrame = 9_600L,
         )
-        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 5_200_000L, trackRateHz = 48_000, trackGeneration = 0L, producerId = null)
+        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 5_200_000L, trackRateHz = 48_000, trackGeneration = 0L, admission = null)
 
         val rendered = recorder.renderedReference()
         assertNotNull(
@@ -1360,14 +1360,14 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
             trackGeneration = 0L,
-            producerId = null,
+            admission = null,
         )
         recorder.onRenderObservation(
             frameOnTrack = 4_800L,
             timeMs = 5_000_000L,
             trackRateHz = 48_000,
             trackGeneration = 0L,
-            producerId = null,
+            admission = null,
         )
         assertNotNull("anchored within the incarnation", recorder.renderedReference())
 
@@ -1407,9 +1407,105 @@ class PlaybackBufferRecorderTest {
             timeMs = 5_000_000L,
             trackRateHz = 48_000,
             trackGeneration = 1L,
-            producerId = null,
+            admission = null,
         )
 
         assertNotNull("a same-generation observation anchors", recorder.renderedReference())
     }
+
+    @Test
+    fun `renewed admission survives global retire while the stale ticket stays dead`() {
+        // @spec's control 2 mechanism at the recorder boundary: an ONGOING owner renews explicitly;
+        // route retirement (global retire) invalidates the STALE ticket but not the renewed one, and
+        // the retained tail still expires by elapsed time alone.
+        var nowMs = 1_000_000L
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap(), monotonicNowMs = { nowMs })
+        val audio = floatArrayOf(0.9f, -0.9f, 0.8f, -0.8f)
+        val stale = recorder.openAdmission(70L)
+        recorder.write(audio, admission = stale)
+        nowMs += 10_000L
+
+        // The continuing owner renews BEFORE the route event, then writes under the renewed ticket.
+        val renewed = recorder.renewAdmission(stale)
+        recorder.write(audio, admission = renewed)
+
+        // Route change: global retirement closes ALL admissions -- old AND current tickets.
+        recorder.retire()
+        // Stay WITHIN the 300 ms tail window so the retained-era audio has not expired yet when we
+        // measure the precondition below.
+        nowMs += 100L
+
+        // Stale ticket callback (even the renewed-era one after retirement) is refused...
+        recorder.write(audio, admission = renewed)
+        // ...and no NEW admission was opened, so nothing may re-anchor the retired buffer.
+        assertNull("retirement removed the anchor; a refused callback cannot restore it", recorder.renderedReference())
+
+        // A genuinely new producer after the route event lands normally. Distinct amplitude band (0.4)
+        // so the loud-threshold assertions below measure ONLY the retired-era 0.9/0.8 audio.
+        val successor = recorder.openAdmission(71L)
+        recorder.write(floatArrayOf(0.4f, -0.4f, 0.35f, -0.35f), admission = successor)
+        assertNotNull("the post-retirement successor owns fresh audio", recorder.snapshot().firstOrNull())
+
+        // Elapsed time ALONE expires the retained tails: advance well past the five-minute deadline,
+        // with NO further writes, then read the whole span. The only audio left must be the post-
+        // retirement successor's own (written before its own deadline); every retired-era sample --
+        // including the renewed ticket's pre-retirement write -- has lost its matchability.
+        // Advance past the retained-tail deadline (DELAY_TAIL_SAMPLES of audio = 500 ms) with NO
+        // further writes. The successor is LIVE, so its
+        // audio survives; the retired-era samples (stale + renewed tickets, both closed by retire())
+        // expire. A ring snapshot cannot separate them positionally here -- the retired-era audio sat
+        // BEFORE the successor's in write order -- so assert on the RING: after expiry, every loud
+        // sample remaining belongs at or after the successor's write position.
+        val loudBefore = recorder.snapshot().count { kotlin.math.abs(it) > 0.8f }
+        assertTrue("precondition: retired-era loud audio still retained within its tail window", loudBefore >= 4)
+        nowMs += 5_000L
+        val afterExpiry = recorder.snapshot()
+        val loudAfter = afterExpiry.count { kotlin.math.abs(it) > 0.8f }
+        assertTrue(
+            "retired-era loud audio (0.9-amplitude answer tones) expires on elapsed time alone; only the " +
+                "live successor's quieter audio may remain",
+            loudAfter < loudBefore,
+        )
+    }
+
+    @Test
+    fun `renewal transfers ownership so the previous ticket cannot write again`() {
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val first = recorder.openAdmission(80L)
+        val second = recorder.renewAdmission(first)
+        assertEquals(first.producerId, second.producerId)
+        recorder.write(floatArrayOf(0.4f), admission = second)
+        recorder.write(floatArrayOf(0.9f, -0.9f), admission = first)
+        val snapshot = recorder.snapshot()
+        assertTrue("stale ticket after renewal cannot contribute", snapshot.none { kotlin.math.abs(it) > 0.8f })
+        assertTrue(snapshot.any { kotlin.math.abs(it) > 0.3f })
+    }
+
+    @Test
+    fun `a callback holding only a pre-retirement ticket cannot write its first block after retire`() {
+        // @spec's admission case at the ticket level: this producer NEVER wrote before retirement, so no
+        // id-membership ledger could have judged it -- but its ticket belongs to the dead generation, and
+        // the genuinely-new successor (fresh ticket) lands.
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val oldProducer = recorder.openAdmission(90L)
+        val episodeAudio = floatArrayOf(0.7f, -0.7f, 0.6f, -0.6f)
+
+        recorder.retire()
+
+        recorder.write(episodeAudio, admission = oldProducer)
+        assertTrue("never-admitted old ticket stores nothing", recorder.snapshot().isEmpty())
+
+        val successor = recorder.openAdmission(91L)
+        recorder.write(successorAudio(), admission = successor)
+        assertNotNull("fresh ticket after retire is admitted", recorder.snapshot().firstOrNull())
+    }
+
+    private fun successorAudio(): FloatArray = floatArrayOf(0.2f, -0.2f)
+
+    // TEST ADMISSIONS: one admission per (recorder, id), mirroring how a production owner holds its
+    // ticket across writes, observations, and its own retirement. Controls that need a SECOND
+    // incarnation or a stale ticket open admissions explicitly instead of using this cache.
+    private val testAdmissions = HashMap<Pair<PlaybackBufferRecorder, Long>, PlaybackBufferRecorder.Admission>()
+
+    private fun admFor(recorder: PlaybackBufferRecorder, id: Long): PlaybackBufferRecorder.Admission = testAdmissions.getOrPut(recorder to id) { recorder.openAdmission(id) }
 }

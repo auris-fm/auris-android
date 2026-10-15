@@ -285,6 +285,10 @@ class AndroidPlatformTtsEngine @Inject constructor(
         // Published under the SAME lock that compares-and-clears it: a locked cleanup cannot protect
         // against an unlocked successor write, so the publication and the clear must share one
         // boundary or the successor can be published into a slot an older cleanup is about to null.
+        // The utterance's recorder ADMISSION is minted with its track and closed when the track is
+        // released -- an owned producer identity, never a null write (@spec).
+        val utteranceAdmission = playbackBufferRecorder.openAdmission(TTS_PRODUCER_BASE + mine)
+        currentUtteranceAdmission = utteranceAdmission
         synthesisLock.withLock { activeTrack = track }
         // Cancellation watcher, owning THIS utterance's LOCAL track. `isActive` flips the moment the
         // job is cancelled -- a write blocked inside withContext(IO) cannot reach the loop's own
@@ -434,6 +438,9 @@ class AndroidPlatformTtsEngine @Inject constructor(
         synthesisLock.withLock {
             if (activeTrack === track) {
                 activeTrack = null
+                val admission = currentUtteranceAdmission
+                currentUtteranceAdmission = null
+                if (admission != null) playbackBufferRecorder.retireProducer(admission)
             }
         }
     }
@@ -489,6 +496,9 @@ class AndroidPlatformTtsEngine @Inject constructor(
     /** The engine's current ownership generation. Test visibility; see [playbackGenerationForTest]. */
     fun currentGenerationForTest(): Int = synthesisLock.withLock { synthesisGeneration }
 
+    @Volatile
+    private var currentUtteranceAdmission: au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.Admission? = null
+
     private fun recordAccepted(
         samples: ShortArray,
         sampleRateHz: Int,
@@ -503,7 +513,12 @@ class AndroidPlatformTtsEngine @Inject constructor(
             startSample = startSample,
             count = count,
         )
-        playbackBufferRecorder.write(FloatArray(forReference.size) { forReference[it] / 32768f })
+        // OWNED like every other reference writer (@spec): the utterance carries the admission minted
+        // when its track started, so its retained tail gets a deadline and stale callbacks cannot re-enter.
+        playbackBufferRecorder.write(
+            FloatArray(forReference.size) { forReference[it] / 32768f },
+            admission = currentUtteranceAdmission,
+        )
     }
 
     private fun buildTrack(sampleRateHz: Int): AudioTrack? = runCatching {
@@ -553,6 +568,9 @@ class AndroidPlatformTtsEngine @Inject constructor(
     private fun localeForLanguageTag(tag: String): Locale = Locale.forLanguageTag(tag)
 
     private companion object {
+        // Producer-id namespace for TTS utterances, disjoint from cloud answers and earcons.
+        private const val TTS_PRODUCER_BASE: Long = Long.MIN_VALUE / 8
+
         /** The rate the shared echo reference and the correlator work at. */
         const val REFERENCE_RATE_HZ = 16_000
 

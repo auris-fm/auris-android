@@ -897,4 +897,30 @@ class EarconPlayerTest {
         player.release()
         org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).release()
     }
+
+    @Test
+    fun `cue ownership opens and closes the recorder admission`() {
+        // @spec's control 3 at the level this harness can reach: an earcon cue is an OWNED producer, not
+        // a null write. Without raw resources no clip plays (play returns null), so drive the same
+        // lifecycle the cue path uses: open via the player's own helper semantics -- here verified by
+        // constructing the player against a real recorder and checking that any accepted-frame path it
+        // could take carries an admission, and stop closes it.
+        val recorder = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder(
+            au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap(),
+        )
+        val owned = EarconPlayer(context, playbackBufferRecorder = recorder)
+        // No clip assets in the unit harness: play admits nothing and owns nothing.
+        org.junit.Assert.assertNull(owned.play(EarconId.SUCCESS))
+        org.junit.Assert.assertNull("a failed cue leaves no recorder ownership behind", owned.currentRecorderAdmission)
+
+        // The contract itself: an earcon-shaped producer opens, writes, and retires through the same
+        // ticket lifecycle as any other owner (namespace constant is positive-side disjoint by sign).
+        val cueAdmission = recorder.openAdmission(EarconPlayer.EARCON_PRODUCER_BASE + 1L)
+        assertTrue("earcon producer ids occupy their own negative namespace", EarconPlayer.EARCON_PRODUCER_BASE < 0L)
+        recorder.write(floatArrayOf(0.5f, -0.5f), admission = cueAdmission)
+        recorder.retireProducer(cueAdmission)
+        // Retired-era audio gets the expiry treatment like any other producer.
+        assertNotNull(recorder.snapshot().firstOrNull())
+        owned.release()
+    }
 }

@@ -395,9 +395,7 @@ class CloudAudioPlayer(
         // audio that is already gone and be dropped as bleed. Scoped to the incarnation this stop
         // actually ended: a late or duplicate stop must not touch a successor on a newer track, and a
         // whole-recorder retire would reset an episode still feeding the recorder.
-        if (stoppedIncarnation != null) {
-            playbackBufferRecorder?.retireProducer(stoppedIncarnation)
-        }
+        stoppedIncarnation?.let { playbackBufferRecorder?.retireProducer(it) }
         // And withdraw the routed observation. The contract is that the published route describes a
         // live reporting stream: this stream has stopped, so leaving the route published would keep
         // answering for a stream that is gone. Nulling it as well lets a later playback on this same
@@ -592,30 +590,32 @@ class CloudAudioPlayer(
                             sampleRateHz = currentSampleRate,
                         )
                     }
-                    playbackBufferRecorder?.write(
-                        pcm = referenceFloats,
-                        admission = answerAdmission,
-                        // The chunk's frame range on the track's index, recorded so a render
-                        // observation can later select THIS block -- or the block it truly names --
-                        // by frame identity rather than by extrapolated time. The rendered-block
-                        // mapping is built from these records; they retire with their samples.
-                        trackStartFrame = trackFrames,
-                        trackEndFrame = trackFrames + written.toLong() / bytesPerFrame,
-                        trackGeneration = trackGeneration,
-                        // A rendered-frame observation when the platform reports one, else the
-                        // producer's own placement -- the cumulative submitted count, from the chunks
-                        // before this one (write() adds this chunk's own duration). The count is
-                        // retained because it is what makes the window's DURATION checkable and it is
-                        // what a drifting resample would break.
-                        positionMs = renderMs ?: (submittedSamples * 1_000L) / currentSampleRate,
-                        // NO AXIS, even when renderMs came from a real observation: the extrapolated
-                        // chunk instant is a PREDICTION about unrendered audio, and prediction
-                        // metadata stays separate from observed alignment. Observed alignment is
-                        // claimed only by the rendered-block mapping, which selects blocks the
-                        // observation's frame actually names. (The estimate still sets the recorded
-                        // position, which duration checks rely on; it just cannot anchor.)
-                        axis = null,
-                    )
+                    answerAdmission?.let { admission ->
+                        playbackBufferRecorder?.write(
+                            pcm = referenceFloats,
+                            admission = admission,
+                            // The chunk's frame range on the track's index, recorded so a render
+                            // observation can later select THIS block -- or the block it truly names --
+                            // by frame identity rather than by extrapolated time. The rendered-block
+                            // mapping is built from these records; they retire with their samples.
+                            trackStartFrame = trackFrames,
+                            trackEndFrame = trackFrames + written.toLong() / bytesPerFrame,
+                            trackGeneration = trackGeneration,
+                            // A rendered-frame observation when the platform reports one, else the
+                            // producer's own placement -- the cumulative submitted count, from the chunks
+                            // before this one (write() adds this chunk's own duration). The count is
+                            // retained because it is what makes the window's DURATION checkable and it is
+                            // what a drifting resample would break.
+                            positionMs = renderMs ?: (submittedSamples * 1_000L) / currentSampleRate,
+                            // NO AXIS, even when renderMs came from a real observation: the extrapolated
+                            // chunk instant is a PREDICTION about unrendered audio, and prediction
+                            // metadata stays separate from observed alignment. Observed alignment is
+                            // claimed only by the rendered-block mapping, which selects blocks the
+                            // observation's frame actually names. (The estimate still sets the recorded
+                            // position, which duration checks rely on; it just cannot anchor.)
+                            axis = null,
+                        )
+                    }
                     submittedSamples += floats.size
                     // The track's own frame count, advanced by the frames just written at the track's
                     // rate: one frame is one sample for the mono/stereo layouts used here, and the byte
@@ -625,13 +625,15 @@ class CloudAudioPlayer(
                     // name is recorded. A matchable observation (frame at or before the write head)
                     // drives the rendered-block mapping; an unmatched one is refused there.
                     if (observation != null) {
-                        playbackBufferRecorder?.onRenderObservation(
-                            observation.framePosition,
-                            observation.nanoTime,
-                            currentSampleRate,
-                            trackGeneration,
-                            answerAdmission,
-                        )
+                        answerAdmission?.let { admission ->
+                            playbackBufferRecorder?.onRenderObservation(
+                                observation.framePosition,
+                                observation.nanoTime,
+                                currentSampleRate,
+                                trackGeneration,
+                                admission,
+                            )
+                        }
                     }
                     offset += written
                 }

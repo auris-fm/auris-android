@@ -12,6 +12,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -36,6 +37,9 @@ class PlaybackBufferRecorderTest {
         channelCount = 1,
         positionSec = 0.0,
         streamEpoch = 0L,
+        // Directly-constructed chunks carry no emission ticket: an admission-enforcing recorder refuses
+        // them, which is the contract. Tap-path tests drive real emissions instead of this helper.
+        admissionTicket = null,
     )
 
     // THE DECODER FORMAT IS NOT THE RECORDER FORMAT. The tap delivers chunks at the decoder's own
@@ -379,7 +383,8 @@ class PlaybackBufferRecorderTest {
     @Test
     fun `a retired tail expires with elapsed time even when no later write arrives`() {
         var nowMs = 1_000_000L
-        val recorder = PlaybackBufferRecorder(FingerprintPcmTap(), monotonicNowMs = { nowMs })
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        recorder.monotonicNowMs = { nowMs }
         val tail = PlaybackBufferRecorder.DELAY_TAIL_SAMPLES
         recorder.write(FloatArray(tail + 4_000) { 0.9f }, admission = admFor(recorder, 31L))
 
@@ -473,7 +478,8 @@ class PlaybackBufferRecorderTest {
     fun `a tail retained by global retirement expires on elapsed time without further writes`() {
         var nowMs = 500_000L
         val tail = PlaybackBufferRecorder.DELAY_TAIL_SAMPLES
-        val recorder = PlaybackBufferRecorder(FingerprintPcmTap(), monotonicNowMs = { nowMs })
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        recorder.monotonicNowMs = { nowMs }
         recorder.write(FloatArray(tail + 4_000) { 0.35f }, admission = admFor(recorder, 71L))
         recorder.retire()
         assertEquals("global retirement keeps exactly the delay tail", tail.toLong(), recorder.snapshot().count { it == 0.35f }.toLong())
@@ -494,7 +500,8 @@ class PlaybackBufferRecorderTest {
     fun `duplicate producer retirement keeps the original expiry`() {
         var nowMs = 0L
         val tail = PlaybackBufferRecorder.DELAY_TAIL_SAMPLES
-        val recorder = PlaybackBufferRecorder(FingerprintPcmTap(), monotonicNowMs = { nowMs })
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        recorder.monotonicNowMs = { nowMs }
         recorder.write(FloatArray(tail + 2_000) { 0.62f }, admission = admFor(recorder, 81L))
         recorder.retireProducer(admFor(recorder, 81L)) // deadline fixed at 0 + 500 ms
         nowMs += tail * 1_000 / PlaybackBufferRecorder.SAMPLE_RATE / 2 // half the window elapses
@@ -604,8 +611,8 @@ class PlaybackBufferRecorderTest {
         val recorder = PlaybackBufferRecorder(tap)
 
         // A hole: 0..1000 then a jump to 4000..5000.
-        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic)
-        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 4_000L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1001L))
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 4_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1002L))
         assertTrue(
             "the hole removes the anchor while both sides are retained",
             recorder.reference().startPositionMs == null,
@@ -615,7 +622,7 @@ class PlaybackBufferRecorderTest {
         // retained is at or after the hole, contiguous, and after the resume position.
         var t = 5_000L
         repeat(2) {
-            recorder.write(FloatArray(16_000) { 0.5f }, positionMs = t, axis = PositionAxis.Monotonic)
+            recorder.write(FloatArray(16_000) { 0.5f }, positionMs = t, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1003L))
             t += 1_000L
         }
 
@@ -642,12 +649,12 @@ class PlaybackBufferRecorderTest {
         val recorder = PlaybackBufferRecorder(tap)
 
         // Contiguous audio ending at 2000 ms.
-        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic)
-        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 1_000L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1004L))
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 1_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1005L))
         recorder.retire()
 
         // The next contribution is 5 s later: a discontinuity, compared against the TAIL's end.
-        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 7_000L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 7_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1006L))
 
         val reference = recorder.reference()
         assertTrue(
@@ -663,12 +670,12 @@ class PlaybackBufferRecorderTest {
         val tap = FingerprintPcmTap()
         val recorder = PlaybackBufferRecorder(tap)
 
-        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic)
-        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 1_000L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1007L))
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 1_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1008L))
         recorder.retire()
 
         // The next contribution MEETS the tail's end, so the window stays contiguous.
-        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 2_000L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 2_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1009L))
 
         val reference = recorder.reference()
         assertTrue(
@@ -688,8 +695,8 @@ class PlaybackBufferRecorderTest {
         // The hole must sit INSIDE the surviving 500 ms tail -- that is what "inside the tail" means.
         // Two 250 ms blocks with a 100 ms gap: the tail keeps the newest 500 ms, which spans BOTH sides
         // of the hole, so the retained samples are still separated by it.
-        recorder.write(FloatArray(4_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic)
-        recorder.write(FloatArray(4_000) { 0.5f }, positionMs = 350L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(4_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1010L))
+        recorder.write(FloatArray(4_000) { 0.5f }, positionMs = 350L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1011L))
 
         recorder.retire()
         assertTrue(
@@ -707,8 +714,8 @@ class PlaybackBufferRecorderTest {
         val recorder = PlaybackBufferRecorder(tap)
 
         // Two ADJACENT blocks: 0..1000 ms then 1000..2000 ms, no hole between them.
-        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic)
-        recorder.write(FloatArray(16_000) { -0.5f }, positionMs = 1_000L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1012L))
+        recorder.write(FloatArray(16_000) { -0.5f }, positionMs = 1_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1013L))
 
         val reference = recorder.reference()
         // The window is contiguous, so its start is exactly end minus its duration -- and NOT null,
@@ -741,12 +748,12 @@ class PlaybackBufferRecorderTest {
         val recorder = PlaybackBufferRecorder(tap)
 
         // One second of rendered audio at t=0.
-        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(16_000) { 0.5f }, positionMs = 0L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1014L))
         val afterFirst = recorder.lastRecordedPositionMs()
 
         // The NEXT rendered block is 3 s later -- 2 s of audio was dropped by the tap and never reached
         // this consumer. Nothing in the samples says so; the position jump is the only evidence.
-        recorder.write(FloatArray(16_000) { -0.5f }, positionMs = 3_000L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(16_000) { -0.5f }, positionMs = 3_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1015L))
 
         val reference = recorder.reference()
         assertTrue(
@@ -788,7 +795,7 @@ class PlaybackBufferRecorderTest {
     fun `retire keeps only the acoustic delay tail so stale audio cannot match later speech`() {
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
         // Fill well past the delay tail with a distinctive signal.
-        recorder.write(FloatArray(PlaybackBufferRecorder.SAMPLE_RATE) { 0.5f })
+        recorder.write(FloatArray(PlaybackBufferRecorder.SAMPLE_RATE) { 0.5f }, admission = admFor(recorder, 1016L))
         val before = recorder.snapshot().size
         assertTrue("precondition: the reference holds audio", before > PlaybackBufferRecorder.DELAY_TAIL_SAMPLES)
 
@@ -807,8 +814,8 @@ class PlaybackBufferRecorderTest {
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
         val tail = PlaybackBufferRecorder.DELAY_TAIL_SAMPLES
         // Old, retired audio is 0.25; the newest `tail` samples are 0.75.
-        recorder.write(FloatArray(PlaybackBufferRecorder.SAMPLE_RATE) { 0.25f })
-        recorder.write(FloatArray(tail) { 0.75f })
+        recorder.write(FloatArray(PlaybackBufferRecorder.SAMPLE_RATE) { 0.25f }, admission = admFor(recorder, 1017L))
+        recorder.write(FloatArray(tail) { 0.75f }, admission = admFor(recorder, 1018L))
 
         recorder.retire()
 
@@ -851,10 +858,10 @@ class PlaybackBufferRecorderTest {
     @Test
     fun `timestamped and untimestamped writes keep the latest position`() {
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
-        recorder.write(FloatArray(16) { 0.1f }, positionMs = 1_000L)
+        recorder.write(FloatArray(16) { 0.1f }, positionMs = 1_000L, admission = admFor(recorder, 1019L))
         assertEquals(1_001L, recorder.lastRecordedPositionMs())
         // An untimestamped write must not erase the last known position.
-        recorder.write(FloatArray(16) { 0.1f })
+        recorder.write(FloatArray(16) { 0.1f }, admission = admFor(recorder, 1020L))
         assertEquals(1_001L, recorder.lastRecordedPositionMs())
     }
 
@@ -887,7 +894,7 @@ class PlaybackBufferRecorderTest {
 
         val writer = Thread {
             while (!stop.get()) {
-                recorder.write(chunk)
+                recorder.write(chunk, admission = admFor(recorder, 1021L))
             }
         }
         val reader = Thread {
@@ -947,7 +954,7 @@ class PlaybackBufferRecorderTest {
         // Declared Media explicitly: this case is about the end-position relation, which holds on
         // either axis, and Media is the axis an episode tap supplies. It used the default before the
         // axis existed, and the default is the only reason it was passing.
-        recorder.write(FloatArray(half) { 0.5f }, positionMs = 1_000, axis = PositionAxis.Media)
+        recorder.write(FloatArray(half) { 0.5f }, positionMs = 1_000, axis = PositionAxis.Media, admission = admFor(recorder, 1022L))
         val recordedEnd = recorder.lastRecordedPositionMs()
         assertEquals("the recorded end position is the chunk start plus its duration", 1_500L, recordedEnd)
 
@@ -989,7 +996,7 @@ class PlaybackBufferRecorderTest {
             while (!stop.get()) {
                 size = if (size > 400) size / 2 else PlaybackBufferRecorder.SAMPLE_RATE
                 position += 1_000
-                recorder.write(FloatArray(size) { 0.25f }, positionMs = position)
+                recorder.write(FloatArray(size) { 0.25f }, positionMs = position, admission = admFor(recorder, 1023L))
             }
         }
         val reader = Thread {
@@ -1033,11 +1040,11 @@ class PlaybackBufferRecorderTest {
         val recorder = PlaybackBufferRecorder(tap)
 
         // An episode chunk at media position 0.5 s -- the axis the episode tap supplies.
-        recorder.write(FloatArray(1_600) { 0.5f }, positionMs = 500L, axis = PositionAxis.Media)
+        recorder.write(FloatArray(1_600) { 0.5f }, positionMs = 500L, axis = PositionAxis.Media, admission = admFor(recorder, 900L))
 
         // A rendered cloud-answer block at 9_000_000 ms of MONOTONIC time -- the axis the render clock
         // supplies. These are the two axes the production sources actually use.
-        recorder.write(FloatArray(1_600) { -0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(1_600) { -0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 901L))
 
         val reference = recorder.reference()
 
@@ -1061,7 +1068,7 @@ class PlaybackBufferRecorderTest {
         val tap = FingerprintPcmTap()
         val recorder = PlaybackBufferRecorder(tap)
 
-        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 12_000L, axis = PositionAxis.Media)
+        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 12_000L, axis = PositionAxis.Media, admission = admFor(recorder, 1024L))
 
         assertNull(
             "a media-positioned window must not offer an anchor to a monotonic microphone instant " +
@@ -1077,7 +1084,7 @@ class PlaybackBufferRecorderTest {
         val tap = FingerprintPcmTap()
         val recorder = PlaybackBufferRecorder(tap)
 
-        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1025L))
 
         val reference = recorder.reference()
         // The write anchors the chunk's START at 9_000_000 and records the END as start + duration,
@@ -1105,11 +1112,11 @@ class PlaybackBufferRecorderTest {
         val recorder = PlaybackBufferRecorder(tap)
 
         // An untimed chunk FIRST: it must leave the axis unset rather than defaulting it.
-        recorder.write(FloatArray(1_600) { 0.25f })
+        recorder.write(FloatArray(1_600) { 0.25f }, admission = admFor(recorder, 1026L))
 
         // Then a monotonic one. If the untimed chunk had defaulted the axis to Media, this window
         // would be Mixed and offer no anchor at all, discarding a valid clock.
-        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1027L))
 
         // REVERSED, and the reversal is the point: this case originally asserted that the window
         // STILL anchors, which encoded the behaviour @spec corrected. An untimed contribution is not
@@ -1133,8 +1140,8 @@ class PlaybackBufferRecorderTest {
         val tap = FingerprintPcmTap()
         val recorder = PlaybackBufferRecorder(tap)
 
-        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
-        recorder.write(FloatArray(1_600) { 0.25f })
+        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1028L))
+        recorder.write(FloatArray(1_600) { 0.25f }, admission = admFor(recorder, 1029L))
 
         assertEquals(
             "the samples are still retained: an absent position changes WHEN, never WHAT",
@@ -1156,11 +1163,11 @@ class PlaybackBufferRecorderTest {
         val tap = FingerprintPcmTap()
         val recorder = PlaybackBufferRecorder(tap)
 
-        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1030L))
         assertNotNull("the timed window anchors first", recorder.reference().startPositionMs)
 
         // TTS or an earcon lands with no timestamp.
-        recorder.write(FloatArray(1_600) { 0.25f })
+        recorder.write(FloatArray(1_600) { 0.25f }, admission = admFor(recorder, 1031L))
 
         assertNull(
             "untimed audio joining an anchored window must invalidate the anchor " +
@@ -1176,8 +1183,8 @@ class PlaybackBufferRecorderTest {
         val tap = FingerprintPcmTap()
         val recorder = PlaybackBufferRecorder(tap)
 
-        recorder.write(FloatArray(1_600) { 0.25f })
-        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(1_600) { 0.25f }, admission = admFor(recorder, 1032L))
+        recorder.write(FloatArray(3_200) { 0.5f }, positionMs = 9_000_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 1033L))
 
         assertNull(
             "a window containing untimed samples has no trustworthy start " +
@@ -1200,6 +1207,7 @@ class PlaybackBufferRecorderTest {
             axis = null,
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
+            admission = admFor(recorder, 504L),
         )
         // Block 2: frames 4800..9600, another 1600 samples.
         recorder.write(
@@ -1208,11 +1216,12 @@ class PlaybackBufferRecorderTest {
             axis = null,
             trackStartFrame = 4_800L,
             trackEndFrame = 9_600L,
+            admission = admFor(recorder, 504L),
         )
 
         // The observation: frame 8_000 sounded at 5_000_000 ms. Frame 8_000 is inside block 2, so
         // block 2 has NOT fully sounded; the newest fully-rendered block is block 1 (end 4800).
-        recorder.onRenderObservation(frameOnTrack = 8_000L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, admission = null)
+        recorder.onRenderObservation(frameOnTrack = 8_000L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, admission = admFor(recorder, 504L))
 
         val rendered = recorder.renderedReference()
         assertNotNull("a fully rendered block exists", rendered)
@@ -1243,12 +1252,13 @@ class PlaybackBufferRecorderTest {
             axis = null,
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
+            admission = admFor(recorder, 503L),
         )
-        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, admission = null)
+        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, admission = admFor(recorder, 503L))
         assertNotNull("the block is selectable while retained", recorder.renderedReference())
 
         // More than the ring's capacity, with no frame identity of its own (e.g. an untimed source).
-        recorder.write(FloatArray(PlaybackBufferRecorder.SAMPLE_RATE * 8))
+        recorder.write(FloatArray(PlaybackBufferRecorder.SAMPLE_RATE * 8), admission = admFor(recorder, 503L))
 
         assertNull(
             "a retired block cannot anchor: its samples are gone and the observation names nothing " +
@@ -1270,8 +1280,9 @@ class PlaybackBufferRecorderTest {
             axis = null,
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
+            admission = admFor(recorder, 503L),
         )
-        recorder.onRenderObservation(frameOnTrack = 99_999L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, admission = null)
+        recorder.onRenderObservation(frameOnTrack = 99_999L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, admission = admFor(recorder, 503L))
 
         assertNull(
             "an observation ahead of the write head names nothing written here",
@@ -1293,12 +1304,13 @@ class PlaybackBufferRecorderTest {
             axis = null,
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
+            admission = admFor(recorder, 502L),
         )
-        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, admission = null)
+        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, admission = admFor(recorder, 502L))
         assertNotNull("anchored before the untimed contribution", recorder.renderedReference())
 
         // Untimed audio joins (no frame range, no observation change), then retires.
-        recorder.write(FloatArray(PlaybackBufferRecorder.SAMPLE_RATE * 8))
+        recorder.write(FloatArray(PlaybackBufferRecorder.SAMPLE_RATE * 8), admission = admFor(recorder, 502L))
 
         // A coherent timed block after the untimed audio has left the ring, and a FRESH observation
         // for the new state -- the old observation (frame 4800) could not render the new block, and
@@ -1309,8 +1321,9 @@ class PlaybackBufferRecorderTest {
             axis = null,
             trackStartFrame = 4_800L,
             trackEndFrame = 9_600L,
+            admission = admFor(recorder, 502L),
         )
-        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 5_200_000L, trackRateHz = 48_000, trackGeneration = 0L, admission = null)
+        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 5_200_000L, trackRateHz = 48_000, trackGeneration = 0L, admission = admFor(recorder, 502L))
 
         val rendered = recorder.renderedReference()
         assertNotNull(
@@ -1336,7 +1349,7 @@ class PlaybackBufferRecorderTest {
         // must not restore an estimated or stale anchor through reference(). window() is what the
         // production supplier falls back to, and its position is null by construction.
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
-        recorder.write(FloatArray(1_600), positionMs = 9_000_000L, axis = PositionAxis.Monotonic)
+        recorder.write(FloatArray(1_600), positionMs = 9_000_000L, axis = PositionAxis.Monotonic, admission = admFor(recorder, 502L))
 
         val fallback = recorder.window()
         assertEquals("the samples are the retained window", 1_600, fallback.samples.size)
@@ -1360,14 +1373,14 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
             trackGeneration = 0L,
-            admission = null,
+            admission = admFor(recorder, 601L),
         )
         recorder.onRenderObservation(
             frameOnTrack = 4_800L,
             timeMs = 5_000_000L,
             trackRateHz = 48_000,
             trackGeneration = 0L,
-            admission = null,
+            admission = admFor(recorder, 601L),
         )
         assertNotNull("anchored within the incarnation", recorder.renderedReference())
 
@@ -1379,6 +1392,7 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
             trackGeneration = 1L,
+            admission = admFor(recorder, 501L),
         )
 
         assertNull(
@@ -1401,13 +1415,14 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
             trackGeneration = 1L,
+            admission = admFor(recorder, 500L),
         )
         recorder.onRenderObservation(
             frameOnTrack = 4_800L,
             timeMs = 5_000_000L,
             trackRateHz = 48_000,
             trackGeneration = 1L,
-            admission = null,
+            admission = admFor(recorder, 600L),
         )
 
         assertNotNull("a same-generation observation anchors", recorder.renderedReference())
@@ -1419,7 +1434,8 @@ class PlaybackBufferRecorderTest {
         // route retirement (global retire) invalidates the STALE ticket but not the renewed one, and
         // the retained tail still expires by elapsed time alone.
         var nowMs = 1_000_000L
-        val recorder = PlaybackBufferRecorder(FingerprintPcmTap(), monotonicNowMs = { nowMs })
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        recorder.monotonicNowMs = { nowMs }
         val audio = floatArrayOf(0.9f, -0.9f, 0.8f, -0.8f)
         val stale = recorder.openAdmission(70L)
         recorder.write(audio, admission = stale)
@@ -1508,4 +1524,110 @@ class PlaybackBufferRecorderTest {
     private val testAdmissions = HashMap<Pair<PlaybackBufferRecorder, Long>, PlaybackBufferRecorder.Admission>()
 
     private fun admFor(recorder: PlaybackBufferRecorder, id: Long): PlaybackBufferRecorder.Admission = testAdmissions.getOrPut(recorder to id) { recorder.openAdmission(id) }
+
+    // CONTROLS @spec/@reviewer: ADMISSION IS CAPTURED AT EMISSION, NOT CONSUMPTION. The tap stamps each
+    // chunk when it is created; a wholesale retire() kills every outstanding ticket, so audio that was
+    // ALREADY QUEUED stays dead even though delivery happens after the reset -- consumption must never
+    // launder in-flight work into the new generation. Only FUTURE emissions from a live owner renew.
+    @Test
+    fun `a chunk emitted before global retirement is refused when delivered after it`() = runTest {
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+        val job = recorder.start(this)
+        runCurrent()
+
+        // One emission under the collector's first ticket: accepted.
+        tap.onSinkBuffer(presentationTimeUs = 0)
+        tap.onPcm(ByteBuffer.wrap(s16le(ShortArray(1_600) { 1_000 })), AudioProcessor.AudioFormat(16_000, 1, C.ENCODING_PCM_16BIT))
+        runCurrent()
+        assertEquals("first emission recorded", 1_600, recorder.snapshot().size)
+
+        // Global retirement WHILE a chunk is in flight: emit, then retire before the flow delivers it.
+        // The flow is rendezvous-buffered, so hold the emitter by suspending the collector between
+        // emissions instead: emit once more without pumping the dispatcher, retire, then pump.
+        tap.onPcm(ByteBuffer.wrap(s16le(ShortArray(1_600) { (-1_000).toShort() })), AudioProcessor.AudioFormat(16_000, 1, C.ENCODING_PCM_16BIT))
+        // NOT yet runCurrent(): the chunk sits queued with its emission-time ticket.
+        recorder.retire()
+        runCurrent()
+
+        // retire() keeps the delay tail of what was ALREADY recorded (chunk 1), so count alone proves
+        // nothing -- CONTENT does: chunk 2 samples are negative, chunk 1 positive. The queued chunk
+        // carried a ticket that died with the generation, so none of its audio entered the ring.
+        val afterRetire = recorder.snapshot()
+        assertTrue(
+            "the queued chunk carried a ticket that died with the generation, so NONE of it stored",
+            afterRetire.none { it < 0f },
+        )
+        assertTrue("the retired tail of accepted audio remains", afterRetire.any { it > 0f })
+
+        // And the NEXT emission renews at the owner: future audio flows again.
+        tap.onPcm(ByteBuffer.wrap(s16le(ShortArray(1_600) { 500 })), AudioProcessor.AudioFormat(16_000, 1, C.ENCODING_PCM_16BIT))
+        runCurrent()
+        assertEquals("future emissions from the live owner are admitted", 1_600, recorder.snapshot().size)
+        job.cancel()
+    }
+
+    @Test
+    fun `expiry owned by an old incarnation cannot zero audio written by the renewed one`() {
+        var clockMs = 0L
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        recorder.monotonicNowMs = { clockMs }
+        val old = recorder.openAdmission(940L)
+        recorder.write(FloatArray(1_600) { 0.2f }, admission = old)
+        recorder.retireProducer(old)
+
+        // The renewed stream shares the logical producer id -- a DIFFERENT incarnation.
+        val renewed = recorder.renewAdmission(old)
+        clockMs += 10_000L
+        recorder.write(FloatArray(1_600) { 0.7f }, admission = renewed)
+
+        // Advance past the OLD deadline: expiry fires for the retired ticket only.
+        clockMs += PlaybackBufferRecorder.DELAY_TAIL_SAMPLES * 1_000L / PlaybackBufferRecorder.SAMPLE_RATE + 1_000L
+        val samples = recorder.snapshot()
+        assertTrue(
+            "renewed audio still present while the old incarnation's tail is gone",
+            samples.any { kotlin.math.abs(it - 0.7f) < 0.01f },
+        )
+        assertFalse(
+            "the old ticket's samples expired on their OWN deadline",
+            samples.any { kotlin.math.abs(it - 0.2f) < 0.01f },
+        )
+    }
+
+    @Test
+    fun `retirement keyed by an old incarnation leaves the renewed stream's anchor standing`() {
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val old = recorder.openAdmission(941L)
+        recorder.write(
+            FloatArray(1_600),
+            positionMs = null,
+            axis = null,
+            trackStartFrame = 0L,
+            trackEndFrame = 4_800L,
+            trackGeneration = 0L,
+            admission = old,
+        )
+        recorder.onRenderObservation(4_800L, 5_000_000L, 48_000, 0L, old)
+        assertNotNull("anchored under the old incarnation", recorder.renderedReference())
+
+        // Renew and record under the NEW ticket, same generation-free identity rules.
+        val renewed = recorder.renewAdmission(old)
+        recorder.write(
+            FloatArray(1_600),
+            positionMs = null,
+            axis = null,
+            trackStartFrame = 0L,
+            trackEndFrame = 4_800L,
+            trackGeneration = 1L,
+            admission = renewed,
+        )
+        recorder.onRenderObservation(4_800L, 6_000_000L, 48_000, 1L, renewed)
+
+        // A late stop of the OLD incarnation withdraws only what IT owns.
+        recorder.retireProducer(old)
+        assertNotNull(
+            "the renewed incarnation keeps its anchor; old-ticket retirement touched only old state",
+            recorder.renderedReference(),
+        )
+    }
 }

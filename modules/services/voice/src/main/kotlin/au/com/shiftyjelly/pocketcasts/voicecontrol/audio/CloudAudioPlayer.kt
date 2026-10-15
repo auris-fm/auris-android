@@ -34,6 +34,9 @@ import timber.log.Timber
  *
  * Unknown or empty codecs default to PCM with the provided sample rate and channel config.
  */
+// Producer identity of the cloud answer stream through the shared reference recorder.
+const val CLOUD_ANSWER_PRODUCER_ID: Long = -2L
+
 class CloudAudioPlayer(
     private val context: Context,
     private val sampleRateHz: Int = 16000,
@@ -372,10 +375,11 @@ class CloudAudioPlayer(
                 stopAudibleHeartbeat()
             }
         }
-        // The answer is no longer playing, so retire its reference contribution. Only the acoustic
-        // delay tail survives, so speech after the stop cannot be matched against audio that is
-        // already gone and dropped as bleed.
-        playbackBufferRecorder?.retire()
+        // The answer is no longer playing, so retire ITS stream only. A whole-recorder retire here
+        // would also reset an episode still feeding the recorder (its resampling phase -- cumulative
+        // truncation on the next episode chunk). The answer's samples age out through the recorder's
+        // own delay window; the episode's reference is untouched.
+        playbackBufferRecorder?.retireProducer(CLOUD_ANSWER_PRODUCER_ID)
         // And withdraw the routed observation. The contract is that the published route describes a
         // live reporting stream: this stream has stopped, so leaving the route published would keep
         // answering for a stream that is gone. Nulling it as well lets a later playback on this same
@@ -569,6 +573,7 @@ class CloudAudioPlayer(
                     }
                     playbackBufferRecorder?.write(
                         pcm = referenceFloats,
+                        producerId = CLOUD_ANSWER_PRODUCER_ID,
                         // The chunk's frame range on the track's index, recorded so a render
                         // observation can later select THIS block -- or the block it truly names --
                         // by frame identity rather than by extrapolated time. The rendered-block

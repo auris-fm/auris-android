@@ -95,23 +95,25 @@ class PlaybackBufferRecorder @Inject constructor(
     private var lastPositionMs: Long? = null
 
     /**
-     * Resampling continuation for the streaming source ([resampleSourceRateHz]). Decoder chunks are
-     * ordinary-sized; converting each chunk independently floors its output length and restarts
-     * interpolation at source index zero, so the SAME stream split differently would store a
-     * different duration and accumulate drift. [resamplePhase] carries the unconsumed fractional
-     * source position across chunks; the rate field invalidates it when the producer's clock changes.
-     * Only ever touched inside `synchronized(lock)` via [write].
+     * Resampling continuation for the current streaming producer. Decoder chunks are ordinary-sized;
+     * converting each chunk independently floors its output length and restarts interpolation at
+     * source index zero, so the SAME stream split differently would store a different duration and
+     * accumulate drift. [resampleCarry] plus [resampleOffsetFrac] carry the unconsumed fractional
+     * source position across chunks; the pair is invalidated whenever [resampleProducerId] or
+     * [resampleSourceRateHz] changes -- a same-rate successor is a new producer and starts fresh.
+     * Touched only inside `synchronized(lock)` via [write], and cleared by [retire].
      */
     private var resampleCarry = FloatArray(0)
     private var resampleOffsetFrac = 0.0
     private var resampleSourceRateHz: Int? = null
+    private var resampleProducerId: Long? = null
 
     /**
      * Downmix + phase-carrying linear resample to [SAMPLE_RATE]. [resampleCarry] holds the source
      * samples the previous chunk left unconsumed and [resampleOffsetFrac] the fractional position
      * inside them where the next output sample begins, so the stored stream is a function of the
-     * SOURCE, not of how the producer partitioned it. Linear interpolation needs the sample AFTER
-     * each position, hence the `- 1` capacity.
+     * SOURCE, not of how the producer partitioned it. Touched only inside `synchronized(lock)` via
+     * [write], and retired with its producer identity.
      */
     private fun normalizeStream(pcm: FloatArray, sourceSampleRateHz: Int, sourceChannels: Int): FloatArray {
         if (sourceChannels == 1 && sourceSampleRateHz == SAMPLE_RATE) return pcm
@@ -187,6 +189,9 @@ class PlaybackBufferRecorder @Inject constructor(
                     // The decoder's own format: the recorder normalizes, the tap stays a pass-through.
                     sourceSampleRateHz = chunk.sampleRate,
                     sourceChannels = chunk.channelCount,
+                    // Identity of the media stream being decoded; a seek/new episode at the SAME rate is
+                    // a new producer and must not inherit this stream's resampling continuation.
+                    producerId = chunk.streamEpoch,
                 )
             }
             .launchIn(scope)
@@ -214,6 +219,7 @@ class PlaybackBufferRecorder @Inject constructor(
             resampleCarry = FloatArray(0)
             resampleOffsetFrac = 0.0
             resampleSourceRateHz = null
+            resampleProducerId = null
             // THE SURVIVING TAIL KEEPS ITS CONTINUITY METADATA. Clearing `expectedNextPositionMs` while
             // samples survive would forget where the tail ENDS, so the FIRST contribution after the
             // retirement could not be compared against it -- and a contribution that does not meet the
@@ -440,6 +446,14 @@ class PlaybackBufferRecorder @Inject constructor(
         trackGeneration: Long? = null,
         sourceSampleRateHz: Int = SAMPLE_RATE,
         sourceChannels: Int = 1,
+        /**
+         * Identity of the stream producing these samples -- typically the playback incarnation whose
+         * decoder emits them. Resampling continuation is keyed to it: two producers at the same rate
+         * (an episode and a cloud answer both decoded at 44.1 kHz, or a restart of the same rate) must
+         * NOT inherit each other's fractional position, and no external retire is required between
+         * them. Omitted by sources already in the reference format, which need no continuation.
+         */
+        producerId: Long? = null,
     ) {
         // THE RECORDER IS THE FORMAT BOUNDARY. Sources deliver the decoder's own PCM (the episode tap
         // runs at 44.1 kHz stereo for ordinary episodes); the ring, the window duration and every
@@ -449,16 +463,20 @@ class PlaybackBufferRecorder @Inject constructor(
         // and no correlation in the correlator can undo that.
         require(sourceSampleRateHz > 0) { "sourceSampleRateHz must be positive" }
         require(sourceChannels > 0) { "sourceChannels must be positive" }
-        if (sourceSampleRateHz != resampleSourceRateHz) {
-            // A different source rate is a different producer clock: the fractional position a
-            // previous stream consumed means nothing to this one.
-            resampleSourceRateHz = sourceSampleRateHz
-            resampleCarry = FloatArray(0)
-            resampleOffsetFrac = 0.0
-        }
-        val samples = normalizeStream(pcm, sourceSampleRateHz, sourceChannels)
         val axisClaimed = axis != null
         synchronized(lock) {
+            // ONE OWNERSHIP BOUNDARY. Normalization mutates continuation state, so it runs under the
+            // same lock that orders the ring write: concurrent writers cannot mix carry/phase, and a
+            // concurrent retire() cannot clear the carry mid-chunk.
+            if (producerId != resampleProducerId || sourceSampleRateHz != resampleSourceRateHz) {
+                // A new producer OR a new clock for the same producer invalidates the continuation:
+                // the fractional position some earlier stream consumed means nothing to this stream.
+                resampleProducerId = producerId
+                resampleSourceRateHz = sourceSampleRateHz
+                resampleCarry = FloatArray(0)
+                resampleOffsetFrac = 0.0
+            }
+            val samples = normalizeStream(pcm, sourceSampleRateHz, sourceChannels)
             totalWritten += samples.size
             for (sample in samples) {
                 buffer[writePos] = sample

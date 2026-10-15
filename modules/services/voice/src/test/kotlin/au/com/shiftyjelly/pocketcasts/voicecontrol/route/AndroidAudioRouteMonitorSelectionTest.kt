@@ -291,18 +291,16 @@ class AndroidAudioRouteMonitorSelectionTest {
     @Test
     @Suppress("DEPRECATION") // ACTION_SCO_AUDIO_STATE_UPDATED drives the live SCO signal
     fun `a live sco link with enumerated wired outputs and an observed sco capture stays the headset`() {
-        // FINDING 1+2 COMBINED: only the SCO link is live; wired and BLE outputs are merely enumerated.
-        // The observed SCO capture (a real TYPE_BLUETOOTH_SCO input id) IS the headset microphone -- the
-        // route must not be stolen by the enumerated outputs, and the SCO capture must not be rejected
-        // as a microphone. Availability is the enumeration's answer, read separately.
+        // THE OPEN-SCO FALLBACK ITSELF: NO output observer and NO selected communication device, so the
+        // only observation is the platform SCO link. Wired and BLE outputs are merely enumerated -- if
+        // the fallback passed the enumeration instead of the observed SCO type, the enumerated wired
+        // output would steal the route and this case would fail. The SCO capture id (a real
+        // TYPE_BLUETOOTH_SCO input) proves the fallback accepts SCO as a microphone. Availability is
+        // the enumeration's separate answer: the enumerated wired output carries no observed mic.
         val scoCaptureId = 41
-        val observer = RoutedOutputObserver().also {
-            it.observe().publishType(AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
-        }
         val monitor = AndroidAudioRouteMonitor(
             context = context,
             gracePeriodSignal = GracePeriodSignal(),
-            routedOutputObserver = observer,
             enumeratedDeviceTypes = {
                 AndroidAudioRouteMonitor.EnumeratedDevices(
                     outputs = listOf(AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_BLE_HEADSET),
@@ -312,8 +310,14 @@ class AndroidAudioRouteMonitorSelectionTest {
             },
             captureRoutedDeviceId = { scoCaptureId },
         )
+        assertEquals(AudioRoute.Unknown, monitor.route.value)
+
+        setBluetoothScoOn(true)
+        context.sendBroadcast(Intent(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED))
+        shadowOf(Looper.getMainLooper()).idle()
 
         assertEquals(AudioRoute.Headset(hasMicrophone = true), monitor.route.value)
+        assertEquals(AudioRoute.Headset(hasMicrophone = false), monitor.availability.value)
     }
 
     @Test
@@ -339,6 +343,18 @@ class AndroidAudioRouteMonitorSelectionTest {
         shadowOf(Looper.getMainLooper()).idle()
 
         assertEquals(AudioRoute.Speaker, observed.route.value)
+        assertEquals(AudioRoute.Speaker, monitor.availability.value)
+
+        // THE A2DP DIRECTION of the same precedence: an explicitly observed A2DP output keeps its own
+        // route while the SCO link is open, rather than the SCO fact overriding it into a Headset.
+        val a2dpObserved = AndroidAudioRouteMonitor(
+            context = context,
+            gracePeriodSignal = GracePeriodSignal(),
+            routedOutputObserver = RoutedOutputObserver().also {
+                it.observe().publishType(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
+            },
+        )
+        assertEquals(AudioRoute.BluetoothA2dpOnly, a2dpObserved.route.value)
         assertEquals(AudioRoute.Speaker, monitor.availability.value)
     }
 

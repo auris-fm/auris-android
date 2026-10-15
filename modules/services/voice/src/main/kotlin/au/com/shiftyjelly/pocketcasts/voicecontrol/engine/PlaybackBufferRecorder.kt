@@ -58,6 +58,13 @@ class PlaybackBufferRecorder @Inject constructor(
     private val fingerprintPcmTap: FingerprintPcmTap,
 ) {
     private val buffer: FloatArray = FloatArray(SAMPLE_RATE * BUFFER_DURATION_SECONDS)
+
+    /**
+     * Which stream contributed each ring slot. Acoustic retirement is per producer: a stopped answer
+     * must invalidate ITS samples and observations without touching an episode's live reference.
+     * [UNTAGGED] marks slots no producer owns any more (retired samples, or never written).
+     */
+    private val ownerTags = LongArray(buffer.size) { UNTAGGED }
     private var writePos = 0
     private var filled = false
 
@@ -102,8 +109,8 @@ class PlaybackBufferRecorder @Inject constructor(
      * plays), and clearing on every switch re-introduces exactly that per-boundary loss. The state is
      * therefore keyed by (producerId, sourceSampleRateHz): an A->B->A alternation resumes A where A
      * left off. Entries leave the map only through their OWN producer's retirement
-     * ([retireProducer]), eviction when long-superseded (bounded to [MAX_CONTINUATIONS] producers),
-     * or whole-recorder retirement ([retire]).
+     * ([retireProducer]), explicit epoch supersession at the tap collector, or whole-recorder
+     * retirement ([retire]) -- never unrelated write pressure.
      * Touched only inside `synchronized(lock)` via [write]/[retireProducer]/[retire].
      */
     private class Continuation {
@@ -111,11 +118,10 @@ class PlaybackBufferRecorder @Inject constructor(
         var offsetFrac = 0.0
     }
 
-    // Access-ordered so eviction drops the LEAST RECENTLY WRITTEN producer: a stream long superseded
-    // by newer epochs releases its entry without anyone having to name it.
-    private val continuations = object : LinkedHashMap<ProducerClockKey, Continuation>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<ProducerClockKey, Continuation>): Boolean = size > MAX_CONTINUATIONS
-    }
+    // Entries leave ONLY through their own lifecycle: [retireProducer] when a stream ends, explicit
+    // epoch supersession at the tap collector, or whole-recorder [retire]. Pressure-based eviction is
+    // NOT ownership: a still-live producer would lose its continuation after unrelated writes.
+    private val continuations = HashMap<ProducerClockKey, Continuation>()
 
     /** Producer identity paired with its source clock: a same-rate successor is a DIFFERENT key. */
     private data class ProducerClockKey(val producerId: Long?, val sampleRateHz: Int)
@@ -199,8 +205,17 @@ class PlaybackBufferRecorder @Inject constructor(
      */
     fun start(scope: CoroutineScope): Job {
         tapJob?.cancel()
+        var lastEpoch: Long? = null
         return fingerprintPcmTap.chunks
             .onEach { chunk ->
+                // EXPLICIT EPOCH SUPERSESSION at its owner site: a seek or new episode bumps the tap's
+                // streamEpoch, which makes the previous epoch dead -- retire it here rather than let
+                // its entry linger until an unrelated global retirement or map pressure approximates it.
+                val epoch = chunk.streamEpoch
+                if (lastEpoch != null && epoch != lastEpoch) {
+                    retireProducer(lastEpoch)
+                }
+                lastEpoch = epoch
                 write(
                     pcm = chunkToFloats(chunk),
                     // The tap's position is seconds of media time; the reference tracks milliseconds.
@@ -223,13 +238,42 @@ class PlaybackBufferRecorder @Inject constructor(
     }
 
     /**
-     * Retires ONE producer's stream: its resampling continuation leaves the map, and nothing else
-     * changes. Use when a stream ENDS while others still feed this recorder -- a cloud answer
-     * stopping under a live episode must not reset the episode's fractional phase.
+     * Retires ONE producer's stream completely -- conversion state AND acoustic reference:
+     *  - its resampling continuation leaves the map;
+     *  - its ring samples older than the audible delay tail are zeroed and untagged, so speech after
+     *    the stop cannot be matched against audio that is already gone and dropped as bleed;
+     *  - its newest [DELAY_TAIL_SAMPLES] worth survive: hardware still plays them out, and the
+     *    correlator legitimately searches that range;
+     *  - its recorded blocks go, and a render observation whose blocks retired goes with them.
+     * Nothing another producer owns is touched -- a cloud answer stopping under a live episode must
+     * not reset the episode's phase or trim its reference.
      */
     fun retireProducer(producerId: Long?) {
+        if (producerId == null) return
         synchronized(lock) {
             continuations.keys.removeAll { it.producerId == producerId }
+            // The producer's OWN newest tail stays matchable; everything older from it is dead air.
+            var surviving = DELAY_TAIL_SAMPLES
+            for (step in 0 until buffer.size) {
+                val idx = ((writePos - 1 - step) % buffer.size + buffer.size) % buffer.size
+                if (!filled && idx == writePos && step > 0) break
+                if (ownerTags[idx] == producerId) {
+                    if (surviving > 0) {
+                        surviving--
+                    } else {
+                        buffer[idx] = 0f
+                        ownerTags[idx] = UNTAGGED
+                    }
+                }
+            }
+            blocks.removeAll { it.producerId == producerId }
+            // An observation whose stream just retired describes audio the microphone can no longer
+            // hear as echo; keeping it would let the correlator trust a dead anchor.
+            if (renderObservation?.producerId == producerId) {
+                renderObservation = null
+            } else if (renderObservation != null && blocks.none { it.trackGeneration == renderObservation!!.trackGeneration }) {
+                renderObservation = null
+            }
         }
     }
 
@@ -247,6 +291,7 @@ class PlaybackBufferRecorder @Inject constructor(
             // Whole-recorder retirement (stop or route change) ends EVERY producer's stream through
             // this recorder, so all continuations go. A single stream ending is [retireProducer].
             continuations.clear()
+
             // THE SURVIVING TAIL KEEPS ITS CONTINUITY METADATA. Clearing `expectedNextPositionMs` while
             // samples survive would forget where the tail ENDS, so the FIRST contribution after the
             // retirement could not be compared against it -- and a contribution that does not meet the
@@ -261,14 +306,18 @@ class PlaybackBufferRecorder @Inject constructor(
             }
             val keep = minOf(DELAY_TAIL_SAMPLES, buffer.size, if (filled) buffer.size else writePos)
             val tail = FloatArray(keep)
+            val tailOwners = LongArray(keep)
             // Copy the newest `keep` samples in order, wrapping as needed, then write them back so the
             // buffer contains only the still-plausible tail and the write cursor sits after it.
             for (i in 0 until keep) {
                 val from = ((writePos - keep + i) % buffer.size + buffer.size) % buffer.size
                 tail[i] = buffer[from]
+                tailOwners[i] = ownerTags[from]
             }
             buffer.fill(0f)
+            java.util.Arrays.fill(ownerTags, UNTAGGED)
             tail.copyInto(buffer, 0)
+            tailOwners.copyInto(ownerTags, 0)
             writePos = if (keep == buffer.size) 0 else keep
             filled = false
         }
@@ -295,6 +344,8 @@ class PlaybackBufferRecorder @Inject constructor(
         val endTrackFrame: Long,
         /** Which track incarnation this audio was written under. */
         val trackGeneration: Long,
+        /** Which stream contributed these samples; stale cleanup retires its own blocks only. */
+        val producerId: Long?,
     )
 
     private val blocks = ArrayDeque<RetainedBlock>()
@@ -313,6 +364,8 @@ class PlaybackBufferRecorder @Inject constructor(
         val timeMs: Long,
         val trackRateHz: Int,
         val trackGeneration: Long,
+        /** Stream this observation was recorded under; scoped retirement drops it with its audio. */
+        val producerId: Long?,
     )
 
     private var renderObservation: RenderObservation? = null
@@ -328,6 +381,7 @@ class PlaybackBufferRecorder @Inject constructor(
         endTrackFrame: Long,
         sampleCount: Int,
         trackGeneration: Long,
+        producerId: Long?,
     ) {
         // totalWritten was already advanced by write(); the block's end names that same position, and
         // its start names the position before this contribution's samples. The SAMPLE range is what
@@ -341,6 +395,7 @@ class PlaybackBufferRecorder @Inject constructor(
                     startTrackFrame,
                     endTrackFrame,
                     trackGeneration,
+                    producerId,
                 ),
             )
         }
@@ -374,6 +429,7 @@ class PlaybackBufferRecorder @Inject constructor(
         timeMs: Long,
         trackRateHz: Int,
         trackGeneration: Long,
+        producerId: Long?,
     ) {
         synchronized(lock) {
             // The observation is matched only against blocks of ITS OWN track incarnation: after a
@@ -383,7 +439,7 @@ class PlaybackBufferRecorder @Inject constructor(
             val writeHeadFrame = blocks.lastOrNull()?.endTrackFrame ?: 0L
             renderObservation =
                 if (sameGeneration && frameOnTrack in 1..writeHeadFrame && trackRateHz > 0) {
-                    RenderObservation(frameOnTrack, timeMs, trackRateHz, trackGeneration)
+                    RenderObservation(frameOnTrack, timeMs, trackRateHz, trackGeneration, producerId)
                 } else {
                     null
                 }
@@ -502,11 +558,12 @@ class PlaybackBufferRecorder @Inject constructor(
             totalWritten += samples.size
             for (sample in samples) {
                 buffer[writePos] = sample
+                ownerTags[writePos] = producerId ?: UNTAGGED
                 writePos = (writePos + 1) % buffer.size
                 if (writePos == 0) filled = true
             }
             if (trackStartFrame != null && trackEndFrame != null) {
-                recordBlock(trackStartFrame, trackEndFrame, samples.size, trackGeneration ?: 0L)
+                recordBlock(trackStartFrame, trackEndFrame, samples.size, trackGeneration ?: 0L, producerId)
             }
             if (positionMs != null) {
                 // A TICK THAT DOES NOT MEET THE PREVIOUS ONE IS A HOLE. Checked HERE, under the same
@@ -636,8 +693,8 @@ class PlaybackBufferRecorder @Inject constructor(
         const val SAMPLE_RATE = 16000
         const val BUFFER_DURATION_SECONDS = 2
 
-        /** Live producers through this recorder at once: episode + a few interleaved streams. */
-        private const val MAX_CONTINUATIONS = 4
+        /** Ring slots no live producer owns. */
+        internal const val UNTAGGED: Long = Long.MIN_VALUE
 
         /**
          * How far a tick's start may sit from the previous tick's end before the samples are treated as

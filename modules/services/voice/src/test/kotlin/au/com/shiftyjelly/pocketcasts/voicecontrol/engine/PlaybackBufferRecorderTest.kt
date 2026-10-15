@@ -244,7 +244,57 @@ class PlaybackBufferRecorderTest {
         }
     }
 
-    // PRODUCER RETIREMENT IS SCOPED. A cloud answer stopping calls retireProducer(its id) -- NOT the
+    // RETIREMENT IS ACOUSTIC, NOT ONLY CONVERSION STATE. Reviewer P1: dropping the continuation while
+    // leaving the ring intact lets a stopped answer keep rejecting later user speech for the whole
+    // buffer age. retireProducer(id) must zero that producer's samples older than the audible delay
+    // tail, keep its newest tail matchable (hardware still sounds it), and leave every OTHER producer's
+    // samples tagged and present. Falsified by a state-only retirement (samples untouched) and by a
+    // global clear (other producer loses audio).
+    @Test
+    fun `retireProducer zeroes only its own samples beyond the delay tail`() {
+        val tail = PlaybackBufferRecorder.DELAY_TAIL_SAMPLES
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val answer = FloatArray(tail + 4_000) { 0.9f }
+        val episode = FloatArray(2_000) { 0.7f }
+        recorder.write(answer, producerId = 11L)
+        recorder.write(episode, producerId = 12L)
+
+        recorder.retireProducer(11L)
+
+        val snap = recorder.snapshot().toList()
+        // Newest 8000 of the answer may survive; anything older from producer 11 is zero.
+        val survivingAnswer = snap.count { kotlin.math.abs(it - 0.9f) < 1e-6f }
+        assertTrue("answer tail must survive within the delay window", survivingAnswer in 1..tail)
+        assertEquals("episode samples must be untouched by the answer's retirement", 2_000, snap.count { kotlin.math.abs(it - 0.7f) < 1e-6f })
+        // Retired slots became UNTAGGED: writing the SAME identity again starts a fresh run, and a
+        // second retirement of an already-retired id is harmless.
+        recorder.retireProducer(11L)
+        assertEquals("double retirement changes nothing further", 2_000, recorder.snapshot().count { kotlin.math.abs(it - 0.7f) < 1e-6f })
+    }
+
+    // RENDER OBSERVATIONS DIE WITH THEIR STREAM. An observation anchored to retired audio would let the
+    // correlator trust a dead anchor and place a confident wrong offset. Scoped retirement clears the
+    // observation written under the retired producer (or whose blocks all came from it) while another
+    // producer's observation survives.
+    @Test
+    fun `retireProducer withdraws observations belonging to the retired stream only`() {
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        recorder.write(
+            FloatArray(9_600) { 0.5f },
+            trackStartFrame = 0L,
+            trackEndFrame = 9_600L,
+            trackGeneration = 0L,
+            producerId = 21L,
+        )
+        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 5_000_000L, trackRateHz = 16_000, trackGeneration = 0L, producerId = 21L)
+        assertNotNull("precondition: same-generation observation anchors", recorder.renderedReference())
+        recorder.retireProducer(22L)
+        assertNotNull("another producer's retirement keeps this observation", recorder.renderedReference())
+        recorder.retireProducer(21L)
+        assertNull("the retired stream's observation must go with its audio", recorder.renderedReference())
+    }
+
+    // PRODUCER RETIREMENT IS SCOPED.    // PRODUCER RETIREMENT IS SCOPED. A cloud answer stopping calls retireProducer(its id) -- NOT the
     // whole-recorder retire(). Falsifiable form: stream an episode partway at 44.1 kHz, interleave a
     // real-format cloud answer (16 kHz mono), stop the answer through the SCOPED call, then finish the
     // episode. The episode's full output must equal its uninterrupted solo baseline sample-by-sample;
@@ -253,7 +303,7 @@ class PlaybackBufferRecorderTest {
     @Test
     fun `scoped producer retirement leaves a live episode's continuation untouched and releases the entry`() {
         val srcRate = 44_100
-        val cloudId = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CLOUD_ANSWER_PRODUCER_ID
+        val cloudId = -123L // any distinct non-tap identity
         fun mono(frames: Int, freqHz: Double): FloatArray = FloatArray(frames) { (0.45 * sin(2 * PI * freqHz * it.toDouble() / srcRate)).toFloat() }
         fun stereo(m: FloatArray): FloatArray = FloatArray(m.size * 2) { m[it / 2] }
         val xFull = mono(12_000, 220.0)
@@ -1023,7 +1073,7 @@ class PlaybackBufferRecorderTest {
 
         // The observation: frame 8_000 sounded at 5_000_000 ms. Frame 8_000 is inside block 2, so
         // block 2 has NOT fully sounded; the newest fully-rendered block is block 1 (end 4800).
-        recorder.onRenderObservation(frameOnTrack = 8_000L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L)
+        recorder.onRenderObservation(frameOnTrack = 8_000L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, producerId = null)
 
         val rendered = recorder.renderedReference()
         assertNotNull("a fully rendered block exists", rendered)
@@ -1055,7 +1105,7 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
         )
-        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L)
+        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, producerId = null)
         assertNotNull("the block is selectable while retained", recorder.renderedReference())
 
         // More than the ring's capacity, with no frame identity of its own (e.g. an untimed source).
@@ -1082,7 +1132,7 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
         )
-        recorder.onRenderObservation(frameOnTrack = 99_999L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L)
+        recorder.onRenderObservation(frameOnTrack = 99_999L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, producerId = null)
 
         assertNull(
             "an observation ahead of the write head names nothing written here",
@@ -1105,7 +1155,7 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
         )
-        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L)
+        recorder.onRenderObservation(frameOnTrack = 4_800L, timeMs = 5_000_000L, trackRateHz = 48_000, trackGeneration = 0L, producerId = null)
         assertNotNull("anchored before the untimed contribution", recorder.renderedReference())
 
         // Untimed audio joins (no frame range, no observation change), then retires.
@@ -1121,7 +1171,7 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 4_800L,
             trackEndFrame = 9_600L,
         )
-        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 5_200_000L, trackRateHz = 48_000, trackGeneration = 0L)
+        recorder.onRenderObservation(frameOnTrack = 9_600L, timeMs = 5_200_000L, trackRateHz = 48_000, trackGeneration = 0L, producerId = null)
 
         val rendered = recorder.renderedReference()
         assertNotNull(
@@ -1171,12 +1221,14 @@ class PlaybackBufferRecorderTest {
             trackStartFrame = 0L,
             trackEndFrame = 4_800L,
             trackGeneration = 0L,
+            producerId = null,
         )
         recorder.onRenderObservation(
             frameOnTrack = 4_800L,
             timeMs = 5_000_000L,
             trackRateHz = 48_000,
             trackGeneration = 0L,
+            producerId = null,
         )
         assertNotNull("anchored within the incarnation", recorder.renderedReference())
 
@@ -1216,6 +1268,7 @@ class PlaybackBufferRecorderTest {
             timeMs = 5_000_000L,
             trackRateHz = 48_000,
             trackGeneration = 1L,
+            producerId = null,
         )
 
         assertNotNull("a same-generation observation anchors", recorder.renderedReference())

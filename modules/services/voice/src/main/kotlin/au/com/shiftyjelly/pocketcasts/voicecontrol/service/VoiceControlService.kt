@@ -295,10 +295,15 @@ class VoiceControlService : Service() {
                                 }
                                 logCaptureStopped(reasons, isUserRequested)
                                 stopEngine()
-                            } else if (route is AudioRoute.BluetoothA2dpOnly && gate.state.value.allowed) {
-                                // The route is a candidate and every non-route gate question passes:
-                                // acquire the external microphone, then capture. Without this the route
-                                // stays Exposed and the mode never leaves Off — the deadlock.
+                            } else if (audioRouteMonitor.availability.value is AudioRoute.BluetoothA2dpOnly &&
+                                gate.state.value.allowed
+                            ) {
+                                // THE CANDIDATE COMES FROM AVAILABILITY, not the observation: with the
+                                // observation-first readRoute, connected-but-unrouted AirPods are Unknown
+                                // here while the enumeration surface still reports the A2DP candidate.
+                                // Acquire that candidate, then capture. Reading the observed route would
+                                // deadlock: SCO opens only after acquisition, and the observation only
+                                // after SCO.
                                 acquireCandidate(route)
                             } else if (!captureWasEverActive && !acquisitionLogged) {
                                 // Capture never started — log once, not on every recomputation

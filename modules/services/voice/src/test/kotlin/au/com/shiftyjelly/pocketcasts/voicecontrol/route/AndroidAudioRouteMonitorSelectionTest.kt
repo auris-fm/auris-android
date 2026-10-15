@@ -53,7 +53,14 @@ class AndroidAudioRouteMonitorSelectionTest {
     fun `a sco selection change without a device change updates the route`() {
         setOutputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
         val monitor = AndroidAudioRouteMonitor(context, GracePeriodSignal())
-        assertEquals(AudioRoute.BluetoothA2dpOnly, monitor.route.value)
+
+        // The OBSERVED route states no acquisition on the strength of enumeration alone: an A2DP
+        // device in the list is availability, not a routing the platform established...
+        assertEquals(AudioRoute.Unknown, monitor.route.value)
+        // ...while the enumeration surface the setup decision reads still names the candidate, so a
+        // pending acquisition is kept alive by the surface that owns that property.
+        assertEquals(AudioRoute.BluetoothA2dpOnly, monitor.availability.value)
+        assertTrue(monitor.availability.value.keepsPendingAcquisition())
 
         // The SCO link opens without any device being added or removed.
         setBluetoothScoOn(true)
@@ -66,9 +73,13 @@ class AndroidAudioRouteMonitorSelectionTest {
         val ble = device(AudioDeviceInfo.TYPE_BLE_HEADSET)
         shadowOf(audioManager).setOutputDevices(listOf(ble))
         val monitor = AndroidAudioRouteMonitor(context, GracePeriodSignal())
-        assertEquals(AudioRoute.BluetoothA2dpOnly, monitor.route.value)
+        // Enumeration alone is availability: the observed route has no answer yet...
+        assertEquals(AudioRoute.Unknown, monitor.route.value)
+        assertEquals(AudioRoute.BluetoothA2dpOnly, monitor.availability.value)
 
-        // The headset is selected as the communication device with no device-list change.
+        // The headset is selected as the communication device with no device-list change. A SELECTION
+        // IS an observation, so the observed route answers now -- and it must, because the acquisition
+        // reads the observed route to confirm the selection it just made.
         selectCommunicationDevice(ble)
         shadowOf(audioManager).callOnCommunicationDeviceChangedListeners(ble)
         shadowOf(Looper.getMainLooper()).idle()
@@ -78,11 +89,13 @@ class AndroidAudioRouteMonitorSelectionTest {
     fun `a confirmed external microphone is published even when no callback fires`() {
         setOutputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
         val monitor = AndroidAudioRouteMonitor(context, GracePeriodSignal())
-        assertEquals(AudioRoute.BluetoothA2dpOnly, monitor.route.value)
+        assertEquals(AudioRoute.Unknown, monitor.route.value)
+        assertEquals(AudioRoute.BluetoothA2dpOnly, monitor.availability.value)
 
         setBluetoothScoOn(true)
         monitor.onExternalMicrophoneConfirmed()
 
+        // The confirmation is an observation of the acquired input, and that is what the route reports.
         assertEquals(AudioRoute.Headset(hasMicrophone = true), monitor.route.value)
     }
 
@@ -113,11 +126,12 @@ class AndroidAudioRouteMonitorSelectionTest {
     fun `a pending acquisition survives the selection callback that confirms it`() {
         setOutputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
         val monitor = AndroidAudioRouteMonitor(context, GracePeriodSignal())
-        // The attempt starts with a CANDIDATE route, so it is valid: this is the case where the route
-        // must still name the acquirable candidate rather than Unknown, because the acquisition already
-        // in flight depends on it to stay alive.
-        assertEquals(AudioRoute.BluetoothA2dpOnly, monitor.route.value)
-        assertTrue(monitor.route.value.keepsPendingAcquisition())
+        // The attempt's survival property lives on the AVAILABILITY surface: that is where "the
+        // candidate is still present" is answered, and it is what the acquisition reads while the
+        // observed route legitimately has no answer yet.
+        assertEquals(AudioRoute.Unknown, monitor.route.value)
+        assertEquals(AudioRoute.BluetoothA2dpOnly, monitor.availability.value)
+        assertTrue(monitor.availability.value.keepsPendingAcquisition())
 
         // The selection callback publishes the selected headset while acquisition is still
         // confirming. That is the attempt succeeding, not device loss: it must keep the attempt
@@ -127,7 +141,46 @@ class AndroidAudioRouteMonitorSelectionTest {
         shadowOf(Looper.getMainLooper()).idle()
 
         assertEquals(AudioRoute.Headset(hasMicrophone = true), monitor.route.value)
-        assertTrue(monitor.route.value.keepsPendingAcquisition())
+        assertTrue(monitor.availability.value.keepsPendingAcquisition())
+    }
+
+    @Test
+    fun `an enumerated wired input beside a2dp output does not make the observed route a headset`() {
+        // THE CONFLICTING CONTROL for the finding: enumeration and observation DISAGREE. The wired input
+        // is auto-selected by the platform and main's classification reads it as a usable microphone --
+        // that is the AVAILABILITY answer. With no observation, the ROUTE must not borrow it: the route
+        // is what the platform established, and it established nothing, so the two surfaces differ.
+        setOutputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
+        setInputDevices(AudioDeviceInfo.TYPE_WIRED_HEADSET)
+        val monitor = AndroidAudioRouteMonitor(context, GracePeriodSignal())
+
+        assertEquals(AudioRoute.Unknown, monitor.route.value)
+        // The availability surface still names the acquirable headset, so an acquisition reads it there.
+        assertEquals(AudioRoute.Headset(hasMicrophone = true), monitor.availability.value)
+        assertTrue(monitor.availability.value.keepsPendingAcquisition())
+    }
+
+    @Test
+    fun `an observed routed output is the route even when enumeration would answer differently`() {
+        // THE OTHER DIRECTION: the observation wins. A speaker is enumerated, so availability says
+        // Speaker; a live stream reports the wired headphone output, and the ROUTE must name what is
+        // actually routed rather than what could be. Built through the observer's real API.
+        setOutputDevices(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER)
+        val observer = RoutedOutputObserver().also {
+            it.observe().publishType(AudioDeviceInfo.TYPE_WIRED_HEADPHONES)
+        }
+        val monitor = AndroidAudioRouteMonitor(
+            context = context,
+            gracePeriodSignal = GracePeriodSignal(),
+            routedOutputObserver = observer,
+        )
+
+        assertEquals(AudioRoute.Speaker, monitor.availability.value)
+        assertEquals(AudioRoute.Headset(hasMicrophone = false), monitor.route.value)
+    }
+
+    private fun setInputDevices(vararg types: Int) {
+        shadowOf(audioManager).setInputDevices(types.map { device(it) })
     }
 
     private fun setOutputDevices(vararg types: Int) {

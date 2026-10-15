@@ -197,21 +197,42 @@ class AndroidAudioRouteMonitor @Inject constructor(
                 captureInputType = captureType,
             )
         }
-        // NO LIVE ROUTED OBSERVATION: the ENUMERATED answer stands, which is main's behaviour and what
-        // the acquisition and selection controls require -- a pending acquisition reads this route to
-        // stay alive, so returning Unknown here would cancel an attempt that is still succeeding.
-        //
-        // The observed route remains the stronger input when a stream IS reporting; what is NOT done is
-        // substituting enumeration for an observation the caller already has. `availability` remains the
-        // separate enumeration-based surface the setup decision reads.
-        val devices = enumerated()
-        return classifyRoute(
-            outputDeviceTypes = devices.outputs,
-            inputDeviceTypes = devices.inputs,
-            bluetoothScoActive = audioManager.isBluetoothScoOn,
-            bleCommunicationDeviceSelected = audioManager.communicationDevice?.type ==
-                AudioDeviceInfo.TYPE_BLE_HEADSET,
-        )
+        // A SELECTED COMMUNICATION DEVICE IS AN OBSERVATION TOO. The platform established that routing
+        // when the session selected the device; it does not need a live stream to be true, and treating
+        // its absence as "no answer" would drop the route to Unknown during the BLE-selection moment the
+        // acquisition flow depends on.
+        val selected = audioManager.communicationDevice
+        if (selected != null) {
+            val devices = enumerated()
+            return classifyRoute(
+                outputDeviceTypes = listOf(selected.type),
+                inputDeviceTypes = devices.inputs,
+                bluetoothScoActive = audioManager.isBluetoothScoOn,
+                bleCommunicationDeviceSelected = selected.type == AudioDeviceInfo.TYPE_BLE_HEADSET,
+                captureInputType = captureRoutedDeviceId?.invoke()?.let { devices.typeOfInput(it) },
+            )
+        }
+        // AN OPEN SCO LINK IS AN OBSERVED ACQUISITION, NOT AN ENUMERATION. BluetoothScoOn is the
+        // platform reporting that the session HAS the headset link up -- that is the acquired input, so
+        // it answers the route question the same way a live stream does. It is deliberately NOT reached
+        // from the enumerated device list: an SCO device merely PRESENT in the list is availability.
+        if (audioManager.isBluetoothScoOn) {
+            val devices = enumerated()
+            // Classified through the same function so the observed capture input and the enumerated
+            // input set are both accounted for rather than hard-coded here.
+            return classifyRoute(
+                outputDeviceTypes = devices.outputs,
+                inputDeviceTypes = devices.inputs,
+                bluetoothScoActive = true,
+                captureInputType = captureRoutedDeviceId?.invoke()?.let { devices.typeOfInput(it) },
+            )
+        }
+        // NO OBSERVATION, NO ANSWER. With no live routed stream, no selected communication device and no
+        // open SCO link there is no routing the platform has established, and substituting ENUMERATION
+        // for that missing answer is exactly the availability-as-acquisition inference PR #56 removed.
+        // The route stays Unknown; `availability` is the separate enumeration-based surface the setup
+        // decision reads, so an acquisition that still needs to proceed reads THAT.
+        return AudioRoute.Unknown
     }
 
     /** The injected enumeration when present, otherwise the platform's. */
@@ -252,6 +273,11 @@ class AndroidAudioRouteMonitor @Inject constructor(
             inputDeviceTypes: List<Int>,
             bluetoothScoActive: Boolean = false,
             bleCommunicationDeviceSelected: Boolean = false,
+            /**
+             * The TYPE of the device the live capture stream is OBSERVED on, or null when no capture
+             * route is observed. My branch's addition: an observation is stronger than enumeration, so
+             * when it is present it decides whether a headset route has a USABLE microphone.
+             */
             captureInputType: Int? = null,
         ): AudioRoute {
             val hasWiredInput = inputDeviceTypes.any { it.isAutoSelectedExternalMicrophone() }
@@ -274,7 +300,11 @@ class AndroidAudioRouteMonitor @Inject constructor(
 
                 // A wired output with no wired microphone (headphones) exposes no mic and
                 // cannot be acquired; it stays NoMic.
-                hasWiredOutput -> AudioRoute.Headset(hasMicrophone = false)
+                hasWiredOutput -> AudioRoute.Headset(
+                    // The observed capture input decides when it is present; main's enumeration rule
+                    // stands when no observation exists.
+                    hasMicrophone = captureInputType?.isWiredOrBleHeadsetInput() == true,
+                )
 
                 // A BLE device whose microphone the session has not selected yet is an
                 // acquirable candidate: LE Audio selection (setCommunicationDevice) turns

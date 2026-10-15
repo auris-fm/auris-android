@@ -5,6 +5,7 @@ import androidx.media3.common.audio.AudioProcessor
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.PI
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -70,6 +71,56 @@ class PlaybackBufferRecorderTest {
         // signal must be near-zero throughout -- interleaved storage would alternate +/- loudly.
         val peak = snapshot.maxOf { kotlin.math.abs(it) }
         assertTrue("L and R are exact opposites, so the mono downmix is near-silence: peak=$peak", peak < 0.01f)
+    }
+
+    // STREAMING, NOT SINGLE-BUFFER: decoder chunks arrive as ordinary-sized pieces. A conversion that
+    // floors each chunk's output length and restarts interpolation at source zero makes the STORED
+    // stream depend on how the producer happened to split it -- duration wobbles per chunk and drift
+    // accumulates. Same source bytes, two partitionings, one result: that is the property.
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `the stored stream is invariant to how the same 44100 Hz stereo source is partitioned into chunks`() = runTest {
+        val srcRate = 44_100
+        val frames = 6_777 // deliberately not a multiple of any convenient divisor
+        val monoSource = FloatArray(frames) { i -> (0.5 * kotlin.math.sin(2 * PI * 220.0 * i / srcRate)).toFloat() }
+        val interleaved = FloatArray(frames * 2) { i -> monoSource[i / 2] } // centered image: L == R
+
+        suspend fun recordInChunks(sizes: List<Int>): FloatArray {
+            val tap = FingerprintPcmTap()
+            val recorder = PlaybackBufferRecorder(tap)
+            val job = recorder.start(this)
+            runCurrent()
+            val format = AudioProcessor.AudioFormat(srcRate, 2, C.ENCODING_PCM_16BIT)
+            var cursor = 0
+            for (size in sizes) {
+                val part = ShortArray(size * 2) { i -> (interleaved[cursor + i] * 32767f).toInt().toShort() }
+                cursor += size * 2
+                tap.onSinkBuffer(presentationTimeUs = 0)
+                tap.onPcm(ByteBuffer.wrap(s16le(part)), format)
+                runCurrent()
+            }
+            job.cancel()
+            return recorder.snapshot()
+        }
+
+        val whole = recordInChunks(listOf(frames))
+        // Sizes must EXACTLY cover `frames`: a short list would silently record a shorter stream.
+        val parts = listOf(977, 311, 1_500, 1_013, 800, 999, 1_177)
+        assertEquals("the partitioning covers the whole source", frames, parts.sum())
+        val irregular = recordInChunks(parts)
+        // At most ONE output sample (~62 microseconds) may differ between partitionings: the shared
+        // truncation of the final partial position, not per-boundary drift. A stateless converter
+        // loses up to one sample at EVERY boundary (seven chunks here), which this tolerance rejects.
+        assertTrue(
+            "chunk boundaries must not change the stored duration: whole=" + whole.size + " irregular=" + irregular.size,
+            kotlin.math.abs(whole.size - irregular.size) <= 1,
+        )
+        val common = minOf(whole.size, irregular.size)
+        val maxDiff = (0 until common).maxOf { kotlin.math.abs(whole[it] - irregular[it]) }
+        assertTrue("and not the stored content: max abs diff=$maxDiff", maxDiff < 0.001f)
+        // The total is the stream's true duration, not a sum of floored chunks.
+        val expected = (frames.toLong() * 16_000 / srcRate).toInt()
+        assertTrue("stored samples must cover the source duration: ${whole.size} vs $expected", kotlin.math.abs(whole.size - expected) <= 1)
     }
 
     @Test

@@ -141,7 +141,7 @@ class VoiceControlService : Service() {
             Timber.i("Voice control already started")
             return
         }
-        // A user-driven service start clears any restart cooldown left by a previous session.
+        // A user-driven service start clears the automatic-restart cap left by a previous session.
         captureRestartBudget.reset()
 
         if (!hasRequiredPermissions()) {

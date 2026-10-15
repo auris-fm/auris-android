@@ -244,6 +244,80 @@ class PlaybackBufferRecorderTest {
         }
     }
 
+    // PRODUCER RETIREMENT IS SCOPED. A cloud answer stopping calls retireProducer(its id) -- NOT the
+    // whole-recorder retire(). Falsifiable form: stream an episode partway at 44.1 kHz, interleave a
+    // real-format cloud answer (16 kHz mono), stop the answer through the SCOPED call, then finish the
+    // episode. The episode's full output must equal its uninterrupted solo baseline sample-by-sample;
+    // a whole-recorder retire here resets the episode's fractional phase (mutant: retire() in the
+    // stop position). Also asserts the retired producer's map entry is actually released.
+    @Test
+    fun `scoped producer retirement leaves a live episode's continuation untouched and releases the entry`() {
+        val srcRate = 44_100
+        val cloudId = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CLOUD_ANSWER_PRODUCER_ID
+        fun mono(frames: Int, freqHz: Double): FloatArray = FloatArray(frames) { (0.45 * sin(2 * PI * freqHz * it.toDouble() / srcRate)).toFloat() }
+        fun stereo(m: FloatArray): FloatArray = FloatArray(m.size * 2) { m[it / 2] }
+        val xFull = mono(12_000, 220.0)
+        val cloudChunk = FloatArray(4_096) { (0.3 * sin(2 * PI * 600.0 * it.toDouble() / 16_000)).toFloat() }
+
+        // Uninterrupted baseline: the whole episode with no cloud interference.
+        val solo = PlaybackBufferRecorder(FingerprintPcmTap())
+        solo.write(stereo(xFull), sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 1L)
+        val baseline = solo.snapshot().toList()
+
+        // Interrupted run: half the episode, the answer, scoped stop, remainder.
+        val mixed = PlaybackBufferRecorder(FingerprintPcmTap())
+        val half = 6_000
+        var xOff = 0
+        val xRanges = ArrayList<IntRange>()
+        var writeCount = 0
+        fun episodeWrite(n: Int) {
+            val before = mixed.snapshot().size
+            mixed.write(stereo(xFull.copyOfRange(xOff, xOff + n)), sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = 1L)
+            xRanges.add(before until mixed.snapshot().size)
+            xOff += n
+            writeCount++
+        }
+        episodeWrite(half)
+        // The answer streams two real-format chunks, then its stop path runs.
+        repeat(2) { mixed.write(cloudChunk, sourceSampleRateHz = 16_000, sourceChannels = 1, producerId = cloudId) }
+        mixed.retireProducer(cloudId)
+        episodeWrite(xFull.size - half)
+
+        // Episode content identical to baseline across the stop, part boundaries included.
+        val all = mixed.snapshot().toList()
+        var bOff = 0
+        for (r in xRanges) {
+            val len = r.last - r.first + 1
+            for (k in 0 until len) {
+                assertTrue(
+                    "episode sample differs after scoped cloud stop: baseline=" + baseline[bOff + k] + " got=" + all[r.first + k],
+                    kotlin.math.abs(all[r.first + k] - baseline[bOff + k]) < 1e-4f,
+                )
+            }
+            bOff += len
+        }
+        assertEquals("episode keeps its full solo duration across the scoped stop", baseline.size, bOff)
+
+        // Retired-entry cleanup: the retired (producer, rate) entry left the map. A 16 kHz mono stream
+        // never populates carry (no resample), so exercise a RESAMPLING format: after scoped
+        // retirement the same identity must start at phase zero, not resume the retired stream.
+        val resampledChunk = FloatArray(4_096 * 2) { (0.3 * sin(2 * PI * 600.0 * (it / 2).toDouble() / srcRate)).toFloat() }
+        val retiredRun = PlaybackBufferRecorder(FingerprintPcmTap())
+        retiredRun.write(resampledChunk, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = cloudId)
+        retiredRun.retireProducer(cloudId)
+        retiredRun.write(resampledChunk, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = cloudId)
+        val freshRun = PlaybackBufferRecorder(FingerprintPcmTap())
+        freshRun.write(resampledChunk, sourceSampleRateHz = srcRate, sourceChannels = 2, producerId = cloudId)
+        // retiredRun holds two writes; its SECOND write must equal freshRun's single fresh write.
+        val retiredAll = retiredRun.snapshot().toList()
+        val freshAll = freshRun.snapshot().toList()
+        val secondWrite = retiredAll.takeLast(freshAll.size)
+        assertTrue(
+            "a retired producer restarts fresh, not mid-phase (sizes ${'$'}{retiredAll.size} vs ${'$'}{freshAll.size})",
+            secondWrite.size == freshAll.size && secondWrite.zip(freshAll).all { (a, b) -> kotlin.math.abs(a - b) < 1e-4f },
+        )
+    }
+
     // THE CARRY MUST BE ATOMIC WITH THE WRITE THAT CONSUMES IT. Probe design: two producers stream
     // MONOTONIC RAMPS through disjoint value bands -- A rises through [0.0, 0.40], B through
     // [0.60, 1.00]. Linear interpolation between equal-neighbour monotone data stays monotone, so

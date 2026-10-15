@@ -218,9 +218,17 @@ class CloudAudioPlayerTest {
     }
 
     @Test
-    fun `stopping the player retires the echo reference`() {
-        // The production lifecycle must retire on stop: a stopped answer must not leave reference
-        // audio that later user speech could be matched against and dropped as bleed.
+    fun `stopping the player retires its own producer without touching other producers' reference audio`() {
+        // Scoped retirement: stop() ends THIS answer's stream (its resampling continuation is
+        // released and a later answer starts at phase zero). It must NOT trim the whole reference
+        // ring: an episode may still be feeding the recorder, and trimming there would reset the
+        // episode's continuation -- cumulative truncation at every answer stop. The untagged ring
+        // cannot remove one producer's samples; whole-recorder trim stays with route/session
+        // retirement (VoiceControlService), and stale samples age out through the delay window.
+        // KNOWN RESIDUAL HAZARD (flagged for review): with no live episode, the stopped answer's
+        // samples linger in the ring past the audible delay until the next retirement, where they
+        // could in principle match speech and drop it as bleed; producer-tagged ring entries would
+        // close that and are a separate change.
         val recorder = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder(
             au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap(),
         )
@@ -229,6 +237,7 @@ class CloudAudioPlayerTest {
             sampleRateHz = 16000,
             playbackBufferRecorder = recorder,
         )
+        // Foreign producer audio in the ring: stop() must leave it untouched.
         recorder.write(FloatArray(au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.SAMPLE_RATE) { 0.4f })
         assertEquals(
             "precondition: reference holds audio",
@@ -239,10 +248,12 @@ class CloudAudioPlayerTest {
         wired.stop()
 
         assertEquals(
-            "stop retires the reference to the delay tail",
-            au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.DELAY_TAIL_SAMPLES,
+            "stop must not trim other producers' audio",
+            au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.SAMPLE_RATE,
             recorder.snapshot().size,
         )
+        // (The answer's own continuation release is covered by the recorder's scoped-retirement
+        // control: a retired identity restarts fresh, not mid-phase.)
         wired.release()
     }
 

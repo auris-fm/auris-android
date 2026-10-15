@@ -99,17 +99,23 @@ class PlaybackBufferRecorder @Inject constructor(
      * independently floors its output length and restarts interpolation at source index zero, so the
      * SAME stream split differently would store a different duration and accumulate drift. A single
      * shared slot does not suffice either: producers interleave (episode while a same-rate answer
-     // plays), and clearing on every switch re-introduces exactly that per-boundary loss. The state is
+     * plays), and clearing on every switch re-introduces exactly that per-boundary loss. The state is
      * therefore keyed by (producerId, sourceSampleRateHz): an A->B->A alternation resumes A where A
-     * left off. Entries are retired with their producer identity, never wholesale.
-     * Touched only inside `synchronized(lock)` via [write]; cleared by [retire].
+     * left off. Entries leave the map only through their OWN producer's retirement
+     * ([retireProducer]), eviction when long-superseded (bounded to [MAX_CONTINUATIONS] producers),
+     * or whole-recorder retirement ([retire]).
+     * Touched only inside `synchronized(lock)` via [write]/[retireProducer]/[retire].
      */
     private class Continuation {
         var carry = FloatArray(0)
         var offsetFrac = 0.0
     }
 
-    private val continuations = HashMap<ProducerClockKey, Continuation>()
+    // Access-ordered so eviction drops the LEAST RECENTLY WRITTEN producer: a stream long superseded
+    // by newer epochs releases its entry without anyone having to name it.
+    private val continuations = object : LinkedHashMap<ProducerClockKey, Continuation>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<ProducerClockKey, Continuation>): Boolean = size > MAX_CONTINUATIONS
+    }
 
     /** Producer identity paired with its source clock: a same-rate successor is a DIFFERENT key. */
     private data class ProducerClockKey(val producerId: Long?, val sampleRateHz: Int)
@@ -217,6 +223,17 @@ class PlaybackBufferRecorder @Inject constructor(
     }
 
     /**
+     * Retires ONE producer's stream: its resampling continuation leaves the map, and nothing else
+     * changes. Use when a stream ENDS while others still feed this recorder -- a cloud answer
+     * stopping under a live episode must not reset the episode's fractional phase.
+     */
+    fun retireProducer(producerId: Long?) {
+        synchronized(lock) {
+            continuations.keys.removeAll { it.producerId == producerId }
+        }
+    }
+
+    /**
      * Retires the reference at a real stop or route change, keeping only the acoustic delay tail.
      *
      * Clearing the whole buffer would drop the tail that legitimately still reaches the microphone
@@ -227,9 +244,8 @@ class PlaybackBufferRecorder @Inject constructor(
      */
     fun retire() {
         synchronized(lock) {
-            // A new incarnation's source may differ (episode -> cloud answer): the carried fractional
-            // position belongs to the retired producer clock.
-            // Retirement ends every producer's stream through this recorder, so all continuations go.
+            // Whole-recorder retirement (stop or route change) ends EVERY producer's stream through
+            // this recorder, so all continuations go. A single stream ending is [retireProducer].
             continuations.clear()
             // THE SURVIVING TAIL KEEPS ITS CONTINUITY METADATA. Clearing `expectedNextPositionMs` while
             // samples survive would forget where the tail ENDS, so the FIRST contribution after the
@@ -619,6 +635,9 @@ class PlaybackBufferRecorder @Inject constructor(
     companion object {
         const val SAMPLE_RATE = 16000
         const val BUFFER_DURATION_SECONDS = 2
+
+        /** Live producers through this recorder at once: episode + a few interleaved streams. */
+        private const val MAX_CONTINUATIONS = 4
 
         /**
          * How far a tick's start may sit from the previous tick's end before the samples are treated as

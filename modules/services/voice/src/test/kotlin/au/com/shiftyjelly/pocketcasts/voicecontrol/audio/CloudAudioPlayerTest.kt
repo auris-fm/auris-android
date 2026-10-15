@@ -238,7 +238,10 @@ class CloudAudioPlayerTest {
             playbackBufferRecorder = recorder,
         )
         // Foreign producer audio in the ring: stop() must leave it untouched.
-        recorder.write(FloatArray(au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.SAMPLE_RATE) { 0.4f })
+        recorder.write(
+            FloatArray(au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.SAMPLE_RATE) { 0.4f },
+            admission = recorder.openAdmission(777L),
+        )
         assertEquals(
             "precondition: reference holds audio",
             au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.SAMPLE_RATE,

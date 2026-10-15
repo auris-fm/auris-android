@@ -221,7 +221,7 @@ class EarconPlayer(
                     closeRecorderAdmission()
                     return null
                 }
-                clip.recordAccepted(offset, written, playbackBufferRecorder, currentRecorderAdmission)
+                currentRecorderAdmission?.let { clip.recordAccepted(offset, written, playbackBufferRecorder, it) }
                 offset += written
             }
             lastPlayedId = id
@@ -572,7 +572,7 @@ class EarconPlayer(
             startSample: Int,
             count: Int,
             recorder: PlaybackBufferRecorder?,
-            admission: PlaybackBufferRecorder.Admission?,
+            admission: PlaybackBufferRecorder.Admission,
         ) {
             if (recorder == null || count <= 0) return
             val forReference = EarconAudio.resampleRange(

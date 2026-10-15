@@ -30,6 +30,14 @@ class FingerprintPcmTap @Inject constructor() {
         val positionSec: Double,
         /** [streamEpoch] at emission: identity of the media stream these chunks belong to. */
         val streamEpoch: Long,
+        /**
+         * Opaque admission ticket captured at EMISSION from the registered stamper (null when none).
+         * A queued chunk carries the ticket its stream held WHEN THE CHUNK WAS CREATED -- a consumer
+         * must never mint or renew admission at delivery time (@spec/@reviewer): work that was already
+         * in flight across a wholesale retirement stays dead, and only FUTURE emissions from a renewed
+         * live owner carry fresh tickets.
+         */
+        val admissionTicket: Long?,
     )
 
     private val chunkFlow = MutableSharedFlow<PcmChunk>(
@@ -37,6 +45,16 @@ class FingerprintPcmTap @Inject constructor() {
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
     val chunks: SharedFlow<PcmChunk> = chunkFlow.asSharedFlow()
+
+    /**
+     * Stamps each emission with the current admission ticket for [streamEpoch]. Invoked on the playback
+     * thread AT CHUNK CREATION. The recorder supplies this through its own ownership state; returning
+     * null means "unowned" and such chunks are refused by an admission-enforcing recorder.
+     */
+    var admissionStamper: ((epoch: Long, previousTicket: Long?) -> Long?)? = null
+
+    private var lastEmittedEpoch = -1L
+    private var lastEmittedTicket: Long? = null
 
     private var pendingAnchorUs = C.TIME_UNSET
     private var anchorUs = C.TIME_UNSET
@@ -82,6 +100,25 @@ class FingerprintPcmTap @Inject constructor() {
         if (chunkFlow.subscriptionCount.value == 0) return
         val data = ByteArray(buffer.remaining())
         buffer.duplicate().get(data)
+        // STAMP AT CREATION, not at consumption: the ticket names the admission this audio was emitted
+        // under. Epoch changes ask the stamper for a fresh ticket (a new incarnation); same epoch reuses
+        // the epoch's current ticket UNLESS the stamper reports one changed after wholesale retirement --
+        // renewal covers only FUTURE emissions because it happens here, before the next chunk is created.
+        val epoch = streamEpoch
+        val stamper = admissionStamper
+        val ticket: Long? = if (stamper == null) {
+            null
+        } else if (epoch != lastEmittedEpoch) {
+            stamper(epoch, null).also {
+                lastEmittedEpoch = epoch
+                lastEmittedTicket = it
+            }
+        } else {
+            val carried = lastEmittedTicket
+            // The stamper decides whether the carried ticket is still live for future emissions; a dead
+            // carried ticket is replaced by the renewed one it mints now.
+            stamper(epoch, carried).also { lastEmittedTicket = it }
+        }
         chunkFlow.tryEmit(
             PcmChunk(
                 data = data,
@@ -90,6 +127,7 @@ class FingerprintPcmTap @Inject constructor() {
                 channelCount = format.channelCount,
                 positionSec = positionSec,
                 streamEpoch = streamEpoch,
+                admissionTicket = ticket,
             ),
         )
     }

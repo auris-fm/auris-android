@@ -515,9 +515,12 @@ class AndroidPlatformTtsEngine @Inject constructor(
         )
         // OWNED like every other reference writer (@spec): the utterance carries the admission minted
         // when its track started, so its retained tail gets a deadline and stale callbacks cannot re-enter.
+        // The utterance's own admission; a stale call after retirement has nothing to record and must
+        // not clear a successor's state -- retire by identity happened at the stop boundary already.
+        val admission = currentUtteranceAdmission ?: return
         playbackBufferRecorder.write(
             FloatArray(forReference.size) { forReference[it] / 32768f },
-            admission = currentUtteranceAdmission,
+            admission = admission,
         )
     }
 

@@ -54,10 +54,12 @@ class EchoReferenceFilterTest {
 
     // END TO END THROUGH THE FILTER: after the clock passes the retired tail's expiry, speech that
     // resembles the stopped answer is user speech again. Same harness as the echo-rejection controls.
+
     @Test
     fun `speech resembling an expired stopped answer is accepted by the filter`() {
         var nowMs = 2_000_000L
-        val recorder = PlaybackBufferRecorder(FingerprintPcmTap(), monotonicNowMs = { nowMs })
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        recorder.monotonicNowMs = { nowMs }
         val routeMonitor = au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor(
             context = org.robolectric.RuntimeEnvironment.getApplication(),
             gracePeriodSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(),
@@ -85,7 +87,7 @@ class EchoReferenceFilterTest {
     fun `echo-only input is rejected once the reference holds the submitted playback`() {
         val (recorder, filter) = buildFilter()
         val playback = tone(8000, 220.0)
-        recorder.write(playback)
+        recorder.write(playback, admission = admFor(recorder, 81L))
 
         // The microphone hears exactly what we played (a delayed copy), scaled down as bleed would be.
         val echoOnly = FloatArray(1600) { i -> 0.3f * playback[i] }
@@ -158,7 +160,7 @@ class EchoReferenceFilterTest {
     fun `simultaneous user speech is preserved while playback is active`() {
         val (recorder, filter) = buildFilter()
         val playback = tone(8000, 220.0)
-        recorder.write(playback)
+        recorder.write(playback, admission = admFor(recorder, 81L))
 
         // User speech is a different waveform from what we are playing, so it must survive.
         val userSpeech = tone(1600, 700.0, phase = 1.1)
@@ -188,7 +190,7 @@ class EchoReferenceFilterTest {
         // The reference is accumulating playback, so it is longer than one mic segment: the correlator
         // searches reference offsets, which only exist when there is room for the segment past them.
         val submitted = FloatArray(48_000) { (0.6 * sin(2 * PI * 220.0 * it / sampleRate)).toFloat() }
-        recorder.write(submitted)
+        recorder.write(submitted, admission = admFor(recorder, 81L))
 
         // The mic segment is the playback delayed by 120 ms — inside the correlator's 50..500 ms
         // window, so a consulted correlator rejects it. A segment at zero delay sits outside the window

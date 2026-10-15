@@ -192,13 +192,17 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartInp
     if (gCapture == nullptr) {
         return JNI_FALSE;
     }
-    if (!gVadProcessor->start()) {
+    // The processor is PUBLISHED through the handle, not deleted on failure: the handle's usage
+    // counting is what protects in-flight getters, and a failed start must retire the attempt
+    // rather than leave raw pointer arithmetic behind.
+    gVadProcessor.retire();
+    auto* processor = new NativeVadProcessor(gCapture);
+    if (!processor->start()) {
         logStartFailure("vad processor thread", nullptr);
-        delete gVadProcessor;
-        gVadProcessor = nullptr;
-        // Capture is still valid — caller will stop/close it
+        delete processor;
         return JNI_FALSE;
     }
+    gVadProcessor.publish(processor);
     if (gCapture->isActive()) {
         return JNI_TRUE;
     }
@@ -300,15 +304,13 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetFrame
     JNIEnv* /*env*/,
     jclass /*clazz*/)
 {
-    NativeVadProcessor* processor = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(gCaptureMutex);
-        processor = gVadProcessor;
-    }
+    auto* processor = gVadProcessor.acquire();
     if (processor == nullptr) {
         return 0;
     }
-    return static_cast<jlong>(processor->getFramesConsumed());
+    const auto frames = processor->getFramesConsumed();
+    gVadProcessor.release();
+    return static_cast<jlong>(frames);
 }
 
 // Aggregate detector diagnosis for capture debugging, as a long array so one call returns the frame
@@ -321,11 +323,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetVadDi
     JNIEnv* env,
     jclass /*clazz*/)
 {
-    NativeVadProcessor* processor = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(gCaptureMutex);
-        processor = gVadProcessor;
-    }
+    auto* processor = gVadProcessor.acquire();
     jlong values[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     if (processor != nullptr) {
         NativeVadProcessor::VadDiagnostics d = processor->getDiagnostics();
@@ -340,6 +338,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetVadDi
         values[6] = d.lastIsSpeech ? 1 : 0;
         values[7] = d.speechActive ? 1 : 0;
     }
+    gVadProcessor.release();
     jlongArray out = env->NewLongArray(8);
     if (out != nullptr) {
         env->SetLongArrayRegion(out, 0, 8, values);
@@ -353,14 +352,11 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeSetVadDi
     jclass /*clazz*/,
     jboolean enabled)
 {
-    NativeVadProcessor* processor = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(gCaptureMutex);
-        processor = gVadProcessor;
-    }
+    auto* processor = gVadProcessor.acquire();
     if (processor != nullptr) {
         processor->setDiagnosticsEnabled(enabled == JNI_TRUE);
     }
+    gVadProcessor.release();
 }
 
 extern "C" JNIEXPORT jint JNICALL

@@ -264,14 +264,11 @@ internal class OboeCaptureEngine(
      */
     fun dispose() {
         disposed = true
-        // Stop the native stream directly rather than only signalling the collector to stop. The
-        // collector sets this flag and then only notices on its next poll (up to the event timeout),
-        // and if nobody is collecting -- cancelled, already ended, or never started -- the flow's
-        // `finally` never runs and the capture stream and its VAD thread are never released. The
-        // native call is idempotent (it deletes behind a mutex and nulls the pointers), so calling it
-        // here and again in the `finally` is safe, and it is the only path that releases the stream
-        // when the collector is not there to do it.
-        OboeNative.nativeStopCaptureAndVad()
+        // Teardown is DELEGATED, not performed here. `onFinished` hands the event to the owner, whose
+        // generation check decides whether this engine still owns the stream: a stale engine whose
+        // stream was replaced or released must not stop the replacement capture. An unconditional stop
+        // here would double-stop the live path and let a stale teardown silence the successor -- which
+        // is exactly what the owner's MicrophoneCapture controls pin.
         onFinished(this)
     }
 

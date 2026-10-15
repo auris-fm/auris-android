@@ -836,15 +836,17 @@ class AndroidPlatformTtsEngineTest {
             // published ticket. Under the fix the resumed write uses the old CLOSED admission ->
             // refused. Under the shared-field defect it reads the successor's LIVE ticket -> stored.
             releaseOldWrite.countDown()
-            kotlinx.coroutines.runBlocking {
-                kotlinx.coroutines.withTimeoutOrNull(5_000) { oldJob.join() }
+            val oldCompleted = kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeoutOrNull(5_000) { oldJob.join() } != null
             }
+            check(oldCompleted) { "precondition: the old utterance must COMPLETE after its write resumes" }
 
             // Let the successor finish normally afterwards.
             releaseSuccessorWrite.countDown()
-            kotlinx.coroutines.runBlocking {
-                kotlinx.coroutines.withTimeoutOrNull(5_000) { successorJob.join() }
+            val successorCompleted = kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeoutOrNull(5_000) { successorJob.join() } != null
             }
+            check(successorCompleted) { "precondition: the successor must complete after its write resumes" }
 
             // ATTRIBUTION, not presence: both utterances legitimately leave tagged tails until they
             // expire, so the question is WHICH admission's ticket each sample carries. Old-utterance
@@ -857,6 +859,12 @@ class AndroidPlatformTtsEngineTest {
             assertTrue("the successor's audio is in the reference (ring non-empty)", snapshot.isNotEmpty())
             val oldTickets = tags.filterIndexed { i, _ -> kotlin.math.abs(snapshot[i]) in 0.025f..0.04f }.toSet()
             val successorTickets = tags.filterIndexed { i, _ -> snapshot[i] > 0.6f }.toSet()
+            // @reviewer: without this, an empty successor set would make the disjointness below
+            // vacuously true even if the successor contributed nothing to the ring at all.
+            assertTrue(
+                "the successor must have recorded audio under ITS OWN ticket (else disjointness is vacuous)",
+                successorTickets.isNotEmpty(),
+            )
             assertTrue(
                 "old-utterance samples must NOT be attributed to any ticket that also owns successor " +
                     "audio (shared-field read would do exactly that): oldTickets=$oldTickets " +

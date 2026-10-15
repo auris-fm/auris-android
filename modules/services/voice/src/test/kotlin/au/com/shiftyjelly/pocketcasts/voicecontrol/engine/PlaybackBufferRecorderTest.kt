@@ -436,6 +436,77 @@ class PlaybackBufferRecorderTest {
         assertEquals("a retired identity stores nothing -- the reference is byte-identical", before, recorder.snapshot().toList())
     }
 
+    // GLOBAL RETIREMENT INVALIDATES OLD CALLBACKS, IT DOES NOT REOPEN THEIR RIGHT TO WRITE. The defect
+    // this defends: retire() used to CLEAR the retired-id ledger and deadlines, so a route change after
+    // a cloud stop handed every previously-retired id back to a held callback and left any surviving
+    // tail matchable forever. Control per @spec: stopped producer -> global retire (route change) ->
+    // successor writes under its own id -> the HELD old write and observation are released -> nothing
+    // lands and the successor is untouched.
+    @Test
+    fun `a callback held across a global retirement cannot repopulate the next incarnation`() {
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        // Producer 61 stops normally (per-producer closure already correct).
+        recorder.write(FloatArray(9_600) { 0.7f }, producerId = 61L)
+        recorder.retireProducer(61L)
+        // Route change: whole-recorder retirement. Previously this reopened id 61.
+        recorder.retire()
+        // Successor incarnation on the new route writes under a NEW id.
+        recorder.write(FloatArray(4_800) { 0.8f }, producerId = 62L)
+        val successorSnap = recorder.snapshot().toList()
+
+        // The stale callbacks from BEFORE everything happened are released now.
+        recorder.write(FloatArray(1_600) { 0.7f }, producerId = 61L)
+        recorder.onRenderObservation(frameOnTrack = 1_000L, timeMs = 9_000_000L, trackRateHz = 16_000, trackGeneration = 61L, producerId = 61L)
+
+        assertEquals(
+            "the held old write reintroduces nothing after global retirement",
+            successorSnap,
+            recorder.snapshot().toList(),
+        )
+    }
+
+    // DEADLIVES SURVIVE THE GLOBAL RESET TOO. @reviewer: preserve or replace tail deadlines for every
+    // retained sample during global retirement. Control: live producer with a long stream -> global
+    // retire keeps only the acoustic tail WITH an expiry -> advance the clock, no further writes -> the
+    // retained tail ages out of reference()/snapshot() instead of lingering indefinitely matchable.
+    @Test
+    fun `a tail retained by global retirement expires on elapsed time without further writes`() {
+        var nowMs = 500_000L
+        val tail = PlaybackBufferRecorder.DELAY_TAIL_SAMPLES
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap(), monotonicNowMs = { nowMs })
+        recorder.write(FloatArray(tail + 4_000) { 0.35f }, producerId = 71L)
+        recorder.retire()
+        assertEquals("global retirement keeps exactly the delay tail", tail.toLong(), recorder.snapshot().count { it == 0.35f }.toLong())
+
+        nowMs += tail * 1_000 / PlaybackBufferRecorder.SAMPLE_RATE + 1
+        assertEquals(
+            "the globally-retained tail must expire with elapsed time and no intervening write",
+            0,
+            recorder.snapshot().count { it == 0.35f },
+        )
+        assertEquals("reference() agrees", 0, recorder.reference().samples.count { it == 0.35f })
+    }
+
+    // A DUPLICATE STOP MUST NOT EXTEND A RETIRED TAIL'S LIFETIME (@reviewer). The first retirement
+    // fixes the deadline; a second call at a later instant re-arms nothing (putIfAbsent), so expiry
+    // still happens one tail-duration after the FIRST stop.
+    @Test
+    fun `duplicate producer retirement keeps the original expiry`() {
+        var nowMs = 0L
+        val tail = PlaybackBufferRecorder.DELAY_TAIL_SAMPLES
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap(), monotonicNowMs = { nowMs })
+        recorder.write(FloatArray(tail + 2_000) { 0.62f }, producerId = 81L)
+        recorder.retireProducer(81L) // deadline fixed at 0 + 500 ms
+        nowMs += tail * 1_000 / PlaybackBufferRecorder.SAMPLE_RATE / 2 // half the window elapses
+        recorder.retireProducer(81L) // stale duplicate stop
+        nowMs += tail * 1_000 / PlaybackBufferRecorder.SAMPLE_RATE / 2 + 1 // PAST the ORIGINAL deadline
+        assertEquals(
+            "the duplicate stop must not have extended the tail's matchable lifetime",
+            0,
+            recorder.snapshot().count { it == 0.62f },
+        )
+    }
+
     // THE CARRY MUST BE ATOMIC WITH THE WRITE THAT CONSUMES IT. Probe design: two producers stream
     // MONOTONIC RAMPS through disjoint value bands -- A rises through [0.0, 0.40], B through
     // [0.60, 1.00]. Linear interpolation between equal-neighbour monotone data stays monotone, so

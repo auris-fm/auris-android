@@ -82,6 +82,9 @@ class PlaybackBufferRecorder @Inject constructor(
      */
     private val retiredProducers = HashSet<Long>()
 
+    /** Every producer identity ever admitted; global retirement CLOSES these instead of clearing them. */
+    private val admittedProducers = HashSet<Long>()
+
     /**
      * When each retired producer's surviving tail stops being plausible playback: retirement instant
      * + the tail's own duration. Enforced by [expireRetiredTailsLocked] at every consumer, so a stale
@@ -308,7 +311,10 @@ class PlaybackBufferRecorder @Inject constructor(
             // observations naming this identity are refused, so a callback admitted BEFORE the stop but
             // released AFTER it cannot resurrect audio this producer no longer owns.
             retiredProducers += producerId
-            tailExpiryMs[producerId] = monotonicNowMs() + DELAY_TAIL_SAMPLES * 1_000L / SAMPLE_RATE
+            // IDEMPOTENT IN TIME (@reviewer): a duplicate stop must NOT restart the deadline -- a stale
+            // second call would extend the retired tail's matchable lifetime. putIfAbsent keeps the
+            // ORIGINAL expiry; the refusal flag is already closed.
+            tailExpiryMs.putIfAbsent(producerId, monotonicNowMs() + DELAY_TAIL_SAMPLES * 1_000L / SAMPLE_RATE)
             continuations.keys.removeAll { it.producerId == producerId }
             // The producer's OWN newest tail stays matchable; everything older from it is dead air.
             var surviving = DELAY_TAIL_SAMPLES
@@ -349,8 +355,21 @@ class PlaybackBufferRecorder @Inject constructor(
             // Whole-recorder retirement (stop or route change) ends EVERY producer's stream through
             // this recorder, so all continuations go. A single stream ending is [retireProducer].
             continuations.clear()
-            retiredProducers.clear()
-            tailExpiryMs.clear()
+            // GLOBAL RETIREMENT CLOSES ADMISSION, IT DOES NOT REOPEN IT (@spec/@reviewer). Clearing the
+            // ledger handed every previously-retired id back to a held callback and deleted the deadline
+            // from any surviving tail -- a route change after a cloud stop could resurrect old audio or
+            // leave its retained tail indefinitely matchable again. Instead EVERY producer this recorder
+            // has ever admitted is closed NOW. Producer ids are monotonic stream incarnations, so a
+            // successor's FUTURE identity is unaffected: never admitted, therefore not in the ledger.
+            // Deadlines self-remove as tails expire; closure persists until the next global reset.
+            val nowMs = monotonicNowMs()
+            for (known in admittedProducers) {
+                retiredProducers += known
+                // Preserve or REPLACE the deadline for retained acoustic tails: whichever owner's samples
+                // survive age out from THIS retirement, since the hardware path they were heard through
+                // is being torn down and rebuilt.
+                tailExpiryMs.putIfAbsent(known, nowMs + DELAY_TAIL_SAMPLES * 1_000L / SAMPLE_RATE)
+            }
 
             // THE SURVIVING TAIL KEEPS ITS CONTINUITY METADATA. Clearing `expectedNextPositionMs` while
             // samples survive would forget where the tail ENDS, so the FIRST contribution after the
@@ -624,6 +643,7 @@ class PlaybackBufferRecorder @Inject constructor(
             // successor may already hold under the same key. Refusing the WHOLE write -- samples and
             // position alike -- is the atomic form; nothing about a retired id re-enters the recorder.
             if (producerId != null && producerId in retiredProducers) return
+            if (producerId != null) admittedProducers += producerId
             // ONE OWNERSHIP BOUNDARY. Normalization mutates continuation state, so it runs under the
             // same lock that orders the ring write: concurrent writers cannot mix carry/phase, and a
             // concurrent retire() cannot clear continuations mid-chunk.

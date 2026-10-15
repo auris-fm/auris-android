@@ -24,7 +24,7 @@ import org.robolectric.annotation.Config
  * segment is accepted. Filling the buffer from the tap is what makes the first case pass.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [30])
+@Config(sdk = [34])
 class EchoReferenceFilterTest {
 
     private val sampleRate = 16_000

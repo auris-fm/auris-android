@@ -177,23 +177,40 @@ class AndroidAudioRouteMonitor @Inject constructor(
 
     @Suppress("DEPRECATION") // isBluetoothScoOn deprecated in API 34; used to distinguish enumerated-but-inactive SCO
     private fun readRoute(): AudioRoute {
+        // THE OBSERVATION IS THE STRONGER INPUT, AND ITS ABSENCE IS THE MISSING ANSWER. When a live
+        // stream reports what it is routed to, that overrides enumeration: enumeration says what COULD
+        // be, the observation says what IS. When no stream reports -- the paired-but-inactive case --
+        // the route is Unknown, because substituting availability for an observation would impose
+        // headset setup on a session that may be using the speaker. @spec's rule, and it is what makes
+        // "paired" different from "routed".
+        routedOutputObserver?.current()?.let { routed ->
+            val devices = enumerated()
+            // The observed CAPTURE input, resolved through the same enumeration: classifyRoute needs a
+            // TYPE, and the observation carries an ID.
+            val captureType = captureRoutedDeviceId?.invoke()?.let { devices.typeOfInput(it) }
+            return classifyRoute(
+                outputDeviceTypes = listOf(routed),
+                inputDeviceTypes = devices.inputs,
+                bluetoothScoActive = audioManager.isBluetoothScoOn,
+                bleCommunicationDeviceSelected = audioManager.communicationDevice?.type ==
+                    AudioDeviceInfo.TYPE_BLE_HEADSET,
+                captureInputType = captureType,
+            )
+        }
+        // NO LIVE ROUTED OBSERVATION: the ENUMERATED answer stands, which is main's behaviour and what
+        // the acquisition and selection controls require -- a pending acquisition reads this route to
+        // stay alive, so returning Unknown here would cancel an attempt that is still succeeding.
+        //
+        // The observed route remains the stronger input when a stream IS reporting; what is NOT done is
+        // substituting enumeration for an observation the caller already has. `availability` remains the
+        // separate enumeration-based surface the setup decision reads.
         val devices = enumerated()
-        val outputDevices = devices.outputs
-        val inputDevices = devices.inputs
-
-        // Observed routing only. With no live stream reporting an output there is no routed answer, and
-        // Unknown is the honest one: falling back to enumeration here would substitute availability for
-        // the observation and impose headset setup on a session that may use the speaker.
-        val routed = routedOutputObserver?.current() ?: return AudioRoute.Unknown
-        // The observed CAPTURE input, resolved to its type. Null when no capture route is observed,
-        // which is "unknown" rather than "no microphone".
-        val captureType = captureRoutedDeviceId?.invoke()
-            ?.let { devices.typeOfInput(it) }
         return classifyRoute(
-            outputDeviceTypes = listOf(routed),
-            inputDeviceTypes = inputDevices,
+            outputDeviceTypes = devices.outputs,
+            inputDeviceTypes = devices.inputs,
             bluetoothScoActive = audioManager.isBluetoothScoOn,
-            captureInputType = captureType,
+            bleCommunicationDeviceSelected = audioManager.communicationDevice?.type ==
+                AudioDeviceInfo.TYPE_BLE_HEADSET,
         )
     }
 
@@ -234,12 +251,8 @@ class AndroidAudioRouteMonitor @Inject constructor(
             outputDeviceTypes: List<Int>,
             inputDeviceTypes: List<Int>,
             bluetoothScoActive: Boolean = false,
-<<<<<<< HEAD
             bleCommunicationDeviceSelected: Boolean = false,
-||||||| parent of 9e454f5 (feat(voice): observe the routed capture device and classify by the observed pair)
-=======
             captureInputType: Int? = null,
->>>>>>> 9e454f5 (feat(voice): observe the routed capture device and classify by the observed pair)
         ): AudioRoute {
             val hasWiredInput = inputDeviceTypes.any { it.isAutoSelectedExternalMicrophone() }
             val hasBleInput = inputDeviceTypes.any { it.isBleHeadset() }
@@ -247,30 +260,30 @@ class AndroidAudioRouteMonitor @Inject constructor(
             val hasBleOutput = outputDeviceTypes.any { it.isBleHeadset() }
             val hasBleDevice = hasBleInput || hasBleOutput
             val hasA2dp = outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP }
-            // SCO as an OUTPUT, not as an available input: an input must not change the output
-            // classification. PR124: "an input cannot change the output classification".
-            val hasScoOutput = outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
-            val hasScoDevices = hasScoOutput ||
+            val hasScoDevices = outputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO } ||
                 inputDeviceTypes.any { it == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
 
             return when {
-                // The OUTPUT names the route. An enumerated headset INPUT beside a speaker output is
-                // availability, not the route: arch/android.md gives `hasMicrophone` as "a headset
-                // OUTPUT with a matching input device", so a route with no headset output is not a
-                // headset route however many headset inputs the system offers.
-                hasWiredOrBleOutput ->
-                    AudioRoute.Headset(
-                        hasMicrophone = captureInputType?.isWiredOrBleHeadsetInput() == true,
-                    )
+                // A wired input is auto-selected by the platform.
+                hasWiredInput -> AudioRoute.Headset(hasMicrophone = true)
 
-                // Classic BT with an observed SCO CAPTURE input: the output remains what it is (A2DP
-                // or SCO), and the usable capture input is recorded from the observation rather than
-                // inferred from the link state. A requested/profile-active SCO link is not itself
-                // proof of the live input, so the output is not relabelled a Headset on SCO alone.
-                hasScoOutput && bluetoothScoActive ->
-                    AudioRoute.Headset(
-                        hasMicrophone = captureInputType?.isScoOrHeadsetInput() == true,
-                    )
+                // For BLE only getCommunicationDevice() proves selection; an enumerated input
+                // is not a selected one.
+                hasBleDevice && bleCommunicationDeviceSelected ->
+                    AudioRoute.Headset(hasMicrophone = true)
+
+                // A wired output with no wired microphone (headphones) exposes no mic and
+                // cannot be acquired; it stays NoMic.
+                hasWiredOutput -> AudioRoute.Headset(hasMicrophone = false)
+
+                // A BLE device whose microphone the session has not selected yet is an
+                // acquirable candidate: LE Audio selection (setCommunicationDevice) turns
+                // it into an Isolated headset. It must not collapse to NoMic.
+                hasBleDevice -> AudioRoute.BluetoothA2dpOnly
+
+                // Classic BT with a live SCO link — mic is on the headset.
+                (hasScoDevices || hasA2dp) && bluetoothScoActive ->
+                    AudioRoute.Headset(hasMicrophone = true)
 
                 // A2DP (and/or enumerated-but-inactive SCO) — acquisition must open SCO
                 // before capture, otherwise Oboe binds the phone bottom mic.
@@ -280,6 +293,16 @@ class AndroidAudioRouteMonitor @Inject constructor(
 
                 else -> AudioRoute.Unknown
             }
+        }
+
+        private fun Int.isWiredOrBleHeadsetOutput(): Boolean {
+            return this == AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                this == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||
+                isBleHeadset()
+        }
+
+        private fun Int.isWiredOrBleHeadsetInput(): Boolean {
+            return this == AudioDeviceInfo.TYPE_WIRED_HEADSET || isBleHeadset()
         }
 
         private fun Int.isWiredHeadsetOutput(): Boolean {

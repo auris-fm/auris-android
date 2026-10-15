@@ -150,6 +150,7 @@ class ListeningModePolicyTest {
             gate = VoiceControlGate(rules = emptyList(), scope = backgroundScope),
             audioRouteMonitor = object : AudioRouteMonitor {
                 override val route: StateFlow<AudioRoute> = routeFlow
+                override val availability: StateFlow<AudioRoute> = routeFlow
             },
             gracePeriodSignal = GracePeriodSignal(),
             scope = backgroundScope,

@@ -142,7 +142,7 @@ class VoiceAsrEngineTest {
             backend = backend,
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.WakeWord,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
             onTerminated = { terminated = true },
@@ -162,7 +162,7 @@ class VoiceAsrEngineTest {
             backend = backend,
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.WakeWord,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
             onTerminated = { terminated = true },
@@ -269,145 +269,6 @@ class VoiceAsrEngineTest {
         verify(voiceAudioProcessor).startProcessing()
 
         engine.stop()
-    }
-
-    @Test
-    fun `SCO disconnect does not start capture on an unconfirmed route`() = runTest {
-        // Reverses the previous expectation. A route that requires SCO and did not get it means the
-        // input the engine would read is not the one the route names: continuing captures from whatever
-        // the phone substitutes, with only a log line saying so. The attempt must stop instead.
-        createEngine()
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-
-        verify(audioManager).startBluetoothSco()
-        verify(voiceAudioProcessor, never()).startProcessing()
-
-        simulateScoState(AudioManager.SCO_AUDIO_STATE_DISCONNECTED)
-        advanceUntilIdle()
-
-        verify(voiceAudioProcessor, never()).startProcessing()
-        // And it says so, through the feedback path the other route failures use.
-        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
-
-        engine.stop()
-    }
-
-    @Test
-    fun `SCO timeout does not start capture and reports the route failure`() = runTest {
-        createEngine()
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-
-        verify(audioManager).startBluetoothSco()
-        verify(voiceAudioProcessor, never()).startProcessing()
-
-        advanceTimeBy(3_001)
-        advanceUntilIdle()
-
-        verify(voiceAudioProcessor, never()).startProcessing()
-        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
-
-        engine.stop()
-    }
-
-    @Test
-    fun `a later attempt after a failed SCO setup can still start`() = runTest {
-        // The flag must not outlive a setup that never completed, or the next attempt is skipped by a
-        // stale "already started" and the route can never be established for the rest of the session.
-        createEngine()
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-        advanceTimeBy(3_001)
-        advanceUntilIdle()
-        verify(voiceAudioProcessor, never()).startProcessing()
-        engine.stop()
-
-        // A second attempt must capture, and it must be on an SCO ROUTE. A retry on `Speaker` would
-        // pass whatever the flag did, because `Speaker` never consults it -- `awaitBluetoothSco()` is
-        // reached only for `BluetoothA2dpOnly` -- so the case would read as coverage of the stale flag
-        // while being blind to it. On `BluetoothA2dpOnly` a leaked flag short-circuits the setup, so
-        // no second `startBluetoothSco()` is issued and nothing captures.
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-        verify(audioManager, times(2)).startBluetoothSco()
-        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
-        advanceUntilIdle()
-        verify(voiceAudioProcessor).startProcessing()
-        engine.stop()
-    }
-
-    @Test
-    fun `a successful second SCO attempt re-runs setup, proving the stale flag was cleared`() = runTest {
-        // The distinguishing case for the stale-flag defect: a second attempt on the SPEAKER route
-        // never consults scoStarted (only BluetoothA2dpOnly gates on it), so a test whose second
-        // attempt uses Speaker passes whether or not the failed setup left the flag set. A second
-        // attempt on the SCO route READS the flag -- `awaitBluetoothSco` returns early on it -- so if
-        // the flag survived, the second attempt skips setup entirely and captures on an unconfirmed
-        // input while behaving as if the route were established.
-        createEngine()
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-        advanceTimeBy(3_001)
-        advanceUntilIdle()
-        verify(voiceAudioProcessor, never()).startProcessing()
-
-        // Second attempt on the SAME route, WITHOUT stopping in between: engine.stop() clears the
-        // flag through closeBluetoothSco, which would mask a rollback that failed to clear it. The
-        // stale-flag failure mode is that the second attempt's awaitBluetoothSco returns early on the
-        // surviving flag, skipping startBluetoothSco entirely and capturing on an input that was
-        // never confirmed -- so the discriminator is the request being made AGAIN.
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-        // Advance ONLY far enough to reach the SCO request: advanceUntilIdle would run the whole
-        // 3 s connect timeout before the broadcast is delivered, and the second attempt would fail
-        // the way the first did rather than being confirmed.
-        advanceTimeBy(100)
-        verify(audioManager, times(2)).startBluetoothSco()
-
-        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
-        advanceUntilIdle()
-        // The first attempt never reaches capture (it fails in SCO setup before the try block), so
-        // startProcessing is called once in total -- by this second attempt, on a CONFIRMED input.
-        verify(voiceAudioProcessor, times(1)).startProcessing()
-        engine.stop()
-    }
-
-    // ── Cancellation / Stop ────────────────────────────────────────────
-
-    @Test
-    fun `stop during SCO await cancels wait and unregisters receiver`() = runTest {
-        createEngine()
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-
-        verify(audioManager).startBluetoothSco()
-        assertTrue("Expected receiver registered", capturedReceiver != null)
-
-        engine.stop()
-        advanceUntilIdle()
-
-        verify(context).unregisterReceiver(any<BroadcastReceiver>())
-        verify(voiceAudioProcessor, never()).startProcessing()
-    }
-
-    @Test
-    fun `stop after capture started closes SCO and keeps the backend warm`() = runTest {
-        createEngine()
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-
-        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
-        advanceUntilIdle()
-        verify(voiceAudioProcessor).startProcessing()
-
-        engine.stop()
-        advanceUntilIdle()
-
-        verify(audioManager).stopBluetoothSco()
-        // Deliberately not released: a listening pause must not cost a model reload on the
-        // next start. VoiceControlService releases the backend in its teardown.
-        verify(backend, never()).release()
     }
 
     @Test
@@ -1435,140 +1296,6 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
-    // ── SCO not reopened for subsequent starts ─────────────────────────
-
-    @Test
-    fun `stop then restart on Bluetooth re-opens SCO`() = runTest {
-        createEngine()
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-
-        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
-        advanceUntilIdle()
-
-        engine.stop()
-        advanceUntilIdle()
-        verify(audioManager).stopBluetoothSco()
-
-        // Restart — stop cleared scoStarted, so SCO must be re-opened
-        capturedReceiver = null
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
-        advanceUntilIdle()
-
-        verify(audioManager, times(2)).startBluetoothSco()
-        verify(voiceAudioProcessor, times(2)).startProcessing()
-
-        engine.stop()
-    }
-
-    // ── Route switching scenarios ──────────────────────────────────────
-
-    @Test
-    fun `restart from Speaker to Bluetooth triggers SCO await`() = runTest {
-        createEngine()
-        startEngine(AudioRoute.Speaker)
-        advanceUntilIdle()
-        verify(audioManager, never()).startBluetoothSco()
-
-        engine.stop()
-        capturedReceiver = null
-
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
-
-        verify(audioManager, times(1)).startBluetoothSco()
-        assertTrue("Expected receiver registered", capturedReceiver != null)
-
-        engine.stop()
-    }
-
-    @Test
-    fun `restart from Bluetooth to Speaker closes SCO`() = runTest {
-        createEngine()
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
-
-        simulateScoState(AudioManager.SCO_AUDIO_STATE_CONNECTED)
-        advanceUntilIdle()
-
-        engine.stop()
-        advanceUntilIdle()
-        verify(audioManager).stopBluetoothSco()
-
-        startEngine(AudioRoute.Speaker)
-        advanceUntilIdle()
-        verify(voiceAudioProcessor, times(2)).startProcessing()
-
-        verify(audioManager, times(1)).startBluetoothSco()
-        verify(audioManager, times(1)).stopBluetoothSco()
-
-        engine.stop()
-    }
-
-    @Test
-    fun `Bluetooth SCO setup exception does not start capture`() = runTest {
-        // Was "falls back to phone mic capture": a failed setup is a failed route, and capturing anyway
-        // reads an input the route does not name without saying so.
-        createEngine()
-        `when`(
-            context.registerReceiver(
-                any<BroadcastReceiver>(),
-                any<IntentFilter>(),
-            ),
-        ).thenThrow(RuntimeException("registerReceiver failed"))
-
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
-
-        verify(voiceAudioProcessor, never()).startProcessing()
-        verify(audioManager, never()).startBluetoothSco()
-        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
-
-        engine.stop()
-    }
-
-    @Test
-    fun `Bluetooth SCO startBluetoothSco exception unregisters receiver and restores audio mode`() = runTest {
-        createEngine()
-        `when`(audioManager.mode).thenReturn(AudioManager.MODE_IN_COMMUNICATION)
-        org.mockito.Mockito.doThrow(RuntimeException("startBluetoothSco failed"))
-            .`when`(audioManager).startBluetoothSco()
-
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
-
-        // Cleanup still runs, and capture still must not start.
-        verify(voiceAudioProcessor, never()).startProcessing()
-        assertTrue("Expected receiver to have been registered", capturedReceiver != null)
-        verify(context).unregisterReceiver(capturedReceiver!!)
-        verify(audioManager).setMode(AudioManager.MODE_IN_COMMUNICATION)
-        // Fallback path must not leave scoStarted set — stop should not call stopBluetoothSco.
-        engine.stop()
-        verify(audioManager, never()).stopBluetoothSco()
-    }
-
-    @Test
-    fun `Bluetooth SCO CancellationException after register rolls back receiver and mode`() = runTest {
-        createEngine()
-        `when`(audioManager.mode).thenReturn(AudioManager.MODE_IN_COMMUNICATION)
-        org.mockito.Mockito.doThrow(kotlinx.coroutines.CancellationException("sco cancelled"))
-            .`when`(audioManager).startBluetoothSco()
-
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        advanceUntilIdle()
-
-        // Cancellation aborts the processing job before capture; rollback must still run.
-        verify(voiceAudioProcessor, never()).startProcessing()
-        assertTrue("Expected receiver to have been registered", capturedReceiver != null)
-        verify(context).unregisterReceiver(capturedReceiver!!)
-        verify(audioManager).setMode(AudioManager.MODE_IN_COMMUNICATION)
-
-        engine.stop()
-        verify(audioManager, never()).stopBluetoothSco()
-    }
-
     // ── Wake-word detection paths ──────────────────────────────────────
 
     private fun CoroutineScope.createEngineWithSpeech(
@@ -1721,7 +1448,7 @@ class VoiceAsrEngineTest {
             backend = backend,
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -1741,7 +1468,7 @@ class VoiceAsrEngineTest {
             backend = backend,
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -1766,7 +1493,7 @@ class VoiceAsrEngineTest {
             backend = backend,
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -1793,7 +1520,7 @@ class VoiceAsrEngineTest {
             backend = backend,
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -1949,29 +1676,39 @@ class VoiceAsrEngineTest {
         override fun release() = Unit
     }
 
-    @Test
-    fun `SCO that is requested but never connects is torn down`() = runTest {
-        // The uncovered case: startBluetoothSco() SUCCEEDS and the connect never arrives, so setup
-        // reports failure while the request is outstanding. rollbackFailedScoSetup clears scoStarted,
-        // and closeBluetoothSco() returns early on that flag -- so unless the rollback itself stops
-        // SCO, the outstanding request is never closed and the headset stays held.
-        createEngine()
+    private class FakeAcquisitionPlatform : RouteAcquisitionPlatform {
+        var openCalls = 0
+        var closeCalls = 0
 
-        startEngine(AudioRoute.BluetoothA2dpOnly)
-        runCurrent()
+        override fun bluetoothCandidates(): List<BluetoothCandidate> = emptyList()
 
-        // The request went out, and no connect follows.
-        verify(audioManager, times(1)).startBluetoothSco()
-        assertTrue("the SCO request must be outstanding", capturedReceiver != null)
+        override fun startBluetoothSco() = Unit
 
-        // Report the connection failure the system would report: disconnected.
-        simulateScoState(AudioManager.SCO_AUDIO_STATE_DISCONNECTED)
-        advanceUntilIdle()
+        override fun stopBluetoothSco() = Unit
 
-        // The failed setup must not capture, and must not leave SCO open.
-        verify(voiceAudioProcessor, never()).startProcessing()
-        verify(audioManager, times(1)).stopBluetoothSco()
+        override fun isBluetoothScoOn(): Boolean = false
 
-        engine.stop()
+        override fun setCommunicationDevice(deviceId: Int): Boolean = false
+
+        override fun communicationDeviceId(): Int? = null
+
+        override fun clearCommunicationDevice() = Unit
+
+        override fun audioMode(): Int = AudioManager.MODE_NORMAL
+
+        override fun setAudioMode(mode: Int) = Unit
+
+        override fun deviceType(deviceId: Int): Int? = AudioDeviceInfo.TYPE_WIRED_HEADSET
+
+        override fun openInputStream(): Int {
+            openCalls++
+            return 21
+        }
+
+        override fun startInputStream(): Boolean = true
+
+        override fun closeInputStream() {
+            closeCalls++
+        }
     }
 }

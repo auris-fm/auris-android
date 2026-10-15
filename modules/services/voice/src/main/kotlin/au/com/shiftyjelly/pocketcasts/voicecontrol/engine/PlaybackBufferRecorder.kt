@@ -303,7 +303,15 @@ class PlaybackBufferRecorder @Inject constructor(
                     // New stream epoch -- or the owner's held admission no longer matches the carried
                     // ticket: the previous incarnation (if any) is superseded and retired; a seek or new
                     // episode is a NEW producer identity, audio never migrates.
-                    carried == null || (owner != null && owner.ticket != carried) -> {
+                    // OWNER == NULL WITH A CARRIED TICKET (@reviewer/@spec, same-epoch stop->start):
+                    // this collector just installed its stamper with no admission of its own yet, and the
+                    // tap still remembers the ticket the PREVIOUS collector was using for an unchanged
+                    // epoch. That ticket is dead -- it belonged to the owner retired at stop(). The
+                    // emission happening NOW belongs to the NEW session, so ownership transfers at
+                    // INSTALLATION: mint a fresh admission exactly as a new epoch would. This cannot
+                    // launder queued chunks: they were stamped BEFORE this stamper existed (or before
+                    // retirement) and carry their own dead tickets, refused at delivery below.
+                    carried == null || owner == null || (owner.ticket != carried) -> {
                         owner?.let { retireProducerLocked(it) }
                         val opened = newAdmissionLocked(epoch)
                         currentAdmission = opened
@@ -316,7 +324,7 @@ class PlaybackBufferRecorder @Inject constructor(
                     // unreachable and every same-epoch emission dead forever. The owner still drives
                     // this live episode; if its held ticket died with the generation, renew for FUTURE
                     // emissions only. Queued chunks keep the dead ticket and stay refused.
-                    owner != null && !isAdmissionLiveLocked(owner) -> {
+                    !isAdmissionLiveLocked(owner) -> {
                         val renewed = renewAdmissionLocked(owner)
                         currentAdmission = renewed
                         renewed.ticket

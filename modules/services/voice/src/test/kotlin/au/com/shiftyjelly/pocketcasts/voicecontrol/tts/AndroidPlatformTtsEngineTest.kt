@@ -61,7 +61,7 @@ class AndroidPlatformTtsEngineTest {
         // The synthesis never completes, so the coroutine is cancelled exactly while suspended inside
         // the call -- the case the !isActive check after the call cannot reach, because that check
         // runs only once the call has already returned.
-        val (wired, fake) = engineWithFakeSynthesizer()
+        val (wired, fake, _) = engineWithFakeSynthesizer()
         fake.onInitialized?.invoke(true)
 
         // Real dispatchers, not runTest's: speak() uses withContext(Dispatchers.Main) to touch the
@@ -97,7 +97,7 @@ class AndroidPlatformTtsEngineTest {
         // the normal path. The first utterance completes through the platform's own onDone callback,
         // and a second utterance on the same engine must still synthesize -- a cancellation handler
         // that fired on success, or that left the engine stopped, would show up here.
-        val (wired, fake) = engineWithFakeSynthesizer()
+        val (wired, fake, _) = engineWithFakeSynthesizer()
         fake.onInitialized?.invoke(true)
 
         val scope = CoroutineScope(Dispatchers.Default)
@@ -131,7 +131,7 @@ class AndroidPlatformTtsEngineTest {
         //
         // The ordering is made EXPLICIT rather than hoped for: the successor's synthesis is confirmed
         // queued BEFORE the cancelled utterance is allowed to finish cancelling.
-        val (wired, fake) = engineWithFakeSynthesizer()
+        val (wired, fake, _) = engineWithFakeSynthesizer()
         fake.onInitialized?.invoke(true)
         val scope = CoroutineScope(Dispatchers.Default)
 
@@ -164,7 +164,7 @@ class AndroidPlatformTtsEngineTest {
         // started must not still be able to stop the engine afterwards. Without the shared lock the
         // check and the stop are separate steps and the successor can slip between them -- the same
         // read-then-act window that let a released claim publish in the route observer.
-        val (wired, fake) = engineWithFakeSynthesizer()
+        val (wired, fake, _) = engineWithFakeSynthesizer()
         fake.onInitialized?.invoke(true)
 
         var successorClaimed = false
@@ -211,17 +211,18 @@ class AndroidPlatformTtsEngineTest {
      */
     private fun engineWithFakeSynthesizer(
         onSynthesize: (utteranceId: String) -> Unit = {},
-    ): Pair<AndroidPlatformTtsEngine, FakeSynthesizer> {
+    ): Triple<AndroidPlatformTtsEngine, FakeSynthesizer, PlaybackBufferRecorder> {
         val fake = FakeSynthesizer(onSynthesize)
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
         lateinit var engineRef: AndroidPlatformTtsEngine
         engineRef = AndroidPlatformTtsEngine(
             context,
-            PlaybackBufferRecorder(FingerprintPcmTap()),
+            recorder,
         ) { onInitialized ->
             fake.onInitialized = onInitialized
             fake
         }
-        return engineRef to fake
+        return Triple(engineRef, fake, recorder)
     }
 
     private class FakeSynthesizer(
@@ -265,7 +266,15 @@ class AndroidPlatformTtsEngineTest {
             // makes speak() return before the write loop, so without this the truncation case would
             // exercise nothing. Off by default, because a decodable clip also engages the drain wait,
             // which the synthesis-oriented cases do not need.
-            if (emitRealWav) file?.also { writeMinimalWav(it, samples = 512, sampleRateHz = 22050) }
+            if (emitRealWav) {
+                file?.also {
+                    // Amplitude encodes WHICH utterance this is (first: 1_000, later: 24_000), so a test
+                    // can tell whose audio reached the reference -- same shape, different identity.
+                    // synthesizeCount ALREADY includes this utterance (incremented above).
+                    val level = if (synthesizeCount == 1) 1_000 else 24_000
+                    writeMinimalWav(it, samples = 512, sampleRateHz = 22050, sampleValue = level)
+                }
+            }
             onSynthesize(utteranceId ?: "")
             synthesizeQueued = true
             return android.speech.tts.TextToSpeech.SUCCESS
@@ -287,7 +296,7 @@ class AndroidPlatformTtsEngineTest {
         //
         // The refusal needs a failing AudioTrack, which a unit test cannot construct, so the write is
         // injected -- the seam CloudAudioPlayer already exposes for its own path.
-        val (wired, fake) = engineWithFakeSynthesizer()
+        val (wired, fake, _) = engineWithFakeSynthesizer()
         fake.onInitialized?.invoke(true)
         fake.emitRealWav = true
         // No drain wait: the write is refused, so there is nothing to drain and waiting would only
@@ -328,7 +337,7 @@ class AndroidPlatformTtsEngineTest {
         // write already BLOCKED when cancellation lands cannot reach the next check -- the stop must
         // be initiated BY the cancellation, while the write is still blocked, and a plain completion
         // hook would wait for the very write it needs to interrupt.
-        val (wired, fake) = engineWithFakeSynthesizer()
+        val (wired, fake, _) = engineWithFakeSynthesizer()
         fake.onInitialized?.invoke(true)
         fake.emitRealWav = true
         wired.drainWaitMs = 0
@@ -398,7 +407,7 @@ class AndroidPlatformTtsEngineTest {
         // measure. (A first version of this case expected a write, which was wrong: an already
         // superseded reply writes nothing at all.)
         val oldSynthesizing = java.util.concurrent.CountDownLatch(1)
-        val (wired, fake) = engineWithFakeSynthesizer(onSynthesize = { oldSynthesizing.countDown() })
+        val (wired, fake, _) = engineWithFakeSynthesizer(onSynthesize = { oldSynthesizing.countDown() })
         fake.onInitialized?.invoke(true)
         fake.emitRealWav = true
         wired.drainWaitMs = 0
@@ -464,7 +473,7 @@ class AndroidPlatformTtsEngineTest {
         // successor claims the engine; when the write unblocks, the old reply must perform NO
         // further writes. The job-completion hook cannot provide this: a blocked write never
         // completes, so the hook never fires until the write returns -- which is the untraced seam.
-        val (wired, fake) = engineWithFakeSynthesizer()
+        val (wired, fake, _) = engineWithFakeSynthesizer()
         fake.onInitialized?.invoke(true)
         fake.emitRealWav = true
         wired.drainWaitMs = 0
@@ -539,7 +548,7 @@ class AndroidPlatformTtsEngineTest {
 
     @Test
     fun `reviewer old render exit preserves actual successor output`() {
-        val (wired, fake) = engineWithFakeSynthesizer()
+        val (wired, fake, _) = engineWithFakeSynthesizer()
         fake.onInitialized?.invoke(true)
         fake.emitRealWav = true
         wired.drainWaitMs = 0
@@ -608,7 +617,7 @@ class AndroidPlatformTtsEngineTest {
 
     @Test
     fun `reviewer cancellation stops old blocked track and preserves actual successor`() {
-        val (wired, fake) = engineWithFakeSynthesizer()
+        val (wired, fake, _) = engineWithFakeSynthesizer()
         fake.onInitialized?.invoke(true)
         fake.emitRealWav = true
         wired.drainWaitMs = 0
@@ -686,7 +695,7 @@ class AndroidPlatformTtsEngineTest {
 
     @Test
     fun `reviewer shared track publication respects ownership boundary`() {
-        val (wired, fake) = engineWithFakeSynthesizer()
+        val (wired, fake, _) = engineWithFakeSynthesizer()
         fake.onInitialized?.invoke(true)
         fake.emitRealWav = true
         wired.drainWaitMs = 0
@@ -746,6 +755,119 @@ class AndroidPlatformTtsEngineTest {
         wired.release()
         assertSame("successor must not replace the shared slot while its cleanup lock is held", oldTrack.get(), observed)
     }
+
+    // CONTROL @reviewer/@spec: a HELD OLD TTS WRITE released after a successor has started and the old
+    // utterance's cleanup ran must not append its audio under the SUCCESSOR'S reference identity. The
+    // defect shape was recordAccepted reading the shared currentUtteranceAdmission at RECORDING time:
+    // an old stream blocked inside AudioTrack.write resumes AFTER a successor published its own
+    // admission, and the old samples get written with the NEWER valid ticket -- contamination no
+    // recorder-level control can see. The fix threads the immutable admission captured with the
+    // utterance's LOCAL track through the write path, and cleanup retires THAT local admission even
+    // when activeTrack already belongs to the successor.
+    @Test
+    fun `a tts write held across a successor start cannot append old audio under the new ticket`() {
+        val (wired, fake, recorder) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        fake.emitRealWav = true
+        wired.drainWaitMs = 0
+
+        val enteredOldWrite = java.util.concurrent.CountDownLatch(1)
+        val enteredSuccessorWrite = java.util.concurrent.CountDownLatch(1)
+        val releaseOldWrite = java.util.concurrent.CountDownLatch(1)
+        val releaseSuccessorWrite = java.util.concurrent.CountDownLatch(1)
+        var writes = 0
+        wired.writeToSink = { _: android.media.AudioTrack, _, _, count ->
+            when (++writes) {
+                1 -> {
+                    enteredOldWrite.countDown()
+                    releaseOldWrite.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                }
+
+                2 -> {
+                    enteredSuccessorWrite.countDown()
+                    // Hold the SUCCESSOR inside its own accepted write as well: its admission is
+                    // published and LIVE while the old write resumes -- exactly the window where the
+                    // shared-field defect would stamp the successor's VALID ticket onto old audio.
+                    releaseSuccessorWrite.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                }
+            }
+            count
+        }
+
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default)
+        try {
+            val oldJob = scope.launch { runCatching { wired.speak("old reply", "en") } }
+            val oldQueued = (0 until 50).any {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(20)
+                fake.synthesizeCount >= 1
+            }
+            check(oldQueued) { "precondition: the old utterance must reach synthesis" }
+            // Synthesis COMPLETION is what releases the file for playback (the fake writes the wav in
+            // onRequestSynthesis; onDone drives the listener path the engine waits on).
+            fake.listener?.onDone(fake.lastUtteranceId)
+            val reached = (0 until 100).any {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(20)
+                enteredOldWrite.await(10, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
+            check(reached) { "precondition: the old utterance must be blocked inside its accepted write" }
+
+            // A SUCCESSOR starts and reaches ITS OWN accepted write while the old write is still
+            // blocked. Its wav carries amplitude 24_000 (~0.73f); the old clip is 1_000 (~0.03f).
+            val successorJob = scope.launch { runCatching { wired.speak("new reply", "en") } }
+            val secondQueued = (0 until 100).any {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(20)
+                fake.synthesizeCount >= 2
+            }
+            check(secondQueued) { "precondition: the successor must reach synthesis (count=${'$'}{fake.synthesizeCount})" }
+            fake.listener?.onDone(fake.lastUtteranceId)
+            val successorInWrite = (0 until 100).any {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                Thread.sleep(20)
+                enteredSuccessorWrite.await(10, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }
+            check(successorInWrite) { "precondition: the successor must be inside its accepted write" }
+
+            // OLD retirement runs WHILE the successor's admission is live: supersession makes the old
+            // utterance exit (its cleanup retires ITS local admission even though activeTrack now
+            // belongs to the successor), then its held write RESUMES against the successor's still-
+            // published ticket. Under the fix the resumed write uses the old CLOSED admission ->
+            // refused. Under the shared-field defect it reads the successor's LIVE ticket -> stored.
+            releaseOldWrite.countDown()
+            kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeoutOrNull(5_000) { oldJob.join() }
+            }
+
+            // Let the successor finish normally afterwards.
+            releaseSuccessorWrite.countDown()
+            kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeoutOrNull(5_000) { successorJob.join() }
+            }
+
+            // ATTRIBUTION, not presence: both utterances legitimately leave tagged tails until they
+            // expire, so the question is WHICH admission's ticket each sample carries. Old-utterance
+            // audio (amplitude ~0.03) written under the SUCCESSOR's live ticket is exactly the defect
+            // shape; under the fix those samples carry the OLD utterance's own ticket and its cleanup
+            // retired that incarnation, zeroing them beyond the delay tail.
+            val snapshot = recorder.snapshot()
+            val tags = recorder.ownerTagIdsForTest()
+            assertEquals("tags align with samples", snapshot.size, tags.size)
+            assertTrue("the successor's audio is in the reference (ring non-empty)", snapshot.isNotEmpty())
+            val oldTickets = tags.filterIndexed { i, _ -> kotlin.math.abs(snapshot[i]) in 0.025f..0.04f }.toSet()
+            val successorTickets = tags.filterIndexed { i, _ -> snapshot[i] > 0.6f }.toSet()
+            assertTrue(
+                "old-utterance samples must NOT be attributed to any ticket that also owns successor " +
+                    "audio (shared-field read would do exactly that): oldTickets=$oldTickets " +
+                    "successorTickets=$successorTickets",
+                oldTickets.intersect(successorTickets).isEmpty(),
+            )
+            wired.release()
+        } finally {
+            scope.cancel()
+        }
+    }
 }
 
 private fun java.io.DataOutputStream.writeIntLE(value: Int) {
@@ -760,7 +882,7 @@ private fun java.io.DataOutputStream.writeShortLE(value: Int) {
     writeByte((value shr 8) and 0xFF)
 }
 
-private fun writeMinimalWav(file: java.io.File, samples: Int, sampleRateHz: Int) {
+private fun writeMinimalWav(file: java.io.File, samples: Int, sampleRateHz: Int, sampleValue: Int = 1_000) {
     val dataBytes = samples * 2
     java.io.DataOutputStream(java.io.BufferedOutputStream(file.outputStream())).use { out ->
         out.writeBytes("RIFF")
@@ -776,6 +898,6 @@ private fun writeMinimalWav(file: java.io.File, samples: Int, sampleRateHz: Int)
         out.writeShortLE(16) // bits per sample
         out.writeBytes("data")
         out.writeIntLE(dataBytes)
-        repeat(samples) { out.writeShortLE(1_000) }
+        repeat(samples) { out.writeShortLE(sampleValue) }
     }
 }

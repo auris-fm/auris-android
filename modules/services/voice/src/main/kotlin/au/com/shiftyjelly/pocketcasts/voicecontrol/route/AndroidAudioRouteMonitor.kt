@@ -139,6 +139,12 @@ class AndroidAudioRouteMonitor @Inject constructor(
     private fun refreshRouteNow() {
         debounceJob?.cancel()
         mutableRoute.value = readRoute()
+        // SELECTION AND SCO STATE CHANGE AVAILABILITY TOO: readAvailability() reads the selected
+        // communication device and the live SCO link, and neither touches the enumerated device list
+        // -- so without this refresh the eligibility surface keeps the pre-selection answer forever
+        // (connected AirPods stay BluetoothA2dpOnly -> Exposed after acquisition selects them, and the
+        // listening mode can never leave Off).
+        mutableAvailability.value = readAvailability()
         gracePeriodSignal.onAudioRouteChanged()
     }
 
@@ -152,6 +158,8 @@ class AndroidAudioRouteMonitor @Inject constructor(
     fun onExternalMicrophoneConfirmed() {
         debounceJob?.cancel()
         mutableRoute.value = AudioRoute.Headset(hasMicrophone = true)
+        // The confirmed selection is also availability's newest answer -- see refreshRouteNow().
+        mutableAvailability.value = readAvailability()
         gracePeriodSignal.onAudioRouteChanged()
     }
 

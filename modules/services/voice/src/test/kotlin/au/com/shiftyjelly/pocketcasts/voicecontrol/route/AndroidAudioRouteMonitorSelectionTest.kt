@@ -100,6 +100,7 @@ class AndroidAudioRouteMonitorSelectionTest {
     }
 
     @Test
+    @Suppress("DEPRECATION") // ACTION_SCO_AUDIO_STATE_UPDATED drives the platform SCO signal
     fun `a confirmed external microphone lets the listening mode leave Off`() = runTest {
         setOutputDevices(AudioDeviceInfo.TYPE_BLUETOOTH_A2DP)
         val graceSignal = GracePeriodSignal()
@@ -114,7 +115,18 @@ class AndroidAudioRouteMonitorSelectionTest {
         policy.mode.test {
             assertEquals(ListeningMode.Off, awaitItem())
 
+            // A real confirmed acquisition leaves BOTH surfaces answered: the platform SCO link is on
+            // AND the SCO input is enumerated (production lists it once connected), so availability
+            // answers Headset-with-microphone -- what the eligibility policy reads -- while the
+            // selection observation arrives for the route surface. Confirming only the observation
+            // would model an acquisition that never opened SCO, which production cannot do.
+            setInputDevices(AudioDeviceInfo.TYPE_BUILTIN_MIC, AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
+            // The acquisition selects the headset as the communication device; that selection is what
+            // makes availability answer Headset-with-microphone for the eligibility policy.
+            selectCommunicationDevice(device(AudioDeviceInfo.TYPE_BLUETOOTH_SCO))
             setBluetoothScoOn(true)
+            context.sendBroadcast(Intent(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED))
+            shadowOf(Looper.getMainLooper()).idle()
             monitor.onExternalMicrophoneConfirmed()
 
             assertEquals(ListeningMode.WakeWord, awaitItem())

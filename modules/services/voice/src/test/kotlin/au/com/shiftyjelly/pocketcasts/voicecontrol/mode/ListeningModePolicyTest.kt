@@ -141,6 +141,50 @@ class ListeningModePolicyTest {
 
     // --- Live mode flow ---
 
+    // THE START-ELIGIBILITY QUESTION IS AVAILABILITY'S. After the observation-first correction, the
+    // OBSERVED route is Unknown until a stream is routed or SCO opens -- but SCO only opens once
+    // acquisition runs, and acquisition waits for the mode to leave Off. If the policy read the
+    // observed route, connected AirPods would hold the pipeline in Off forever: no observation can
+    // ever arrive. The policy must read `availability` -- the enumeration surface that answers "is an
+    // external microphone candidate present" -- while the observed route stays the observation.
+    @Test
+    fun `an available headset candidate leaves Off even though the observed route is Unknown`() = runTest {
+        val routeFlow = MutableStateFlow<AudioRoute>(AudioRoute.Unknown)
+        val availabilityFlow = MutableStateFlow<AudioRoute>(AudioRoute.BluetoothA2dpOnly)
+        val policy = ListeningModePolicy(
+            gate = VoiceControlGate(rules = emptyList(), scope = backgroundScope),
+            audioRouteMonitor = object : AudioRouteMonitor {
+                override val route: StateFlow<AudioRoute> = routeFlow
+                override val availability: StateFlow<AudioRoute> = availabilityFlow
+            },
+            gracePeriodSignal = GracePeriodSignal(),
+            scope = backgroundScope,
+        )
+
+        policy.mode.test {
+            assertEquals(
+                "an unacquired A2DP candidate still leaves the built-in microphone exposed -- Off, " +
+                    "while the service's start branch acquires it from availability",
+                ListeningMode.Off,
+                awaitItem(),
+            )
+
+            // Acquisition succeeds: the platform SCO link is on and availability answers Headset.
+            availabilityFlow.value = AudioRoute.Headset(hasMicrophone = true)
+
+            assertEquals(ListeningMode.WakeWord, awaitItem())
+
+            availabilityFlow.value = AudioRoute.Speaker
+
+            assertEquals(
+                "no external microphone candidate, so nothing to listen on",
+                ListeningMode.Off,
+                awaitItem(),
+            )
+        }
+    }
+    // --- Live mode flow ---
+
     // The core spec's integration case: unplugging the headset moves the route to the built-in
     // microphone, which is `Exposed`, so capture stops instead of continuing on it.
     @Test

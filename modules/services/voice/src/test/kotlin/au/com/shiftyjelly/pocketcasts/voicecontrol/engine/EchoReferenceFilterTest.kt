@@ -1,12 +1,19 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.engine
 
+import android.media.AudioFormat
+import androidx.media3.common.C
+import androidx.media3.common.audio.AudioProcessor
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRouteMonitor
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.PI
 import kotlin.math.sin
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -58,6 +65,57 @@ class EchoReferenceFilterTest {
             "echo-only audio must be dropped, not treated as user speech",
             filter.shouldProcess(echoOnly, hasSpeakerId = false, speakerIndex = 0, playbackBuffer = recorder.snapshot()),
         )
+    }
+
+    // THE DECODER-FORMAT BOUNDARY, END TO END: a 44.1 kHz stereo episode goes through the REAL tap
+    // into the recorder, and the microphone segment that matches what actually sounded must be
+    // rejected as bleed. Before the recorder normalized rate/channels, the reference held raw
+    // interleaved frames -- ~2.8x time-compressed, L/R alternating -- so nothing correlated, the echo
+    // was accepted, and the podcast's own audio reached recognition as a user command.
+    @Test
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun `a 44100 Hz stereo episode played into the reference rejects its own echo at the microphone`() = runTest {
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+        val job = recorder.start(this)
+        runCurrent()
+
+        // 0.5 s of 220 Hz at 44.1 kHz stereo, L == R (a centered image -- downmix preserves it).
+        val srcRate = 44_100
+        val halfSecond = srcRate / 2
+        val data = ShortArray(halfSecond * 2) { i ->
+            val v = (0.6 * sin(2 * PI * 220.0 * (i / 2) / srcRate)).toFloat()
+            (v * 32767).toInt().toShort()
+        }
+        val format = AudioProcessor.AudioFormat(srcRate, 2, C.ENCODING_PCM_16BIT)
+        tap.onSinkBuffer(presentationTimeUs = 0)
+        tap.onPcm(
+            ByteBuffer.wrap(
+                ByteBuffer.allocate(data.size * 2).order(ByteOrder.nativeOrder()).apply { data.forEach { putShort(it) } }.array(),
+            ),
+            format,
+        )
+        runCurrent()
+        job.cancel()
+
+        // The mic hears a delayed (200 ms), quieter copy of what sounded -- 16 kHz mono, as captured.
+        val reference = recorder.snapshot()
+        val delay16k = 200 * sampleRate / 1_000
+        val echoOnly = FloatArray(1600) { i -> 0.3f * reference[delay16k + i] }
+
+        assertFalse(
+            "the episode's own audio, heard by the microphone, must be rejected as bleed",
+            filterShouldProcess(recorder, echoOnly),
+        )
+    }
+
+    private fun filterShouldProcess(recorder: PlaybackBufferRecorder, mic: FloatArray): Boolean {
+        val routeMonitor = AndroidAudioRouteMonitor(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            gracePeriodSignal = GracePeriodSignal(),
+        )
+        return UtteranceFilter(PlaybackCrossCorrelator(), routeMonitor)
+            .shouldProcess(mic, hasSpeakerId = false, speakerIndex = 0, playbackBuffer = recorder.snapshot())
     }
 
     @Test

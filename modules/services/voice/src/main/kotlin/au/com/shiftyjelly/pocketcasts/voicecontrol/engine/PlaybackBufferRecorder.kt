@@ -136,6 +136,9 @@ class PlaybackBufferRecorder @Inject constructor(
                     pcm = chunkToFloats(chunk),
                     // The tap's position is seconds of media time; the reference tracks milliseconds.
                     positionMs = (chunk.positionSec * 1_000.0).toLong(),
+                    // The decoder's own format: the recorder normalizes, the tap stays a pass-through.
+                    sourceSampleRateHz = chunk.sampleRate,
+                    sourceChannels = chunk.channelCount,
                 )
             }
             .launchIn(scope)
@@ -382,17 +385,28 @@ class PlaybackBufferRecorder @Inject constructor(
         trackStartFrame: Long? = null,
         trackEndFrame: Long? = null,
         trackGeneration: Long? = null,
+        sourceSampleRateHz: Int = SAMPLE_RATE,
+        sourceChannels: Int = 1,
     ) {
+        // THE RECORDER IS THE FORMAT BOUNDARY. Sources deliver the decoder's own PCM (the episode tap
+        // runs at 44.1 kHz stereo for ordinary episodes); the ring, the window duration and every
+        // position computation assume 16 kHz mono. Normalizing here -- once, for every source -- is
+        // what makes "pcm.size * 1_000L / SAMPLE_RATE" the chunk's true duration below. A tap that
+        // stores raw interleaved frames instead holds ~2.8x too little playback time, L/R interleaved,
+        // and no correlation in the correlator can undo that.
+        require(sourceSampleRateHz > 0) { "sourceSampleRateHz must be positive" }
+        require(sourceChannels > 0) { "sourceChannels must be positive" }
+        val samples = normalizeToReferenceFormat(pcm, sourceSampleRateHz, sourceChannels)
         val axisClaimed = axis != null
         synchronized(lock) {
-            totalWritten += pcm.size
-            for (sample in pcm) {
+            totalWritten += samples.size
+            for (sample in samples) {
                 buffer[writePos] = sample
                 writePos = (writePos + 1) % buffer.size
                 if (writePos == 0) filled = true
             }
             if (trackStartFrame != null && trackEndFrame != null) {
-                recordBlock(trackStartFrame, trackEndFrame, pcm.size, trackGeneration ?: 0L)
+                recordBlock(trackStartFrame, trackEndFrame, samples.size, trackGeneration ?: 0L)
             }
             if (positionMs != null) {
                 // A TICK THAT DOES NOT MEET THE PREVIOUS ONE IS A HOLE. Checked HERE, under the same
@@ -405,7 +419,7 @@ class PlaybackBufferRecorder @Inject constructor(
                     holeThroughPositionMs = maxOf(holeThroughPositionMs ?: 0L, positionMs)
                 }
                 // The position of the newest sample: the chunk's start plus its duration at 16 kHz.
-                lastPositionMs = positionMs + (pcm.size * 1_000L) / SAMPLE_RATE
+                lastPositionMs = positionMs + (samples.size * 1_000L) / SAMPLE_RATE
                 expectedNextPositionMs = lastPositionMs
                 // WHICH CLOCK that number belongs to. A window holding two contributions from
                 // different axes has no single position, and subtracting across them yields a
@@ -533,6 +547,45 @@ class PlaybackBufferRecorder @Inject constructor(
          * upper bound (500 ms): everything older than this cannot still be heard at the mic.
          */
         const val DELAY_TAIL_SAMPLES = SAMPLE_RATE / 2
+
+        /**
+         * Downmixes interleaved channels to mono and resamples [sourceSampleRateHz] to [SAMPLE_RATE]
+         * with linear interpolation. Phase-preserving enough for correlation: the correlator matches
+         * against a microphone that heard the playback through air, so sub-sample interpolation error
+         * is far below the acoustic variance it already absorbs. Duration, not fidelity, is the
+         * invariant: N seconds of source must become N * [SAMPLE_RATE] stored samples.
+         */
+        internal fun normalizeToReferenceFormat(
+            pcm: FloatArray,
+            sourceSampleRateHz: Int,
+            sourceChannels: Int,
+        ): FloatArray {
+            if (sourceChannels == 1 && sourceSampleRateHz == SAMPLE_RATE) return pcm
+            val mono = if (sourceChannels == 1) {
+                pcm
+            } else {
+                run {
+                    val frames = pcm.size / sourceChannels
+                    FloatArray(frames) { frame ->
+                        var sum = 0f
+                        for (ch in 0 until sourceChannels) sum += pcm[frame * sourceChannels + ch]
+                        sum / sourceChannels
+                    }
+                }
+            }
+            if (sourceSampleRateHz == SAMPLE_RATE) return mono
+            val outFrames = (mono.size.toLong() * SAMPLE_RATE / sourceSampleRateHz).toInt()
+            if (outFrames <= 0) return FloatArray(0)
+            val ratio = sourceSampleRateHz.toDouble() / SAMPLE_RATE
+            return FloatArray(outFrames) { out ->
+                val srcPos = out * ratio
+                val i = srcPos.toInt()
+                val frac = (srcPos - i).toFloat()
+                val a = mono[i]
+                val b = if (i + 1 < mono.size) mono[i + 1] else a
+                a + (b - a) * frac
+            }
+        }
 
         /**
          * Converts a tap chunk to the float samples the reference stores. Mirrors the existing

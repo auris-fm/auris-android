@@ -35,6 +35,43 @@ class PlaybackBufferRecorderTest {
         positionSec = 0.0,
     )
 
+    // THE DECODER FORMAT IS NOT THE RECORDER FORMAT. The tap delivers chunks at the decoder's own
+    // rate and channel count (44.1 kHz stereo for ordinary episodes), while the ring, the window
+    // duration and every position computation assume 16 kHz mono. The recorder is the ONE boundary
+    // where sources meet the reference format, so normalization lives there -- not in the tap (which
+    // must stay a faithful pass-through of the player's PCM) and not in the correlator (which reads
+    // what the recorder stored).
+    @Test
+    fun `a 44100 Hz stereo episode chunk is normalized to 16 kHz mono with its true duration`() = runTest {
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+        val job = recorder.start(this)
+        runCurrent()
+
+        // One second of 44.1 kHz stereo: L counts up, R counts down, so any surviving L/R
+        // interleaving is visible as an alternating sawtooth in the stored samples.
+        val oneSecond = 44_100
+        val data = ShortArray(oneSecond * 2) { i ->
+            if (i % 2 == 0) ((i / 2) % 3276 * 10).toShort() else ((i / 2) % 3276 * -10).toShort()
+        }
+        val format = AudioProcessor.AudioFormat(44_100, 2, C.ENCODING_PCM_16BIT)
+        tap.onSinkBuffer(presentationTimeUs = 0)
+        tap.onPcm(ByteBuffer.wrap(s16le(data)), format)
+        runCurrent()
+        job.cancel()
+
+        val snapshot = recorder.snapshot()
+        assertEquals(
+            "one second of 44.1 kHz source must store one second of 16 kHz samples, not raw frames",
+            16_000,
+            snapshot.size,
+        )
+        // Downmixed content: with L = -R the mono average is silence for EVERY pair, so the stored
+        // signal must be near-zero throughout -- interleaved storage would alternate +/- loudly.
+        val peak = snapshot.maxOf { kotlin.math.abs(it) }
+        assertTrue("L and R are exact opposites, so the mono downmix is near-silence: peak=$peak", peak < 0.01f)
+    }
+
     @Test
     fun `episode PCM submitted to the sink reaches the reference`() = runTest {
         val tap = FingerprintPcmTap()

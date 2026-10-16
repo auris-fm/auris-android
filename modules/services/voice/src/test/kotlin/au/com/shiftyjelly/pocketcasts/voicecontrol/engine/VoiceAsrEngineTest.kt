@@ -382,27 +382,33 @@ class VoiceAsrEngineTest {
         // scheduled before the precondition can hold.
         advanceUntilIdle()
 
-        // PRECONDITION, asserted before any claim: the cue's own write is genuinely in progress.
-        assertTrue(
-            "precondition: the real player must be INSIDE the accepted cue write",
-            enteredWrite.await(5, java.util.concurrent.TimeUnit.SECONDS),
-        )
-        // POSITIVE assertions, all made WHILE the write is still held (holdWrite has not counted down).
-        assertEquals(
-            "ASR must reach the recognizer while the acknowledgement cue is still being written",
-            listOf("ensureReady", "recognize:pause"),
-            recognizer.calls,
-        )
-        assertEquals(
-            "the intent must be dispatched to the caller while the cue write is held",
-            listOf(VoiceIntent.Playback.Pause),
-            handledIntents,
-        )
-
-        // Release the held write so the player thread finishes, then shut the boundary down.
-        holdWrite.countDown()
-        realRenderer.release()
-        engine.stop()
+        try {
+            // PRECONDITION, asserted before any claim: the cue's own write is genuinely in progress.
+            assertTrue(
+                "precondition: the real player must be INSIDE the accepted cue write",
+                enteredWrite.await(5, java.util.concurrent.TimeUnit.SECONDS),
+            )
+            // POSITIVE assertions, all made WHILE the write is still held (holdWrite has not counted down).
+            assertEquals(
+                "ASR must reach the recognizer while the acknowledgement cue is still being written",
+                listOf("ensureReady", "recognize:pause"),
+                recognizer.calls,
+            )
+            assertEquals(
+                "the intent must be dispatched to the caller while the cue write is held",
+                listOf(VoiceIntent.Playback.Pause),
+                handledIntents,
+            )
+        } finally {
+            // BOUNDARY CLEANUP UNCONDITIONALLY (ea63aebe). The mocked write() blocks on `holdWrite`, so an
+            // assertion failure BEFORE the release would leave the player worker parked inside that write
+            // until its own 10s timeout -- and `engine.stop()`/`realRenderer.release()` would never run at
+            // all. Every step here is individually guarded: a failure in one must not skip the others, or
+            // the cleanup itself becomes the thing that leaks the blocked worker.
+            holdWrite.countDown()
+            runCatching { realRenderer.release() }
+            runCatching { engine.stop() }
+        }
     }
 
     @Test

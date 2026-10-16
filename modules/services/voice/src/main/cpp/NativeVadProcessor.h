@@ -91,8 +91,6 @@ private:
     // the worker did not exit within the bound -- the caller must assert success before reading the
     // terminal cause. Synchronization is by worker completion, not by script bookkeeping.
     bool awaitRunLoopExitForTest(int maxMs);
-    // Blocks until the runLoop thread has actually exited (worker completion, not stop()).
-    void awaitWorkerCompletionForTest();
   private:
 
     /**

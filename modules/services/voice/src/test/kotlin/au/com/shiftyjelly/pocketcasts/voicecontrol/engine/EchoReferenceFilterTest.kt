@@ -107,9 +107,10 @@ class EchoReferenceFilterTest {
         // One second of episode audio through the real tap (sine at 220 Hz, amplitude ~0.6).
         val episode = FloatArray(8_000) { i -> (0.6 * sin(2 * PI * 220.0 * i / sampleRate)).toFloat() }
         var anchorUs = 0L
-        // HEAP buffer, as the production decoder path delivers: a DIRECT ByteBuffer is silently
-        // dropped by the tap (observed under diagnosis: snapshot stayed empty), so the control must
-        // exercise the array-backed shape production actually sends.
+        // The buffer is wrapped AFTER filling so position==0: handing the tap a buffer whose position
+        // already sits at capacity (remaining == 0) is refused by the frames==0 guard -- correct
+        // behaviour, exercised by diagnosis. Production's asReadOnlyBuffer() view keeps the codec's
+        // intact position/remaining, so it is unaffected.
         val pcm = ByteBuffer.allocate(episode.size * 2).order(ByteOrder.nativeOrder())
         episode.forEach { pcm.putShort((it * 32767).toInt().toShort()) }
         tap.onSinkBuffer(presentationTimeUs = 0)

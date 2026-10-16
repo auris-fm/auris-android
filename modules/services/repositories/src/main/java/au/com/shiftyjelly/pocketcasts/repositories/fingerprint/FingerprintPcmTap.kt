@@ -94,7 +94,12 @@ class FingerprintPcmTap @Inject constructor() {
         // THE STOP/DRAIN EVENT ITSELF, not a later successor emission: an owner that wants to close
         // admission at the real boundary subscribes here (streamClosedCallbacks). Runs BEFORE the
         // epoch bump so retirement is complete before any new-stream stamping can happen.
-        streamClosedCallbacks.toList().forEach { it() }
+        // SNAPSHOT UNDER THE REGISTRY MONITOR, INVOKE OUTSIDE IT (@reviewer): toList() racing an
+        // unsynchronized register/unregister on another thread is undefined on a MutableList; and
+        // invoking under the monitor would run arbitrary retirement code while a concurrent
+        // register/unregister blocks the playback thread.
+        val callbacks = synchronized(streamClosedCallbacks) { streamClosedCallbacks.toList() }
+        callbacks.forEach { it() }
         pendingAnchorUs = C.TIME_UNSET
         anchorUs = C.TIME_UNSET
         framesSinceAnchor = 0

@@ -1739,34 +1739,26 @@ class PlaybackBufferRecorderTest {
         )
     }
 
-    // POSITION ATTRIBUTION (4236341498): a cue written on the Monotonic axis extends the window's
-    // truthfully -- the derived start accounts for the cue's duration, and the window reports its
-    // position only while every contribution is on one clock.
+    // POSITION ATTRIBUTION (4236341498, conservative contract): an UNTIMED cue contribution must
+    // INVALIDATE a window anchor it is not covered by -- the anchor can never be presented as
+    // covering audio whose sounding time is unknown (@spec 6e52d610).
     @Test
-    fun `a monotonic-axis cue write keeps the window start truthful`() = runTest {
+    fun `an untimed cue write invalidates a window anchor that would otherwise cover it`() = runTest {
         val tap = FingerprintPcmTap()
         val recorder = PlaybackBufferRecorder(tap)
         var nowMs = 50_000L
         recorder.monotonicNowMs = { nowMs }
         val admission = recorder.openAdmission(31L)
-        // 0.5 s episode chunk at media second 100 (Media axis), then a 0.25 s cue at monotonic 50_000.
-        recorder.write(FloatArray(8_000) { 0.5f }, positionMs = 100_000L, axis = PositionAxis.Media, admission = admission)
-        nowMs = 50_100L
-        recorder.write(FloatArray(4_000) { 0.5f }, positionMs = 50_000L, axis = PositionAxis.Monotonic, admission = admission)
-        // Two clocks in one window: the honest answer is NO position.
-        assertNull("a window spanning Media and Monotonic clocks reports no position", recorder.reference().startPositionMs)
-        // Same clock only: the cue's duration is accounted for in the derived start.
-        val solo = PlaybackBufferRecorder(tap)
-        var soloNow = 50_000L
-        solo.monotonicNowMs = { soloNow }
-        val soloAdmission = solo.openAdmission(33L)
-        solo.write(FloatArray(8_000) { 0.5f }, positionMs = 50_000L, axis = PositionAxis.Monotonic, admission = soloAdmission)
-        soloNow = 50_100L
-        solo.write(FloatArray(4_000) { 0.5f }, positionMs = 50_500L, axis = PositionAxis.Monotonic, admission = soloAdmission)
-        assertEquals(
-            "the window start accounts for every sample's own position: 12_000 samples (750 ms) ending at 50_750",
-            50_000L,
-            solo.reference().startPositionMs!!,
+        // Timed writes on one clock establish an anchor.
+        recorder.write(FloatArray(8_000) { 0.5f }, positionMs = 50_000L, axis = PositionAxis.Monotonic, admission = admission)
+        recorder.write(FloatArray(4_000) { 0.5f }, positionMs = 50_500L, axis = PositionAxis.Monotonic, admission = admission)
+        assertEquals(50_000L, recorder.reference().startPositionMs)
+        // An UNTIMED cue write joins the window: the anchor must not survive as though it covered
+        // the cue's samples.
+        recorder.write(FloatArray(4_000) { 0.5f }, admission = admission)
+        assertNull(
+            "after an untimed contribution the window reports no position instead of an anchor that does not cover it",
+            recorder.reference().startPositionMs,
         )
     }
 

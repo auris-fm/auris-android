@@ -26,52 +26,87 @@ class EarconPlayerTest {
     }
 
     @Test
-    fun `submit hands the cue's OWN admission to its callback, in task order, and returns before the write`() {
-        // 4236341555 + bb6f3aa9 controls, at the production player:
-        // (1) submit returns BEFORE the submitted write runs (the caller is not the one drained);
-        // (2) the player executor serialises tasks, so each callback receives ITS OWN cue's token --
-        //     a successor's coverage cannot observe a predecessor's result;
-        // (3) the token is non-null (real acceptance) -- a refused cue's callback gets null and no
-        //     coverage would start.
-        val submitReturned = java.util.concurrent.CountDownLatch(1)
-        val ranA = java.util.concurrent.CountDownLatch(1)
-        val ranB = java.util.concurrent.CountDownLatch(1)
+    fun `submit is nonblocking, serialised, and hands each cue its OWN accepted token`() {
+        // 4d1e5946 controls on the PRODUCTION player with a real accepted write:
+        // - a predecessor holds the player thread; submit must return while the write is pending;
+        // - tasks run serialised: exactly A then B, each callback with ITS OWN distinct token;
+        // - an uninstalled clip is a refusal: callback with null, and worker exceptions fail the test.
+        player.installClipForTest(EarconId.SUCCESS, ShortArray(1600) { 1 }, 16_000)
+        player.installClipForTest(EarconId.WAKE_WORD, ShortArray(1600) { 2 }, 16_000)
+        // A track whose write ACCEPTS everything, so the accepted-token path is exercised without a
+        // native audio stack.
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.kotlin.any<ShortArray>(),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { inv -> inv.getArgument<Int>(2) }
+        player.trackFactoryForTest = { track }
+        val blockerEntered = java.util.concurrent.CountDownLatch(1)
+        val releaseBlocker = java.util.concurrent.CountDownLatch(1)
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        // Hold the player thread: this blocker runs before anything the player submits.
+        executor.submit {
+            blockerEntered.countDown()
+            releaseBlocker.await(5, java.util.concurrent.TimeUnit.SECONDS)
+        }
+        assertTrue("precondition: the blocker must hold the player thread", blockerEntered.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        player.installExecutorForTest(executor)
+
+        val workerFailures = java.util.concurrent.CopyOnWriteArrayList<Throwable>()
         val order = java.util.Collections.synchronizedList(mutableListOf<String>())
-        val tokens = java.util.concurrent.ConcurrentHashMap<String, EarconPlayer.AdmissionToken?>()
+        val tokens = java.util.concurrent.ConcurrentHashMap<String, EarconPlayer.AdmissionToken>()
+        val bDone = java.util.concurrent.CountDownLatch(1)
 
-        var returnedBeforeWrite = false
+        val t0 = System.nanoTime()
         player.submit(EarconId.SUCCESS) { token ->
-            ranA.await(2, java.util.concurrent.TimeUnit.SECONDS) // hold THIS write behind the test's signal
-            order += "A"
-            tokens["A"] = token
-            ranB.countDown()
+            try {
+                order += "A"
+                if (token == null) {
+                    workerFailures += IllegalStateException("A must be accepted, not refused")
+                } else {
+                    tokens["A"] = token
+                }
+            } catch (t: Throwable) {
+                workerFailures += t
+            } finally {
+                releaseBlocker.countDown()
+                bDone.countDown()
+            }
         }
-        // submit() must have returned while task A is still held: the caller is not drained.
-        returnedBeforeWrite = ranA.count > 0
-        submitReturned.countDown()
-        player.submit(EarconId.WAKE_WORD) { token ->
-            order += "B"
-            tokens["B"] = token
-            ranB.countDown()
-        }
-        // release A's hold and let both run to completion
-        // (A's callback awaits ranA, which the test counted down above only after submit returned;
-        //  to unblock A we must count down ranA again is wrong -- ranA gates A's START. So instead
-        //  we simply let the awaits time out and assert on what did run.)
-
-        assertTrue("submit must return before the submitted write runs", returnedBeforeWrite || ranA.count == 0L)
-        // In this suite the clip assets are absent (see `play returns false for missing assets`), so
-        // every callback here exercises the REFUSAL branch: the token is null and coverage must not
-        // start. Acceptance-attribution with a real token is pinned at the renderer/coverage level.
-        // Serialisation: whatever ran, A's callback ran before B's.
-        val ranOrder: List<String> = order.toList()
+        val elapsedMs = (System.nanoTime() - t0) / 1_000_000
         assertTrue(
-            "callbacks must run in player-task order (A before B), got: $ranOrder",
-            ranOrder == listOf("A", "B") || ranOrder == listOf("A") || ranOrder.isEmpty(),
+            "submit must return while the predecessor still holds the player thread (took ${elapsedMs}ms)",
+            elapsedMs < 1_000 && releaseBlocker.count > 0,
         )
-        for (k in tokens.keys) {
-            assertTrue("a callback for $k must carry that cue's own non-null admission token", tokens[k] != null)
+        player.submit(EarconId.WAKE_WORD) { token ->
+            try {
+                order += "B"
+                if (token == null) {
+                    workerFailures += IllegalStateException("B must be accepted, not refused")
+                } else {
+                    tokens["B"] = token
+                    assertTrue(
+                        "tokens must be DISTINCT per cue",
+                        tokens["A"] != null && tokens["B"] != null && tokens["A"] != tokens["B"],
+                    )
+                }
+            } catch (t: Throwable) {
+                workerFailures += t
+            } finally {
+                bDone.countDown()
+            }
         }
+        releaseBlocker.countDown()
+        assertTrue("both callbacks must complete", bDone.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        executor.shutdownNow()
+
+        assertTrue("worker failures: $workerFailures", workerFailures.isEmpty())
+        assertEquals("callbacks must run exactly A then B", listOf("A", "B"), order)
+        assertTrue("A's token must be its own acceptance", tokens["A"] != null)
+        assertTrue("B's token must be its own distinct acceptance", tokens["B"] != null)
     }
 
     @Test

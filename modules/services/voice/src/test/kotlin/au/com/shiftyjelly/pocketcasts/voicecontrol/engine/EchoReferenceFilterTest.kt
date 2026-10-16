@@ -189,11 +189,11 @@ class EchoReferenceFilterTest {
 
     // THE ACTUAL CUE WRITER -> CONSUMER (4236341498, @spec b51b1c23/1026f360): the production
     // EarconPlayer.writeCueReference path -- with a QUEUED and a PARTIAL acceptance -- feeds the
-    // reference, and the anchor behaves per the conservative contract: a previously established
-    // position is invalidated by the untimed cue contributions, and matching speech is accepted by
-    // the production filter (not suppressed by an anchor that never covered the cue).
+    // reference, and the anchor behaves per the conservative contract: the previously established
+    // position is invalidated by the untimed cue contributions, and episode echo is still suppressed
+    // through the production shouldProcessReference by offset matching.
     @Test
-    fun `actual earcon cue writer - queued and partial acceptances invalidate the anchor and matching speech is accepted`() {
+    fun `actual earcon cue writer - queued and partial acceptances invalidate the anchor at the consumer`() {
         var nowMs = 6_000_000L
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
         recorder.monotonicNowMs = { nowMs }
@@ -219,20 +219,29 @@ class EchoReferenceFilterTest {
             org.robolectric.RuntimeEnvironment.getApplication(),
         )
         player.writeCueReference(recorder, cueSamples, sampleRate, 0, cue.size / 2, cueAdmission)
-        player.writeCueReference(recorder, cueSamples, sampleRate, cue.size / 2, cue.size - cue.size / 2, cueAdmission)
-        player.release()
-
-        // The anchor did not survive as though it covered the cue's unknown sounding time.
+        // The anchor is invalidated by the FIRST untimed acceptance, observed through the production
+        // consumer's own input -- shouldProcessReference with recorder.reference() (NOT snapshot(),
+        // which discards timing before the filter and could never detect stale-anchor use).
+        val micPositionMs = nowMs + 1_000L // capture-clock instant on the anchor's axis
         assertNull(
-            "the untimed cue contributions must invalidate the window anchor",
+            "the first untimed acceptance must invalidate the anchor at the production consumer's input",
             recorder.reference().startPositionMs,
         )
-        // And speech is matched by offset through the production filter (no position offered).
+        player.writeCueReference(recorder, cueSamples, sampleRate, cue.size / 2, cue.size - cue.size / 2, cueAdmission)
+        player.release()
+        assertNull(
+            "the queued remainder leaves the anchor invalidated too",
+            recorder.reference().startPositionMs,
+        )
+
+        // And through shouldProcessReference -- the production engine's exact call shape, with the
+        // reference and a capture-clock mic instant -- episode-matching audio is still suppressed as
+        // bleed via the offset-matching fallback (correct: the episode sounds; the cue invalidated
+        // only the now-untruthful anchor).
         val speechLike = FloatArray(1_600) { i -> 0.3f * episode[i] }
-        assertTrue(
-            "with no offered position the correlator falls back to offset matching and the " +
-                "episode-matching speech is still suppressed as bleed (correct: the episode sounds)",
-            !filter.shouldProcess(speechLike, hasSpeakerId = false, speakerIndex = 0, playbackBuffer = recorder.snapshot()),
+        assertFalse(
+            "episode echo must still be suppressed through shouldProcessReference after the cue",
+            filter.shouldProcessReference(speechLike, false, 0, recorder.reference(), micPositionMs),
         )
     }
 

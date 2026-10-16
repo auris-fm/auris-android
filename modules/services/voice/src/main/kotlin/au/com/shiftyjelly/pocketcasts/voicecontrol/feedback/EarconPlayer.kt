@@ -8,7 +8,6 @@ import android.media.AudioTrack
 import android.media.MediaPlayer
 import androidx.annotation.VisibleForTesting
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
-import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PositionAxis
 import java.io.InputStream
 import javax.inject.Inject
 import kotlin.math.roundToInt
@@ -586,19 +585,16 @@ class EarconPlayer(
             // OWNED like every other reference writer (@spec): the earcon's samples carry the admission
             // minted when this cue took the track, so global retirement gives them a deadline and stale
             // cues cannot re-enter.
-            // POSITION ATTRIBUTION (4236341498): the cue's samples occupy the monotonic capture clock
-            // at the write instant -- the clock the microphone onset and the cloud answer's render
-            // timestamps share -- under the Monotonic axis. An UNTIMED write left the window's derived
-            // start short by the cue's duration and permanently degraded the position axis once
-            // shouldProcessReference began consuming the anchor; attributing the cue to its true
-            // sounding time keeps every window position truthful (an episode+cue window honestly
-            // reports Mixed/no position, since a cue has no media-timeline place).
-            recorder.write(
-                FloatArray(forReference.size) { forReference[it] / 32768f },
-                positionMs = recorder.monotonicNowMs(),
-                axis = PositionAxis.Monotonic,
-                admission = admission,
-            )
+            // POSITION ATTRIBUTION (4236341498, conservative per @spec 6e52d610): cue timing is
+            // explicitly UNAVAILABLE. recordAccepted observes accepted/submitted samples, not their
+            // render instants -- a write-instant timestamp would be submission time relabeled as
+            // sounding time (queued and partial writes make that guess wrong), so no timing is
+            // claimed. The UNTIMED write invalidates the window anchor through write()'s own rule
+            // (untimed -> Unanchored; any later timed write -> Mixed): an anchor can never be
+            // presented as covering cue audio whose sounding time is unknown. If a real
+            // render/frame-to-clock observation is ever established for this track, it can replace
+            // this -- until then, unavailable is the honest answer.
+            recorder.write(FloatArray(forReference.size) { forReference[it] / 32768f }, admission = admission)
         }
     }
 

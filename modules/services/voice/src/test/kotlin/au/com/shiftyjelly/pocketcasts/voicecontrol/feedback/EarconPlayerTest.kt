@@ -26,6 +26,90 @@ class EarconPlayerTest {
     }
 
     @Test
+    fun `submit is nonblocking, serialised, and hands each cue its OWN accepted token`() {
+        // 4d1e5946 controls on the PRODUCTION player with a real accepted write:
+        // - a predecessor holds the player thread; submit must return while the write is pending;
+        // - tasks run serialised: exactly A then B, each callback with ITS OWN distinct token;
+        // - an uninstalled clip is a refusal: callback with null, and worker exceptions fail the test.
+        player.installClipForTest(EarconId.SUCCESS, ShortArray(1600) { 1 }, 16_000)
+        player.installClipForTest(EarconId.WAKE_WORD, ShortArray(1600) { 2 }, 16_000)
+        // A track whose write ACCEPTS everything, so the accepted-token path is exercised without a
+        // native audio stack.
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.kotlin.any<ShortArray>(),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { inv -> inv.getArgument<Int>(2) }
+        player.trackFactoryForTest = { track }
+        val blockerEntered = java.util.concurrent.CountDownLatch(1)
+        val releaseBlocker = java.util.concurrent.CountDownLatch(1)
+        val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+        // Hold the player thread: this blocker runs before anything the player submits.
+        executor.submit {
+            blockerEntered.countDown()
+            releaseBlocker.await(5, java.util.concurrent.TimeUnit.SECONDS)
+        }
+        assertTrue("precondition: the blocker must hold the player thread", blockerEntered.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        player.installExecutorForTest(executor)
+
+        val workerFailures = java.util.concurrent.CopyOnWriteArrayList<Throwable>()
+        val order = java.util.Collections.synchronizedList(mutableListOf<String>())
+        val tokens = java.util.concurrent.ConcurrentHashMap<String, EarconPlayer.AdmissionToken>()
+        val bDone = java.util.concurrent.CountDownLatch(2)
+
+        val t0 = System.nanoTime()
+        player.submit(EarconId.SUCCESS) { token ->
+            try {
+                order += "A"
+                if (token == null) {
+                    workerFailures += IllegalStateException("A must be accepted, not refused")
+                } else {
+                    tokens["A"] = token
+                }
+            } catch (t: Throwable) {
+                workerFailures += t
+            } finally {
+                releaseBlocker.countDown()
+                bDone.countDown()
+            }
+        }
+        val elapsedMs = (System.nanoTime() - t0) / 1_000_000
+        assertTrue(
+            "submit must return while the predecessor still holds the player thread (took ${elapsedMs}ms)",
+            elapsedMs < 1_000 && releaseBlocker.count > 0,
+        )
+        player.submit(EarconId.WAKE_WORD) { token ->
+            try {
+                order += "B"
+                if (token == null) {
+                    workerFailures += IllegalStateException("B must be accepted, not refused")
+                } else {
+                    tokens["B"] = token
+                    assertTrue(
+                        "tokens must be DISTINCT per cue",
+                        tokens["A"] != null && tokens["B"] != null && tokens["A"] != tokens["B"],
+                    )
+                }
+            } catch (t: Throwable) {
+                workerFailures += t
+            } finally {
+                bDone.countDown()
+            }
+        }
+        releaseBlocker.countDown()
+        assertTrue("both callbacks must complete", bDone.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        executor.shutdownNow()
+
+        assertTrue("worker failures: $workerFailures", workerFailures.isEmpty())
+        assertEquals("callbacks must run exactly A then B", listOf("A", "B"), order)
+        assertTrue("A's token must be its own acceptance", tokens["A"] != null)
+        assertTrue("B's token must be its own distinct acceptance", tokens["B"] != null)
+    }
+
+    @Test
     fun `a HELD accepted write does not block the submitter, and coverage follows that cue only`() {
         // 35f7e2d8 controls on the production player lifecycle:
         // (1) held-write: the track's write BLOCKS like MODE_STREAM behind the audio buffer; the

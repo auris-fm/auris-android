@@ -26,6 +26,12 @@ class AndroidAudioRouteMonitor @Inject constructor(
     @ApplicationContext context: Context,
     private val gracePeriodSignal: GracePeriodSignal,
     /**
+     * Route-read debounce in milliseconds. Injectable (the way [GracePeriodSignal] takes timeoutMs)
+     * so a test can shrink it and pin the production debounce path deterministically instead of
+     * racing it with wall-clock slack (4236540741). Production default: 500 ms.
+     */
+    private val debounceMs: Long = 500L,
+    /**
      * Where an owned stream reports its output actually goes, or null when that is not knowable.
      *
      * Enumeration says what COULD be an output; this says what one IS routed to, so it is the stronger
@@ -125,7 +131,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
 
         debounceJob?.cancel()
         debounceJob = scope.launch {
-            delay(500L)
+            delay(debounceMs)
             mutableRoute.value = readRoute()
             mutableAvailability.value = readAvailability()
         }

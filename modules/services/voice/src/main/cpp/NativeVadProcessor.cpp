@@ -67,6 +67,7 @@ void NativeVadProcessor::stop() {
     mSpeechOnsetSample = 0;
                     mSpeechEndSample = 0;
     mSpeechActive = false;
+    mFaultLatched = false; // a new session starts with no terminal cause latched
     mConsecutiveSilentFrames = 0;
     mDrainRemaining = 0;
 
@@ -267,6 +268,7 @@ void NativeVadProcessor::runLoop() {
             // distinct value is what makes the fault visible at the boundary.
             mPendingEvent = kFaultEvent; // fault: surfaced, not an ordinary end
             mEventReady = true;
+            mFaultLatched = true; // preserve the terminal cause through loop exit
             mEventCv.notify_one();
             break;
         }
@@ -398,8 +400,14 @@ void NativeVadProcessor::runLoop() {
     // believing capture is running, with no restart.
     {
         std::lock_guard<std::mutex> lock(mEventMutex);
-        mPendingEvent = -1;
-        mEventReady = true;
+        // PRESERVE THE TERMINAL CAUSE. Overwriting unconditionally replaced a published
+        // kFaultEvent with -1 whenever the consumer had not read it yet -- the fault became
+        // scheduling-dependent. A latched fault stays what it is; only an unconsumed ordinary
+        // exit gets the terminal stop sentinel.
+        if (!mFaultLatched) {
+            mPendingEvent = -1;
+            mEventReady = true;
+        }
         mEventCv.notify_all();
     }
 }

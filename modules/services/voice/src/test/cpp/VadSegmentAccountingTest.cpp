@@ -59,6 +59,11 @@ class FakeCapture : public OboeAudioCapture {
 public:
     // loud = speech; quiet = silence. Consumed in order, one frame per readRingBuffer.
     std::deque<bool> script;
+    // When true, an exhausted script keeps serving frames (loud or silent per drainLoud) instead of
+    // reporting the stream inactive -- the stuck-detector case needs 3750+ consecutive SPEECH frames,
+    // which a finite script cannot supply at the consumer's pace.
+    bool drainExhausted = false;
+    bool drainLoud = false;
     // Optional per-read wall-clock delay. The processor no longer discards frames after a
     // segment (the blind 1500ms cooldown is removed), so no test needs this to pass; it is kept
     // only as a lever for timing-sensitive scripts.
@@ -68,6 +73,15 @@ public:
 
     int32_t readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs) override {
         (void)timeoutMs;
+        // The stuck-case script is LONGER than the frame limit; drain it fully instead of treating
+        // exhaustion as an end. Without this, a 4000-frame script exhausts at the consumer's pace
+        // and the loop exits before reaching kStuckDetectorFrameLimit.
+        if (drainExhausted && script.empty()) {
+            const int16_t amp = drainLoud ? 4000 : 0;
+            for (int32_t i = 0; i < maxSamples; i++) outData[i] = amp;
+            served++;
+            return maxSamples;
+        }
         if (maxSamples < kFrame || script.empty()) return 0;  // stream inactive, like a timeout
         // Sleep on every read from pauseAfterFrames onward, so the wall-clock cooldown elapses no
         // matter where the segment happens to close. The cost is wall time — the pause stretches
@@ -154,19 +168,24 @@ int main() {
         std::deque<bool> script = frames(4000, true);
         FakeCapture capture;
         capture.script = script;
+        capture.drainExhausted = true;
+        capture.drainLoud = true;
         NativeVadProcessor processor(&capture);
         check(processor.start(), "stuck-case capture starts");
         bool sawFault = false;
         int segmentsEmitted = 0;
         int lastEvent = 0;
+        bool timedOut = false;
         while (true) {
             const int event = processor.waitForEvent(30000);
             lastEvent = event;
             if (event == NativeVadProcessor::kFaultEvent) { sawFault = true; continue; }
             if (event == 2) { segmentsEmitted++; continue; }
-            break;  // stop sentinel or timeout ends the run
+            if (event == 0) { timedOut = true; }  // TIMEOUT is its own outcome, not a terminal stop
+            break;
         }
-        std::printf("      stuck-case last event=%d unserved=%zu\n", lastEvent, capture.script.size());
+        std::printf("      stuck-case last event=%d timedOut=%d unserved=%zu\n", lastEvent,
+            (int)timedOut, capture.script.size());
         processor.stop();
         check(sawFault, "a stuck detector surfaces the FAULT sentinel, not the stop sentinel");
         check(segmentsEmitted == 0, "a stuck detector emits NO completed segment");

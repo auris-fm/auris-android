@@ -17,6 +17,63 @@ class PlaybackCrossCorrelatorPositionTest {
     private val rate = 16_000
     private fun tone(n: Int, freq: Double, phase: Double = 0.0) = FloatArray(n) { i -> (0.6 * sin(2 * PI * freq * i / rate + phase)).toFloat() }
 
+    // 4235652583 BOUNDARIES (unpositioned path, END-anchored window): with a FULL ring the window is
+    // [maxOffset-8000, maxOffset-800]; a match at exactly the 50 ms and 500 ms delay edges must be
+    // found, and a fresh (partial) reference must still admit its in-window offsets.
+    @Test
+    fun `unpositioned - full ring, match at the 50 ms delay edge is found`() {
+        val rate = 16_000
+        val micSize = 1600
+        val burst = tone(micSize, 300.0)
+        val maxOffset = 32_000 - micSize
+        val offset = maxOffset - (50 * rate / 1_000)
+        val samples = FloatArray(32_000) { 0f }
+        burst.copyInto(samples, offset)
+        val mic = FloatArray(micSize) { i -> 0.3f * burst[i] }
+        assertTrue(
+            "unpositioned full-ring match at the 50 ms edge must be found",
+            PlaybackCrossCorrelator().isPlaybackBleed(mic, PlaybackReference(samples, rate, null)),
+        )
+    }
+
+    @Test
+    fun `unpositioned - full ring, match at the 500 ms delay edge is found`() {
+        val rate = 16_000
+        val micSize = 1600
+        val burst = tone(micSize, 300.0)
+        val maxOffset = 32_000 - micSize
+        val offset = maxOffset - (500 * rate / 1_000)
+        val samples = FloatArray(32_000) { 0f }
+        burst.copyInto(samples, offset)
+        val mic = FloatArray(micSize) { i -> 0.3f * burst[i] }
+        assertTrue(
+            "unpositioned full-ring match at the 500 ms edge must be found",
+            PlaybackCrossCorrelator().isPlaybackBleed(mic, PlaybackReference(samples, rate, null)),
+        )
+    }
+
+    @Test
+    fun `unpositioned - partial reference admits only in-window offsets`() {
+        val rate = 16_000
+        val micSize = 1600
+        // Reference 4_800 samples (300 ms): maxOffset = 3_200 (200 ms). The clamped window is
+        // 0..2_400 (implied delays 50..200 ms). The burst sits at offset 2_400 -- the 50 ms edge,
+        // the window's END -- and must still be found on a partial reference. (The sub-50 ms
+        // EXCLUSION is a source-level window property -- end = maxOffset - minDelay -- and cannot
+        // be observed end-to-end: content near the newest samples is partially overlapped by the
+        // last searched slice, and normalized correlation of a partial overlap still fires. That is
+        // inherent to windowed correlation, not a defect; asserting it here would be asserting
+        // nothing.)
+        val burst = tone(micSize, 300.0)
+        val windowMatch = FloatArray(4_800) { 0f }
+        burst.copyInto(windowMatch, 2_400)
+        val mic = FloatArray(micSize) { i -> 0.3f * burst[i] }
+        assertTrue(
+            "partial reference: in-window offset (50 ms implied delay) is found",
+            PlaybackCrossCorrelator().isPlaybackBleed(mic, PlaybackReference(windowMatch, rate, null)),
+        )
+    }
+
     @Test
     fun `audio that matches only a stale region is not bleed when the position says it is old`() {
         // The reference holds a distinctive burst at its START, followed by unrelated audio. By

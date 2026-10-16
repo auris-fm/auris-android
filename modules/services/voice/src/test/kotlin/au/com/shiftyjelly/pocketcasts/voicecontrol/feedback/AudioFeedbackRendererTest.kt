@@ -37,6 +37,47 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `submitEarcon starts coverage ONLY at that cue's admission, never before or on refusal`() {
+        // 35f7e2d8 renderer-boundary control (d58ef6c2: name the missing boundary): with a mocked
+        // player, submit()'s callback is the ONLY thing that may start coverage. Before admission
+        // the shared completion state belongs to no cue -- starting an observer there is exactly
+        // how the shipped bug published a PREDECESSOR's Consumed. A refusal (null token) must
+        // leave coverage unstarted forever.
+        val callbacks = mutableListOf<(EarconPlayer.AdmissionToken?) -> Unit>()
+        org.mockito.kotlin.doAnswer { inv ->
+            @Suppress("UNCHECKED_CAST")
+            callbacks += inv.getArgument<((EarconPlayer.AdmissionToken?) -> Unit)?>(1)!!
+            null // submit returns Unit; the answer just records the callback
+        }.whenever(earconPlayer).submit(org.mockito.kotlin.eq(EarconId.WAKE_WORD), org.mockito.kotlin.any())
+
+        renderer.submitEarcon(EarconId.WAKE_WORD)
+        assertEquals("the renderer must hand submit its own callback", 1, callbacks.size)
+        assertFalse(
+            "coverage must NOT start before the cue is admitted (predecessor-state window)",
+            renderer.coverageIsRunningForTest(),
+        )
+
+        callbacks[0](null) // refusal
+        assertFalse(
+            "a REFUSED cue gets no coverage observer at all",
+            renderer.coverageIsRunningForTest(),
+        )
+
+        renderer.submitEarcon(EarconId.SUCCESS)
+        org.mockito.kotlin.doAnswer { inv ->
+            @Suppress("UNCHECKED_CAST")
+            callbacks += inv.getArgument<((EarconPlayer.AdmissionToken?) -> Unit)?>(1)!!
+            null
+        }.whenever(earconPlayer).submit(org.mockito.kotlin.eq(EarconId.SUCCESS), org.mockito.kotlin.any())
+        renderer.submitEarcon(EarconId.SUCCESS)
+        callbacks.last()(EarconPlayer.AdmissionToken(42L)) // acceptance for THAT cue
+        assertTrue(
+            "coverage starts only from the admitted cue's own result",
+            renderer.coverageIsRunningForTest(),
+        )
+    }
+
+    @Test
     fun `a REFUSED cue is reported as refused, not accepted`() {
         // @reviewer: playEarcon returned true even when the player returned null, so a REFUSED cue looked
         // accepted to every caller -- they could not tell a cue that never sounded from one that did.

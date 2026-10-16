@@ -68,6 +68,7 @@ void NativeVadProcessor::stop() {
                     mSpeechEndSample = 0;
     mSpeechActive = false;
     mFaultLatched = false; // a new session starts with no terminal cause latched
+    mLoopExited.store(false, std::memory_order_release); // and no stale completion flag
     mConsecutiveSilentFrames = 0;
     mDrainRemaining = 0;
 
@@ -279,6 +280,9 @@ void NativeVadProcessor::runLoop() {
             mPendingEvent = kFaultEvent; // fault: surfaced, not an ordinary end
             mEventReady = true;
             mFaultLatched = true; // preserve the terminal cause through loop exit
+            // The processor is STOPPED by the fault: clear mActive BEFORE unlocking so a later
+            // start() cannot report already-running against an exiting worker (b124a183).
+            mActive.store(false, std::memory_order_release);
             mEventCv.notify_one();
             break;
         }

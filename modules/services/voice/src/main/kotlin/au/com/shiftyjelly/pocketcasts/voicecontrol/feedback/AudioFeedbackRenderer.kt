@@ -148,8 +148,16 @@ class AudioFeedbackRenderer(
      */
     fun submitEarcon(id: EarconId) {
         if (disposed) return
-        earconPlayer.submit(id)
-        coverEarconUntilConsumed(id)
+        // Coverage starts ONLY from the player task's own result (bb6f3aa9): starting it here would
+        // read the predecessor's emittedDurationMs/completion -- publishing its Consumed and stopping
+        // before this cue is even written -- and a refused or missing clip would get an observer
+        // despite no acceptance. Disposal between submission and admission is handled by the same
+        // disposed check the coverage path applies.
+        earconPlayer.submit(id) { token ->
+            if (token != null && !disposed) {
+                coverEarconUntilConsumed(id)
+            }
+        }
     }
 
     /**

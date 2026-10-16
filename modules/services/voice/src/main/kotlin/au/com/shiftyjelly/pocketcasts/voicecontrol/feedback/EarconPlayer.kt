@@ -198,9 +198,17 @@ class EarconPlayer(
      * through a return value, so this is only for callers who cue and move on (the ASR collect path),
      * not for callers that must gate on acceptance.
      */
-    fun submit(id: EarconId) {
+    fun submit(id: EarconId, onAdmitted: ((AdmissionToken?) -> Unit)? = null) {
+        val task = {
+            // The callback runs ON THE PLAYER THREAD, in task order: a successor's coverage cannot
+            // start while an older cue is still writing, and a refusal (null) never starts coverage
+            // at all. Admission-token ownership is unchanged -- the token is minted here, by the
+            // same bookkeeping play() uses.
+            val token = startOnPlayerThread(id)
+            onAdmitted?.invoke(token)
+        }
         synchronized(executorLock) {
-            executorForLocked().submit { startOnPlayerThread(id) }
+            executorForLocked().submit(task)
         }
     }
 

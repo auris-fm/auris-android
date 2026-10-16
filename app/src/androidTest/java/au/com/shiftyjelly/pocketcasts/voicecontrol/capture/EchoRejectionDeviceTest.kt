@@ -75,9 +75,9 @@ class EchoRejectionDeviceTest {
             // An open failure is not evidence of a missing environment: a native or configuration
             // regression returns the same negative. Unexplained open failure is a FAILURE.
             assertTrue("openStreamForAcquisition failed (deviceId=$deviceId)", deviceId >= 0)
-            // Only the OPEN failure is an observed unavailable prerequisite (no input device).
-            // start/attach failures have no independently identified environmental cause, so they
-            // stay failures, not skips. The selected input device is NOT verified here -- attach is
+            // All three acquisition steps are hard assertions (339f7f63): an unexplained failure is
+            // a failure, not a skip -- a native/configuration regression must not present as a
+            // missing environment. The selected input device is NOT verified here -- attach is
             // "attached", not "confirmed to the chosen route".
             assertTrue("the acquired stream did not start", capture.startAcquiredStream())
             assertTrue("the native VAD did not attach to the acquired stream", capture.attachCapture())
@@ -189,9 +189,9 @@ class EchoRejectionDeviceTest {
             // An open failure is not evidence of a missing environment: a native or configuration
             // regression returns the same negative. Unexplained open failure is a FAILURE.
             assertTrue("openStreamForAcquisition failed (deviceId=$deviceId)", deviceId >= 0)
-            // Only the OPEN failure is an observed unavailable prerequisite (no input device).
-            // start/attach failures have no independently identified environmental cause, so they
-            // stay failures, not skips. The selected input device is NOT verified here -- attach is
+            // All three acquisition steps are hard assertions (339f7f63): an unexplained failure is
+            // a failure, not a skip -- a native/configuration regression must not present as a
+            // missing environment. The selected input device is NOT verified here -- attach is
             // "attached", not "confirmed to the chosen route".
             assertTrue("the acquired stream did not start", capture.startAcquiredStream())
             assertTrue("the native VAD did not attach to the acquired stream", capture.attachCapture())

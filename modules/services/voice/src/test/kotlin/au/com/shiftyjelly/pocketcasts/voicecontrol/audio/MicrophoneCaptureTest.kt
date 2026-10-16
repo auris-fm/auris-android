@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.audio
 
 import android.content.Context
 import android.content.res.AssetManager
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.EpisodeReferenceEligibility
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -72,7 +73,7 @@ class MicrophoneCaptureTest {
     @Test
     fun `a stale collector teardown cannot stop a stream opened for its replacement`() {
         val hardware = FakeCaptureHardware()
-        val capture = MicrophoneCapture(context(), hardware)
+        val capture = MicrophoneCapture(context(), hardware, EpisodeReferenceEligibility())
 
         // First capture: open the stream and attach engine A.
         assertTrue(capture.openStreamForAcquisition() >= 0)
@@ -97,7 +98,7 @@ class MicrophoneCaptureTest {
     @Test
     fun `a stale collector teardown cannot stop an attached replacement capture`() {
         val hardware = FakeCaptureHardware()
-        val capture = MicrophoneCapture(context(), hardware)
+        val capture = MicrophoneCapture(context(), hardware, EpisodeReferenceEligibility())
 
         capture.openStreamForAcquisition()
         assertTrue(capture.attachCapture())
@@ -117,7 +118,7 @@ class MicrophoneCaptureTest {
     @Test
     fun `stopping the current capture tears the native stream down`() {
         val hardware = FakeCaptureHardware()
-        val capture = MicrophoneCapture(context(), hardware)
+        val capture = MicrophoneCapture(context(), hardware, EpisodeReferenceEligibility())
 
         capture.openStreamForAcquisition()
         assertTrue(capture.attachCapture())
@@ -131,7 +132,7 @@ class MicrophoneCaptureTest {
     @Test
     fun `closing the acquired stream stops a later stale teardown from touching native capture`() {
         val hardware = FakeCaptureHardware()
-        val capture = MicrophoneCapture(context(), hardware)
+        val capture = MicrophoneCapture(context(), hardware, EpisodeReferenceEligibility())
 
         capture.openStreamForAcquisition()
         assertTrue(capture.attachCapture())

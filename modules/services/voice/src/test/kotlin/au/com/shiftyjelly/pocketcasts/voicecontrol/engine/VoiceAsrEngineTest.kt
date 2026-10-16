@@ -286,7 +286,11 @@ class VoiceAsrEngineTest {
         )
         `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
 
-        // Wake word not detected: full segment flows through during grace
+        // Wake word not detected, so the whole segment is handed to transcription. NOTE (4236593975):
+        // this fixture does NOT observe the wake/grace path -- the mocked grace window is shut (see
+        // init), and no wake signal is emitted here. The claim it previously justified ("flows through
+        // during grace") was dropped because the test cannot see that path; what it actually establishes
+        // is recognizer-before-match ordering with a non-detected wake result.
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,

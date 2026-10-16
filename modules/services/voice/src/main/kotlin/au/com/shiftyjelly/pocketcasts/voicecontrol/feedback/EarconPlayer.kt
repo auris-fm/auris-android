@@ -8,6 +8,7 @@ import android.media.AudioTrack
 import android.media.MediaPlayer
 import androidx.annotation.VisibleForTesting
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
+import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PositionAxis
 import java.io.InputStream
 import javax.inject.Inject
 import kotlin.math.roundToInt
@@ -585,7 +586,19 @@ class EarconPlayer(
             // OWNED like every other reference writer (@spec): the earcon's samples carry the admission
             // minted when this cue took the track, so global retirement gives them a deadline and stale
             // cues cannot re-enter.
-            recorder.write(FloatArray(forReference.size) { forReference[it] / 32768f }, admission = admission)
+            // POSITION ATTRIBUTION (4236341498): the cue's samples occupy the monotonic capture clock
+            // at the write instant -- the clock the microphone onset and the cloud answer's render
+            // timestamps share -- under the Monotonic axis. An UNTIMED write left the window's derived
+            // start short by the cue's duration and permanently degraded the position axis once
+            // shouldProcessReference began consuming the anchor; attributing the cue to its true
+            // sounding time keeps every window position truthful (an episode+cue window honestly
+            // reports Mixed/no position, since a cue has no media-timeline place).
+            recorder.write(
+                FloatArray(forReference.size) { forReference[it] / 32768f },
+                positionMs = recorder.monotonicNowMs(),
+                axis = PositionAxis.Monotonic,
+                admission = admission,
+            )
         }
     }
 

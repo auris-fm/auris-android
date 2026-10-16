@@ -119,6 +119,9 @@ class EarconPlayer(
 
     // Replaces the worker with [service], so a test controls when it is shut down.
 
+    /** Test seam: the production accepted-frames frontier, to prove bookkeeping ran (35f7e2d8). */
+    internal fun acceptedFrontierForTest(): Int = synchronized(executorLock) { acceptedFramesTotal }
+
     internal fun installExecutorForTest(service: java.util.concurrent.ExecutorService) {
         synchronized(executorLock) { executor = service }
     }
@@ -538,14 +541,15 @@ class EarconPlayer(
     }
 
     /**
-     * Test seam (4d1e5946): when non-null, tracks come from here instead of the platform, so a unit
-     * test can hold/observe an ACCEPTED write without a native audio stack. Null in production.
+     * Test seam (4d1e5946; 35f7e2d8 correction): substitutes only the AudioTrack CONSTRUCTION.
+     * The returned instance goes through the SAME lifecycle as a platform track -- rate reuse,
+     * discard-and-recreate, `track = created`, play(), and the acceptedFramesTotal frontier reset --
+     * so completion/release bookkeeping is exercised, not bypassed. Null in production.
      */
     @VisibleForTesting
     internal var trackFactoryForTest: ((sampleRateHz: Int) -> AudioTrack)? = null
 
     private fun ensureTrack(sampleRateHz: Int): AudioTrack {
-        trackFactoryForTest?.let { return it(sampleRateHz) }
         val current = track
         if (current != null) {
             if (current.sampleRate == sampleRateHz) return current
@@ -561,23 +565,25 @@ class EarconPlayer(
             cueHeadTarget = 0
             cueHeadOrigin = 0
         }
-        val minBuffer = AudioTrack.getMinBufferSize(
-            sampleRateHz,
-            AudioFormat.CHANNEL_OUT_MONO,
-            AudioFormat.ENCODING_PCM_16BIT,
-        )
-        val created = AudioTrack.Builder()
-            .setAudioAttributes(earconAudioAttributes())
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(sampleRateHz)
-                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                    .build(),
+        val created = trackFactoryForTest?.invoke(sampleRateHz) ?: run {
+            val minBuffer = AudioTrack.getMinBufferSize(
+                sampleRateHz,
+                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
             )
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .setBufferSizeInBytes(minBuffer)
-            .build()
+            AudioTrack.Builder()
+                .setAudioAttributes(earconAudioAttributes())
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(sampleRateHz)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build(),
+                )
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .setBufferSizeInBytes(minBuffer)
+                .build()
+        }
         created.play()
         track = created
         // A NEW track's head starts at zero, so the frontier restarts with it. Carrying the previous

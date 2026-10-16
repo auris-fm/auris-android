@@ -94,6 +94,17 @@ int NativeVadProcessor::waitForEvent(int32_t timeoutMs) {
     return event;
 }
 
+bool NativeVadProcessor::awaitRunLoopExitForTest(int maxMs) {
+    // Waits for the runLoop's final act (mLoopExited, set under mEventMutex AFTER the terminal
+    // cause is settled). No stop(), no touching mPendingEvent: reading the terminal cause only
+    // after this returns true is synchronized by worker completion, not by racing notifications.
+    for (int waited = 0; waited < maxMs; waited += 5) {
+        if (mLoopExited.load(std::memory_order_acquire)) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
+}
+
 NativeVadProcessor::VadDiagnostics NativeVadProcessor::getDiagnostics() {
     VadDiagnostics d;
     d.lastRms = mLastRms.load(std::memory_order_relaxed);
@@ -406,13 +417,11 @@ void NativeVadProcessor::runLoop() {
         if (!mFaultLatched) {
             mPendingEvent = -1;
             mEventReady = true;
-        } else {
-            // END THE STREAM ON A FAULT. Without this the guard fires every subsequent frame and
-            // overwrites its own published fault with a fresh one while the consumer sleeps --
-            // the run timed out at 60s instead of terminating on the sentinel. Deactivating here
-            // lets the exit block see the latch and leave kFaultEvent standing as the terminal cause.
-            mActive.store(false, std::memory_order_release);
         }
+        // FINAL ACT, after the terminal cause is settled: publish worker completion for the test
+        // boundary (and any future observer). Set UNDER the event lock so an observer that sees
+        // the flag also sees the published event state.
+        mLoopExited.store(true, std::memory_order_release);
         mEventCv.notify_all();
     }
 }

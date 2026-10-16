@@ -72,7 +72,9 @@ class EchoRejectionDeviceTest {
             // are scoped to THIS run; the counter is process-global.
             val runStartFrames = MicrophoneCapture.framesConsumed()
             val deviceId = capture.openStreamForAcquisition()
-            assumeTrue("inconclusive: no input stream could be opened (capture prereq absent)", deviceId >= 0)
+            // An open failure is not evidence of a missing environment: a native or configuration
+            // regression returns the same negative. Unexplained open failure is a FAILURE.
+            assertTrue("openStreamForAcquisition failed (deviceId=$deviceId)", deviceId >= 0)
             // Only the OPEN failure is an observed unavailable prerequisite (no input device).
             // start/attach failures have no independently identified environmental cause, so they
             // stay failures, not skips. The selected input device is NOT verified here -- attach is
@@ -184,7 +186,9 @@ class EchoRejectionDeviceTest {
         try {
             val runStartFrames = MicrophoneCapture.framesConsumed()
             val deviceId = capture.openStreamForAcquisition()
-            assumeTrue("inconclusive: no input stream could be opened (capture prereq absent)", deviceId >= 0)
+            // An open failure is not evidence of a missing environment: a native or configuration
+            // regression returns the same negative. Unexplained open failure is a FAILURE.
+            assertTrue("openStreamForAcquisition failed (deviceId=$deviceId)", deviceId >= 0)
             // Only the OPEN failure is an observed unavailable prerequisite (no input device).
             // start/attach failures have no independently identified environmental cause, so they
             // stay failures, not skips. The selected input device is NOT verified here -- attach is

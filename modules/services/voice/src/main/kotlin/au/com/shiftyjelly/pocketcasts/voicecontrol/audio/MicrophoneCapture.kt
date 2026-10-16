@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.audio
 import android.Manifest
 import android.content.Context
 import androidx.annotation.RequiresPermission
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.EpisodeReferenceEligibility
 import au.com.shiftyjelly.pocketcasts.voicecontrol.BuildConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -27,6 +28,7 @@ import timber.log.Timber
 class MicrophoneCapture @Inject constructor(
     @ApplicationContext private val context: Context,
     private val hardware: CaptureHardware,
+    private val episodeReferenceEligibility: EpisodeReferenceEligibility,
 ) {
     companion object {
         internal const val SAMPLE_RATE_HZ = 16_000
@@ -130,6 +132,9 @@ class MicrophoneCapture @Inject constructor(
         val attached = engine.attachCapture()
         if (attached) {
             activeEngine = engine
+            // REFERENCE ELIGIBILITY (4235652501): capture is live, so the episode reference must be
+            // collected regardless of the transcripts feature toggle.
+            episodeReferenceEligibility.setCaptureActive(true)
             Timber.i("Using OboeCaptureEngine (event-driven VAD) generation=%d", generation)
         } else {
             activeEngine = null
@@ -172,12 +177,14 @@ class MicrophoneCapture @Inject constructor(
         hardware.closeInputCapture()
         currentGeneration = null
         activeEngine = null
+        episodeReferenceEligibility.setCaptureActive(false)
     }
 
     /**
      * Stop audio capture and release resources.
      */
     fun stopCapture() = synchronized(lock) {
+        episodeReferenceEligibility.setCaptureActive(false)
         activeEngine?.dispose()
     }
 

@@ -260,7 +260,6 @@ void NativeVadProcessor::runLoop() {
             mContextCount = 0;
             mContextHead = 0;
 
-            mActive.store(false, std::memory_order_release);
             std::lock_guard<std::mutex> lock(mEventMutex);
             // NOT the stop sentinel. `-1` means "the stream was stopped" and the consumer treats it
             // as an ordinary end, so emitting it here made a fault indistinguishable from a normal
@@ -407,6 +406,12 @@ void NativeVadProcessor::runLoop() {
         if (!mFaultLatched) {
             mPendingEvent = -1;
             mEventReady = true;
+        } else {
+            // END THE STREAM ON A FAULT. Without this the guard fires every subsequent frame and
+            // overwrites its own published fault with a fresh one while the consumer sleeps --
+            // the run timed out at 60s instead of terminating on the sentinel. Deactivating here
+            // lets the exit block see the latch and leave kFaultEvent standing as the terminal cause.
+            mActive.store(false, std::memory_order_release);
         }
         mEventCv.notify_all();
     }

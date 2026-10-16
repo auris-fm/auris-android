@@ -10,17 +10,27 @@ import java.nio.ByteBuffer
 @OptIn(UnstableApi::class)
 class FingerprintTapAudioProcessor(
     private val tap: FingerprintPcmTap,
+    /** STATIC eligibility (feature/platform/decode policy); cannot change mid-stream. */
     private val isEnabled: () -> Boolean,
+    /** DYNAMIC eligibility (active capture session); checked per buffer and at configure time. */
+    private val episodeReferenceEligibility: EpisodeReferenceEligibility? = null,
 ) : BaseAudioProcessor() {
 
-    override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
-        return if (isEnabled()) inputAudioFormat else AudioProcessor.AudioFormat.NOT_SET
-    }
+    // LIFECYCLE TRANSITION IS THE CONTRACT (4235652501, @reviewer 7fc5a3b8): media3 configures the
+    // processor chain only when the renderer (re)enables, and a NOT_SET configuration BYPASSES this
+    // processor entirely -- a capture session starting during existing playback could then never
+    // activate it. The processor therefore stays CONFIGURED whenever it is constructed (the player
+    // builds it only when the tap exists) and eligibility is evaluated PER BUFFER in [queueInput]:
+    // capture start begins forwarding on the next buffer; teardown stops it -- no reconfiguration,
+    // no player restart. The bypass cost of an ineligible-but-configured passthrough is one copy.
+    override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat = inputAudioFormat
+
+    private fun isEligible(): Boolean = isEnabled() || episodeReferenceEligibility?.isCaptureActive() == true
 
     override fun queueInput(inputBuffer: ByteBuffer) {
         val remaining = inputBuffer.remaining()
         if (remaining == 0) return
-        tap.onPcm(inputBuffer.asReadOnlyBuffer(), inputAudioFormat)
+        if (isEligible()) tap.onPcm(inputBuffer.asReadOnlyBuffer(), inputAudioFormat)
         replaceOutputBuffer(remaining).put(inputBuffer).flip()
     }
 }

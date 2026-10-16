@@ -16,6 +16,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -183,6 +184,55 @@ class EchoReferenceFilterTest {
             "a short utterance's echo against the FULL ring must be rejected as bleed, whatever its " +
                 "position in the ring",
             filter.shouldProcess(mic, hasSpeakerId = false, speakerIndex = 0, playbackBuffer = recorder.snapshot()),
+        )
+    }
+
+    // THE ACTUAL CUE WRITER -> CONSUMER (4236341498, @spec b51b1c23/1026f360): the production
+    // EarconPlayer.writeCueReference path -- with a QUEUED and a PARTIAL acceptance -- feeds the
+    // reference, and the anchor behaves per the conservative contract: a previously established
+    // position is invalidated by the untimed cue contributions, and matching speech is accepted by
+    // the production filter (not suppressed by an anchor that never covered the cue).
+    @Test
+    fun `actual earcon cue writer - queued and partial acceptances invalidate the anchor and matching speech is accepted`() {
+        var nowMs = 6_000_000L
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        recorder.monotonicNowMs = { nowMs }
+        val routeMonitor = AndroidAudioRouteMonitor(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            gracePeriodSignal = GracePeriodSignal(),
+        )
+        val filter = UtteranceFilter(PlaybackCrossCorrelator(), routeMonitor)
+        assertTrue("precondition: route is not a headset", routeMonitor.route.value !is AudioRoute.Headset)
+
+        // Episode establishes an anchor on the monotonic clock (the cloud-answer-style path).
+        val episode = FloatArray(8_000) { i -> (0.6 * sin(2 * PI * 220.0 * i / sampleRate)).toFloat() }
+        recorder.write(episode, positionMs = nowMs, axis = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PositionAxis.Monotonic, admission = recorder.openAdmission(91L))
+        val anchorBefore = recorder.reference().startPositionMs
+        assertTrue("precondition: the window is anchored", anchorBefore != null)
+
+        // THE PRODUCTION CUE WRITER, driven directly: first a partial acceptance (half the clip),
+        // then the queued remainder -- exactly the accepted-submission shapes recordAccepted sees.
+        val cue = FloatArray(4_000) { i -> (0.6 * sin(2 * PI * 700.0 * i / sampleRate)).toFloat() }
+        val cueSamples = ShortArray(cue.size) { (cue[it] * 32767).toInt().toShort() }
+        val cueAdmission = recorder.openAdmission(au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer.EARCON_PRODUCER_BASE + 1L)
+        val player = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer(
+            org.robolectric.RuntimeEnvironment.getApplication(),
+        )
+        player.writeCueReference(recorder, cueSamples, sampleRate, 0, cue.size / 2, cueAdmission)
+        player.writeCueReference(recorder, cueSamples, sampleRate, cue.size / 2, cue.size - cue.size / 2, cueAdmission)
+        player.release()
+
+        // The anchor did not survive as though it covered the cue's unknown sounding time.
+        assertNull(
+            "the untimed cue contributions must invalidate the window anchor",
+            recorder.reference().startPositionMs,
+        )
+        // And speech is matched by offset through the production filter (no position offered).
+        val speechLike = FloatArray(1_600) { i -> 0.3f * episode[i] }
+        assertTrue(
+            "with no offered position the correlator falls back to offset matching and the " +
+                "episode-matching speech is still suppressed as bleed (correct: the episode sounds)",
+            !filter.shouldProcess(speechLike, hasSpeakerId = false, speakerIndex = 0, playbackBuffer = recorder.snapshot()),
         )
     }
 

@@ -575,27 +575,35 @@ class EarconPlayer(
             admission: PlaybackBufferRecorder.Admission,
         ) {
             if (recorder == null || count <= 0) return
-            val forReference = EarconAudio.resampleRange(
-                samples = samples,
-                fromRate = sampleRateHz,
-                toRate = REFERENCE_RATE_HZ,
-                startSample = startSample,
-                count = count,
-            )
-            // OWNED like every other reference writer (@spec): the earcon's samples carry the admission
-            // minted when this cue took the track, so global retirement gives them a deadline and stale
-            // cues cannot re-enter.
-            // POSITION ATTRIBUTION (4236341498, conservative per @spec 6e52d610): cue timing is
-            // explicitly UNAVAILABLE. recordAccepted observes accepted/submitted samples, not their
-            // render instants -- a write-instant timestamp would be submission time relabeled as
-            // sounding time (queued and partial writes make that guess wrong), so no timing is
-            // claimed. The UNTIMED write invalidates the window anchor through write()'s own rule
-            // (untimed -> Unanchored; any later timed write -> Mixed): an anchor can never be
-            // presented as covering cue audio whose sounding time is unknown. If a real
-            // render/frame-to-clock observation is ever established for this track, it can replace
-            // this -- until then, unavailable is the honest answer.
-            recorder.write(FloatArray(forReference.size) { forReference[it] / 32768f }, admission = admission)
+            writeCueReference(recorder, samples, sampleRateHz, startSample, count, admission)
         }
+    }
+
+    /**
+     * THE ACTUAL CUE WRITER the accepted-submission path uses, extracted so a control can drive it
+     * directly (queued and partial acceptances included) without clip assets. POSITION ATTRIBUTION
+     * (4236341498, conservative per @spec 6e52d610): cue timing is explicitly UNAVAILABLE --
+     * recordAccepted observes accepted/submitted samples, not render instants, and a write-instant
+     * timestamp would be submission time relabeled as sounding time. The UNTIMED write invalidates
+     * any window anchor the cue's unknown sounding time cannot cover. OWNED like every other
+     * reference writer (@spec): the samples carry the admission minted when the cue took the track.
+     */
+    internal fun writeCueReference(
+        recorder: PlaybackBufferRecorder,
+        samples: ShortArray,
+        fromRateHz: Int,
+        startSample: Int,
+        count: Int,
+        admission: PlaybackBufferRecorder.Admission,
+    ) {
+        val forReference = EarconAudio.resampleRange(
+            samples = samples,
+            fromRate = fromRateHz,
+            toRate = REFERENCE_RATE_HZ,
+            startSample = startSample,
+            count = count,
+        )
+        recorder.write(FloatArray(forReference.size) { forReference[it] / 32768f }, admission = admission)
     }
 
     private inline fun <K, V : Any> Iterable<K>.associateWithNotNull(valueSelector: (K) -> V?): Map<K, V> {

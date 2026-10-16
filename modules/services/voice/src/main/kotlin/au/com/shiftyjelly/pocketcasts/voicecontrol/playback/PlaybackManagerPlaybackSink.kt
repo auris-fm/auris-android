@@ -29,25 +29,30 @@ class PlaybackManagerPlaybackSink @Inject constructor(
      * The [PlaybackManager] already responds to AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK
      * by lowering its volume (VOLUME_DUCK) when configured for duck-over-notification.
      */
+    // THE LISTENER IS THE FOCUS OWNER'S IDENTITY (4236727145): Android keys the focus grant to the
+    // listener instance it was handed, so abandon must pass THAT SAME instance. A fresh lambda in
+    // restore() releases nothing and the host player stays ducked for the rest of the episode.
+    private val duckFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                Timber.i("[VoicePipeline] audio focus restored after cloud duck")
+            }
+
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                Timber.i("[VoicePipeline] host player ducked via focus")
+            }
+
+            else -> {}
+        }
+    }
+
     // The listener-based overload is deprecated in favour of AudioFocusRequestCompat, which lives in
     // androidx.media — a dependency this module does not carry (FocusManager in :repositories uses it).
     // Migrating means adding that dependency; suppressing is the smaller change until then.
     @Suppress("DEPRECATION")
     override suspend fun duck(): VoiceResponse {
         val result = audioManager.requestAudioFocus(
-            { focusChange ->
-                when (focusChange) {
-                    AudioManager.AUDIOFOCUS_GAIN -> {
-                        Timber.i("[VoicePipeline] audio focus restored after cloud duck")
-                    }
-
-                    AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                        Timber.i("[VoicePipeline] host player ducked via focus")
-                    }
-
-                    else -> {}
-                }
-            },
+            duckFocusListener,
             AudioManager.STREAM_MUSIC,
             AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK,
         )
@@ -62,7 +67,7 @@ class PlaybackManagerPlaybackSink @Inject constructor(
     /** Restore by abandoning the duckable focus so the host player regains full volume. */
     @Suppress("DEPRECATION") // Same reason as duck(): see the note there.
     override suspend fun restore(): VoiceResponse {
-        audioManager.abandonAudioFocus {}
+        audioManager.abandonAudioFocus(duckFocusListener)
         Timber.i("[VoicePipeline] abandoned cloud duck focus, host player restored")
         return VoiceResponse.Silent
     }

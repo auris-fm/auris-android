@@ -84,6 +84,9 @@ private:
     // ceiling only exists to surface a detector STUCK active as an explicit fault; it must be far
     // above any plausible utterance so ordinary long speech is never affected.
     static constexpr int32_t kStuckDetectorFrameLimit = 3750;  // ~240s @ 64ms frames
+  public:
+    static constexpr int32_t stuckFrameLimitForTest() { return kStuckDetectorFrameLimit; }
+  private:
 
     /**
      * The event value that reports a FAULT, distinct from the stop sentinel.

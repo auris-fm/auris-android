@@ -187,6 +187,12 @@ int main() {
         std::printf("      stuck-case last event=%d timedOut=%d unserved=%zu\n", lastEvent,
             (int)timedOut, capture.script.size());
         processor.stop();
+        // SYNCHRONIZED observation after worker shutdown: how many frames did the loop actually
+        // consume? (Reviewer 92d80009: establish the premise before asserting the terminal cause.)
+        std::printf("      stuck-case served=%d unserved=%zu after join\n", capture.served,
+            capture.script.size());
+        check(capture.served >= NativeVadProcessor::stuckFrameLimitForTest(),
+            "premise: the script must reach the stuck ceiling before the fault assertion");
         check(sawFault, "a stuck detector surfaces the FAULT sentinel, not the stop sentinel");
         check(segmentsEmitted == 0, "a stuck detector emits NO completed segment");
     }

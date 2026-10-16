@@ -207,20 +207,22 @@ class FlushRetirementNoSuccessorTest {
             tap.onPcm(ByteBuffer.wrap(s16le(ShortArray(1_600) { value })), AudioProcessor.AudioFormat(16_000, 1, C.ENCODING_PCM_16BIT))
         }
 
-        // Playing, then PAUSED: the sink pause event retires the audible reference now. A chunk is
-        // ALSO held in flight across the pause (emitted, not drained): its ticket died at the pause.
+        // Playing; a chunk is emitted and HELD IN FLIGHT (no dispatcher progress yet) -- it carries
+        // the PRE-PAUSE ticket. Then the sink pause event retires the audible reference.
         emit(20_000)
         runCurrent()
         assertEquals("episode audio admitted before pause", 1_600, recorder.snapshot().size)
         val ticketBeforePause = recorder.ownerTagIdsForTest().last()
+        emit(-5_000) // stamped with the LIVE pre-pause ticket; delivery withheld across the pause
         tap.onSinkPaused()
-        emit(-5_000) // pre-pause-stamped chunk, still queued when the pause retires the admission
 
         // PAUSED, NO RESUME, NO WRITES: the bounded tail expires on elapsed time alone. The CONSUMER
         // paths agree, not just snapshot(): window() -- the production read the correlator matches
         // microphone speech against -- holds no expired reference either, so matching speech is no
-        // longer rejected by stale episode audio.
+        // longer rejected by stale episode audio. THEN the held chunk drains -- runCurrent AFTER the
+        // clock moved, so refusal is asserted against post-expiry state.
         nowMs = 60_000L
+        runCurrent()
         val expired = recorder.snapshot()
         assertTrue(
             "the paused episode's audible reference must expire without another write",

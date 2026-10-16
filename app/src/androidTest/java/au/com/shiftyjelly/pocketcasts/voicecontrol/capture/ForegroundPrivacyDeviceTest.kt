@@ -1,8 +1,9 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.capture
 
 import android.util.Log
-import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import au.com.shiftyjelly.pocketcasts.shared.AppLifecycleProviderImpl
 import au.com.shiftyjelly.pocketcasts.voicecontrol.foreground.ForegroundStateMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
@@ -33,54 +34,63 @@ class ForegroundPrivacyDeviceTest {
     @Test
     fun losingTheForegroundClosesGraceAndReturningDoesNotRestoreIt() = runBlocking<Unit> {
         val signal = GracePeriodSignal()
-        val provider = AppLifecycleProviderImpl()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val monitor = ForegroundStateMonitor(provider, scope, signal)
-        // 4236563768: the transition is driven through the REGISTERED observer, exactly as Android
-        // dispatches it. The provider is added to the process lifecycle owner's registry, and the
-        // lifecycle events are delivered through that registry -- the same path ProcessLifecycleOwner's
-        // main-thread bookkeeping uses -- not by calling the provider's methods directly. The app's
-        // own production registration uses this same owner, so the observer here sits where the
-        // shipped one sits.
-        // (ProcessLifecycleOwner itself is this pattern: a LifecycleOwner whose registry dispatches
-        // events to its registered DefaultLifecycleObservers; lifecycle-process is not on the
-        // androidTest classpath, so the same registry mechanism is exercised here on a local owner.)
-        val owner = object : androidx.lifecycle.LifecycleOwner {
-            override val lifecycle: androidx.lifecycle.Lifecycle =
-                androidx.lifecycle.LifecycleRegistry(this)
-        }
-        val registry = androidx.lifecycle.LifecycleRegistry(owner)
-        registry.addObserver(provider)
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val ctx = instrumentation.targetContext
+        val provider = au.com.shiftyjelly.pocketcasts.shared.AppLifecycleProviderImpl()
 
-        // The app is in the foreground before anything else: the monitor's edge detector needs to have
-        // SEEN a foreground state, or a later loss is not a transition and closure never fires.
-        registry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_RESUME)
+        // PRODUCTION REGISTRATION (4236563768, mutation-checked): the provider is registered the way
+        // AppLifecycleObserver.setup() registers it -- added as a DefaultLifecycleObserver to the
+        // PROCESS lifecycle owner the app itself uses. Events are then produced by the REAL dispatch
+        // path: moving the actual process to the background (pressHome) and back (relaunch) makes
+        // Android's main thread drive ProcessLifecycleOwner, which reaches the registered provider
+        // exactly as in production. If AppLifecycleObserver.setup() stopped registering the provider,
+        // the flow would never flip and the closure below would never fire -- the control fails.
+        // (lifecycle-process is on the app classpath; the app under test has already run setup().)
+        val appLifecycleOwner = ProcessLifecycleOwner.get()
+        instrumentation.runOnMainSync { appLifecycleOwner.lifecycle.addObserver(provider) }
         delay(300)
+
+        // Bring the app to the foreground first: the edge detector must have SEEN a foreground state,
+        // or a later loss is not a transition and closure never fires. The launch intent is the
+        // app's own entry activity.
+        val launchIntent = ctx.getLaunchIntentForApp()
+        val device = androidx.test.uiautomator.UiDevice.getInstance(instrumentation)
+        ctx.startActivity(launchIntent)
+        device.waitForIdle()
+        delay(1_500)
 
         // A wake opens the window, the way a user's spoken wake does.
         signal.onWakeWordDetected()
         assertTrue("the wake must open the window", signal.isActive.value)
         assertFalse("an open window is not a privacy closure", signal.isClosedByPrivacy())
         val closuresBefore = signal.privacyClosureCount()
-        Log.i(tag, "window open: active=${signal.isActive.value} closures=$closuresBefore")
+        Log.i(tag, "window open: active=${'$'}{signal.isActive.value} closures=${'$'}closuresBefore")
 
-        // The real lifecycle dispatch: ON_PAUSE through the registry reaches the registered observer.
-        registry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_PAUSE)
-        delay(500)
+        // The REAL foreground loss: pressHome moves the process background, Android dispatches
+        // onStop to the registered provider on the main thread.
+        device.pressHome()
+        delay(1_500)
 
         val closed = signal.isClosedByPrivacy()
-        Log.i(tag, "after foreground loss: closedByPrivacy=$closed active=${signal.isActive.value} closures=${signal.privacyClosureCount()}")
+        Log.i(tag, "after foreground loss: closedByPrivacy=${'$'}closed active=${'$'}{signal.isActive.value} closures=${'$'}{signal.privacyClosureCount()}")
         assertTrue("losing the foreground must close the window", closed)
         assertFalse("a privacy closure ends the window", signal.isActive.value)
         assertEquals("exactly one closure", closuresBefore + 1, signal.privacyClosureCount())
 
         // Returning to the foreground must not quietly reopen the window the privacy event ended: only
         // a new wake begins another, so grace must stay closed across the return.
-        registry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_RESUME)
-        delay(500)
+        ctx.startActivity(launchIntent)
+        device.waitForIdle()
+        delay(1_500)
         val reopened = signal.isActive.value
-        Log.i(tag, "after foreground return: active=$reopened closedByPrivacy=${signal.isClosedByPrivacy()}")
+        Log.i(tag, "after foreground return: active=${'$'}reopened closedByPrivacy=${'$'}{signal.isClosedByPrivacy()}")
         assertFalse("returning to the foreground must not restore the closed window", reopened)
         assertTrue("the closure must still stand after the return", signal.isClosedByPrivacy())
+        instrumentation.runOnMainSync { appLifecycleOwner.lifecycle.removeObserver(provider) }
+    }
+
+    /** The app's own entry activity, launched as a new task. */
+    private fun android.content.Context.getLaunchIntentForApp(): android.content.Intent = packageManager.getLaunchIntentForPackage(packageName)!!.apply {
+        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
     }
 }

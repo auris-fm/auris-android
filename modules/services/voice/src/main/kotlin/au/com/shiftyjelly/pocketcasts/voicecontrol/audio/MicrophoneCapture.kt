@@ -206,6 +206,10 @@ class MicrophoneCapture @Inject constructor(
         synchronized(lock) {
             if (activeEngine === engine) {
                 activeEngine = null
+                // Only the engine that still OWNS the active capture ends eligibility: a stale
+                // engine finishing while a replacement holds the session must not end it
+                // (@reviewer fe77cc24).
+                episodeReferenceEligibility.setCaptureActive(false)
             }
             if (currentGeneration == engine.generation) {
                 currentGeneration = null

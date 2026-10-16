@@ -75,6 +75,23 @@ class PlaybackCrossCorrelatorPositionTest {
     }
 
     @Test
+    fun `unpositioned - a reference shorter than the minimum delay declines the comparison`() {
+        val rate = 16_000
+        val micSize = 1600
+        // maxOffset = 400 (25 ms) < minDelay (50 ms): even offset 0 implies a sub-floor delay, so
+        // there is no complete in-window candidate -- the comparison is DECLINED (no bleed), never
+        // resolved by clamping onto fabricated offset zero (@spec 691ee13c).
+        val burst = tone(micSize, 300.0)
+        val shortReference = FloatArray(micSize + 400) { 0f }
+        burst.copyInto(shortReference, 0)
+        val mic = FloatArray(micSize) { i -> 0.3f * burst[i] }
+        assertFalse(
+            "a reference shorter than the minimum delay must decline the comparison, not fabricate offset zero",
+            PlaybackCrossCorrelator().isPlaybackBleed(mic, PlaybackReference(shortReference, rate, null)),
+        )
+    }
+
+    @Test
     fun `audio that matches only a stale region is not bleed when the position says it is old`() {
         // The reference holds a distinctive burst at its START, followed by unrelated audio. By
         // buffer OFFSET the burst sits where a plausible delay would be looked for; by POSITION it

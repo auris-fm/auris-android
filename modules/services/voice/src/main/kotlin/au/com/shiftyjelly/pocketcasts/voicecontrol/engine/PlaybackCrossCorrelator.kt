@@ -42,20 +42,19 @@ class PlaybackCrossCorrelator @Inject constructor() {
         val candidate = candidateOffsets(micAudio, reference, micPositionMs, sampleRate)
         val offsetRange = when (candidate) {
             is CandidateRange.Unavailable -> {
-                // THE DEFAULT WINDOW IS END-ANCHORED (4235652583): the microphone hears audio that
-                // sounded an acoustic delay before NOW, and the reference's NEWEST sample is the
-                // closest thing to now. Offset o names content whose delay is (maxOffset - o), so
-                // the 50..500 ms window is offsets [maxOffset - maxDelay, maxOffset - minDelay],
-                // clamped into [0, maxOffset]. PARTIAL-REFERENCE POLICY, stated explicitly: clamping
-                // is the whole policy -- a reference shorter than the delay window still admits the
-                // offsets whose implied delay falls inside the window (e.g. maxOffset 1600 = 100 ms
-                // admits 0..800, i.e. delays 20..100 ms), and offsets implying a faster-than-
-                // physical delay stay excluded. There is no full-scan fallback and no empty case:
-                // start and end are ordered by the same monotone clamp.
+                // 50..500 ms window is offsets [maxOffset - maxDelay, maxOffset - minDelay],
+                // clamped into [0, maxOffset]. PARTIAL-REFERENCE POLICY (@spec 691ee13c): offsets
+                // whose implied delay falls inside the window (e.g. maxOffset 1600 = 100 ms admits
+                // 0..800, i.e. delays 50..100 ms). A reference SHORTER than the minimum delay has
+                // no offset with a complete in-window candidate -- maxOffset < minDelay means even
+                // offset 0 implies a sub-50 ms delay -- so the comparison is DECLINED (empty range),
+                // never resolved by clamping onto fabricated offset zero.
                 val maxOffset = (playbackBuffer.size - micAudio.size).coerceAtLeast(0)
-                val start = (maxOffset - maxDelay).coerceAtLeast(0)
-                val end = (maxOffset - minDelay).coerceAtLeast(0).coerceAtMost(maxOffset)
-                start..end
+                if (maxOffset < minDelay) {
+                    IntRange.EMPTY
+                } else {
+                    (maxOffset - maxDelay).coerceAtLeast(0)..(maxOffset - minDelay).coerceAtMost(maxOffset)
+                }
             }
 
             is CandidateRange.Empty -> return false

@@ -177,11 +177,16 @@ int main() {
         int lastEvent = 0;
         bool timedOut = false;
         while (true) {
-            const int event = processor.waitForEvent(30000);
+            const int event = processor.waitForEvent(60000);
             lastEvent = event;
             if (event == NativeVadProcessor::kFaultEvent) { sawFault = true; continue; }
             if (event == 2) { segmentsEmitted++; continue; }
-            if (event == 0) { timedOut = true; }  // TIMEOUT is its own outcome, not a terminal stop
+            // CONTINUE on speech-started (1): it is an ordinary mid-run event, not a terminator.
+            // Breaking here shut the worker down after a few frames (reviewer 1b0b712b).
+            if (event == 1) { continue; }
+            if (event == 0) { timedOut = true; break; }   // asserted timeout: its own outcome
+            if (event == -1) { break; }                    // named terminal stop sentinel
+            std::printf("      stuck-case unexpected event=%d\n", event);
             break;
         }
         std::printf("      stuck-case last event=%d timedOut=%d unserved=%zu\n", lastEvent,

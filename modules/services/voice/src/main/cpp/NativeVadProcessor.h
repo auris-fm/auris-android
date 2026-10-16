@@ -92,7 +92,9 @@ private:
      * value looked like a clean shutdown: the session ended with no error, no result and no recovery.
      * A separate value lets the consumer surface it instead of completing.
      */
+  public:
     static constexpr int32_t kFaultEvent = -2;
+  private:
     static constexpr double kRmsThreshold = 200.0;
     static constexpr float kSpeechThreshold = 0.2f;
 

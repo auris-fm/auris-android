@@ -52,6 +52,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.runner.RunWith
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
 import org.mockito.Mockito.times
@@ -60,7 +61,9 @@ import org.mockito.Mockito.`when`
 import org.mockito.kotlin.any
 import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.eq
+import org.robolectric.RobolectricTestRunner
 
+@RunWith(RobolectricTestRunner::class)
 class VoiceAsrEngineTest {
 
     @get:Rule
@@ -268,6 +271,137 @@ class VoiceAsrEngineTest {
 
         verify(voiceAudioProcessor).startProcessing()
 
+        engine.stop()
+    }
+
+    @Test
+    fun `the wake path reaches routing while the real cue's audio write is held`() = runTest {
+        // 35f7e2d8 / b124a183 ASR-PROGRESS control at the REAL renderer+player boundary.
+        //
+        // WHY THE RENDERER IS NOT MOCKED HERE: a mocked AudioFeedbackRenderer returns from
+        // submitEarcon immediately no matter what the engine does, so "the callback was recorded but
+        // never invoked" proves nothing about admission -- the same case passes unchanged if the
+        // engine blocks on the cue. That made the previous version of this control vacuous. This one
+        // wires the REAL AudioFeedbackRenderer over the REAL EarconPlayer and holds an ACTUAL
+        // accepted AudioTrack.write() on a latch, so "ASR progressed while the cue was still being
+        // written" is an observation of the shipped mechanism rather than of a stub's default.
+        //
+        // MUTANT TARGET (what must make this fail): replacing the wake branch's
+        // `audioFeedbackRenderer.submitEarcon(EarconId.WAKE_WORD)` with
+        // `playEarcon(EarconId.WAKE_WORD)`. playEarcon -> EarconPlayer.play -> onPlayerThread does
+        // future.get(), so the collect coroutine parks until the held write completes and BOTH
+        // positive assertions below come back empty. Verified by running that mutant.
+        //
+        // SHIPPED SHAPE (not a token fixture): both selected backends return tokens=null
+        // (SenseVoiceBackend:92, CanaryFlashBackend:203), so WakeTranscriptTrimmer.commandText
+        // short-circuits to the raw transcript at :23 and the band trim never fires. The transcript
+        // therefore survives a wake-positive capture as-is and reaches routing without any
+        // timestamp-dependent branch. A token-bearing fixture would have been testing a path
+        // production does not take.
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        val holdWrite = java.util.concurrent.CountDownLatch(1)
+        val enteredWrite = java.util.concurrent.CountDownLatch(1)
+
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16_000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any<ShortArray>(),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { inv ->
+            // The worker enters the write and STAYS there until the test releases it. Nothing in
+            // this control counts the release; the assertions below run inside the hold.
+            enteredWrite.countDown()
+            assertTrue("test bug: the held write was never released", holdWrite.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            inv.getArgument<Int>(2) // accept everything, once released
+        }
+
+        // The REAL application context, not the class's mocked one: EarconPlayer resolves clips and
+        // the AudioTrack factory off it, and a bare mock answers null to applicationContext.
+        val appContext = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val player = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer(appContext)
+        player.trackFactoryForTest = { track }
+        player.installClipForTest(EarconId.WAKE_WORD, ShortArray(1_600) { 1 }, 16_000)
+        val realRenderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
+            player,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine(),
+        )
+
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        // 100 ms of audio. speechEndSample stays 0 (the production default for segmenters that do not
+        // report it), which the engine reads as UNKNOWN -- so the wake-only drop at :334 cannot fire:
+        // it requires speechEndSample > 0. Stated explicitly because leaving it implicit let a later
+        // default change silently alter what this test proves.
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(ShortArray(1_600) { (it % 251).toShort() }, 16_000)),
+                    speechOnsetSample = 0,
+                    speechEndSample = 0,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        // `detect` is SUSPEND: Mockito can only intercept the stub when the call is registered inside
+        // a coroutine (same pattern as createEngineWithSpeech). Stubbed bare it answers null, the
+        // engine's runCatching swallows the NPE as "wake detection failed", and the segment is dropped
+        // BEFORE ASR -- which would make "recognizer never called" pass for entirely the wrong reason.
+        kotlinx.coroutines.runBlocking {
+            `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+                WakeWordResult(detected = true, confidence = 0.95f, completionSample = 800, threshold = 0.812f),
+            )
+        }
+
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = realRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        val handledIntents = mutableListOf<VoiceIntent>()
+        // Unconfined test dispatcher (MainCoroutineRule): the collect body runs inline as frames
+        // arrive, so by the time start() has returned the engine is parked INSIDE the held write.
+        engine.scope = this
+        engine.start(
+            backend = FakeAsrBackend("pause"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { handledIntents += it },
+        )
+
+        // The cue reaches AudioTrack.write on the PLAYER'S OWN thread via submit(), so it must be
+        // scheduled before the precondition can hold.
+        advanceUntilIdle()
+
+        // PRECONDITION, asserted before any claim: the cue's own write is genuinely in progress.
+        assertTrue(
+            "precondition: the real player must be INSIDE the accepted cue write",
+            enteredWrite.await(5, java.util.concurrent.TimeUnit.SECONDS),
+        )
+        // POSITIVE assertions, all made WHILE the write is still held (holdWrite has not counted down).
+        assertEquals(
+            "ASR must reach the recognizer while the acknowledgement cue is still being written",
+            listOf("ensureReady", "recognize:pause"),
+            recognizer.calls,
+        )
+        assertEquals(
+            "the intent must be dispatched to the caller while the cue write is held",
+            listOf(VoiceIntent.Playback.Pause),
+            handledIntents,
+        )
+
+        // Release the held write so the player thread finishes, then shut the boundary down.
+        holdWrite.countDown()
+        realRenderer.release()
         engine.stop()
     }
 

@@ -59,11 +59,6 @@ class FakeCapture : public OboeAudioCapture {
 public:
     // loud = speech; quiet = silence. Consumed in order, one frame per readRingBuffer.
     std::deque<bool> script;
-    // When true, an exhausted script keeps serving frames (loud or silent per drainLoud) instead of
-    // reporting the stream inactive -- the stuck-detector case needs 3750+ consecutive SPEECH frames,
-    // which a finite script cannot supply at the consumer's pace.
-    bool drainExhausted = false;
-    bool drainLoud = false;
     // Optional per-read wall-clock delay. The processor no longer discards frames after a
     // segment (the blind 1500ms cooldown is removed), so no test needs this to pass; it is kept
     // only as a lever for timing-sensitive scripts.
@@ -71,18 +66,27 @@ public:
     std::chrono::milliseconds pauseFor{0};
     int served = 0;
 
+    // Set when the script is exhausted: the runLoop takes the next 0 as "stream inactive" and
+    // exits, so this is the worker-exit barrier the delayed-consumer control waits on.
+    std::atomic<bool> scriptDrained{false};
+    // Bounded: an unbounded spin deadlocks the test forever if the worker never reaches the
+    // drained branch (e.g. start() failed); the caller's event assertions then report the truth.
+    bool awaitWorkerExitForTest(int maxMs = 30000) {
+        for (int waited = 0; waited < maxMs; waited += 5) {
+            if (scriptDrained.load(std::memory_order_acquire)) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return false;
+    }
+
     int32_t readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs) override {
         (void)timeoutMs;
-        // The stuck-case script is LONGER than the frame limit; drain it fully instead of treating
-        // exhaustion as an end. Without this, a 4000-frame script exhausts at the consumer's pace
-        // and the loop exits before reaching kStuckDetectorFrameLimit.
-        if (drainExhausted && script.empty()) {
-            const int16_t amp = drainLoud ? 4000 : 0;
-            for (int32_t i = 0; i < maxSamples; i++) outData[i] = amp;
-            served++;
-            return maxSamples;
+        if (maxSamples < kFrame || script.empty()) {
+            scriptDrained.store(true, std::memory_order_release);
+            // NEGATIVE is what the runLoop treats as "stream inactive" (read < 0 -> break). Zero is
+            // a retry-timeout and would spin forever past the end of the script.
+            return -1;
         }
-        if (maxSamples < kFrame || script.empty()) return 0;  // stream inactive, like a timeout
         // Sleep on every read from pauseAfterFrames onward, so the wall-clock cooldown elapses no
         // matter where the segment happens to close. The cost is wall time — the pause stretches
         // the whole script — which is why waitForEvent's timeout has to be generous above.
@@ -167,28 +171,31 @@ int main() {
     {
         std::deque<bool> script = frames(4000, true);
         FakeCapture capture;
-        capture.script = script;
-        capture.drainExhausted = true;
-        capture.drainLoud = true;
+        capture.script = script;  // 4000 > 3750: a finite script already exceeds the ceiling.
         NativeVadProcessor processor(&capture);
         check(processor.start(), "stuck-case capture starts");
         bool sawFault = false;
-        int segmentsEmitted = 0;
-        int lastEvent = 0;
         bool timedOut = false;
+        int segmentsEmitted = 0;
+        // DELAYED-CONSUMER BARRIER: hold EVERY consumer wait until the worker has exited (the fake
+        // signals runLoop completion), so the fault is read after the exit block has run -- the
+        // notification race is excluded by construction, not by repeated passes.
+        int lastEvent = 0;
         while (true) {
-            const int event = processor.waitForEvent(60000);
+            const int event = [&]() {
+                capture.awaitWorkerExitForTest();
+                return processor.waitForEvent(60000);
+            }();
             lastEvent = event;
-            if (event == NativeVadProcessor::kFaultEvent) { sawFault = true; continue; }
+            if (event == NativeVadProcessor::kFaultEvent) { sawFault = true; break; }  // TERMINAL
             if (event == 2) { segmentsEmitted++; continue; }
-            // CONTINUE on speech-started (1): it is an ordinary mid-run event, not a terminator.
-            // Breaking here shut the worker down after a few frames (reviewer 1b0b712b).
-            if (event == 1) { continue; }
-            if (event == 0) { timedOut = true; break; }   // asserted timeout: its own outcome
-            if (event == -1) { break; }                    // named terminal stop sentinel
+            if (event == 1) { continue; }  // ordinary mid-run event (reviewer 1b0b712b)
+            if (event == 0) { timedOut = true; break; }
+            if (event == -1) { break; }
             std::printf("      stuck-case unexpected event=%d\n", event);
             break;
         }
+        check(!timedOut, "the stuck run must terminate on the fault, never on a timeout");
         std::printf("      stuck-case last event=%d timedOut=%d unserved=%zu\n", lastEvent,
             (int)timedOut, capture.script.size());
         processor.stop();
@@ -196,6 +203,7 @@ int main() {
         // consume? (Reviewer 92d80009: establish the premise before asserting the terminal cause.)
         std::printf("      stuck-case served=%d unserved=%zu after join\n", capture.served,
             capture.script.size());
+        check(!timedOut, "the stuck case must terminate on events, never on the wait timeout");
         check(capture.served >= NativeVadProcessor::stuckFrameLimitForTest(),
             "premise: the script must reach the stuck ceiling before the fault assertion");
         check(sawFault, "a stuck detector surfaces the FAULT sentinel, not the stop sentinel");

@@ -129,6 +129,7 @@ private:
     int32_t mSpeechOnsetSample = 0;
     int32_t mSpeechEndSample = 0;
     bool mSpeechActive = false;
+    bool mFaultLatched = false; // set when the stuck guard published the fault
 
     // Snapshot of mSpeechBuffer for safe cross-thread access from Kotlin.
     std::vector<int16_t> mSnapshotBuffer;

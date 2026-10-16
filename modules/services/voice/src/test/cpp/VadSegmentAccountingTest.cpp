@@ -158,12 +158,15 @@ int main() {
         check(processor.start(), "stuck-case capture starts");
         bool sawFault = false;
         int segmentsEmitted = 0;
+        int lastEvent = 0;
         while (true) {
             const int event = processor.waitForEvent(30000);
+            lastEvent = event;
             if (event == NativeVadProcessor::kFaultEvent) { sawFault = true; continue; }
             if (event == 2) { segmentsEmitted++; continue; }
             break;  // stop sentinel or timeout ends the run
         }
+        std::printf("      stuck-case last event=%d unserved=%zu\n", lastEvent, capture.script.size());
         processor.stop();
         check(sawFault, "a stuck detector surfaces the FAULT sentinel, not the stop sentinel");
         check(segmentsEmitted == 0, "a stuck detector emits NO completed segment");

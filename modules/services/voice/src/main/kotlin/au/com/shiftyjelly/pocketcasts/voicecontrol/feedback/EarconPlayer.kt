@@ -587,7 +587,10 @@ class EarconPlayer(
     }
 
     /**
-     * Decodes a PCM WAV resource to mono 16 kHz 16-bit samples.
+     * Decodes a PCM WAV resource to mono 16-BIT samples AT THE CLIP'S OWN RATE.
+     *
+     * The rate is read from the file header and preserved (the track is created at it), per @spec's
+     * rate policy: playback keeps original fidelity and only the reference copy is normalized.
      *
      * Handles the format the bundles actually use (16-bit PCM, possibly stereo); anything else is
      * rejected rather than silently mis-read, since a wrong interpretation would put wrong audio in

@@ -313,8 +313,10 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetFrame
     return static_cast<jlong>(frames);
 }
 
-// Aggregate detector diagnosis for capture debugging, as a long array so one call returns the frame
-// state atomically. Order: rms, score, speechFrames, silentFrames, drainRemaining, then the three
+// Aggregate detector diagnosis for capture debugging, as a long array so ONE call carries the whole
+// snapshot. NOTE: the fields are read INDEPENDENTLY -- there is no atomicity guarantee across them;
+// the array shape is about call economy, not a consistent view. Order: rms, score, speechFrames,
+// silentFrames, drainRemaining, then the three
 // booleans as 0/1 (gatePassed, isSpeech, speechActive). Aggregates only — no audio is exported.
 // Collection is off unless nativeSetVadDiagnosticsEnabled(true) was called, which release builds do
 // not do.

@@ -64,14 +64,18 @@ class EchoRejectionDeviceTest {
         // startCapture() is an emptyFlow and a zero-segment run says nothing. Frame deltas are taken
         // around THIS run, not read once: the counter is process-global, so another test's audio
         // could satisfy a bare "> 0".
-        val runStartFrames = MicrophoneCapture.framesConsumed()
-        capture.openStreamForAcquisition()
-        assumeTrue("inconclusive: the acquired stream did not start (capture prereq absent)", capture.startAcquiredStream())
-        assumeTrue("inconclusive: the native VAD did not attach to the acquired stream (prereq absent)", capture.attachCapture())
-
         var engine: AndroidPlatformTtsEngine? = null
         var job: kotlinx.coroutines.Job? = null
         try {
+            // Acquisition INSIDE the protected body (99c2d869): an Assume after opening the stream
+            // but before the finally would skip cleanup and leak the acquired stream. Frame deltas
+            // are scoped to THIS run; the counter is process-global.
+            val runStartFrames = MicrophoneCapture.framesConsumed()
+            val deviceId = capture.openStreamForAcquisition()
+            assumeTrue("inconclusive: no input stream could be opened (capture prereq absent)", deviceId >= 0)
+            assumeTrue("inconclusive: the acquired stream did not start (capture prereq absent)", capture.startAcquiredStream())
+            assumeTrue("inconclusive: the native VAD did not attach (prereq absent)", capture.attachCapture())
+
             val segments = mutableListOf<FloatArray>()
             var captureFailure: Throwable? = null
             job = scope.launch {
@@ -168,27 +172,29 @@ class EchoRejectionDeviceTest {
         val capture = MicrophoneCapture(ctx, OboeCaptureHardware(), EpisodeReferenceEligibility())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-        // Same REAL acquisition lifecycle as the echo run (e878d156); see its note on run-scoped
-        // frame deltas.
-        val runStartFrames = MicrophoneCapture.framesConsumed()
-        capture.openStreamForAcquisition()
-        assumeTrue("inconclusive: the acquired stream did not start (capture prereq absent)", capture.startAcquiredStream())
-        assumeTrue("inconclusive: the native VAD did not attach (prereq absent)", capture.attachCapture())
-
-        val segments = mutableListOf<FloatArray>()
-        val job = scope.launch {
-            try {
-                capture.startCapture().collect { result ->
-                    if (result is VoiceSegmenterResult.SpeechEnded) {
-                        segments += result.frames.flatMap { f -> f.samples.map { it / 32768f } }.toFloatArray()
-                    }
-                }
-            } catch (t: Throwable) {
-                Log.e(tag, "capture failed: ${t::class.simpleName}: ${t.message}", t)
-            }
-        }
+        // Same REAL acquisition lifecycle as the echo run. Acquisition is INSIDE the protected body
+        // (99c2d869): a skip after opening must not leak the acquired stream.
+        var job: kotlinx.coroutines.Job? = null
         var engine: AndroidPlatformTtsEngine? = null
         try {
+            val runStartFrames = MicrophoneCapture.framesConsumed()
+            val deviceId = capture.openStreamForAcquisition()
+            assumeTrue("inconclusive: no input stream could be opened (capture prereq absent)", deviceId >= 0)
+            assumeTrue("inconclusive: the acquired stream did not start (capture prereq absent)", capture.startAcquiredStream())
+            assumeTrue("inconclusive: the native VAD did not attach (prereq absent)", capture.attachCapture())
+
+            val segments = mutableListOf<FloatArray>()
+            job = scope.launch {
+                try {
+                    capture.startCapture().collect { result ->
+                        if (result is VoiceSegmenterResult.SpeechEnded) {
+                            segments += result.frames.flatMap { f -> f.samples.map { it / 32768f } }.toFloatArray()
+                        }
+                    }
+                } catch (t: Throwable) {
+                    Log.e(tag, "capture failed: ${t::class.simpleName}: ${t.message}", t)
+                }
+            }
             engine = AndroidPlatformTtsEngine(ctx, recorder)
             engine.warmUp("en")
             withTimeoutOrNull(30_000) {
@@ -200,11 +206,12 @@ class EchoRejectionDeviceTest {
             val nativeTotal = MicrophoneCapture.framesConsumed()
             val runDelta = nativeTotal - runStartFrames
             Log.i(tag, "positive control: runDelta=$runDelta segments=${segments.size}")
-            // Explicit inconclusive is only legitimate when the prerequisites are genuinely absent:
-            // if the native VAD consumed no frames at all, the run says nothing about acceptance.
-            assumeTrue(
-                "inconclusive: this run delivered no frames to the native VAD (capture prereq " +
-                    "unavailable); this is not a demonstrated pass or a demonstrated failure",
+            // After VERIFIED acquisition/attach and an audible TTS delivery, zero delivered frames
+            // is a FAILURE, not an inconclusive (99c2d869): capture is proven live by the
+            // open/start/attach results above, and the speech source is the app's own audible output.
+            assertTrue(
+                "verified capture delivered no frames to the native VAD during audible speech " +
+                    "(runDelta=$runDelta)",
                 runDelta > 0,
             )
             assertTrue(
@@ -214,7 +221,7 @@ class EchoRejectionDeviceTest {
             )
         } finally {
             runCatching { engine?.release() }
-            runCatching { job.cancel() }
+            runCatching { job?.cancel() }
             runCatching { capture.stopCapture() }
             runCatching { capture.closeAcquiredStream() }
         }

@@ -216,21 +216,26 @@ class FlushRetirementNoSuccessorTest {
         emit(-5_000) // stamped with the LIVE pre-pause ticket; delivery withheld across the pause
         tap.onSinkPaused()
 
+        // REFUSAL OBSERVED SEPARATELY FROM EXPIRY (@spec): drain the held chunk at the PAUSE instant,
+        // BEFORE any clock movement -- at this point nothing has expired, so the -5_000 amplitude's
+        // absence is pure admission refusal (the ticket died at the pause), not tail expiry.
+        runCurrent()
+        val atPauseInstant = recorder.snapshot()
+        assertTrue(
+            "the held pre-pause chunk must be REFUSED at delivery (ticket died at the pause) -- " +
+                "asserted at the pause instant, before any expiry",
+            atPauseInstant.none { kotlin.math.abs(it - -5_000 / 32768f) < 0.01f },
+        )
+
         // PAUSED, NO RESUME, NO WRITES: the bounded tail expires on elapsed time alone. The CONSUMER
         // paths agree, not just snapshot(): window() -- the production read the correlator matches
         // microphone speech against -- holds no expired reference either, so matching speech is no
-        // longer rejected by stale episode audio. THEN the held chunk drains -- runCurrent AFTER the
-        // clock moved, so refusal is asserted against post-expiry state.
+        // longer rejected by stale episode audio.
         nowMs = 60_000L
-        runCurrent()
         val expired = recorder.snapshot()
         assertTrue(
             "the paused episode's audible reference must expire without another write",
             expired.none { kotlin.math.abs(it - 20_000 / 32768f) < 0.01f },
-        )
-        assertTrue(
-            "the held pre-pause chunk must be REFUSED at delivery (ticket died at the pause)",
-            expired.none { kotlin.math.abs(it - -5_000 / 32768f) < 0.01f },
         )
         val expiredWindow = recorder.window()
         assertTrue(

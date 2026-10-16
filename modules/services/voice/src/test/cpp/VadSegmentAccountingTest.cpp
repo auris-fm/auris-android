@@ -66,27 +66,14 @@ public:
     std::chrono::milliseconds pauseFor{0};
     int served = 0;
 
-    // Set when the script is exhausted: the runLoop takes the next 0 as "stream inactive" and
-    // exits, so this is the worker-exit barrier the delayed-consumer control waits on.
-    std::atomic<bool> scriptDrained{false};
     bool exitOnEmpty = false;
-    // Bounded: an unbounded spin deadlocks the test forever if the worker never reaches the
-    // drained branch (e.g. start() failed); the caller's event assertions then report the truth.
-    bool awaitWorkerExitForTest(int maxMs = 30000) {
-        for (int waited = 0; waited < maxMs; waited += 5) {
-            if (scriptDrained.load(std::memory_order_acquire)) return true;
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-        return false;
-    }
 
     int32_t readRingBuffer(int16_t* outData, int32_t maxSamples, int32_t timeoutMs) override {
         (void)timeoutMs;
         if (maxSamples < kFrame || script.empty()) {
-            scriptDrained.store(true, std::memory_order_release);
-            // OPT-IN negative return: NEGATIVE makes the runLoop treat the stream as inactive and
-            // BREAK (the stuck case needs a real worker exit for its barrier). Default stays 0 --
-            // the retry-timeout other cases depend on.
+            // OPT-IN real stream-inactive: NEGATIVE makes the runLoop break and EXIT (the stuck
+            // case joins on worker completion). Default 0 keeps the retry-timeout semantics the
+            // other scripted cases were written against.
             if (exitOnEmpty) return -1;
             return 0;
         }
@@ -175,7 +162,7 @@ int main() {
         std::deque<bool> script = frames(4000, true);
         FakeCapture capture;
         capture.script = script;  // 4000 > 3750: a finite script already exceeds the ceiling.
-        capture.exitOnEmpty = true;  // real worker exit for the delayed-consumer barrier
+        capture.exitOnEmpty = true;  // the loop EXITS at script end, so worker completion is joinable
         NativeVadProcessor processor(&capture);
         check(processor.start(), "stuck-case capture starts");
         bool sawFault = false;
@@ -185,11 +172,18 @@ int main() {
         // signals runLoop completion), so the fault is read after the exit block has run -- the
         // notification race is excluded by construction, not by repeated passes.
         int lastEvent = 0;
+        bool synced = false;
         while (true) {
-            const int event = [&]() {
-                capture.awaitWorkerExitForTest();
-                return processor.waitForEvent(60000);
-            }();
+            // WORKER-COMPLETION BOUNDARY (U1): before reading any event, block until the runLoop
+            // thread has exited by itself -- no stop(), no touching the pending event. The terminal
+            // cause is only read AFTER that synchronization succeeds, so the notification race is
+            // excluded by construction.
+            if (!synced) {
+                // HOLD ALL CONSUMER DELIVERY until the worker has completed on its own.
+                synced = processor.awaitRunLoopExitForTest(30000);
+                check(synced, "synchronization: the worker must complete before the terminal read");
+            }
+            const int event = processor.waitForEvent(60000);
             lastEvent = event;
             if (event == NativeVadProcessor::kFaultEvent) { sawFault = true; break; }  // TERMINAL
             if (event == 2) { segmentsEmitted++; continue; }
@@ -200,13 +194,11 @@ int main() {
             break;
         }
         check(!timedOut, "the stuck run must terminate on the fault, never on a timeout");
-        std::printf("      stuck-case last event=%d timedOut=%d unserved=%zu\n", lastEvent,
-            (int)timedOut, capture.script.size());
+        std::printf("      stuck-case last event=%d timedOut=%d\n", lastEvent, (int)timedOut);
         processor.stop();
         // SYNCHRONIZED observation after worker shutdown: how many frames did the loop actually
         // consume? (Reviewer 92d80009: establish the premise before asserting the terminal cause.)
-        std::printf("      stuck-case served=%d unserved=%zu after join\n", capture.served,
-            capture.script.size());
+        std::printf("      stuck-case served=%d after join\n", capture.served);
         check(!timedOut, "the stuck case must terminate on events, never on the wait timeout");
         check(capture.served >= NativeVadProcessor::stuckFrameLimitForTest(),
             "premise: the script must reach the stuck ceiling before the fault assertion");

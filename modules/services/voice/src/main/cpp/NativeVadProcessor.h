@@ -86,6 +86,13 @@ private:
     static constexpr int32_t kStuckDetectorFrameLimit = 3750;  // ~240s @ 64ms frames
   public:
     static constexpr int32_t stuckFrameLimitForTest() { return kStuckDetectorFrameLimit; }
+    // TEST BOUNDARY (U1 barrier): blocks until the runLoop thread has EXITED on its own (the exit
+    // block ran), WITHOUT calling stop() and without touching the pending event. Returns false if
+    // the worker did not exit within the bound -- the caller must assert success before reading the
+    // terminal cause. Synchronization is by worker completion, not by script bookkeeping.
+    bool awaitRunLoopExitForTest(int maxMs);
+    // Blocks until the runLoop thread has actually exited (worker completion, not stop()).
+    void awaitWorkerCompletionForTest();
   private:
 
     /**
@@ -133,6 +140,7 @@ private:
     int32_t mSpeechEndSample = 0;
     bool mSpeechActive = false;
     bool mFaultLatched = false; // set when the stuck guard published the fault
+    std::atomic<bool> mLoopExited{false}; // runLoop's final act, observed by awaitRunLoopExitForTest
 
     // Snapshot of mSpeechBuffer for safe cross-thread access from Kotlin.
     std::vector<int16_t> mSnapshotBuffer;

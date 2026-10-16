@@ -26,87 +26,56 @@ class EarconPlayerTest {
     }
 
     @Test
-    fun `submit is nonblocking, serialised, and hands each cue its OWN accepted token`() {
-        // 4d1e5946 controls on the PRODUCTION player with a real accepted write:
-        // - a predecessor holds the player thread; submit must return while the write is pending;
-        // - tasks run serialised: exactly A then B, each callback with ITS OWN distinct token;
-        // - an uninstalled clip is a refusal: callback with null, and worker exceptions fail the test.
-        player.installClipForTest(EarconId.SUCCESS, ShortArray(1600) { 1 }, 16_000)
-        player.installClipForTest(EarconId.WAKE_WORD, ShortArray(1600) { 2 }, 16_000)
-        // A track whose write ACCEPTS everything, so the accepted-token path is exercised without a
-        // native audio stack.
+    fun `a HELD accepted write does not block the submitter, and coverage follows that cue only`() {
+        // 35f7e2d8 controls on the production player lifecycle:
+        // (1) held-write: the track's write BLOCKS like MODE_STREAM behind the audio buffer; the
+        //     submitting caller must return anyway -- the ASR collect path proceeds while the cue
+        //     is still sounding. The previous control only proved enqueue, because nothing was
+        //     actually held inside write().
+        // (2) per-cue completion: the admitted token arrives only when THAT cue's write finishes,
+        //     through the production frontier bookkeeping (track field + acceptedFramesTotal),
+        //     since trackFactoryForTest now substitutes only construction.
+        val holdWrite = java.util.concurrent.CountDownLatch(1)
+        val enteredWrite = java.util.concurrent.CountDownLatch(1)
         val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16_000)
         org.mockito.Mockito.`when`(
-            track.write(
-                org.mockito.kotlin.any<ShortArray>(),
-                org.mockito.ArgumentMatchers.anyInt(),
-                org.mockito.ArgumentMatchers.anyInt(),
-            ),
-        ).thenAnswer { inv -> inv.getArgument<Int>(2) }
+            track.write(org.mockito.ArgumentMatchers.any<ShortArray>(), org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.anyInt()),
+        ).thenAnswer { inv ->
+            enteredWrite.countDown()
+            assertTrue("the held write must be released by the test", holdWrite.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            inv.getArgument<Int>(2) // accept everything, once released
+        }
         player.trackFactoryForTest = { track }
-        val blockerEntered = java.util.concurrent.CountDownLatch(1)
-        val releaseBlocker = java.util.concurrent.CountDownLatch(1)
-        val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
-        // Hold the player thread: this blocker runs before anything the player submits.
-        executor.submit {
-            blockerEntered.countDown()
-            releaseBlocker.await(5, java.util.concurrent.TimeUnit.SECONDS)
-        }
-        assertTrue("precondition: the blocker must hold the player thread", blockerEntered.await(2, java.util.concurrent.TimeUnit.SECONDS))
-        player.installExecutorForTest(executor)
+        player.installClipForTest(EarconId.SUCCESS, ShortArray(1600) { 1 }, 16_000)
 
-        val workerFailures = java.util.concurrent.CopyOnWriteArrayList<Throwable>()
-        val order = java.util.Collections.synchronizedList(mutableListOf<String>())
-        val tokens = java.util.concurrent.ConcurrentHashMap<String, EarconPlayer.AdmissionToken>()
-        val bDone = java.util.concurrent.CountDownLatch(1)
-
+        val admitted = java.util.concurrent.CountDownLatch(1)
+        var token: EarconPlayer.AdmissionToken? = null
         val t0 = System.nanoTime()
-        player.submit(EarconId.SUCCESS) { token ->
-            try {
-                order += "A"
-                if (token == null) {
-                    workerFailures += IllegalStateException("A must be accepted, not refused")
-                } else {
-                    tokens["A"] = token
-                }
-            } catch (t: Throwable) {
-                workerFailures += t
-            } finally {
-                releaseBlocker.countDown()
-                bDone.countDown()
-            }
+        player.submit(EarconId.SUCCESS) { t ->
+            token = t
+            admitted.countDown()
         }
-        val elapsedMs = (System.nanoTime() - t0) / 1_000_000
+        val returnedMs = (System.nanoTime() - t0) / 1_000_000
+        assertTrue("precondition: the worker must be INSIDE the blocking write", enteredWrite.await(2, java.util.concurrent.TimeUnit.SECONDS))
         assertTrue(
-            "submit must return while the predecessor still holds the player thread (took ${elapsedMs}ms)",
-            elapsedMs < 1_000 && releaseBlocker.count > 0,
+            "submit must RETURN while an actual accepted write is held (took ${returnedMs}ms)",
+            returnedMs < 500,
         )
-        player.submit(EarconId.WAKE_WORD) { token ->
-            try {
-                order += "B"
-                if (token == null) {
-                    workerFailures += IllegalStateException("B must be accepted, not refused")
-                } else {
-                    tokens["B"] = token
-                    assertTrue(
-                        "tokens must be DISTINCT per cue",
-                        tokens["A"] != null && tokens["B"] != null && tokens["A"] != tokens["B"],
-                    )
-                }
-            } catch (t: Throwable) {
-                workerFailures += t
-            } finally {
-                bDone.countDown()
-            }
-        }
-        releaseBlocker.countDown()
-        assertTrue("both callbacks must complete", bDone.await(5, java.util.concurrent.TimeUnit.SECONDS))
-        executor.shutdownNow()
-
-        assertTrue("worker failures: $workerFailures", workerFailures.isEmpty())
-        assertEquals("callbacks must run exactly A then B", listOf("A", "B"), order)
-        assertTrue("A's token must be its own acceptance", tokens["A"] != null)
-        assertTrue("B's token must be its own distinct acceptance", tokens["B"] != null)
+        assertTrue(
+            "coverage/admission for THIS cue must NOT have arrived while its write is still held",
+            !admitted.await(200, java.util.concurrent.TimeUnit.MILLISECONDS),
+        )
+        holdWrite.countDown()
+        assertTrue("after release, the cue's own admission must arrive", admitted.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        assertTrue("the delivered token must be a real acceptance", token != null)
+        // Production bookkeeping ran (not bypassed): the track FIELD holds the instance and the
+        // frontier advanced by exactly the accepted frames.
+        assertEquals(
+            "the frontier must carry this cue's accepted count through the production path",
+            1600,
+            player.acceptedFrontierForTest(),
+        )
     }
 
     @Test

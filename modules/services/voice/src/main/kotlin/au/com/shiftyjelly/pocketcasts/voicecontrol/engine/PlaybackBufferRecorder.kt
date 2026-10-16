@@ -167,6 +167,12 @@ class PlaybackBufferRecorder @Inject constructor(
     private var tapJob: Job? = null
 
     /**
+     * The collector's subscription to the shared tap's stream-close events, retained so [stop] can
+     * unregister exactly this closure. Null when no collector owns the episode stream.
+     */
+    private var streamCloseCallback: (() -> Unit)? = null
+
+    /**
      * Whether the [sampleCount] newest retained samples are contiguous on the reported axis.
      *
      * A hole ceases to matter when the ring has overwritten the audio BEFORE it: from that point every
@@ -296,6 +302,22 @@ class PlaybackBufferRecorder @Inject constructor(
         // stale in-flight work would be laundered into a new generation. Renewal here covers only
         // FUTURE emissions of the live episode owner.
         var currentAdmission: Admission? = null
+        // THE STOP/DRAIN EVENT ITSELF (@reviewer 4235702596): the tap fires this on every sink flush()
+        // and reset(), which is what media3 pause/seek/stop reach. Retiring the held admission HERE,
+        // before any successor emission, closes admission at the real boundary; the epoch bump alone
+        // only superseded it when a SUCCESSOR later emitted, leaving a paused-then-idle episode holding
+        // live admission with no owner event closing it.
+        val retireAtStreamClose: () -> Unit = {
+            synchronized(lock) {
+                val owner = currentAdmission
+                if (owner != null && isAdmissionLiveLocked(owner)) {
+                    retireProducerLocked(owner)
+                    currentAdmission = null
+                }
+            }
+        }
+        fingerprintPcmTap.registerStreamClosed(retireAtStreamClose)
+        streamCloseCallback = retireAtStreamClose
         fingerprintPcmTap.admissionStamper = { epoch, carried ->
             synchronized(lock) {
                 val owner = currentAdmission
@@ -366,6 +388,15 @@ class PlaybackBufferRecorder @Inject constructor(
         // The collector no longer owns an episode stream: stop stamping emissions so a later start()
         // (or another recorder instance sharing the tap singleton) does not inherit this owner's state.
         fingerprintPcmTap.admissionStamper = null
+        // Unsubscribe from the shared tap's stream-close events: this collector's held owner is about
+        // to be retired wholesale below, and a later session must not fire THIS closure's stale owner.
+        run {
+            val callback = streamCloseCallback
+            if (callback != null) {
+                fingerprintPcmTap.unregisterStreamClosed(callback)
+                streamCloseCallback = null
+            }
+        }
         // SESSION BOUNDARY RETIREMENT (@reviewer 4235702596): leaving up to the whole retained window
         // of audio behind let the FIRST utterance of a new capture session correlate against PCM the
         // PREVIOUS session submitted -- the same stale-reference case retirement exists for. This is

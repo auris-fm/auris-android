@@ -53,6 +53,25 @@ class FingerprintPcmTap @Inject constructor() {
      */
     var admissionStamper: ((epoch: Long, previousTicket: Long?) -> Long?)? = null
 
+    /**
+     * Called on the playback thread at every stream-close event -- [onSinkFlush] (media3 sink flush()
+     * AND reset(), which covers pause/seek/stop in this renderer) and a foreground transition to
+     * background ([handlePlaybackState]). A subscriber retires its held admission AT THE EVENT; the
+     * epoch bump alone only ever superseded admission when a SUCCESSOR later emitted, which left a
+     * paused-then-idle episode holding live admission with no owner event closing it (@reviewer,
+     * thread 4235702596).
+     */
+    private val streamClosedCallbacks = mutableListOf<() -> Unit>()
+
+    /** Idempotent: registering the same callback twice fires it once per stream-close event. */
+    fun registerStreamClosed(callback: () -> Unit) {
+        synchronized(streamClosedCallbacks) { if (callback !in streamClosedCallbacks) streamClosedCallbacks += callback }
+    }
+
+    fun unregisterStreamClosed(callback: () -> Unit) {
+        synchronized(streamClosedCallbacks) { streamClosedCallbacks -= callback }
+    }
+
     private var lastEmittedEpoch = -1L
     private var lastEmittedTicket: Long? = null
 
@@ -72,6 +91,10 @@ class FingerprintPcmTap @Inject constructor() {
     }
 
     fun onSinkFlush() {
+        // THE STOP/DRAIN EVENT ITSELF, not a later successor emission: an owner that wants to close
+        // admission at the real boundary subscribes here (streamClosedCallbacks). Runs BEFORE the
+        // epoch bump so retirement is complete before any new-stream stamping can happen.
+        streamClosedCallbacks.toList().forEach { it() }
         pendingAnchorUs = C.TIME_UNSET
         anchorUs = C.TIME_UNSET
         framesSinceAnchor = 0

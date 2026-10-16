@@ -60,6 +60,15 @@ class EchoRejectionDeviceTest {
         // 4236613848: EVERYTHING after resource acquisition is wrapped -- an assertion failure must
         // not leave the microphone open or the collector draining in the shared process. Each
         // cleanup step is protected so one failure cannot skip the others.
+        // The REAL acquisition lifecycle (e878d156): open -> start -> confirmed attach. Without it
+        // startCapture() is an emptyFlow and a zero-segment run says nothing. Frame deltas are taken
+        // around THIS run, not read once: the counter is process-global, so another test's audio
+        // could satisfy a bare "> 0".
+        val runStartFrames = MicrophoneCapture.framesConsumed()
+        capture.openStreamForAcquisition()
+        assumeTrue("inconclusive: the acquired stream did not start (capture prereq absent)", capture.startAcquiredStream())
+        assumeTrue("inconclusive: the native VAD did not attach to the acquired stream (prereq absent)", capture.attachCapture())
+
         var engine: AndroidPlatformTtsEngine? = null
         var job: kotlinx.coroutines.Job? = null
         try {
@@ -114,14 +123,18 @@ class EchoRejectionDeviceTest {
 
             // The acoustic part must have run: without samples reaching the native VAD, nothing below is a
             // statement about rejection.
-            assertTrue("capture must deliver samples to the native VAD (nativeFrames=$nativeTotal)", nativeTotal > nativeBefore)
+            val runDelta = nativeTotal - runStartFrames
+            assertTrue(
+                "capture must deliver samples to the native VAD during THIS run (runDelta=$runDelta nativeTotal=$nativeTotal)",
+                runDelta > 0,
+            )
             assertTrue("the app's speech must be in the reference", reference.samples.isNotEmpty())
 
             // A segmented utterance is required before the filter can be asked anything. Its absence is
             // reported as "not demonstrated" rather than converted into a pass.
             assertTrue(
                 "the VAD must have emitted a segment around the app's own speech; none formed " +
-                    "(nativeFrames=$nativeTotal segments=${segments.size})",
+                    "(runDelta=$runDelta segments=${segments.size})",
                 segments.isNotEmpty(),
             )
 
@@ -155,6 +168,13 @@ class EchoRejectionDeviceTest {
         val capture = MicrophoneCapture(ctx, OboeCaptureHardware(), EpisodeReferenceEligibility())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+        // Same REAL acquisition lifecycle as the echo run (e878d156); see its note on run-scoped
+        // frame deltas.
+        val runStartFrames = MicrophoneCapture.framesConsumed()
+        capture.openStreamForAcquisition()
+        assumeTrue("inconclusive: the acquired stream did not start (capture prereq absent)", capture.startAcquiredStream())
+        assumeTrue("inconclusive: the native VAD did not attach (prereq absent)", capture.attachCapture())
+
         val segments = mutableListOf<FloatArray>()
         val job = scope.launch {
             try {
@@ -178,23 +198,25 @@ class EchoRejectionDeviceTest {
             withTimeoutOrNull(10_000) { delay(4_000) }
 
             val nativeTotal = MicrophoneCapture.framesConsumed()
-            Log.i(tag, "positive control: nativeFrames=$nativeTotal segments=${segments.size}")
+            val runDelta = nativeTotal - runStartFrames
+            Log.i(tag, "positive control: runDelta=$runDelta segments=${segments.size}")
             // Explicit inconclusive is only legitimate when the prerequisites are genuinely absent:
             // if the native VAD consumed no frames at all, the run says nothing about acceptance.
             assumeTrue(
-                "inconclusive: the native VAD consumed no frames (capture prereq unavailable); " +
-                    "this is not a demonstrated pass or a demonstrated failure",
-                nativeTotal > 0,
+                "inconclusive: this run delivered no frames to the native VAD (capture prereq " +
+                    "unavailable); this is not a demonstrated pass or a demonstrated failure",
+                runDelta > 0,
             )
             assertTrue(
                 "the production native detector must emit a segment for genuine audible speech " +
-                    "(nativeFrames=$nativeTotal segments=${segments.size})",
+                    "(runDelta=$runDelta segments=${segments.size})",
                 segments.isNotEmpty(),
             )
         } finally {
             runCatching { engine?.release() }
             runCatching { job.cancel() }
             runCatching { capture.stopCapture() }
+            runCatching { capture.closeAcquiredStream() }
         }
     }
 }

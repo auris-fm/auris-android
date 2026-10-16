@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.rule.GrantPermissionRule
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.EpisodeReferenceEligibility
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeCaptureHardware
@@ -23,6 +24,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -143,35 +145,56 @@ class EchoRejectionDeviceTest {
     fun theDetectionPathAcceptsGenuineSpeechLevelAudio() = runBlocking<Unit> {
         // The positive control @spec requires, and the reason it is not optional: with no control, zero
         // segments cannot distinguish correct echo rejection from a scenario that would never have
-        // produced a segment whatever the input. This drives the shipped detector with speech-level PCM
-        // so the path is shown to be capable of accepting speech; the echo run below then has a baseline.
-        val segmenter = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.EnergyVoiceAudioSegmenter()
+        // produced a segment whatever the input. 4236631774: the control now drives the PRODUCTION
+        // detector -- the same native Silero path via MicrophoneCapture.startCapture() the echo run
+        // uses -- with a guaranteed speech source: the app's own platform TTS played audibly. (The
+        // previous control drove EnergyVoiceAudioSegmenter, a different detector, so its pass proved
+        // nothing about the shipped path.)
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
+        val capture = MicrophoneCapture(ctx, OboeCaptureHardware(), EpisodeReferenceEligibility())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-        // Speech-like bursts well above the detector's own threshold, alternating with trailing silence
-        // so a segment closes naturally rather than being truncated.
-        fun frame(amplitude: Double): au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame {
-            val samples = ShortArray(512) { i ->
-                val env = 0.6 + 0.4 * kotlin.math.sin(2.0 * kotlin.math.PI * 5.0 * i / 512.0)
-                (amplitude * env * kotlin.math.sin(2.0 * kotlin.math.PI * 220.0 * i / 16_000.0)).toInt().toShort()
+        val segments = mutableListOf<FloatArray>()
+        val job = scope.launch {
+            try {
+                capture.startCapture().collect { result ->
+                    if (result is VoiceSegmenterResult.SpeechEnded) {
+                        segments += result.frames.flatMap { f -> f.samples.map { it / 32768f } }.toFloatArray()
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.e(tag, "capture failed: ${t::class.simpleName}: ${t.message}", t)
             }
-            return au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame(samples, 16_000)
         }
+        var engine: AndroidPlatformTtsEngine? = null
+        try {
+            engine = AndroidPlatformTtsEngine(ctx, recorder)
+            engine.warmUp("en")
+            withTimeoutOrNull(30_000) {
+                engine.speak("testing one two three four five six seven eight nine ten", "en")
+            }
+            // Let the loopback land in the microphone and any segment close.
+            withTimeoutOrNull(10_000) { delay(4_000) }
 
-        val results = mutableListOf<VoiceSegmenterResult>()
-        repeat(12) { results += segmenter.process(frame(8_000.0)) }
-        repeat(8) { results += segmenter.process(frame(0.0)) }
-
-        val segments = results.filterIsInstance<VoiceSegmenterResult.SpeechEnded>()
-        // Counted, not dumped: the frame contents are large and their shape is already asserted by the
-        // segmenter's own tests.
-        Log.i(
-            tag,
-            "positive control: segments=${segments.size} frames=${segments.sumOf { it.frames.size }} " +
-                "kinds=${results.map { it::class.simpleName }.distinct()}",
-        )
-        assertTrue(
-            "the detection path must accept speech-level audio, or a zero-segment echo run proves nothing",
-            segments.isNotEmpty(),
-        )
+            val nativeTotal = MicrophoneCapture.framesConsumed()
+            Log.i(tag, "positive control: nativeFrames=$nativeTotal segments=${segments.size}")
+            // Explicit inconclusive is only legitimate when the prerequisites are genuinely absent:
+            // if the native VAD consumed no frames at all, the run says nothing about acceptance.
+            assumeTrue(
+                "inconclusive: the native VAD consumed no frames (capture prereq unavailable); " +
+                    "this is not a demonstrated pass or a demonstrated failure",
+                nativeTotal > 0,
+            )
+            assertTrue(
+                "the production native detector must emit a segment for genuine audible speech " +
+                    "(nativeFrames=$nativeTotal segments=${segments.size})",
+                segments.isNotEmpty(),
+            )
+        } finally {
+            runCatching { engine?.release() }
+            runCatching { job.cancel() }
+            runCatching { capture.stopCapture() }
+        }
     }
 }

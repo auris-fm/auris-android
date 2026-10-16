@@ -145,6 +145,30 @@ std::deque<bool> frames(int count, bool loud) {
 int main() {
     std::printf("native VAD segment accounting\n");
 
+    // (0) UNTHREAD-U1 (4d1e5946/2d8d5c4a): the stuck-detector branch. A detector stuck
+    // speech-classified past kStuckDetectorFrameLimit must surface the FAULT sentinel (kFaultEvent,
+    // not the stop sentinel) and must NOT emit a completed segment. The script is 4000 loud frames
+    // (limit 3750): the frames are served as fast as the loop reads them, so the script runs in
+    // wall-fast time despite the 240s equivalent length.
+    {
+        std::deque<bool> script = frames(4000, true);
+        FakeCapture capture;
+        capture.script = script;
+        NativeVadProcessor processor(&capture);
+        check(processor.start(), "stuck-case capture starts");
+        bool sawFault = false;
+        int segmentsEmitted = 0;
+        while (true) {
+            const int event = processor.waitForEvent(30000);
+            if (event == NativeVadProcessor::kFaultEvent) { sawFault = true; continue; }
+            if (event == 2) { segmentsEmitted++; continue; }
+            break;  // stop sentinel or timeout ends the run
+        }
+        processor.stop();
+        check(sawFault, "a stuck detector surfaces the FAULT sentinel, not the stop sentinel");
+        check(segmentsEmitted == 0, "a stuck detector emits NO completed segment");
+    }
+
     // (1) A single timed utterance: the end sample is the end of the last *speech* frame, in the
     // segment's coordinates — which is also what makes it fit inside the emitted PCM.
     {

@@ -102,6 +102,21 @@ class EarconPlayer(
     // because the cases ran THIS copy. A test seam must route through the mechanism, not restate it.
     internal fun <T> submitForTest(block: () -> T): T = onPlayerThread(block)
 
+    /** Test seam (4d1e5946): install a real clip so submit()/play() take an actual accepted write. */
+    internal fun installClipForTest(id: EarconId, samples: ShortArray, sampleRateHz: Int) {
+        val ctor = EarconClip::class.java.getDeclaredConstructor(
+            EarconPlayer::class.java,
+            ShortArray::class.java,
+            Int::class.java,
+        )
+        ctor.isAccessible = true
+        val field = EarconPlayer::class.java.getDeclaredField("clips")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val map = field.get(this) as MutableMap<EarconId, Any>
+        map[id] = ctor.newInstance(this, samples, sampleRateHz)
+    }
+
     // Replaces the worker with [service], so a test controls when it is shut down.
 
     internal fun installExecutorForTest(service: java.util.concurrent.ExecutorService) {
@@ -522,7 +537,15 @@ class EarconPlayer(
         }
     }
 
+    /**
+     * Test seam (4d1e5946): when non-null, tracks come from here instead of the platform, so a unit
+     * test can hold/observe an ACCEPTED write without a native audio stack. Null in production.
+     */
+    @VisibleForTesting
+    internal var trackFactoryForTest: ((sampleRateHz: Int) -> AudioTrack)? = null
+
     private fun ensureTrack(sampleRateHz: Int): AudioTrack {
+        trackFactoryForTest?.let { return it(sampleRateHz) }
         val current = track
         if (current != null) {
             if (current.sampleRate == sampleRateHz) return current

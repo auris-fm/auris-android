@@ -443,7 +443,7 @@ class VoiceAsrEngineTest {
         )
         // Escalating is not an error, so no error tone: the answer (or the
         // cloud path's own failure tone) is what the user hears.
-        verify(audioFeedbackRenderer, never()).playEarcon(any())
+        verify(audioFeedbackRenderer, never()).submitEarcon(any())
 
         engine.stop()
     }
@@ -468,7 +468,7 @@ class VoiceAsrEngineTest {
         verify(audioFeedbackRenderer).render(VoiceResponse.Spoken("I didn't catch that."))
         // The WAKE_WORD cue is expected here — it acknowledges the detection. What must not happen
         // is the error tone, because that would mean the engine had no line to speak.
-        verify(audioFeedbackRenderer, never()).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
 
         engine.stop()
     }
@@ -494,7 +494,7 @@ class VoiceAsrEngineTest {
         verify(audioFeedbackRenderer, never()).render(any(), any())
         // No ERROR tone either: that is what the missing-line fallback would play if this capture
         // had reached the router. The WAKE_WORD cue is expected and not asserted against.
-        verify(audioFeedbackRenderer, never()).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
 
         engine.stop()
     }
@@ -556,7 +556,7 @@ class VoiceAsrEngineTest {
         )
 
         assertTrue(intents.isEmpty())
-        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer).submitEarcon(EarconId.ERROR)
         verify(audioFeedbackRenderer, never()).render(any(), any())
 
         engine.stop()
@@ -587,7 +587,7 @@ class VoiceAsrEngineTest {
         // Escalating this would turn a broken install into cloud traffic and
         // make "the model never loaded" look like a healthy turn.
         assertTrue(intents.isEmpty())
-        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer).submitEarcon(EarconId.ERROR)
 
         engine.stop()
     }
@@ -645,7 +645,7 @@ class VoiceAsrEngineTest {
 
         // Two failures in one window: the second is refused, and says so.
         assertEquals(1, intents.size)
-        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer).submitEarcon(EarconId.ERROR)
 
         engine.stop()
     }
@@ -764,7 +764,7 @@ class VoiceAsrEngineTest {
         // capability failure is not something to spend a server call on.
         assertTrue(intents.isEmpty())
         assertEquals(0, recognizer.recognizes)
-        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer).submitEarcon(EarconId.ERROR)
 
         engine.stop()
     }
@@ -780,7 +780,7 @@ class VoiceAsrEngineTest {
         val engine = startTokenless(recognizer, "Hi, allri.")
 
         assertTrue("the router may see it; the decision is what matters", recognizer.calls.isNotEmpty())
-        verify(audioFeedbackRenderer, never()).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
 
         engine.stop()
     }
@@ -1244,7 +1244,7 @@ class VoiceAsrEngineTest {
                 "${case.label}: expected no intent routing, got ${recognizer.calls}",
                 recognizer.calls.isEmpty(),
             )
-            verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+            verify(audioFeedbackRenderer).submitEarcon(EarconId.ERROR)
 
             engine.stop()
             org.mockito.Mockito.reset(audioFeedbackRenderer)
@@ -1364,7 +1364,7 @@ class VoiceAsrEngineTest {
         advanceUntilIdle()
 
         verify(gracePeriodSignal).onWakeWordDetected()
-        verify(audioFeedbackRenderer).playEarcon(EarconId.WAKE_WORD)
+        verify(audioFeedbackRenderer).submitEarcon(EarconId.WAKE_WORD)
         assertEquals(listOf("ensureReady", "recognize:skip forward"), recognizer.calls)
         assertEquals(listOf(VoiceIntent.Playback.Pause), handledIntents)
 
@@ -1397,10 +1397,10 @@ class VoiceAsrEngineTest {
         advanceUntilIdle()
 
         verify(gracePeriodSignal).onWakeWordDetected()
-        verify(audioFeedbackRenderer).playEarcon(EarconId.WAKE_WORD)
+        verify(audioFeedbackRenderer).submitEarcon(EarconId.WAKE_WORD)
         // Nothing was asked: a wake-only capture starts the session, it is not a
         // question that failed, so it plays nothing beyond the wake earcon.
-        verify(audioFeedbackRenderer, never()).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
         assertTrue("Expected no intent routing, got ${recognizer.calls}", recognizer.calls.isEmpty())
 
         engine.stop()
@@ -1429,7 +1429,7 @@ class VoiceAsrEngineTest {
         advanceUntilIdle()
 
         verify(gracePeriodSignal, never()).onWakeWordDetected()
-        verify(audioFeedbackRenderer, never()).playEarcon(any())
+        verify(audioFeedbackRenderer, never()).submitEarcon(any())
         assertTrue("Expected no ASR calls, got ${recognizer.calls}", recognizer.calls.isEmpty())
 
         engine.stop()

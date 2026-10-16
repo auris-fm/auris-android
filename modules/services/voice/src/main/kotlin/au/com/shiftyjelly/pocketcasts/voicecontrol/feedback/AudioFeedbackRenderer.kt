@@ -141,6 +141,18 @@ class AudioFeedbackRenderer(
     }
 
     /**
+     * Latency-sensitive variant (4236341555): submits the cue on the player executor and returns
+     * BEFORE the clip is written, so the ASR collect path is not delayed by the cue's own drain.
+     * Acceptance is not synchronously known -- observable via the coverage heartbeat, same as
+     * [playEarcon]. Use [playEarcon] where the caller must gate on acceptance.
+     */
+    fun submitEarcon(id: EarconId) {
+        if (disposed) return
+        earconPlayer.submit(id)
+        coverEarconUntilConsumed(id)
+    }
+
+    /**
      * Plays an earcon directly, outside a rendered response.
      *
      * This is the path the wake and listening cues take, and they are the two earcons that sound

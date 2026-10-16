@@ -261,7 +261,7 @@ class VoiceAsrEngine @Inject constructor(
             gracePeriodSignal.onWakeWordDetected()
 
             // Always acknowledge detection with the WAKE_WORD earcon
-            audioFeedbackRenderer.playEarcon(EarconId.WAKE_WORD)
+            audioFeedbackRenderer.submitEarcon(EarconId.WAKE_WORD)
 
             Timber.i("[VoicePipeline] wake %s → ASR (hit, mode=%s)", wakeCmp, mode)
             return TranscribeRequest(
@@ -367,7 +367,7 @@ class VoiceAsrEngine @Inject constructor(
         if (routePrep.dropWithError) {
             // Don't feed untranslated CJK into the English-only intent model.
             Timber.i("[VoicePipeline] → drop (%s)", routePrep.translateNote)
-            audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+            audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
             return
         }
         // "Addressed" is this segment's own wake detection, per core voice-intents.md: a Detected
@@ -388,7 +388,7 @@ class VoiceAsrEngine @Inject constructor(
             // so — silence here is the complaint this change exists to remove.
             // Deliberately not escalated: a capability failure would turn a
             // broken install into cloud traffic (see CloudEscalationPolicy).
-            audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+            audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
             return
         }
 
@@ -449,7 +449,7 @@ class VoiceAsrEngine @Inject constructor(
             // did not cover in its own segment, or speech caught from the room.
             // Heard something we could not route and the user was not addressing us: a tone is
             // all that is warranted.
-            CloudEscalation.EARCON -> audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+            CloudEscalation.EARCON -> audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
 
             CloudEscalation.SILENT -> Unit
 
@@ -458,7 +458,7 @@ class VoiceAsrEngine @Inject constructor(
             CloudEscalation.SPEAK_UNROUTED -> {
                 val line = SpokenLine.forKey(KEY_CLOUD_UNROUTED, templateResolver, currentLocale())
                 if (line.isBlank()) {
-                    audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+                    audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
                 } else {
                     audioFeedbackRenderer.render(VoiceResponse.Spoken(line))
                 }
@@ -466,7 +466,7 @@ class VoiceAsrEngine @Inject constructor(
 
             // Nothing was sent, but a turn happened: the earcon table already
             // requires a tone for this case.
-            CloudEscalation.SPEAK_ERROR -> audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+            CloudEscalation.SPEAK_ERROR -> audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
 
             // The client has no answer of its own, so the service gets asked —
             // through the same handler a chosen `cloud_route` uses, so
@@ -482,7 +482,7 @@ class VoiceAsrEngine @Inject constructor(
                         "[VoicePipeline] cloud escalation skipped: origin %d is no longer live",
                         windowAtRequest,
                     )
-                    audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+                    audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
                     return
                 }
                 // CLAIMED AGAINST THE REQUEST'S OWN WINDOW. The liveness check above refuses a stale
@@ -495,7 +495,7 @@ class VoiceAsrEngine @Inject constructor(
                         "[VoicePipeline] cloud escalation skipped (%s)",
                         gracePeriodSignal.escalationRefusal(),
                     )
-                    audioFeedbackRenderer.playEarcon(EarconId.ERROR)
+                    audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
                     return
                 }
                 Timber.i("[VoicePipeline] cloud escalation ← '%s' (reason=%s)", input.routerTranscript, reason)

@@ -190,6 +190,20 @@ class EarconPlayer(
         startOnPlayerThread(id)
     }
 
+    /**
+     * Fire-and-forget submission for latency-sensitive callers (4236341555): the clip write runs on
+     * the player executor -- serialised with every other cue, and with the SAME admission-token
+     * minting, recorder-admission ownership and completion bookkeeping as [play] -- but the CALLER
+     * does not wait for the write. Acceptance is observable through the coverage heartbeat, not
+     * through a return value, so this is only for callers who cue and move on (the ASR collect path),
+     * not for callers that must gate on acceptance.
+     */
+    fun submit(id: EarconId) {
+        synchronized(executorLock) {
+            executorForLocked().submit { startOnPlayerThread(id) }
+        }
+    }
+
     private fun startOnPlayerThread(id: EarconId): AdmissionToken? {
         val clip = clips[id] ?: return null
         if (clip.samples.isEmpty()) return null

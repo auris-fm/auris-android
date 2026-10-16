@@ -36,14 +36,25 @@ class ForegroundPrivacyDeviceTest {
         val provider = AppLifecycleProviderImpl()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val monitor = ForegroundStateMonitor(provider, scope, signal)
-        // AppLifecycleProviderImpl ignores its LifecycleOwner argument — it only sets the flow — so no
-        // real registry is needed. Passing one would build an object that carries no behaviour and
-        // would imply the lifecycle participates when it does not.
-        val owner = inertOwner()
+        // 4236563768: the transition is driven through the REGISTERED observer, exactly as Android
+        // dispatches it. The provider is added to the process lifecycle owner's registry, and the
+        // lifecycle events are delivered through that registry -- the same path ProcessLifecycleOwner's
+        // main-thread bookkeeping uses -- not by calling the provider's methods directly. The app's
+        // own production registration uses this same owner, so the observer here sits where the
+        // shipped one sits.
+        // (ProcessLifecycleOwner itself is this pattern: a LifecycleOwner whose registry dispatches
+        // events to its registered DefaultLifecycleObservers; lifecycle-process is not on the
+        // androidTest classpath, so the same registry mechanism is exercised here on a local owner.)
+        val owner = object : androidx.lifecycle.LifecycleOwner {
+            override val lifecycle: androidx.lifecycle.Lifecycle =
+                androidx.lifecycle.LifecycleRegistry(this)
+        }
+        val registry = androidx.lifecycle.LifecycleRegistry(owner)
+        registry.addObserver(provider)
 
         // The app is in the foreground before anything else: the monitor's edge detector needs to have
         // SEEN a foreground state, or a later loss is not a transition and closure never fires.
-        provider.onResume(owner = owner)
+        registry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_RESUME)
         delay(300)
 
         // A wake opens the window, the way a user's spoken wake does.
@@ -53,8 +64,8 @@ class ForegroundPrivacyDeviceTest {
         val closuresBefore = signal.privacyClosureCount()
         Log.i(tag, "window open: active=${signal.isActive.value} closures=$closuresBefore")
 
-        // The real lifecycle callback Android delivers when the app leaves the foreground.
-        provider.onPause(owner = owner)
+        // The real lifecycle dispatch: ON_PAUSE through the registry reaches the registered observer.
+        registry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_PAUSE)
         delay(500)
 
         val closed = signal.isClosedByPrivacy()
@@ -65,20 +76,11 @@ class ForegroundPrivacyDeviceTest {
 
         // Returning to the foreground must not quietly reopen the window the privacy event ended: only
         // a new wake begins another, so grace must stay closed across the return.
-        provider.onResume(owner = owner)
+        registry.handleLifecycleEvent(androidx.lifecycle.Lifecycle.Event.ON_RESUME)
         delay(500)
         val reopened = signal.isActive.value
         Log.i(tag, "after foreground return: active=$reopened closedByPrivacy=${signal.isClosedByPrivacy()}")
         assertFalse("returning to the foreground must not restore the closed window", reopened)
         assertTrue("the closure must still stand after the return", signal.isClosedByPrivacy())
-    }
-
-    /**
-     * A LifecycleOwner that does nothing, for a callback that does not read it. Named for that, so a
-     * reader does not take it for a driven lifecycle.
-     */
-    private fun inertOwner(): androidx.lifecycle.LifecycleOwner = object : androidx.lifecycle.LifecycleOwner {
-        override val lifecycle: androidx.lifecycle.Lifecycle
-            get() = throw UnsupportedOperationException("the provider does not read the owner")
     }
 }

@@ -1739,6 +1739,37 @@ class PlaybackBufferRecorderTest {
         )
     }
 
+    // POSITION ATTRIBUTION (4236341498): a cue written on the Monotonic axis extends the window's
+    // truthfully -- the derived start accounts for the cue's duration, and the window reports its
+    // position only while every contribution is on one clock.
+    @Test
+    fun `a monotonic-axis cue write keeps the window start truthful`() = runTest {
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+        var nowMs = 50_000L
+        recorder.monotonicNowMs = { nowMs }
+        val admission = recorder.openAdmission(31L)
+        // 0.5 s episode chunk at media second 100 (Media axis), then a 0.25 s cue at monotonic 50_000.
+        recorder.write(FloatArray(8_000) { 0.5f }, positionMs = 100_000L, axis = PositionAxis.Media, admission = admission)
+        nowMs = 50_100L
+        recorder.write(FloatArray(4_000) { 0.5f }, positionMs = 50_000L, axis = PositionAxis.Monotonic, admission = admission)
+        // Two clocks in one window: the honest answer is NO position.
+        assertNull("a window spanning Media and Monotonic clocks reports no position", recorder.reference().startPositionMs)
+        // Same clock only: the cue's duration is accounted for in the derived start.
+        val solo = PlaybackBufferRecorder(tap)
+        var soloNow = 50_000L
+        solo.monotonicNowMs = { soloNow }
+        val soloAdmission = solo.openAdmission(33L)
+        solo.write(FloatArray(8_000) { 0.5f }, positionMs = 50_000L, axis = PositionAxis.Monotonic, admission = soloAdmission)
+        soloNow = 50_100L
+        solo.write(FloatArray(4_000) { 0.5f }, positionMs = 50_500L, axis = PositionAxis.Monotonic, admission = soloAdmission)
+        assertEquals(
+            "the window start accounts for every sample's own position: 12_000 samples (750 ms) ending at 50_750",
+            50_000L,
+            solo.reference().startPositionMs!!,
+        )
+    }
+
     // CONTROL @reviewer 4235702596 (episode renderer stop/pause hook): the media3 sink forwards BOTH
     // flush() and reset() to tap.onSinkFlush(), which bumps the stream epoch. The stamper must treat
     // that as supersession: retire the paused/seeked-away producer (its samples get an expiry, a held

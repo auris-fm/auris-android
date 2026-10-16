@@ -63,6 +63,9 @@ class FingerprintPcmTap @Inject constructor() {
      */
     private val streamClosedCallbacks = mutableListOf<() -> Unit>()
 
+    /** See [registerStreamPaused]: the SINK PAUSE event (media3 audioSink.pause(), NOT a flush). */
+    private val streamPausedCallbacks = mutableListOf<() -> Unit>()
+
     /** Idempotent: registering the same callback twice fires it once per stream-close event. */
     fun registerStreamClosed(callback: () -> Unit) {
         synchronized(streamClosedCallbacks) { if (callback !in streamClosedCallbacks) streamClosedCallbacks += callback }
@@ -70,6 +73,21 @@ class FingerprintPcmTap @Inject constructor() {
 
     fun unregisterStreamClosed(callback: () -> Unit) {
         synchronized(streamClosedCallbacks) { streamClosedCallbacks -= callback }
+    }
+
+    /**
+     * Subscribes to the SINK PAUSE event: media3 calls audioSink.pause() on player pause WITHOUT any
+     * flush (@reviewer/@spec pause acoustic contract). A subscriber ends the current audible-reference
+     * admission at the pause: only the bounded delay tail survives, expiring without another write;
+     * queued pre-pause work is refused. Logical stream identity is retained for resume, which admits
+     * future playback under a RENEWED admission -- the old reference is never revived.
+     */
+    fun registerStreamPaused(callback: () -> Unit) {
+        synchronized(streamPausedCallbacks) { if (callback !in streamPausedCallbacks) streamPausedCallbacks += callback }
+    }
+
+    fun unregisterStreamPaused(callback: () -> Unit) {
+        synchronized(streamPausedCallbacks) { streamPausedCallbacks -= callback }
     }
 
     private var lastEmittedEpoch = -1L
@@ -88,6 +106,16 @@ class FingerprintPcmTap @Inject constructor() {
 
     fun onSinkBuffer(presentationTimeUs: Long) {
         pendingAnchorUs = presentationTimeUs
+    }
+
+    /**
+     * THE PAUSE EVENT (media3 audioSink.pause(); DecoderAudioRenderer.onStopped forwards here with NO
+     * flush). Snapshot under the registry monitor, invoke outside it -- same discipline as
+     * [onSinkFlush]. The epoch does NOT change: resume continues the same logical stream.
+     */
+    fun onSinkPaused() {
+        val callbacks = synchronized(streamPausedCallbacks) { streamPausedCallbacks.toList() }
+        callbacks.forEach { it() }
     }
 
     fun onSinkFlush() {

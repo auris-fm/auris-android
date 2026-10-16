@@ -185,13 +185,14 @@ class FlushRetirementNoSuccessorTest {
         jobB.cancel()
     }
 
-    // MEDIA3 PAUSE TRACE, PINNED AS BEHAVIOR (media3 1.10.1 DecoderAudioRenderer: onStopped calls
-    // audioSink.pause() ONLY -- flush() fires in onPositionReset (seek) and reset() in onDisabled
-    // (track change/stop/release)). So a pause delivers NO event, and correctly so: resume continues
-    // the SAME stream with no onPositionReset, so admission must stay live across a pause. The stop
-    // boundary the user eventually exercises (seek/stop) reaches onSinkFlush and retires there.
+    // MEDIA3 PAUSE TRACE + PAUSE ACOUSTIC CONTRACT (@spec confirmed; media3 1.10.1
+    // DecoderAudioRenderer.onStopped calls audioSink.pause() ONLY -- flush()=onPositionReset/seek,
+    // reset()=onDisabled/stop). Pause is a real sink event and ends the episode's current
+    // audible-reference admission: only the bounded delay tail survives, it expires without another
+    // write, queued pre-pause work is refused, and RESUME admits future playback under a RENEWED
+    // admission (logical stream identity preserved; the old reference is never revived).
     @Test
-    fun `a pause emits no event and keeps admission live - the later stop flush retires`() = runTest {
+    fun `a pause expires the audible reference on elapsed time - resume admits only future playback under a renewed admission`() = runTest {
         val tap = FingerprintPcmTap()
         val recorder = PlaybackBufferRecorder(tap)
         var nowMs = 0L
@@ -206,25 +207,47 @@ class FlushRetirementNoSuccessorTest {
             tap.onPcm(ByteBuffer.wrap(s16le(ShortArray(1_600) { value })), AudioProcessor.AudioFormat(16_000, 1, C.ENCODING_PCM_16BIT))
         }
 
-        // Playing, then PAUSED: no event fires, the collector keeps its admission.
+        // Playing, then PAUSED: the sink pause event retires the audible reference now.
         emit(20_000)
         runCurrent()
+        assertEquals("episode audio admitted before pause", 1_600, recorder.snapshot().size)
         val ticketBeforePause = recorder.ownerTagIdsForTest().last()
+        tap.onSinkPaused()
 
-        // RESUME after pause: same epoch (no flush happened), continued emission must carry the SAME
-        // ticket -- a spurious pause retirement would stamp the resume under a fresh one.
-        emit(20_000)
-        runCurrent()
-        val tagsAfterResume = recorder.ownerTagIdsForTest()
-        assertTrue("resume after pause is the same stream", tagsAfterResume.all { it == ticketBeforePause })
-
-        // THE STOP: seek/stop reaches the sink flush and retires with no successor emission.
-        tap.onSinkFlush()
+        // PAUSED, NO RESUME, NO WRITES: the bounded tail expires on elapsed time alone.
         nowMs = 60_000L
         val expired = recorder.snapshot()
         assertTrue(
-            "the stop flush after a paused episode expires its audio on elapsed time alone",
+            "the paused episode's audible reference must expire without another write",
             expired.none { kotlin.math.abs(it - 20_000 / 32768f) < 0.01f },
+        )
+
+        // RESUME: same epoch (no flush happened), but the pause closed the old admission -- future
+        // playback is admitted under a RENEWED ticket, and pre-pause queued work stays refused.
+        emit(5_000)
+        runCurrent()
+        val afterResume = recorder.snapshot()
+        assertTrue(
+            "resume admits future playback",
+            afterResume.any { kotlin.math.abs(it - 5_000 / 32768f) < 0.01f },
+        )
+        assertEquals(
+            "resume must carry a RENEWED ticket, never the pre-pause one",
+            1_600,
+            afterResume.count { kotlin.math.abs(it - 5_000 / 32768f) < 0.01f },
+        )
+        val ticketAfterResume = recorder.ownerTagIdsForTest().last()
+        assertTrue(
+            "the resumed admission is a NEW incarnation, not the pre-pause ticket",
+            ticketAfterResume != ticketBeforePause,
+        )
+
+        // The eventual stop still retires: seek/stop reaches the sink flush.
+        tap.onSinkFlush()
+        nowMs = 120_000L
+        assertTrue(
+            "the stop flush after a paused-and-resumed episode expires its audio on elapsed time alone",
+            recorder.snapshot().none { kotlin.math.abs(it - 5_000 / 32768f) < 0.01f },
         )
         job.cancel()
     }

@@ -35,6 +35,31 @@ class PlaybackManagerPlaybackSinkTest {
         ApplicationProvider.getApplicationContext(),
     )
 
+    // FOCUS-LISTENER IDENTITY (4236727145, @reviewer 2803feab): the AudioManager boundary, collected.
+    // Android keys a focus grant to the listener instance it was handed; restore() must abandon THAT
+    // instance, not a fresh lambda. A mocked AudioManager records both calls, so an identity mismatch
+    // (the shipped defect: restore abandoned `[:]`) fails on the instance comparison.
+    @Suppress("DEPRECATION") // Same deprecated overloads production uses; see the note in the sink.
+    @Test
+    fun `restore abandons the same listener instance duck requested`() = runTest {
+        val manager = mock<PlaybackManager>()
+        val audioManager = mock<android.media.AudioManager>()
+        val context = mock<android.content.Context>()
+        // The sink uses the CLASS-based extension getSystemService<AudioManager>(), which calls
+        // getSystemService(Class), not the string overload.
+        org.mockito.kotlin.whenever(context.getSystemService(android.media.AudioManager::class.java))
+            .thenReturn(audioManager)
+        val sink = PlaybackManagerPlaybackSink(manager, context)
+
+        sink.duck()
+        val captor = argumentCaptor<android.media.AudioManager.OnAudioFocusChangeListener>()
+        org.mockito.kotlin.verify(audioManager).requestAudioFocus(captor.capture(), org.mockito.kotlin.eq(android.media.AudioManager.STREAM_MUSIC), org.mockito.kotlin.eq(android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK))
+        val requested = captor.firstValue
+
+        sink.restore()
+        org.mockito.kotlin.verify(audioManager).abandonAudioFocus(org.mockito.kotlin.same(requested))
+    }
+
     @Test
     fun `a seek bound to another episode is refused AT THE SINK, not by its caller`() = runTest {
         // THE BOUNDARY IS THE PRODUCTION SINK, so the case must drive IT rather than a fake. This is the

@@ -317,6 +317,11 @@ class PlaybackBufferRecorder @Inject constructor(
             }
         }
         fingerprintPcmTap.registerStreamClosed(retireAtStreamClose)
+        // REPLACEMENT OWNS THE SLOT (@reviewer): a start() over a still-installed callback (repeated
+        // start without stop) must unregister the PRIOR closure first, or the old owner's held
+        // admission retirement -- against state the old collector no longer controls -- fires on every
+        // later flush alongside the new owner's.
+        streamCloseCallback?.let { fingerprintPcmTap.unregisterStreamClosed(it) }
         streamCloseCallback = retireAtStreamClose
         fingerprintPcmTap.admissionStamper = { epoch, carried ->
             synchronized(lock) {

@@ -120,4 +120,112 @@ class FlushRetirementNoSuccessorTest {
         )
         job.cancel()
     }
+
+    // REGISTRATION OWNERSHIP (@reviewer): a start() over a still-installed callback -- repeated start
+    // without stop -- must replace, not stack: after the second start, a flush retires the NEW owner's
+    // admission only. The stale closure firing would retire against collector state the old run no
+    // longer controls, and a same-callback double registration would fire twice per event.
+    @Test
+    fun `a repeated start replaces the stream-close subscription - the stale owner's closure does not fire`() = runTest {
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+        var nowMs = 0L
+        recorder.monotonicNowMs = { nowMs }
+
+        var anchorUs = 0L
+        fun emit(value: Short) {
+            tap.onSinkBuffer(presentationTimeUs = anchorUs)
+            anchorUs += 100_000
+            tap.onPcm(ByteBuffer.wrap(s16le(ShortArray(1_600) { value })), AudioProcessor.AudioFormat(16_000, 1, C.ENCODING_PCM_16BIT))
+        }
+
+        // Owner A: admitted at its first emission, subscription installed. A writes MORE than the
+        // 8_000-sample delay tail (6 x 1_600), so a retirement of A is OBSERVABLE as count != 9_600 --
+        // a chunk smaller than the tail would survive retirement entirely and hide the stale firing.
+        val jobA = recorder.start(this)
+        runCurrent()
+        repeat(6) { emit(20_000) }
+        runCurrent()
+        val aSnapshot = recorder.snapshot()
+        assertEquals("owner A's audio is admitted", 9_600, aSnapshot.size)
+
+        // REPEATED START WITHOUT STOP: same recorder, new collector. The old closure is stale.
+        val jobB = recorder.start(this)
+        runCurrent()
+
+        // A flush now must retire owner B's held admission (none yet -- B has not emitted) and the
+        // STALE A closure must not run: A's admission and audio were minted by the first collector,
+        // and the test-visible proof is that A's tail keeps its original retirement deadline --
+        // a stale firing would have retired it at the flush instant and, crucially, a SECOND stale
+        // firing would have restarted the deadline (idempotency violation).
+        val flushInstantMs = 10_000L
+        nowMs = flushInstantMs
+        tap.onSinkFlush()
+
+        // Episode B plays after the flush under a fresh epoch stamp (the flush bumped the epoch).
+        emit(5_000)
+        runCurrent()
+        val afterB = recorder.snapshot()
+        assertTrue(
+            "owner B's audio must be admitted after the flush",
+            afterB.any { kotlin.math.abs(it - 5_000 / 32768f) < 0.01f },
+        )
+        // THE STALE CLOSURE DID NOT FIRE: with the defect (start() stacking registrations), A's old
+        // closure runs at this flush and retires A at nowMs=10s -- zeroing A's audio beyond its
+        // 500-sample tail immediately. With replacement ownership, A's admission was never touched
+        // at the flush: its audio remains fully present (retirement of A is wholesale stop()'s job,
+        // and the old collector is uninstalled -- only the stale closure could have retired it here).
+        assertEquals(
+            "the stale owner's closure must not run at the flush: A's audio is untouched beyond its " +
+                "delay tail -- a stale firing would trim A to the 8_000-sample tail",
+            9_600,
+            afterB.count { kotlin.math.abs(it - 20_000 / 32768f) < 0.01f },
+        )
+        jobA.cancel()
+        jobB.cancel()
+    }
+
+    // MEDIA3 PAUSE TRACE, PINNED AS BEHAVIOR (media3 1.10.1 DecoderAudioRenderer: onStopped calls
+    // audioSink.pause() ONLY -- flush() fires in onPositionReset (seek) and reset() in onDisabled
+    // (track change/stop/release)). So a pause delivers NO event, and correctly so: resume continues
+    // the SAME stream with no onPositionReset, so admission must stay live across a pause. The stop
+    // boundary the user eventually exercises (seek/stop) reaches onSinkFlush and retires there.
+    @Test
+    fun `a pause emits no event and keeps admission live - the later stop flush retires`() = runTest {
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+        var nowMs = 0L
+        recorder.monotonicNowMs = { nowMs }
+        val job = recorder.start(this)
+        runCurrent()
+
+        var anchorUs = 0L
+        fun emit(value: Short) {
+            tap.onSinkBuffer(presentationTimeUs = anchorUs)
+            anchorUs += 100_000
+            tap.onPcm(ByteBuffer.wrap(s16le(ShortArray(1_600) { value })), AudioProcessor.AudioFormat(16_000, 1, C.ENCODING_PCM_16BIT))
+        }
+
+        // Playing, then PAUSED: no event fires, the collector keeps its admission.
+        emit(20_000)
+        runCurrent()
+        val ticketBeforePause = recorder.ownerTagIdsForTest().last()
+
+        // RESUME after pause: same epoch (no flush happened), continued emission must carry the SAME
+        // ticket -- a spurious pause retirement would stamp the resume under a fresh one.
+        emit(20_000)
+        runCurrent()
+        val tagsAfterResume = recorder.ownerTagIdsForTest()
+        assertTrue("resume after pause is the same stream", tagsAfterResume.all { it == ticketBeforePause })
+
+        // THE STOP: seek/stop reaches the sink flush and retires with no successor emission.
+        tap.onSinkFlush()
+        nowMs = 60_000L
+        val expired = recorder.snapshot()
+        assertTrue(
+            "the stop flush after a paused episode expires its audio on elapsed time alone",
+            expired.none { kotlin.math.abs(it - 20_000 / 32768f) < 0.01f },
+        )
+        job.cancel()
+    }
 }

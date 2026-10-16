@@ -29,8 +29,11 @@ class EarconPlayerTest {
     fun `submit is nonblocking, serialised, and hands each cue its OWN accepted token`() {
         // 4d1e5946 controls on the PRODUCTION player with a real accepted write:
         // - a predecessor holds the player thread; submit must return while the write is pending;
-        // - tasks run serialised: exactly A then B, each callback with ITS OWN distinct token;
-        // - an uninstalled clip is a refusal: callback with null, and worker exceptions fail the test.
+        // - tasks run serialised: exactly A then B, each callback with ITS OWN distinct token.
+        // Both cues here are INSTALLED and ACCEPTED, so this case establishes admission identity and
+        // ordering only -- it does NOT exercise a refusal. The refused-cue arms (callback with null,
+        // and coverage never starting) belong to AudioFeedbackRendererTest's
+        // `submitEarcon starts coverage ONLY at that cue's admission, never before or on refusal`.
         player.installClipForTest(EarconId.SUCCESS, ShortArray(1600) { 1 }, 16_000)
         player.installClipForTest(EarconId.WAKE_WORD, ShortArray(1600) { 2 }, 16_000)
         // A track whose write ACCEPTS everything, so the accepted-token path is exercised without a

@@ -63,8 +63,10 @@ class PlaybackCrossCorrelatorPositionTest {
     fun `without a position the offset scan still runs`() {
         val burst = tone(1600, 300.0)
         val samples = FloatArray(16_000) { 0f }
-        // Place the burst where the offset scan looks for it.
-        val offset = 1600
+        // Place the burst where the offset scan looks for it: the END-anchored acoustic window --
+        // the mic hears the reference's NEWEST content minus the delay. maxOffset = 16000-1600 =
+        // 14400; a 200 ms delay puts the match at 14400 - 3200 = 11200.
+        val offset = 11_200
         burst.copyInto(samples, offset)
         val mic = FloatArray(1600) { i -> 0.3f * burst[i] }
 
@@ -147,11 +149,11 @@ class PlaybackCrossCorrelatorPositionTest {
         // evidence of a temporally possible echo -- so the answer is no bleed, reached WITHOUT
         // correlating a fabricated boundary offset.
         //
-        // The bleed here is placed INSIDE the default delay window (offset 2000 of 800..8000), so a
-        // correlator that fell back to the full window would FIND it. That is what makes this case
-        // able to distinguish the two policies: the positioned call must say no while the no-position
-        // control says yes.
-        val (samples, mic) = referenceWithBleedAt(burstStart = 2_000)
+        // The bleed here is placed INSIDE the default delay window (END-anchored: offset 154_000 of
+        // 150_400..157_600 for a 160_000-sample reference), so a correlator that fell back to the
+        // full window would FIND it. That is what makes this case able to distinguish the two
+        // policies: the positioned call must say no while the no-position control says yes.
+        val (samples, mic) = referenceWithBleedAt(burstStart = 154_000)
         val ref = PlaybackReference(samples, rate, startPositionMs = 0L) // covers 0..10_000 ms
         val correlator = PlaybackCrossCorrelator()
 

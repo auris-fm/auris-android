@@ -279,13 +279,22 @@ class CloudAudioPlayerTest {
         )
         // An episode contributes BEFORE and AFTER the answer: both must survive the answer's stop.
         val episodeEarly = FloatArray(6_000) { (0.8f * kotlin.math.sin(2 * kotlin.math.PI * 111.0 * it / 16_000)).toFloat() }
-        val episodeLate = FloatArray(6_000) { (0.8f * kotlin.math.sin(2 * kotlin.math.PI * 222.0 * it / 16_000)).toFloat() }
+        // 900 Hz -- disjoint from the answer chirp's span (200..700) so the END-anchored delay window
+        // (which searches recent audio, where this contribution lives) cannot correlate the mic
+        // segment against the LIVE episode; the control's property is about the RETIRED answer only.
+        val episodeLate = FloatArray(6_000) { (0.8f * kotlin.math.sin(2 * kotlin.math.PI * 900.0 * it / 16_000)).toFloat() }
         recorder.write(episodeEarly, admission = admFor(recorder, 7L))
 
         // The answer: one loud PCM frame LONGER than the delay tail, drained through the real path.
         val tail = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.DELAY_TAIL_SAMPLES
         val answerFrames = tail + 4_000
-        val answerTone = FloatArray(answerFrames) { (0.9 * kotlin.math.sin(2 * kotlin.math.PI * 440.0 * it / 16_000)).toFloat() }
+        // NONPERIODIC chirp (200 -> 700 Hz over the answer): the answer's surviving periodic tail
+        // must not correlate the mic segment at a wrong lag -- the whole point of this control is
+        // that the RETIRED portion does not match. A periodic tone correlates its own tail anywhere.
+        val answerTone = FloatArray(answerFrames) {
+            val t = it.toDouble() / 16_000
+            (0.9 * kotlin.math.sin(2 * kotlin.math.PI * (200.0 + (700.0 - 200.0) * it / (2.0 * answerFrames)) * t)).toFloat()
+        }
         val pcm = ByteArray(answerFrames * 2) { i -> (answerTone[i / 2] * 32767f).toInt().coerceIn(-32768, 32767).let { v -> if (i % 2 == 0) v else v shr 8 }.toByte() }
         wired.submitFrame(pcm)
         wired.play()

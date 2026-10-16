@@ -41,8 +41,23 @@ class PlaybackCrossCorrelator @Inject constructor() {
         //   Available    candidates exist -> correlate them.
         val candidate = candidateOffsets(micAudio, reference, micPositionMs, sampleRate)
         val offsetRange = when (candidate) {
-            is CandidateRange.Unavailable ->
-                minDelay..maxDelay.coerceAtMost(playbackBuffer.size - micAudio.size)
+            is CandidateRange.Unavailable -> {
+                // THE DEFAULT WINDOW IS END-ANCHORED (4235652583): the microphone hears audio that
+                // sounded an acoustic delay before NOW, and the reference's NEWEST sample is the
+                // closest thing to now -- so the matching content sits at
+                // [size - micSize - maxDelay, size - micSize - minDelay], near the ring END. A
+                // START-anchored window (offsets 0.05..0.5 s from the array start) only matches when
+                // the reference is fresh (shorter than delay + utterance); against a FULL retained
+                // ring a short command's echo lies ~1.5 s past the searched range, and a periodic
+                // waveform hides the miss. Clamp into the admissible range and intersect with the
+                // plain [0, size-micSize] so a fresh (short) reference degrades to the full scan.
+                val maxOffset = (playbackBuffer.size - micAudio.size).coerceAtLeast(0)
+                val end0 = maxOffset - minDelay
+                val start0 = maxOffset - maxDelay
+                val start = start0.coerceIn(0, maxOffset)
+                val end = end0.coerceIn(0, maxOffset)
+                if (start > end) minDelay..maxDelay.coerceAtMost(maxOffset) else start..end
+            }
 
             is CandidateRange.Empty -> return false
 

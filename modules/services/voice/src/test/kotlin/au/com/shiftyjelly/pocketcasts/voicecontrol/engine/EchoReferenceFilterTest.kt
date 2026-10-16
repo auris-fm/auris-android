@@ -14,6 +14,7 @@ import kotlin.math.PI
 import kotlin.math.sin
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -130,6 +131,59 @@ class EchoReferenceFilterTest {
             filter.shouldProcess(echoLikeSpeech, hasSpeakerId = false, speakerIndex = 0, playbackBuffer = recorder.snapshot()),
         )
         job.cancel()
+    }
+
+    // THE RING-ORDER/LAG BOUNDARY (4235652583, @reviewer): with a FULL retained ring (2 s), a short
+    // utterance's echo sits near the ring's END (the newest submitted audio, minus the acoustic
+    // delay) -- not in the first 50..500 ms of the array. The reference is a NONPERIODIC chirp, so a
+    // wrong lag cannot correlate by periodicity; the mic segment is delayed 200 ms and only 300 ms
+    // long (a short command). The filter must reject it as bleed; a START-anchored lag window
+    // searches the wrong 0.5 s of the ring and accepts it.
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `a short utterance's echo in a full ring is rejected - nonperiodic, end-of-ring alignment`() = runTest {
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+        val job = recorder.start(this)
+        runCurrent()
+
+        val routeMonitor = AndroidAudioRouteMonitor(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            gracePeriodSignal = GracePeriodSignal(),
+        )
+        val filter = UtteranceFilter(PlaybackCrossCorrelator(), routeMonitor)
+        assertTrue("precondition: route is not a headset", routeMonitor.route.value !is AudioRoute.Headset)
+
+        // TWO seconds of NONPERIODIC chirp (80 -> 600 Hz): no lag except the true one correlates.
+        val ringSize = PlaybackBufferRecorder.SAMPLE_RATE * 2
+        val chirp = FloatArray(ringSize) { i ->
+            val t = i.toDouble() / PlaybackBufferRecorder.SAMPLE_RATE
+            (0.6 * sin(2 * PI * (80.0 + (600.0 - 80.0) * i / (2.0 * ringSize)) * t)).toFloat()
+        }
+        var anchorUs = 0L
+        val delaySamples = (0.2 * PlaybackBufferRecorder.SAMPLE_RATE).toInt()
+        val segSamples = (0.3 * PlaybackBufferRecorder.SAMPLE_RATE).toInt()
+        // Submit in two chunks so the ring FILLS (snapshot == full 2 s).
+        for (half in 0..1) {
+            val slice = chirp.copyOfRange(half * ringSize / 2, (half + 1) * ringSize / 2)
+            val pcm = ByteBuffer.allocate(slice.size * 2).order(ByteOrder.nativeOrder())
+            slice.forEach { pcm.putShort((it * 32767).toInt().toShort()) }
+            tap.onSinkBuffer(presentationTimeUs = anchorUs)
+            anchorUs += slice.size * 1_000_000L / PlaybackBufferRecorder.SAMPLE_RATE
+            tap.onPcm(ByteBuffer.wrap(pcm.array()), AudioProcessor.AudioFormat(16_000, 1, C.ENCODING_PCM_16BIT))
+            runCurrent()
+        }
+        job.cancel()
+        assertEquals("precondition: the ring is FULL", ringSize, recorder.snapshot().size)
+
+        // The mic hears the episode content that sounded 200 ms ago: ring offset
+        // ringSize - delay - seg. Nonperiodic, so ONLY the true offset correlates.
+        val mic = chirp.copyOfRange(ringSize - delaySamples - segSamples, ringSize - delaySamples)
+        assertFalse(
+            "a short utterance's echo against the FULL ring must be rejected as bleed, whatever its " +
+                "position in the ring",
+            filter.shouldProcess(mic, hasSpeakerId = false, speakerIndex = 0, playbackBuffer = recorder.snapshot()),
+        )
     }
 
     @Test

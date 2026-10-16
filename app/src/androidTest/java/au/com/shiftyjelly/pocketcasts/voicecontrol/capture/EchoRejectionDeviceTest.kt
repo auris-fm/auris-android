@@ -53,7 +53,7 @@ class EchoRejectionDeviceTest {
     fun appSpeechHeardByTheMicIsRejected() = runBlocking<Unit> {
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
-        val capture = MicrophoneCapture(ctx, OboeCaptureHardware())
+        val capture = MicrophoneCapture(ctx, OboeCaptureHardware(), au.com.shiftyjelly.pocketcasts.repositories.fingerprint.EpisodeReferenceEligibility())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
         val segments = mutableListOf<FloatArray>()
@@ -127,9 +127,15 @@ class EchoRejectionDeviceTest {
             !accepted,
         )
 
-        engine.release()
-        job.cancel()
-        capture.stopCapture()
+        // CLEANUP IN FINALLY (4236613848): an assertion above must not leave the microphone open or
+        // the collector draining in the shared instrumentation process. engine/job/capture are
+        // effectively-final locals captured by the guard.
+        try {
+            engine.release()
+        } finally {
+            job.cancel()
+            capture.stopCapture()
+        }
     }
 
     @Test

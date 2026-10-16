@@ -69,6 +69,7 @@ public:
     // Set when the script is exhausted: the runLoop takes the next 0 as "stream inactive" and
     // exits, so this is the worker-exit barrier the delayed-consumer control waits on.
     std::atomic<bool> scriptDrained{false};
+    bool exitOnEmpty = false;
     // Bounded: an unbounded spin deadlocks the test forever if the worker never reaches the
     // drained branch (e.g. start() failed); the caller's event assertions then report the truth.
     bool awaitWorkerExitForTest(int maxMs = 30000) {
@@ -83,9 +84,11 @@ public:
         (void)timeoutMs;
         if (maxSamples < kFrame || script.empty()) {
             scriptDrained.store(true, std::memory_order_release);
-            // NEGATIVE is what the runLoop treats as "stream inactive" (read < 0 -> break). Zero is
-            // a retry-timeout and would spin forever past the end of the script.
-            return -1;
+            // OPT-IN negative return: NEGATIVE makes the runLoop treat the stream as inactive and
+            // BREAK (the stuck case needs a real worker exit for its barrier). Default stays 0 --
+            // the retry-timeout other cases depend on.
+            if (exitOnEmpty) return -1;
+            return 0;
         }
         // Sleep on every read from pauseAfterFrames onward, so the wall-clock cooldown elapses no
         // matter where the segment happens to close. The cost is wall time — the pause stretches
@@ -172,6 +175,7 @@ int main() {
         std::deque<bool> script = frames(4000, true);
         FakeCapture capture;
         capture.script = script;  // 4000 > 3750: a finite script already exceeds the ceiling.
+        capture.exitOnEmpty = true;  // real worker exit for the delayed-consumer barrier
         NativeVadProcessor processor(&capture);
         check(processor.start(), "stuck-case capture starts");
         bool sawFault = false;

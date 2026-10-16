@@ -83,6 +83,54 @@ class EchoReferenceFilterTest {
         )
     }
 
+    // PAUSE EXPIRY THROUGH THE FILTER (@reviewer acceptance control): the same two-sided decision as
+    // the stopped-answer control, but the retirement comes from the SINK PAUSE EVENT -- the real tap
+    // drives the real recorder through its production collector, tap.onSinkPaused() ends the audible
+    // reference, and after clock-only expiry speech resembling the PAUSED episode is accepted by the
+    // production correlating filter instead of being suppressed forever.
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `speech resembling a paused episode is accepted by the filter after the pause-expired tail`() = runTest {
+        var nowMs = 4_000_000L
+        val tap = FingerprintPcmTap()
+        val recorder = PlaybackBufferRecorder(tap)
+        recorder.monotonicNowMs = { nowMs }
+        val routeMonitor = AndroidAudioRouteMonitor(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            gracePeriodSignal = GracePeriodSignal(),
+        )
+        val filter = UtteranceFilter(PlaybackCrossCorrelator(), routeMonitor)
+        assertTrue("precondition: route is not a headset", routeMonitor.route.value !is AudioRoute.Headset)
+        val job = recorder.start(this)
+        runCurrent()
+
+        // One second of episode audio through the real tap (sine at 220 Hz, amplitude ~0.6).
+        val episode = FloatArray(8_000) { i -> (0.6 * sin(2 * PI * 220.0 * i / sampleRate)).toFloat() }
+        var anchorUs = 0L
+        // HEAP buffer, as the production decoder path delivers: a DIRECT ByteBuffer is silently
+        // dropped by the tap (observed under diagnosis: snapshot stayed empty), so the control must
+        // exercise the array-backed shape production actually sends.
+        val pcm = ByteBuffer.allocate(episode.size * 2).order(ByteOrder.nativeOrder())
+        episode.forEach { pcm.putShort((it * 32767).toInt().toShort()) }
+        tap.onSinkBuffer(presentationTimeUs = 0)
+        tap.onPcm(ByteBuffer.wrap(pcm.array()), AudioProcessor.AudioFormat(16_000, 1, C.ENCODING_PCM_16BIT))
+        runCurrent()
+        val echoLikeSpeech = FloatArray(1_600) { i -> 0.3f * episode[i] }
+        assertFalse(
+            "precondition: while the episode plays its echo is bleed",
+            filter.shouldProcess(echoLikeSpeech, hasSpeakerId = false, speakerIndex = 0, playbackBuffer = recorder.snapshot()),
+        )
+
+        // PAUSE: the sink pause event retires the audible reference. No further writes.
+        tap.onSinkPaused()
+        nowMs += PlaybackBufferRecorder.DELAY_TAIL_SAMPLES * 1_000 / PlaybackBufferRecorder.SAMPLE_RATE + 1
+        assertTrue(
+            "after the PAUSE-expired tail, speech resembling the paused episode must be accepted",
+            filter.shouldProcess(echoLikeSpeech, hasSpeakerId = false, speakerIndex = 0, playbackBuffer = recorder.snapshot()),
+        )
+        job.cancel()
+    }
+
     @Test
     fun `echo-only input is rejected once the reference holds the submitted playback`() {
         val (recorder, filter) = buildFilter()

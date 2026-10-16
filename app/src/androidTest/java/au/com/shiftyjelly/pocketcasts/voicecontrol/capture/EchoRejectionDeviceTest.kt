@@ -73,8 +73,12 @@ class EchoRejectionDeviceTest {
             val runStartFrames = MicrophoneCapture.framesConsumed()
             val deviceId = capture.openStreamForAcquisition()
             assumeTrue("inconclusive: no input stream could be opened (capture prereq absent)", deviceId >= 0)
-            assumeTrue("inconclusive: the acquired stream did not start (capture prereq absent)", capture.startAcquiredStream())
-            assumeTrue("inconclusive: the native VAD did not attach (prereq absent)", capture.attachCapture())
+            // Only the OPEN failure is an observed unavailable prerequisite (no input device).
+            // start/attach failures have no independently identified environmental cause, so they
+            // stay failures, not skips. The selected input device is NOT verified here -- attach is
+            // "attached", not "confirmed to the chosen route".
+            assertTrue("the acquired stream did not start", capture.startAcquiredStream())
+            assertTrue("the native VAD did not attach to the acquired stream", capture.attachCapture())
 
             val segments = mutableListOf<FloatArray>()
             var captureFailure: Throwable? = null
@@ -155,6 +159,7 @@ class EchoRejectionDeviceTest {
             runCatching { engine?.release() }
             runCatching { job?.cancel() }
             runCatching { capture.stopCapture() }
+            runCatching { capture.closeAcquiredStream() }
         }
     }
 
@@ -180,8 +185,12 @@ class EchoRejectionDeviceTest {
             val runStartFrames = MicrophoneCapture.framesConsumed()
             val deviceId = capture.openStreamForAcquisition()
             assumeTrue("inconclusive: no input stream could be opened (capture prereq absent)", deviceId >= 0)
-            assumeTrue("inconclusive: the acquired stream did not start (capture prereq absent)", capture.startAcquiredStream())
-            assumeTrue("inconclusive: the native VAD did not attach (prereq absent)", capture.attachCapture())
+            // Only the OPEN failure is an observed unavailable prerequisite (no input device).
+            // start/attach failures have no independently identified environmental cause, so they
+            // stay failures, not skips. The selected input device is NOT verified here -- attach is
+            // "attached", not "confirmed to the chosen route".
+            assertTrue("the acquired stream did not start", capture.startAcquiredStream())
+            assertTrue("the native VAD did not attach to the acquired stream", capture.attachCapture())
 
             val segments = mutableListOf<FloatArray>()
             job = scope.launch {

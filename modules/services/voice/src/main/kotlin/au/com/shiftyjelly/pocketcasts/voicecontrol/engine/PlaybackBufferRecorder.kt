@@ -172,6 +172,9 @@ class PlaybackBufferRecorder @Inject constructor(
      */
     private var streamCloseCallback: (() -> Unit)? = null
 
+    /** The collector's subscription to the tap's SINK PAUSE events; see [start]. */
+    private var streamPausedCallback: (() -> Unit)? = null
+
     /**
      * Whether the [sampleCount] newest retained samples are contiguous on the reported axis.
      *
@@ -316,13 +319,27 @@ class PlaybackBufferRecorder @Inject constructor(
                 }
             }
         }
-        fingerprintPcmTap.registerStreamClosed(retireAtStreamClose)
-        // REPLACEMENT OWNS THE SLOT (@reviewer): a start() over a still-installed callback (repeated
-        // start without stop) must unregister the PRIOR closure first, or the old owner's held
-        // admission retirement -- against state the old collector no longer controls -- fires on every
-        // later flush alongside the new owner's.
+        // PAUSE ACOUSTIC CONTRACT (@spec/@reviewer): a sink pause ends the current audible-reference
+        // admission -- only the bounded delay tail survives and expires without another write; queued
+        // pre-pause work is refused at delivery. currentAdmission is deliberately KEPT: resume
+        // continues the same logical stream, so the stamper's renewal branch admits future playback
+        // under a fresh ticket -- the old reference is never revived.
+        val retireAtStreamPaused: () -> Unit = {
+            synchronized(lock) {
+                val owner = currentAdmission
+                if (owner != null && isAdmissionLiveLocked(owner)) {
+                    retireProducerLocked(owner)
+                }
+            }
+        }
+        // REPLACEMENT OWNS THE SLOT (@reviewer): unregister the PRIOR closures before installing the
+        // new ones -- a start() over a still-installed subscription must replace, not stack.
         streamCloseCallback?.let { fingerprintPcmTap.unregisterStreamClosed(it) }
+        streamPausedCallback?.let { fingerprintPcmTap.unregisterStreamPaused(it) }
+        fingerprintPcmTap.registerStreamClosed(retireAtStreamClose)
+        fingerprintPcmTap.registerStreamPaused(retireAtStreamPaused)
         streamCloseCallback = retireAtStreamClose
+        streamPausedCallback = retireAtStreamPaused
         fingerprintPcmTap.admissionStamper = { epoch, carried ->
             synchronized(lock) {
                 val owner = currentAdmission
@@ -393,13 +410,19 @@ class PlaybackBufferRecorder @Inject constructor(
         // The collector no longer owns an episode stream: stop stamping emissions so a later start()
         // (or another recorder instance sharing the tap singleton) does not inherit this owner's state.
         fingerprintPcmTap.admissionStamper = null
-        // Unsubscribe from the shared tap's stream-close events: this collector's held owner is about
-        // to be retired wholesale below, and a later session must not fire THIS closure's stale owner.
+        // Unsubscribe from the shared tap's stream-close and pause events: this collector's held owner
+        // is about to be retired wholesale below, and a later session must not fire THIS closure's
+        // stale owner.
         run {
             val callback = streamCloseCallback
             if (callback != null) {
                 fingerprintPcmTap.unregisterStreamClosed(callback)
                 streamCloseCallback = null
+            }
+            val pausedCallback = streamPausedCallback
+            if (pausedCallback != null) {
+                fingerprintPcmTap.unregisterStreamPaused(pausedCallback)
+                streamPausedCallback = null
             }
         }
         // SESSION BOUNDARY RETIREMENT (@reviewer 4235702596): leaving up to the whole retained window

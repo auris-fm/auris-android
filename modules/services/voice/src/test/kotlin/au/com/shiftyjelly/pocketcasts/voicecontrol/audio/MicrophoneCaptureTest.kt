@@ -70,6 +70,41 @@ class MicrophoneCaptureTest {
         return context
     }
 
+    // 4235652501 lifecycle exit (@reviewer fe77cc24): onEngineFinished clears reference eligibility
+    // only when the finishing engine still OWNS the active capture.
+    @Test
+    fun `a current engine finishing ends reference eligibility`() {
+        val gate = EpisodeReferenceEligibility()
+        val hardware = FakeCaptureHardware()
+        val capture = MicrophoneCapture(context(), hardware, gate)
+        assertTrue(capture.openStreamForAcquisition() >= 0)
+        assertTrue(capture.attachCapture())
+        assertTrue("precondition: capture active", gate.isCaptureActive())
+        capture.currentEngineForTest()!!.dispose()
+        assertFalse("the owning engine's finish must end eligibility", gate.isCaptureActive())
+    }
+
+    @Test
+    fun `a stale engine finishing does not end the replacement's reference eligibility`() {
+        val gate = EpisodeReferenceEligibility()
+        val hardware = FakeCaptureHardware()
+        val capture = MicrophoneCapture(context(), hardware, gate)
+        assertTrue(capture.openStreamForAcquisition() >= 0)
+        assertTrue(capture.attachCapture())
+        val stale = capture.currentEngineForTest()!!
+        // Replacement session opens and attaches before the stale engine finishes.
+        assertTrue(capture.openStreamForAcquisition() >= 0)
+        assertTrue(capture.attachCapture())
+        stale.dispose()
+        assertTrue(
+            "a stale finish must not end the replacement's eligibility",
+            gate.isCaptureActive(),
+        )
+        // And the replacement's own finish does.
+        capture.currentEngineForTest()!!.dispose()
+        assertFalse(gate.isCaptureActive())
+    }
+
     @Test
     fun `a stale collector teardown cannot stop a stream opened for its replacement`() {
         val hardware = FakeCaptureHardware()

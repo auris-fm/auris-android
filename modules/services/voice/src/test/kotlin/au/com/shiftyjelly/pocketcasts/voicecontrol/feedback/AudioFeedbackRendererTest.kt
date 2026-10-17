@@ -1121,4 +1121,124 @@ class AudioFeedbackRendererTest {
         combinedRenderer.endSession()
         org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).release()
     }
+
+    @Test
+    fun `an observer held across a successor's CALLBACK GAP must not publish the successor's completion as its own`() {
+        // 21c36ea8 / reviewer 63f99bed -- THE CALLBACK-GAP RACE, reproduced against UNCHANGED production.
+        //
+        // The interleaving: A's observer is the CURRENT coverage job, parked at the hold seam AFTER its
+        // wait and BEFORE its completion read. B -- the SAME sound, WAKE_WORD -- is admitted and its
+        // write COMPLETES on the player thread, overwriting the shared latest-cue fields
+        // cueHeadOrigin/cueHeadTarget (EarconPlayer.kt :290-292, :323/:327) -- but B's admission
+        // callback has NOT yet run, so the renderer still names A's job as the coverage owner and
+        // currentCueId is still A's. In that window A resumes, reads completion(), and the comparison
+        // runs against B'S interval while the ownership guard (earconCoverageJob === observer) still
+        // admits A's publication: A publishes a Consumed whose evidence belongs to ANOTHER admission.
+        //
+        // The window is created deterministically by taking B's write through the RAW player
+        // (realPlayer.play), which performs exactly the production write/frontier bookkeeping and
+        // mints B's token, but -- unlike the renderer's submitEarcon/playEarcon paths -- never starts
+        // B's coverage. That is the machine state between "B finished writing" and "B's callback
+        // replaced the observer", held open for as long as the case needs.
+        //
+        // THE ASSERTION IS THE OWNERSHIP RULE: a completion read in this window is B's, not A's, so A
+        // must not publish it. With per-admission completion ownership, A's scoped query recognises
+        // that the track's current admission is no longer its own and publishes nothing. Production,
+        // reading the shared fields, publishes Consumed -- which is exactly the failure.
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val realPlayer = EarconPlayer(context)
+        realPlayer.installClipForTest(EarconId.WAKE_WORD, ShortArray(100) { 2 }, 16_000)
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16_000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        realPlayer.trackFactoryForTest = { track }
+        val head = java.util.concurrent.atomic.AtomicInteger(0)
+        realPlayer.readPlaybackHeadFrames = { head.get() }
+
+        val combinedRenderer = AudioFeedbackRenderer(realPlayer, ttsEngine)
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        combinedRenderer.holdObserverForTest = barrier
+        combinedRenderer.holdArrivalForTest = arrival
+
+        // A IS ADMITTED THROUGH THE RENDERER, so its coverage job is REAL, and it ARRIVES at the hold
+        // before ever having read a completion.
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        val aAdmission = realPlayer.currentAdmissionForTest()
+        assertNotNull("A's admission must exist after its successful play", aAdmission)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue("A's observer must actually ARRIVE at the hold", arrival.isCompleted)
+        assertEquals("A's writes are accepted by the real track", 100, realPlayer.emittedFrames)
+        assertNull(
+            "precondition: A has published nothing while held",
+            combinedRenderer.lastCueObservation.value,
+        )
+
+        // B'S WRITE COMPLETES IN A'S CALLBACK GAP. The raw player performs the production write loop,
+        // advances acceptedFramesTotal, and overwrites the shared latest-cue fields to B'S interval
+        // [100, 200] -- while the renderer's coverage owner is still A's job and A's cue id still
+        // stands. currentAdmission is now B's token, which is precisely what a per-admission
+        // completion query can detect and shared fields cannot.
+        val bAdmission = realPlayer.play(EarconId.WAKE_WORD)
+        assertNotNull("B's write must be accepted in the gap", bAdmission)
+        assertNotEquals("B is a DISTINCT admission of the same sound", aAdmission, bAdmission)
+        assertEquals(
+            "B wrote its own 100 frames onto the cumulative frontier",
+            200,
+            realPlayer.javaClass.getDeclaredField("acceptedFramesTotal")
+                .apply { isAccessible = true }
+                .get(realPlayer),
+        )
+        assertEquals(
+            "the shared frontier now names B's interval, written under A's observership",
+            200,
+            realPlayer.javaClass.getDeclaredField("cueHeadTarget")
+                .apply { isAccessible = true }
+                .get(realPlayer),
+        )
+        assertTrue(
+            "and B's callback has NOT replaced the renderer job: A is still the live coverage owner",
+            combinedRenderer.coverageIsRunningForTest(),
+        )
+        assertTrue(
+            "A's own job is the one still running -- B's observer never started",
+            arrival.getCompleted().isActive,
+        )
+        assertNull(
+            "precondition: the gap holds and B's observer has not started",
+            combinedRenderer.lastCueObservation.value,
+        )
+
+        // THE HEAD MOVES INTO B'S INTERVAL, PAST B'S TARGET. A shared-fields completion() now reports
+        // Consumed -- for B. A's OWN interval ended at 100, and this head proves A's frames sounded
+        // too, but the VERDICT A is about to read was computed from B's frontier, not A's admission.
+        head.set(250)
+        assertEquals(
+            "the shared completion in the gap answers for B's interval",
+            EarconPlayer.EarconCompletion.Consumed,
+            realPlayer.completion(),
+        )
+
+        // A RESUMES. Production reads the shared fields and publishes B's Consumed under A's
+        // ownership; the ownership rule says a completion read in this window is not A's to publish.
+        barrier.complete(Unit)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(3_000))
+
+        assertNull(
+            "A must NOT publish the successor's completion as its own verdict",
+            combinedRenderer.lastCueObservation.value,
+        )
+
+        // TEARDOWN, through the RENDERER's own lifecycle.
+        combinedRenderer.endSession()
+        org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).release()
+    }
 }

@@ -1320,4 +1320,138 @@ class AudioFeedbackRendererTest {
         combinedRenderer.endSession()
         org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).release()
     }
+
+    private fun realPlayerWithControlledHeads(): Triple<EarconPlayer, android.media.AudioTrack, java.util.concurrent.ConcurrentHashMap<android.media.AudioTrack, Int>> {
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val player = EarconPlayer(context)
+        player.installClipForTest(EarconId.WAKE_WORD, ShortArray(100) { 2 }, 16_000)
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16_000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        player.trackFactoryForTest = { track }
+        val heads = java.util.concurrent.ConcurrentHashMap<android.media.AudioTrack, Int>()
+        player.readPlaybackHeadFrames = { t -> heads[t] }
+        return Triple(player, track, heads)
+    }
+
+    @Test
+    fun `a rate-change track replacement leaves the old cue's verdict on ITS OWN track, refused successor or not`() {
+        // Reviewer 719c64c8 window: ensureTrack replaces the track on a rate change WITHOUT retiring
+        // the current admission's snapshot. A then reads the NEW track's playback head against A's
+        // OLD bounds. The sharpest form is the REFUSED successor: the replacement happens during
+        // ensureTrack, BEFORE the write, so a refused B leaves the track replaced and the stale
+        // snapshot paired with it indefinitely -- no successful successor ever republishes.
+        // A's REAL audio sounded on ITS track (head 50 of the old track); the new track's head stands
+        // at 0. A verdict computed from the new track says Queued and attributes nothing -- the theft
+        // is observable as a lost attribution, same signature as ddaf3aa7b but from TRACK identity,
+        // not field mixture.
+        val (realPlayer, trackA, heads) = realPlayerWithControlledHeads()
+        val combinedRenderer = AudioFeedbackRenderer(realPlayer, ttsEngine)
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        combinedRenderer.holdObserverForTest = barrier
+        combinedRenderer.holdArrivalForTest = arrival
+
+        // A ADMITTED AND PARKED; its own track has genuinely sounded through half its frames.
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        val aAdmission = realPlayer.currentAdmissionForTest()
+        assertNotNull("A's admission must exist after its successful play", aAdmission)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue("A's observer must actually ARRIVE at the hold", arrival.isCompleted)
+        heads[trackA] = 50
+        assertNull("precondition: A has published nothing while held", combinedRenderer.lastCueObservation.value)
+        assertEquals(0, combinedRenderer.emissionNotesForTest())
+
+        // A SECOND SOUND AT A DIFFERENT RATE FORCES ensureTrack TO REPLACE THE TRACK. Its write is
+        // REFUSED, so play returns null: the track is replaced, no new admission exists, and the
+        // stale snapshot now faces a track A never wrote to.
+        realPlayer.installClipForTest(EarconId.SUCCESS, ShortArray(80) { 1 }, 8_000)
+        val trackB = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(trackB.sampleRate).thenReturn(8_000)
+        org.mockito.Mockito.`when`(
+            trackB.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenReturn(0)
+        val factory = realPlayer.trackFactoryForTest
+        realPlayer.trackFactoryForTest = { trackB }
+        org.mockito.Mockito.`when`(trackB.playbackHeadPosition).thenReturn(0)
+        val refused = realPlayer.play(EarconId.SUCCESS)
+        realPlayer.trackFactoryForTest = factory
+        assertNull("the successor must be REFUSED by its failed write", refused)
+        assertNotEquals("the rate change must have replaced the track", trackA, currentTrackOf(realPlayer))
+
+        // A RESUMES. Its verdict must come from ITS OWN track's head (50, inside A's interval),
+        // never from the replacement track's state.
+        barrier.complete(Unit)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(300))
+
+        assertTrue(
+            "A's verdict must be computed from ITS OWN track: the old track's head is inside A's" +
+                " interval and must attribute, not the replacement track's zero head",
+            combinedRenderer.emissionNotesForTest() >= 1,
+        )
+
+        combinedRenderer.endSession()
+    }
+
+    @Test
+    fun `a stop that lands DURING head sampling must not let the sampled head become a verdict`() {
+        // Reviewer 719c64c8: the head read is not validated against stop/release. Land the stop
+        // RE-ENTRANTLY inside the head sample itself -- the sample call performs the stop, then
+        // returns a large head. Without a post-sampling revalidation, the in-flight verdict publishes
+        // Consumed for a cue whose admission was already stopped and retired. (A latch-based handshake
+        // cannot work here: the observer runs on the single Robolectric main dispatcher, so blocking
+        // the sample blocks the test thread too.)
+        val (realPlayer, trackA, heads) = realPlayerWithControlledHeads()
+        val combinedRenderer = AudioFeedbackRenderer(realPlayer, ttsEngine)
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        combinedRenderer.holdObserverForTest = barrier
+        combinedRenderer.holdArrivalForTest = arrival
+        var stopLandedDuringSample = false
+
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue(arrival.isCompleted)
+        heads[trackA] = 250
+
+        // THE HEAD SAMPLE ITSELF LANDS THE STOP: the admission is retired while the read is in
+        // flight, and only then does the sample produce its value.
+        realPlayer.readPlaybackHeadFrames = { _ ->
+            realPlayer.stopNow()
+            stopLandedDuringSample = true
+            heads[trackA]!!
+        }
+        barrier.complete(Unit)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_000))
+
+        assertTrue(
+            "precondition: the stop must have landed inside the head sample",
+            stopLandedDuringSample,
+        )
+        assertNull(
+            "a head sampled against a retired admission is not a verdict: the stopped cue must not" +
+                " be published Consumed by its own in-flight observer",
+            combinedRenderer.lastCueObservation.value,
+        )
+
+        combinedRenderer.endSession()
+    }
+
+    private fun currentTrackOf(player: EarconPlayer): android.media.AudioTrack? = player.javaClass.getDeclaredField("track")
+        .apply { isAccessible = true }
+        .get(player) as android.media.AudioTrack?
 }

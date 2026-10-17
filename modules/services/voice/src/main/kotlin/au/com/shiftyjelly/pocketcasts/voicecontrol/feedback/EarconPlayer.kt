@@ -291,13 +291,20 @@ class EarconPlayer(
             cueHeadOrigin = acceptedFramesTotal - offset
             emittedFrames = offset
             emittedRateHz = clip.sampleRateHz
-            // THE ADMISSION MARKER IS WRITTEN LAST. `completionFor` vouches a completion read to the
-            // admission named here; writing the marker after the frontier fields it vouches for makes
-            // the vouch one-directional and sound: a reader that sees THIS marker has synchronised
-            // with this write and therefore sees these fields, while a reader that races a successor's
-            // overwrite sees the marker move and knows the verdict it just computed belongs to the
-            // successor -- not to the admission that asked. Writing it BEFORE the fields would vouch
-            // for fields not yet written, reopening the shared-slot race through the check itself.
+            // THE ADMISSION'S OWN FRONTIER, PUBLISHED AS ONE IMMUTABLE SNAPSHOT. The shared slots
+            // above serve the legacy/inspection readers; the SCOPED reader (completionFor) reads only
+            // this reference. One @Volatile reference write is atomic: there is no intermediate state
+            // in which the bounds belong to one admission and the marker to another -- the defect the
+            // writer-between-fields-and-marker control (ddaf3aa7b) demonstrated for marker-last
+            // ordering, where B's fields could land while B's marker had not and A read the mixture
+            // as its own. BOUNDS AND ADMISSION MARKER MOVE TOGETHER, IN THE SAME SNAPSHOT.
+            currentFrontier = Frontier(
+                admissionRaw = admitted.raw,
+                origin = acceptedFramesTotal - offset,
+                target = acceptedFramesTotal,
+            )
+            // THE RAW MARKER STAYS IN STEP for the stop-scoping path (stopAdmissionNow compares
+            // currentAdmission); completion ownership checks read the snapshot, not this.
             currentAdmissionRaw = admitted.raw
             admitted
         } catch (e: Exception) {
@@ -472,9 +479,9 @@ class EarconPlayer(
             cueHeadTarget = 0
             lastPlayedId = null
             currentAdmission = null
-            // THE MARKER CLEARS LAST, for the same reason it is minted last: a completion read in
-            // flight must observe the marker move away from its admission AFTER it read the zeroed
-            // fields, so it bails as superseded instead of vouching zeroes to a live admission.
+            // THE SNAPSHOT CLEARS WITH THE ADMISSION, in one reference write: nothing is admitted, so
+            // no scoped read can vouch stale bounds to a live caller.
+            currentFrontier = null
             currentAdmissionRaw = 0L
         }
     }
@@ -501,6 +508,27 @@ class EarconPlayer(
     private var currentAdmission: AdmissionToken? = null
 
     /**
+     * ONE ADMISSION'S FRONTIER AS AN IMMUTABLE VALUE.
+     *
+     * Bounds are computed once, at admission, and never mutated: a successor does not overwrite them,
+     * it publishes a NEW snapshot. A scoped reader therefore always sees bounds and admission marker
+     * from the SAME admission -- the mixture state (B's bounds, A's marker) that marker-last ordering
+     * still admitted is unrepresentable.
+     */
+    private data class Frontier(
+        val admissionRaw: Long,
+        val origin: Int,
+        val target: Int,
+    )
+
+    /**
+     * The CURRENT admission's frontier, or null when nothing is admitted. Single @Volatile reference:
+     * readers get one consistent snapshot, writers swap in a fresh one per admission.
+     */
+    @Volatile
+    private var currentFrontier: Frontier? = null
+
+    /**
      * The raw admission identity that owns the track, published for cross-thread ownership checks.
      *
      * EVERY writer sets this LAST, after the frontier fields it vouches for (admission above, the
@@ -514,24 +542,38 @@ class EarconPlayer(
     /**
      * Completion SCOPED TO ONE ADMISSION, not to whatever cue currently owns the track.
      *
-     * `completion()` answers for the LATEST admitted cue, because the frontier fields are shared
-     * latest-cue slots. An OLD observer that reads it in the gap between a successor's completed
-     * write and the successor's callback would receive the SUCCESSOR'S verdict and, still passing
-     * the renderer's job-identity guard, publish it as its own (the 21c36ea8/63f99bed race, failed
-     * as `A must NOT publish the successor's completion as its own verdict`). This query instead
-     * validates the read against the caller's OWN token: the verdict is returned only if the player
-     * still names that admission after the read; otherwise the admission was superseded mid-read
-     * and the observation is [EarconCompletion.Unknown] -- which the renderer's observer treats as
-     * "nothing established", so the superseded cue publishes nothing and the successor's own
-     * observer, once its callback runs, speaks for the cue.
+     * The verdict is computed from THE CALLER'S OWN immutable frontier snapshot: the current snapshot
+     * is read once (one atomic reference read), and anything that is not the caller's admission yields
+     * [EarconCompletion.Unknown] -- which the renderer's observer treats as "nothing established", so
+     * a superseded cue publishes nothing and the successor's own observer, once its callback runs,
+     * speaks for the cue. Covers BOTH known races:
+     *
+     * - the CALLBACK GAP (63f99bed, control 2034cd5d4): A reads after B's whole publication -- B's
+     *   snapshot is current, A bails.
+     * - the WRITER-INTERNAL WINDOW (52b786fe, control ddaf3aa7b): A reads between B's frontier
+     *   mutation and B's marker. Marker-last alone let A accept B's bounds as its own; with the
+     *   snapshot there are no shared bounds to half-write -- A reads either its OWN immutable bounds
+     *   (its verdict, correct) or B's whole snapshot (not its admission, bails).
+     *
+     * The playback head is read AFTER the snapshot: the head is cumulative track state, not admission
+     * state, and a head sampled slightly later only ever makes a verdict MORE progressed, never
+     * attributes a different cue.
      */
     fun completionFor(admissionRaw: Long?): EarconCompletion {
         if (admissionRaw == null) return EarconCompletion.Unknown
-        val verdict = completion()
-        return if (currentAdmissionRaw == admissionRaw) {
-            verdict
+        val current = track ?: return EarconCompletion.Unknown
+        val frontier = currentFrontier ?: return EarconCompletion.Unknown
+        if (frontier.admissionRaw != admissionRaw) return EarconCompletion.Unknown
+        if (emittedFrames <= 0) return EarconCompletion.Unknown
+        val head = if (readPlaybackHeadFrames != null) {
+            readPlaybackHeadFrames!!.invoke(current) ?: return EarconCompletion.Unknown
         } else {
-            EarconCompletion.Unknown
+            current.playbackHeadPosition
+        }
+        return when {
+            head >= frontier.target -> EarconCompletion.Consumed
+            head > frontier.origin -> EarconCompletion.Playing
+            else -> EarconCompletion.Queued
         }
     }
 
@@ -578,8 +620,8 @@ class EarconPlayer(
             acceptedFramesTotal = 0
             cueHeadTarget = 0
             cueHeadOrigin = 0
-            // Same ordering rule as [stopAdmissionNow]: the marker clears after the fields it vouches
-            // for, so an in-flight scoped read bails as superseded rather than vouching zeroes.
+            // Same rule as [stopAdmissionNow]: the snapshot and marker clear with the admission.
+            currentFrontier = null
             currentAdmissionRaw = 0L
         }
         // Release the worker itself, last: the teardown above runs ON this thread, and the next session

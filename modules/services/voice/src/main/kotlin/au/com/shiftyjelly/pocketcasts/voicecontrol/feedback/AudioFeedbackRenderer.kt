@@ -155,7 +155,7 @@ class AudioFeedbackRenderer(
         // disposed check the coverage path applies.
         earconPlayer.submit(id) { token ->
             if (token != null && !disposed) {
-                coverEarconUntilConsumed(id)
+                coverEarconUntilConsumed(id, token)
             }
         }
     }
@@ -187,7 +187,7 @@ class AudioFeedbackRenderer(
             // The span is the clip's OWN duration, from the frames the sink accepted and the rate it
             // accepted them at, so a shorter cue is not covered longer than it sounds and a longer one
             // is not cut short by an assumed length.
-            coverEarconUntilConsumed(id)
+            coverEarconUntilConsumed(id, admitted)
         }
         // THE PUBLIC RESULT STILL REPORTS ACCEPTANCE. Returning true unconditionally made a REFUSED cue
         // look accepted to every caller, so a caller could not tell a cue that never sounded from one
@@ -366,7 +366,7 @@ class AudioFeedbackRenderer(
      *
      * Runs on the renderer's own scope so a synchronous caller is not blocked.
      */
-    private fun coverEarconUntilConsumed(startedEarcon: EarconId) {
+    private fun coverEarconUntilConsumed(startedEarcon: EarconId, admitted: EarconPlayer.AdmissionToken?) {
         // THE OBSERVER KNOWS ITS OWN CUE. `coverageExpiredUnknown` is a plain field written by a
         // NON-SUSPENDING assignment after `completion()` returns, so cancellation alone cannot protect it:
         // an OLD observer can resume after a SUCCESSOR has published its own result and overwrite it.
@@ -482,7 +482,7 @@ class AudioFeedbackRenderer(
                     holdArrivalForTest?.complete(observerRef.await())
                     barrier.await()
                 }
-                when (earconPlayer.completion()) {
+                when (earconPlayer.completionFor(admitted?.raw)) {
                     // CONSUMED IS MEASURED RENDERING, so it NOTES BEFORE ENDING. The head has passed
                     // every accepted frame, which is the STRONGEST evidence the cue sounded -- and a cue
                     // that finished BETWEEN observations would otherwise never be attributed at all.

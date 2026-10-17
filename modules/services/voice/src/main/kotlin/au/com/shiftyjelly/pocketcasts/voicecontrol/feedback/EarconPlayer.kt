@@ -291,6 +291,14 @@ class EarconPlayer(
             cueHeadOrigin = acceptedFramesTotal - offset
             emittedFrames = offset
             emittedRateHz = clip.sampleRateHz
+            // THE ADMISSION MARKER IS WRITTEN LAST. `completionFor` vouches a completion read to the
+            // admission named here; writing the marker after the frontier fields it vouches for makes
+            // the vouch one-directional and sound: a reader that sees THIS marker has synchronised
+            // with this write and therefore sees these fields, while a reader that races a successor's
+            // overwrite sees the marker move and knows the verdict it just computed belongs to the
+            // successor -- not to the admission that asked. Writing it BEFORE the fields would vouch
+            // for fields not yet written, reopening the shared-slot race through the check itself.
+            currentAdmissionRaw = admitted.raw
             admitted
         } catch (e: Exception) {
             Timber.w(e, "[Earcon] play failed")
@@ -464,6 +472,10 @@ class EarconPlayer(
             cueHeadTarget = 0
             lastPlayedId = null
             currentAdmission = null
+            // THE MARKER CLEARS LAST, for the same reason it is minted last: a completion read in
+            // flight must observe the marker move away from its admission AFTER it read the zeroed
+            // fields, so it bails as superseded instead of vouching zeroes to a live admission.
+            currentAdmissionRaw = 0L
         }
     }
 
@@ -487,6 +499,41 @@ class EarconPlayer(
     }
 
     private var currentAdmission: AdmissionToken? = null
+
+    /**
+     * The raw admission identity that owns the track, published for cross-thread ownership checks.
+     *
+     * EVERY writer sets this LAST, after the frontier fields it vouches for (admission above, the
+     * zeroing in [stopAdmissionNow]), and readers rely on exactly that order: seeing raw R means the
+     * fields R's admission wrote are visible, and NOT seeing R after a read means the read raced a
+     * successor and its verdict is not the caller's to publish. 0 means nothing is admitted.
+     */
+    @Volatile
+    private var currentAdmissionRaw: Long = 0L
+
+    /**
+     * Completion SCOPED TO ONE ADMISSION, not to whatever cue currently owns the track.
+     *
+     * `completion()` answers for the LATEST admitted cue, because the frontier fields are shared
+     * latest-cue slots. An OLD observer that reads it in the gap between a successor's completed
+     * write and the successor's callback would receive the SUCCESSOR'S verdict and, still passing
+     * the renderer's job-identity guard, publish it as its own (the 21c36ea8/63f99bed race, failed
+     * as `A must NOT publish the successor's completion as its own verdict`). This query instead
+     * validates the read against the caller's OWN token: the verdict is returned only if the player
+     * still names that admission after the read; otherwise the admission was superseded mid-read
+     * and the observation is [EarconCompletion.Unknown] -- which the renderer's observer treats as
+     * "nothing established", so the superseded cue publishes nothing and the successor's own
+     * observer, once its callback runs, speaks for the cue.
+     */
+    fun completionFor(admissionRaw: Long?): EarconCompletion {
+        if (admissionRaw == null) return EarconCompletion.Unknown
+        val verdict = completion()
+        return if (currentAdmissionRaw == admissionRaw) {
+            verdict
+        } else {
+            EarconCompletion.Unknown
+        }
+    }
 
     /**
      * The admission currently owning the track, so a caller can tell TWO admissions of the SAME sound
@@ -531,6 +578,9 @@ class EarconPlayer(
             acceptedFramesTotal = 0
             cueHeadTarget = 0
             cueHeadOrigin = 0
+            // Same ordering rule as [stopAdmissionNow]: the marker clears after the fields it vouches
+            // for, so an in-flight scoped read bails as superseded rather than vouching zeroes.
+            currentAdmissionRaw = 0L
         }
         // Release the worker itself, last: the teardown above runs ON this thread, and the next session
         // creates a fresh one rather than finding a shut-down executor.

@@ -108,7 +108,7 @@ class AudioFeedbackRendererTest {
         assertFalse(renderer.hasEmittedAudio.value)
         whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
         renderer.render(VoiceResponse.Earcon(EarconId.SUCCESS))
         // THE HEARTBEAT RUNS ON THE MAIN DISPATCHER, which Robolectric PAUSES: a delayed task is only
@@ -130,7 +130,7 @@ class AudioFeedbackRendererTest {
         // sit queued behind earlier audio. Attribution follows OBSERVED progress past the cue's first
         // frame, so the heartbeat reports it and the acceptance alone does not.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
         assertFalse(renderer.hasEmittedAudio.value)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
@@ -150,7 +150,7 @@ class AudioFeedbackRendererTest {
         // audibly it sounded. The bound is a CEILING on waiting, not a reason to skip looking.
         whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(6L)
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
         renderer.playEarcon(EarconId.SUCCESS)
         // Well past the cue's own span, because the point is that the observation happens at all.
@@ -170,7 +170,7 @@ class AudioFeedbackRendererTest {
         // fix above would attribute every short cue on acceptance -- the submission note by another route.
         whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(6L)
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
 
         renderer.playEarcon(EarconId.SUCCESS)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
@@ -189,7 +189,7 @@ class AudioFeedbackRendererTest {
         // on Consumed WITHOUT noting, so a cue that finished between observations was never attributed --
         // treated as if completion proved nothing, when it is in fact the STRONGEST evidence of sounding.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
@@ -213,7 +213,7 @@ class AudioFeedbackRendererTest {
         // the ownership check was unnecessary for the outcome; the mutation SURVIVED it.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         // The OLD observer's cue never sounds, so it will expire.
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
         // RUN THE OLD OBSERVER TO ITS DEADLINE, where it publishes its expiry.
@@ -225,7 +225,7 @@ class AudioFeedbackRendererTest {
         )
 
         // THE SUCCESSOR NOW OWNS THE CUE and observes it CONSUMED, so it publishes "not an expiry".
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
         renderer.playEarcon(EarconId.WAKE_WORD)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(100))
@@ -244,7 +244,7 @@ class AudioFeedbackRendererTest {
         // not overwrite the successor's verdict -- otherwise a stale stop would re-open the gate's
         // attribution on a cue that already finished, or hide one that is still sounding.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
         renderer.playEarcon(EarconId.WAKE_WORD)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(2_100))
@@ -257,7 +257,7 @@ class AudioFeedbackRendererTest {
         // observation never starts and the case would be about the missing acceptance rather than about
         // the retirement it is asking about.
         whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
         renderer.playEarcon(EarconId.LISTENING_START)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(100))
@@ -290,7 +290,7 @@ class AudioFeedbackRendererTest {
         // CUE, allocated once at admission -- otherwise a consumer comparing ids reads its own cue
         // changing its verdict as a DIFFERENT cue and discards the elapsed time it should keep.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
@@ -330,7 +330,7 @@ class AudioFeedbackRendererTest {
         // would release an admission it never made. The token now comes back FROM the play.
         whenever(earconPlayer.play(EarconId.WAKE_WORD))
             .thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
         whenever(earconPlayer.emittedDurationMs()).thenReturn(1_000L)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
@@ -346,7 +346,7 @@ class AudioFeedbackRendererTest {
     fun `a session end RETIRES the unresolved observation`() = runTest {
         // The other production retirement path, reached from `stopVoiceControl()`.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
@@ -367,7 +367,7 @@ class AudioFeedbackRendererTest {
         // because the loop refused any heartbeat that would overshoot and so gave up one tick EARLY --
         // the cue was never observed AT the boundary. The loop now sleeps exactly as far as the deadline.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
         // ONE MILLISECOND SHORT OF THE LIMIT: the observation must still be running.
@@ -408,7 +408,7 @@ class AudioFeedbackRendererTest {
         // THE OTHER SIDE OF THE DISCRIMINATION: if every ending published Unknown, the consumer would
         // hold our audio open forever and the typed outcome would carry no information.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
@@ -428,7 +428,7 @@ class AudioFeedbackRendererTest {
         // permanently queued cue was observed forever and the deadline was a formality, not a bound.
         // The limit is ABSOLUTE from submission.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
         // Well past the 2_000 ms queued limit.
@@ -466,7 +466,7 @@ class AudioFeedbackRendererTest {
         // observation BEFORE the sound it is waiting for.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(6L)
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
@@ -474,7 +474,7 @@ class AudioFeedbackRendererTest {
         assertFalse("a queued cue is not attributed yet", renderer.hasEmittedAudio.value)
 
         // It sounds LATER, after the estimate had already passed.
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(1_100))
 
@@ -489,7 +489,7 @@ class AudioFeedbackRendererTest {
         // The positive control, so the rule above is not satisfied by never attributing anything.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
         // THE HEARTBEAT RUNS ON THE MAIN DISPATCHER, which Robolectric PAUSES: a delayed task is only
@@ -510,7 +510,7 @@ class AudioFeedbackRendererTest {
         // Unavailable progress is not evidence of sounding. Setting the attribution from an unknown
         // would let the gate read the microphone as ours on no observation at all.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Unknown)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Unknown)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
         // THE HEARTBEAT RUNS ON THE MAIN DISPATCHER, which Robolectric PAUSES: a delayed task is only
@@ -540,7 +540,7 @@ class AudioFeedbackRendererTest {
         whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
         // Still sounding for the whole observation: the attribution must keep being refreshed, and
         // only an observed CONSUMPTION may end it.
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
         // A dispatcher the test controls, so the heartbeat's ticks are deterministic rather than
         // dependent on real-time scheduling. Must be set before the renderer's scope is first used.
@@ -580,7 +580,7 @@ class AudioFeedbackRendererTest {
         whenever(earconPlayer.emittedDurationMs()).thenReturn(1_500L)
         // OBSERVED SOUNDING, then consumed: the note comes from the cue being heard, not from its
         // submission -- acceptance alone is queued, not audible.
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
         renderer.playEarcon(EarconId.SUCCESS)
         // THE HEARTBEAT RUNS ON THE MAIN DISPATCHER, which Robolectric PAUSES: a delayed task is only
@@ -589,7 +589,7 @@ class AudioFeedbackRendererTest {
         // clock, so the tick lands deterministically instead of depending on wall time.
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(2_500))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
         // (the consumed observation needs no further draining)
 
         assertTrue(
@@ -608,7 +608,7 @@ class AudioFeedbackRendererTest {
         whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
         // Still playing at first, then consumed.
         var consumed = false
-        whenever(earconPlayer.completion()).thenAnswer {
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenAnswer {
             if (consumed) EarconPlayer.EarconCompletion.Consumed else EarconPlayer.EarconCompletion.Playing
         }
 
@@ -653,7 +653,7 @@ class AudioFeedbackRendererTest {
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
         var stopped = false
-        whenever(earconPlayer.completion()).thenAnswer {
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenAnswer {
             if (stopped) EarconPlayer.EarconCompletion.Unknown else EarconPlayer.EarconCompletion.Playing
         }
 
@@ -680,7 +680,7 @@ class AudioFeedbackRendererTest {
         renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
         kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(1_100) }
@@ -703,7 +703,7 @@ class AudioFeedbackRendererTest {
         // is the property the older case was protecting, now stated against the rule that replaced it.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         whenever(earconPlayer.emittedDurationMs()).thenReturn(1_500L)
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
         // Run well past the limit. A cue still reporting Playing must NOT be observed indefinitely.
@@ -896,7 +896,7 @@ class AudioFeedbackRendererTest {
 
         // A IS OBSERVED AND ITS VERDICT PUBLISHED.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
         renderer.playEarcon(EarconId.WAKE_WORD)
         // THE LOOP WAITS ONE HEARTBEAT-SCALED INTERVAL BEFORE ITS FIRST OBSERVATION, so a 100 ms idle
         // samples before A has been observed at all -- the wait must cover that first observation.
@@ -947,7 +947,7 @@ class AudioFeedbackRendererTest {
         renderer.holdObserverForTest = barrier
         renderer.holdArrivalForTest = arrival
         whenever(earconPlayer.emittedDurationMs()).thenReturn(1_000L)
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
 
         // A STARTS AND ARRIVES AT THE HOLD.
         whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
@@ -974,7 +974,7 @@ class AudioFeedbackRendererTest {
 
         // A RESUMES AND REACHES THE PUBLISH PATH. What it would write is a DIFFERENT verdict, so the
         // assertion separates "A was refused" from "A published and happened to agree".
-        whenever(earconPlayer.completion()).thenReturn(EarconPlayer.EarconCompletion.Queued)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
         barrier.complete(Unit)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(3_000))

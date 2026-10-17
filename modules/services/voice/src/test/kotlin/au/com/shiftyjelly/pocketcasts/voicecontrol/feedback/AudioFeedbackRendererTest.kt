@@ -1543,8 +1543,11 @@ class AudioFeedbackRendererTest {
             // OUTER FINALLY: full lifecycle cleanup (endSession) on ANY assertion failure anywhere
             // after submission -- the write-in-flight precondition, the window asserts, AND B's
             // positive publication path -- while keeping all of B's live positive assertions inside
-            // the try. The inner finally releases ONLY the held write, so a red window assertion
-            // unblocks the player before the outer cleanup runs.
+            // the try. The outer finally counts the latch down BEFORE endSession too: a precondition
+            // failure (write-in-flight await, track-replacement assert) can throw BEFORE the inner
+            // try is ever entered, and endSession must not block behind B's still-held write.
+            // countDown is idempotent, so the inner release is unaffected.
+            holdWrite.countDown()
             combinedRenderer.endSession()
         }
     }

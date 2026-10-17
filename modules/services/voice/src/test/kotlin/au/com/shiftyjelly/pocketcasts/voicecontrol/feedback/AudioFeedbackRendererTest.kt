@@ -1455,6 +1455,123 @@ class AudioFeedbackRendererTest {
         combinedRenderer.endSession()
     }
 
+    @Test
+    fun `an ACCEPTED rate-change successor holds its write between track replacement and its own snapshot`() {
+        // Reviewer-requested variant (1ecc361b): B is ACCEPTED and its write is HELD between the
+        // track replacement (ensureTrack, done before any write) and B's snapshot publication (end
+        // of the write loop). In that window A must publish and attribute NOTHING: the retired
+        // snapshot cannot vouch, and B has no snapshot yet.
+        val (realPlayer, trackA, heads) = realPlayerWithControlledHeads()
+        val combinedRenderer = AudioFeedbackRenderer(realPlayer, ttsEngine)
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        combinedRenderer.holdObserverForTest = barrier
+        combinedRenderer.holdArrivalForTest = arrival
+
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue(arrival.isCompleted)
+        heads[trackA] = 50
+
+        // B: DIFFERENT RATE -> track replacement; write entered but HELD.
+        realPlayer.installClipForTest(EarconId.SUCCESS, ShortArray(80) { 1 }, 8_000)
+        val trackB = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(trackB.sampleRate).thenReturn(8_000)
+        val writeEntered = java.util.concurrent.CountDownLatch(1)
+        val holdWrite = java.util.concurrent.CountDownLatch(1)
+        org.mockito.Mockito.`when`(
+            trackB.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer {
+            writeEntered.countDown()
+            holdWrite.await()
+            it.getArgument<Int>(2)
+        }
+        val factory = realPlayer.trackFactoryForTest
+        realPlayer.trackFactoryForTest = { trackB }
+        combinedRenderer.submitEarcon(EarconId.SUCCESS)
+        assertTrue("B's write must be in flight", writeEntered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        realPlayer.trackFactoryForTest = factory
+        assertNotEquals("the rate change must have replaced the track", trackA, currentTrackOf(realPlayer))
+        // THE REPLACEMENT TRACK'S HEAD IS LIVE AND LARGE: a verdict sampled from it says Consumed.
+        // Without this, a pre-snapshot reader simply finds no head and accidentally bails.
+        heads[trackB] = 250
+
+        // A RESUMES IN THE HELD-WRITE WINDOW: no live snapshot of any admission.
+        barrier.complete(Unit)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(300))
+        assertEquals(
+            "A must not attribute from the retired snapshot while B's write is held",
+            0,
+            combinedRenderer.emissionNotesForTest(),
+        )
+        assertNull(
+            "and A must publish nothing in that window",
+            combinedRenderer.lastCueObservation.value,
+        )
+
+        // B'S WRITE COMPLETES; ITS OWN SNAPSHOT AND OBSERVER TAKE OVER. B's real frontier: its own
+        // head now stands at its cumulative target (A's 100 + B's 80).
+        heads[trackB] = 180
+        holdWrite.countDown()
+        // LET B'S CALLBACK LAND BEFORE IDLING: it launches B's observer from the PLAYER thread, and
+        // Robolectric's scheduler misses posts that arrive DURING an idleFor pass.
+        Thread.sleep(300)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_500))
+        val bVerdict = combinedRenderer.lastCueObservation.value
+        assertEquals(
+            "B's own observation is published once its write completes",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            bVerdict?.observation,
+        )
+        assertNotEquals("B is a distinct cue", 1L, bVerdict?.cueId)
+
+        combinedRenderer.endSession()
+    }
+
+    @Test
+    fun `a RELEASE that lands DURING head sampling must not let the sampled head become a verdict`() {
+        // Reviewer-requested variant (1ecc361b): full player RELEASE inside the head sample. The
+        // post-sampling revalidation must see the retired snapshot; without it, the in-flight verdict
+        // publishes Consumed after the whole session was torn down.
+        val (realPlayer, trackA, heads) = realPlayerWithControlledHeads()
+        val combinedRenderer = AudioFeedbackRenderer(realPlayer, ttsEngine)
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        combinedRenderer.holdObserverForTest = barrier
+        combinedRenderer.holdArrivalForTest = arrival
+        var releaseLandedDuringSample = false
+
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue(arrival.isCompleted)
+        heads[trackA] = 250
+
+        realPlayer.readPlaybackHeadFrames = { _ ->
+            realPlayer.release()
+            releaseLandedDuringSample = true
+            heads[trackA]!!
+        }
+        barrier.complete(Unit)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_000))
+
+        assertTrue("precondition: the release must have landed inside the head sample", releaseLandedDuringSample)
+        assertNull(
+            "a head sampled after full release is not a verdict",
+            combinedRenderer.lastCueObservation.value,
+        )
+
+        combinedRenderer.endSession()
+    }
+
     private fun currentTrackOf(player: EarconPlayer): android.media.AudioTrack? = player.javaClass.getDeclaredField("track")
         .apply { isAccessible = true }
         .get(player) as android.media.AudioTrack?

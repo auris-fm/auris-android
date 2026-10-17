@@ -195,6 +195,148 @@ class AndroidPlatformTtsEngineTest {
         )
     }
 
+    @Test
+    fun `a late onDone from a cancelled utterance must not complete its successor`() {
+        // Reviewer 3aaab695 (original finding 4236364898): the utterance listener is SHARED across
+        // speak() calls -- B's setOnUtteranceProgressListener REPLACES A's, so any LATE callback
+        // from the cancelled A is delivered into B's listener, which resumes B's captured
+        // continuation WITHOUT checking the utterance id. A cancel / B start / late A onDone thus
+        // completes B while B's own synthesis is still outstanding.
+        val (wired, fake, _) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        val scope = CoroutineScope(Dispatchers.Default)
+
+        val first = scope.launch { wired.speak("first", "en") }
+        assertTrue("precondition: A reached synthesis", awaitSynthesize(fake, 1))
+        val aId = fake.lastUtteranceId
+
+        // A is cancelled while suspended in synthesis.
+        runBlocking { first.cancelAndJoin() }
+
+        // B starts on the shared engine: its listener is now the one installed.
+        val second = scope.launch { wired.speak("second", "en") }
+        assertTrue("precondition: B reached synthesis", awaitSynthesize(fake, 2))
+        val bId = fake.lastUtteranceId
+        assertNotEquals("each synthesis needs its own utterance id", aId, bId)
+
+        // A's LATE completion arrives at B's listener.
+        fake.listener?.onDone(aId)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        Thread.sleep(200)
+        assertFalse(
+            "B must stay pending: a late onDone from A must not complete B",
+            second.isCompleted,
+        )
+
+        // Only B's OWN completion finishes it.
+        fake.listener?.onDone(bId)
+        var done = false
+        for (i in 0 until 100) {
+            Thread.sleep(20)
+            if (second.isCompleted) {
+                done = true
+                break
+            }
+        }
+        assertTrue("B completes on its own utterance id", done)
+        scope.cancel()
+    }
+
+    @Test
+    fun `a late onError from a cancelled utterance must not fail its successor`() {
+        // Same shared-listener window as the onDone case, ERROR flavour: A's late onError must not
+        // be read as B's synthesis failure.
+        val (wired, fake, _) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        val scope = CoroutineScope(Dispatchers.Default)
+
+        val first = scope.launch { wired.speak("first", "en") }
+        assertTrue(awaitSynthesize(fake, 1))
+        val aId = fake.lastUtteranceId
+        runBlocking { first.cancelAndJoin() }
+
+        val second = scope.launch { wired.speak("second", "en") }
+        assertTrue(awaitSynthesize(fake, 2))
+        val bId = fake.lastUtteranceId
+
+        @Suppress("DEPRECATION")
+        fake.listener?.onError(aId)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        Thread.sleep(200)
+        assertFalse("B must stay pending: A's late onError must not fail B", second.isCompleted)
+
+        fake.listener?.onDone(bId)
+        var done = false
+        for (i in 0 until 100) {
+            Thread.sleep(20)
+            if (second.isCompleted) {
+                done = true
+                break
+            }
+        }
+        assertTrue(done)
+        scope.cancel()
+    }
+
+    @Test
+    fun `a refused synthesis is one-shot and a late completion cannot double-resume it`() {
+        // An immediate synthesis refusal resumes the continuation with false; a LATE platform
+        // callback for the same (or a stale) utterance id must not resume it a second time. A
+        // double resume throws IllegalStateException out of the listener -- on a binder thread in
+        // production.
+        val (wired, fake, _) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        fake.refuseNext = true
+        val scope = CoroutineScope(Dispatchers.Default)
+
+        val job = scope.launch { wired.speak("refused", "en") }
+        var refused = false
+        for (i in 0 until 100) {
+            // speak() touches the platform engine on Main first: idle the looper so the coroutine
+            // can reach the synthesis call.
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            if (job.isCompleted) {
+                refused = true
+                break
+            }
+        }
+        assertTrue("precondition: the refusal surfaced as false", refused)
+        val utteranceId = fake.lastUtteranceId
+
+        // The platform's LATE callback for the refused utterance must be a no-op, not a crash.
+        var lateThrew: Throwable? = null
+        try {
+            fake.listener?.onDone(utteranceId)
+            @Suppress("DEPRECATION")
+            fake.listener?.onError(utteranceId)
+            Thread.sleep(200)
+        } catch (t: Throwable) {
+            lateThrew = t
+        }
+        assertNull("a late completion after a refusal must not double-resume", lateThrew)
+        scope.cancel()
+    }
+
+    @Test
+    fun `utterance ids are unique across consecutive syntheses on the shared engine`() {
+        // Millisecond-clock ids collide; every synthesis must carry a distinct id so a callback can
+        // always be attributed to its own utterance. Control for the id scheme itself.
+        val (wired, fake, _) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        val scope = CoroutineScope(Dispatchers.Default)
+        val ids = mutableListOf<String>()
+        repeat(3) {
+            var job: kotlinx.coroutines.Job? = null
+            job = scope.launch { wired.speak("u$it", "en") }
+            assertTrue(awaitSynthesize(fake, it + 1))
+            ids.add(fake.lastUtteranceId)
+            runBlocking { job.cancelAndJoin() }
+        }
+        assertEquals("all ids distinct", ids.size, ids.distinct().size)
+        scope.cancel()
+    }
+
     /**
      * Idles the main looper until the fake has queued at least [count] syntheses.
      */
@@ -239,6 +381,10 @@ class AndroidPlatformTtsEngineTest {
         @Volatile
         var synthesizeQueued = false
             private set
+
+        /** When set, the next synthesizeToFile REFUSES (non-SUCCESS), as the platform can. */
+        @Volatile
+        var refuseNext = false
         var emitRealWav = false
         var synthesizeCount = 0
             private set
@@ -263,6 +409,9 @@ class AndroidPlatformTtsEngineTest {
         ): Int {
             lastUtteranceId = utteranceId ?: ""
             synthesizeCount += 1
+            if (refuseNext) {
+                return android.speech.tts.TextToSpeech.ERROR
+            }
             // Write a real WAV only when a test asks for the write path to be reached: an empty file
             // makes speak() return before the write loop, so without this the truncation case would
             // exercise nothing. Off by default, because a decodable clip also engages the drain wait,

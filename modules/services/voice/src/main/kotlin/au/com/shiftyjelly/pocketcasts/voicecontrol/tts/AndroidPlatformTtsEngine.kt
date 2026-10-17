@@ -187,25 +187,43 @@ class AndroidPlatformTtsEngine @Inject constructor(
             // The ownership claim made at synthesis, carried into playback: playback must never
             // re-read the global generation, or an utterance whose successor claimed during synthesis
             // would adopt the successor's generation and believe itself the owner.
+            // The utterance id is UNIQUE PER SYNTHESIS (finding 4236364898): a millisecond-clock id can
+            // collide, and every callback below must be attributable to exactly one utterance on this
+            // shared engine.
+            val utteranceId = "voice-tts-" + UTTERANCE_ID_SEQ.incrementAndGet()
             var ownershipToken = -1
             val synthesized = suspendCancellableCoroutine { continuation ->
+                // ONE-SHOT, ID-MATCHED completion (finding 4236364898). This listener is SHARED: the
+                // next speak() replaces it, so any LATE callback from THIS utterance is delivered into
+                // the SUCCESSOR's listener instance. Two guards follow.
+                // (1) The id check: a late callback carrying this utterance's id is ignored by the
+                // successor's listener, and vice versa -- a callback can only complete its OWN
+                // utterance. (2) The one-shot flag: an immediate refusal and a late callback (or two
+                // late callbacks) can both arrive at the same listener; only the first resumption wins,
+                // and the second is a no-op instead of an IllegalStateException out of a binder thread.
+                val completed = java.util.concurrent.atomic.AtomicBoolean(false)
+                fun completeOnce(value: Boolean) {
+                    if (completed.compareAndSet(false, true)) {
+                        continuation.resume(value)
+                    }
+                }
                 engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     @Deprecated("Deprecated in Java")
-                    override fun onDone(utteranceId: String?) {
-                        continuation.resume(true)
+                    override fun onDone(id: String?) {
+                        if (id == utteranceId) completeOnce(true)
                     }
 
                     @Deprecated("Deprecated in Java")
-                    override fun onError(utteranceId: String?) {
-                        Timber.w("TTS synthesis error for utteranceId=$utteranceId")
-                        continuation.resume(false)
+                    override fun onError(id: String?) {
+                        if (id == utteranceId) {
+                            Timber.w("TTS synthesis error for utteranceId=$utteranceId")
+                            completeOnce(false)
+                        }
                     }
 
                     @Deprecated("Deprecated in Java")
-                    override fun onStart(utteranceId: String?) {}
+                    override fun onStart(id: String?) {}
                 })
-
-                val utteranceId = System.currentTimeMillis().toString()
                 // Cancellation must stop the queued synthesis, but only while this synthesis is
                 // still the current one. This handler is registered before the call and runs
                 // asynchronously, so it can execute after a successor has already started on the
@@ -229,7 +247,9 @@ class AndroidPlatformTtsEngine @Inject constructor(
                     ?: engine.synthesizeToFile(text, null, wav, utteranceId)
                 if (queued != TextToSpeech.SUCCESS) {
                     Timber.w("TTS synthesizeToFile failed with $queued")
-                    continuation.resume(false)
+                    // ONE-SHOT: the refusal is this utterance's first completion; the flag makes any
+                    // late platform callback for the same id a no-op instead of a double resume.
+                    completeOnce(false)
                 }
                 if (!continuation.isActive) {
                     // A cancellation landed between registering the listener and the call, so stop
@@ -626,6 +646,9 @@ class AndroidPlatformTtsEngine @Inject constructor(
     private companion object {
         // Producer-id namespace for TTS utterances, disjoint from cloud answers and earcons.
         private const val TTS_PRODUCER_BASE: Long = Long.MIN_VALUE / 8
+
+        /** Source of unique per-synthesis utterance ids (finding 4236364898). */
+        private val UTTERANCE_ID_SEQ = java.util.concurrent.atomic.AtomicLong(0)
 
         /** The rate the shared echo reference and the correlator work at. */
         const val REFERENCE_RATE_HZ = 16_000

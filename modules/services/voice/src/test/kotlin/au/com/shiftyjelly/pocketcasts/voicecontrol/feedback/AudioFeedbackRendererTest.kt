@@ -1241,4 +1241,83 @@ class AudioFeedbackRendererTest {
         combinedRenderer.endSession()
         org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).release()
     }
+
+    @Test
+    fun `a successor's frontier mutation that lands before its admission marker must not steal the current observer's verdict`() {
+        // Reviewer 52b786fe / @spec 3125932c -- THE WRITER-INTERNAL WINDOW the first control cannot
+        // reach. The callback-gap control waits for play() to RETURN, so B's marker has already moved
+        // and A correctly bails. But B's publication is TWO steps -- frontier fields, then the
+        // admission marker -- and marker-last ordering alone does not exclude a reader landing
+        // BETWEEN them: A reads B's bounds while the marker still names A, and the after-read check
+        // accepts the verdict as A's own.
+        //
+        // This case holds that exact mid-publication state deterministically: A admitted and parked;
+        // B's frontier values written while the marker is deliberately left naming A; head at 50.
+        // The two verdicts then DISAGREE, which is what makes the theft observable: A's OWN interval
+        // [0,100] says Playing (the head is past A's first frame), while B's interval [100,200] says
+        // Queued. A QUEUED verdict attributes NOTHING -- the observer loop defers and keeps waiting --
+        // so if A's observation is computed from B's bounds, the cue is never attributed at all. The
+        // assertion is therefore on attribution: A's own verdict must note the emission.
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val realPlayer = EarconPlayer(context)
+        realPlayer.installClipForTest(EarconId.WAKE_WORD, ShortArray(100) { 2 }, 16_000)
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16_000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        realPlayer.trackFactoryForTest = { track }
+        val head = java.util.concurrent.atomic.AtomicInteger(0)
+        realPlayer.readPlaybackHeadFrames = { head.get() }
+
+        val combinedRenderer = AudioFeedbackRenderer(realPlayer, ttsEngine)
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        combinedRenderer.holdObserverForTest = barrier
+        combinedRenderer.holdArrivalForTest = arrival
+
+        // A ADMITTED AND PARKED, having published nothing.
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        val aAdmission = realPlayer.currentAdmissionForTest()
+        assertNotNull("A's admission must exist after its successful play", aAdmission)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue("A's observer must actually ARRIVE at the hold", arrival.isCompleted)
+        assertNull("precondition: A has published nothing while held", combinedRenderer.lastCueObservation.value)
+        assertEquals(0, combinedRenderer.emissionNotesForTest())
+
+        // THE WRITER-INTERNAL WINDOW, HELD BY HAND: B's frontier mutation lands (cumulative target
+        // 200, origin 100 -- exactly what B's write loop would compute) while the admission marker is
+        // deliberately NOT moved. This is the state a marker-last writer produces between its two
+        // steps, now frozen for the reader.
+        val fields = realPlayer.javaClass.getDeclaredField("cueHeadTarget").apply { isAccessible = true }
+        fields.setInt(realPlayer, 200)
+        realPlayer.javaClass.getDeclaredField("cueHeadOrigin").apply { isAccessible = true }
+            .setInt(realPlayer, 100)
+
+        // THE HEAD AT 50 MAKES THE TWO VERDICTS DISAGREE. A's own interval [0,100]: Playing (past its
+        // first frame, not consumed). The written bounds [100,200]: Queued. If A's observation is
+        // computed from the shared slot, it reads Queued, attributes nothing, and keeps waiting.
+        head.set(50)
+
+        // A RESUMES AND TAKES ITS FIRST OBSERVATION. THE CLAIM: the verdict must be A's OWN. A Playing
+        // verdict notes the emission; a stolen Queued verdict does not.
+        barrier.complete(Unit)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(300))
+
+        assertTrue(
+            "A's first observation must be computed from A's OWN bounds: head 50 is INSIDE A's" +
+                " interval and must attribute, not inherit B's Queued",
+            combinedRenderer.emissionNotesForTest() >= 1,
+        )
+
+        // TEARDOWN, through the RENDERER's own lifecycle.
+        combinedRenderer.endSession()
+        org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).release()
+    }
 }

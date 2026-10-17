@@ -1,9 +1,21 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.route
 
 import android.media.AudioDeviceInfo
+import androidx.test.core.app.ApplicationProvider
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+// API 34 supplies AudioManager.getCommunicationDevice(); the Robolectric default does not, and its
+// absence failed these tests with NoSuchMethodError instead of exercising the classification.
+@Config(sdk = [34])
 class AndroidAudioRouteMonitorTest {
 
     @Test
@@ -180,4 +192,76 @@ class AndroidAudioRouteMonitorTest {
         )
         assertEquals(AudioRoute.Headset(hasMicrophone = true), route)
     }
+
+    // ── Additions that main's suite does not cover ─────────────────────────
+    //
+    // These exercise the ROUTED-OUTPUT observation and the availability/route separation. They do not
+    // restate main's classification rules; main's own tests above are the authority for those.
+
+    @Test
+    fun `a live stream's routed output outranks enumeration`() {
+        val signal = GracePeriodSignal()
+        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val monitor = AndroidAudioRouteMonitor(
+            context = ctx,
+            gracePeriodSignal = signal,
+            routedOutputObserver = publishingObserver(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER),
+        )
+        assertEquals(
+            "the observed routing decides the route, not enumerated availability",
+            AudioRoute.Speaker,
+            monitor.route.value,
+        )
+    }
+
+    @Test
+    fun `an unknown routed output stays unknown rather than becoming a speaker`() {
+        val signal = GracePeriodSignal()
+        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val monitor = AndroidAudioRouteMonitor(
+            context = ctx,
+            gracePeriodSignal = signal,
+            routedOutputObserver = publishingObserver(null),
+        )
+        // Nullable on purpose: a missing observation must stay missing rather than becoming a claim.
+        assertTrue(
+            "no routed answer reads as Unknown (got=${monitor.route.value})",
+            monitor.route.value is AudioRoute.Unknown,
+        )
+    }
+
+    @Test
+    fun `a device change closes the window through the production route monitor`() = runBlocking {
+        // The production connection the sink's privacy guard depends on: a device event reaches
+        // GracePeriodSignal through the monitor's own callback, not a test-installed one.
+        val signal = GracePeriodSignal(timeoutMs = 60_000L)
+        val monitor = AndroidAudioRouteMonitor(ApplicationProvider.getApplicationContext(), signal)
+
+        signal.onWakeWordDetected()
+        assertTrue("the wake must open the window", signal.isActive.value)
+        assertFalse("an open window is not a privacy closure", signal.isClosedByPrivacy())
+        val closuresBefore = signal.privacyClosureCount()
+
+        monitor.onDevicesChanged()
+
+        assertTrue(
+            "grace must end as the event arrives, not after the debounce",
+            signal.isClosedByPrivacy(),
+        )
+        assertFalse("a privacy closure ends the window", signal.isActive.value)
+        assertEquals(
+            "the event closes grace exactly once, not once per debounce",
+            closuresBefore + 1,
+            signal.privacyClosureCount(),
+        )
+    }
+
+    /**
+     * An observer with one live stream already publishing [type].
+     *
+     * Built through the production API rather than subclassed: `RoutedOutputObserver` is a final
+     * `@Singleton` whose ownership token is the mechanism, so a hand-rolled stub would exercise a
+     * different contract than the one production reads.
+     */
+    private fun publishingObserver(type: Int?): RoutedOutputObserver = RoutedOutputObserver().also { it.observe().publishType(type) }
 }

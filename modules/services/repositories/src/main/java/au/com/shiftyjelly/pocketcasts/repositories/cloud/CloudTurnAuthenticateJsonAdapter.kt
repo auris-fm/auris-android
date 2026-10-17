@@ -61,33 +61,41 @@ internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<Clou
             writer.name("route_hint")
             hintAdapter.toJson(writer, hint)
         }
+        // The conversation admission fields travel with the turn's own captured identity. Both are
+        // written or neither: a mode without a handle (or a handle without a mode) is not a state the
+        // contract admits, so it is omitted rather than half-sent.
+        val conversationId = value.conversationId
+        val conversationMode = value.conversationMode
+        if (conversationId != null && conversationMode != null) {
+            writer.name("conversation_id").value(conversationId)
+            writer.name("conversation_mode").value(conversationMode)
+        }
         writer.endObject()
     }
 
     /** Emit a [CloudRouteContext] as a raw nested JSON object. */
     private fun writeContextAsRaw(writer: JsonWriter, context: CloudRouteContext) {
         writer.beginObject()
-        if (context.recentConversation != null && context.recentConversation.isNotEmpty()) {
-            writer.name("recent_conversation")
-            writer.beginArray()
-            for (entry in context.recentConversation) {
-                writer.beginObject()
-                writer.name("role").value(entry.role)
-                writer.name("text").value(entry.text)
-                writer.endObject()
-            }
-            writer.endArray()
-        }
-        if (context.episodeId.isNotEmpty()) {
+        // NO CLIENT CONVERSATION HISTORY ON A CLOUD FRAME. The owning spec forbids
+        // `context.recent_conversation` here and requires a wire-omission assertion: the Worker owns
+        // cloud conversation history, so a client copy would duplicate it and could diverge from the
+        // conversation the server maintains. The field is deliberately NOT written even when the
+        // context carries entries -- conversation identity says WHICH conversation the turn belongs to.
+        //
+        // Local conversation memory is unaffected: it serves the local intent path, not this encoder.
+        // Each field is written only when it HAS a value. An absent episode, podcast, position or
+        // reference is omitted rather than defaulted: a zero position is a real instant (the very
+        // start) and an empty id claims a subject, so neither can stand in for "none".
+        if (context.episodeId?.isNotEmpty() == true) {
             writer.name("episode_id").value(context.episodeId)
         }
         if (context.podcastId?.isNotEmpty() == true) {
             writer.name("podcast_id").value(context.podcastId)
         }
-        if (context.referencePositionMs != 0L) {
+        if (context.referencePositionMs != null) {
             writer.name("reference_position_ms").value(context.referencePositionMs)
         }
-        if (context.clientPositionMs != 0L) {
+        if (context.clientPositionMs != null) {
             writer.name("client_position_ms").value(context.clientPositionMs)
         }
         if (context.recentReferencePositions.isNotEmpty()) {

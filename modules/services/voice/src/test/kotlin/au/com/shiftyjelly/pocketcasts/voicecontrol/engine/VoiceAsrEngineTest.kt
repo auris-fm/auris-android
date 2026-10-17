@@ -47,18 +47,23 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.runner.RunWith
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
 import org.mockito.Mockito.times
 import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
 import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.eq
+import org.robolectric.RobolectricTestRunner
 
+@RunWith(RobolectricTestRunner::class)
 class VoiceAsrEngineTest {
 
     @get:Rule
@@ -122,7 +127,7 @@ class VoiceAsrEngineTest {
             backend = backend,
             audioRoute = route,
             listeningMode = mode,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -140,7 +145,7 @@ class VoiceAsrEngineTest {
             backend = backend,
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.WakeWord,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
             onTerminated = { terminated = true },
@@ -160,7 +165,7 @@ class VoiceAsrEngineTest {
             backend = backend,
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.WakeWord,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
             onTerminated = { terminated = true },
@@ -270,6 +275,143 @@ class VoiceAsrEngineTest {
     }
 
     @Test
+    fun `the wake path reaches routing while the real cue's audio write is held`() = runTest {
+        // 35f7e2d8 / b124a183 ASR-PROGRESS control at the REAL renderer+player boundary.
+        //
+        // WHY THE RENDERER IS NOT MOCKED HERE: a mocked AudioFeedbackRenderer returns from
+        // submitEarcon immediately no matter what the engine does, so "the callback was recorded but
+        // never invoked" proves nothing about admission -- the same case passes unchanged if the
+        // engine blocks on the cue. That made the previous version of this control vacuous. This one
+        // wires the REAL AudioFeedbackRenderer over the REAL EarconPlayer and holds an ACTUAL
+        // accepted AudioTrack.write() on a latch, so "ASR progressed while the cue was still being
+        // written" is an observation of the shipped mechanism rather than of a stub's default.
+        //
+        // MUTANT TARGET (what must make this fail): replacing the wake branch's
+        // `audioFeedbackRenderer.submitEarcon(EarconId.WAKE_WORD)` with
+        // `playEarcon(EarconId.WAKE_WORD)`. playEarcon -> EarconPlayer.play -> onPlayerThread does
+        // future.get(), so the collect coroutine parks until the held write completes and BOTH
+        // positive assertions below come back empty. Verified by running that mutant.
+        //
+        // SHIPPED SHAPE (not a token fixture): both selected backends return tokens=null
+        // (SenseVoiceBackend:92, CanaryFlashBackend:203), so WakeTranscriptTrimmer.commandText
+        // short-circuits to the raw transcript at :23 and the band trim never fires. The transcript
+        // therefore survives a wake-positive capture as-is and reaches routing without any
+        // timestamp-dependent branch. A token-bearing fixture would have been testing a path
+        // production does not take.
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        val holdWrite = java.util.concurrent.CountDownLatch(1)
+        val enteredWrite = java.util.concurrent.CountDownLatch(1)
+
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16_000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any<ShortArray>(),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { inv ->
+            // The worker enters the write and STAYS there until the test releases it. Nothing in
+            // this control counts the release; the assertions below run inside the hold.
+            enteredWrite.countDown()
+            assertTrue("test bug: the held write was never released", holdWrite.await(10, java.util.concurrent.TimeUnit.SECONDS))
+            inv.getArgument<Int>(2) // accept everything, once released
+        }
+
+        // The REAL application context, not the class's mocked one: EarconPlayer resolves clips and
+        // the AudioTrack factory off it, and a bare mock answers null to applicationContext.
+        val appContext = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val player = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer(appContext)
+        player.trackFactoryForTest = { track }
+        player.installClipForTest(EarconId.WAKE_WORD, ShortArray(1_600) { 1 }, 16_000)
+        val realRenderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
+            player,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine(),
+        )
+
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        // 100 ms of audio. speechEndSample stays 0 (the production default for segmenters that do not
+        // report it), which the engine reads as UNKNOWN -- so the wake-only drop at :334 cannot fire:
+        // it requires speechEndSample > 0. Stated explicitly because leaving it implicit let a later
+        // default change silently alter what this test proves.
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(ShortArray(1_600) { (it % 251).toShort() }, 16_000)),
+                    speechOnsetSample = 0,
+                    speechEndSample = 0,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        // `detect` is SUSPEND: Mockito can only intercept the stub when the call is registered inside
+        // a coroutine (same pattern as createEngineWithSpeech). Stubbed bare it answers null, the
+        // engine's runCatching swallows the NPE as "wake detection failed", and the segment is dropped
+        // BEFORE ASR -- which would make "recognizer never called" pass for entirely the wrong reason.
+        kotlinx.coroutines.runBlocking {
+            `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+                WakeWordResult(detected = true, confidence = 0.95f, completionSample = 800, threshold = 0.812f),
+            )
+        }
+
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = realRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        val handledIntents = mutableListOf<VoiceIntent>()
+        // Unconfined test dispatcher (MainCoroutineRule): the collect body runs inline as frames
+        // arrive, so by the time start() has returned the engine is parked INSIDE the held write.
+        engine.scope = this
+        engine.start(
+            backend = FakeAsrBackend("pause"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { handledIntents += it },
+        )
+
+        // The cue reaches AudioTrack.write on the PLAYER'S OWN thread via submit(), so it must be
+        // scheduled before the precondition can hold.
+        advanceUntilIdle()
+
+        try {
+            // PRECONDITION, asserted before any claim: the cue's own write is genuinely in progress.
+            assertTrue(
+                "precondition: the real player must be INSIDE the accepted cue write",
+                enteredWrite.await(5, java.util.concurrent.TimeUnit.SECONDS),
+            )
+            // POSITIVE assertions, all made WHILE the write is still held (holdWrite has not counted down).
+            assertEquals(
+                "ASR must reach the recognizer while the acknowledgement cue is still being written",
+                listOf("ensureReady", "recognize:pause"),
+                recognizer.calls,
+            )
+            assertEquals(
+                "the intent must be dispatched to the caller while the cue write is held",
+                listOf(VoiceIntent.Playback.Pause),
+                handledIntents,
+            )
+        } finally {
+            // BOUNDARY CLEANUP UNCONDITIONALLY (ea63aebe). The mocked write() blocks on `holdWrite`, so an
+            // assertion failure BEFORE the release would leave the player worker parked inside that write
+            // until its own 10s timeout -- and `engine.stop()`/`realRenderer.release()` would never run at
+            // all. Every step here is individually guarded: a failure in one must not skip the others, or
+            // the cleanup itself becomes the thing that leaks the blocked worker.
+            holdWrite.countDown()
+            runCatching { realRenderer.release() }
+            runCatching { engine.stop() }
+        }
+    }
+
+    @Test
     fun `transcription initializes recognizer before matching intent`() = runTest {
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
@@ -282,9 +424,13 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
 
-        // Wake word not detected: full segment flows through during grace
+        // Wake word not detected, so the whole segment is handed to transcription. NOTE (4236593975):
+        // this fixture does NOT observe the wake/grace path -- the mocked grace window is shut (see
+        // init), and no wake signal is emitted here. The claim it previously justified ("flows through
+        // during grace") was dropped because the test cannot see that path; what it actually establishes
+        // is recognizer-before-match ordering with a non-detected wake result.
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,
@@ -310,7 +456,7 @@ class VoiceAsrEngineTest {
             backend = FakeAsrBackend("pause"),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = { handledIntents += it },
         )
@@ -319,6 +465,84 @@ class VoiceAsrEngineTest {
         assertEquals(listOf("ensureReady", "recognize:pause"), recognizer.calls)
         assertEquals(listOf(VoiceIntent.Playback.Pause), handledIntents)
         verify(wakeWordDetector).detect(any(), eq(16000), eq(2))
+
+        engine.stop()
+    }
+
+    @Test
+    fun `playback bleed is dropped before transcription and produces no accepted activity`() = runTest {
+        // The acceptance property for echo, at the level where it is decided: a segment the bleed
+        // filter rejects must not reach ASR, the recognizer, or feedback, so no transcript, no intent,
+        // no request and no spend can follow. The filter's own return value is covered separately; this
+        // is the consequence, which is what "no accepted activity" means.
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        val backend = FakeAsrBackend("pause")
+        var resets = 0
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        // The filter refuses this segment: it is the playback the app itself submitted, returning to
+        // the mic. No speaker diarization runs (hasSpeakerId=false), so the bleed check is what decides.
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(false)
+        // Counted so the row's "no reset" half is observed rather than assumed.
+        `when`(utteranceFilter.reset()).thenAnswer { resets += 1 }
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = false,
+                confidence = 0f,
+                completionSample = 4000,
+            ),
+        )
+
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+        val handledIntents = mutableListOf<VoiceIntent>()
+
+        engine.start(
+            backend = backend,
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { handledIntents += it },
+        )
+        advanceUntilIdle()
+
+        assertEquals("a bleed-rejected segment must not reach the recognizer", emptyList<String>(), recognizer.calls)
+        assertEquals("and no intent may be accepted", emptyList<VoiceIntent>(), handledIntents)
+        assertEquals(
+            "nor may the segment have been transcribed",
+            0,
+            backend.transcribeCalls,
+        )
+        // A dropped segment must not be treated as a listening session beginning, which would reset the
+        // session's speaker target. start() resets once, before processing, so exactly one reset is the
+        // drop adding none of its own.
+        assertEquals("a rejected segment must not reset the session filter", 1, resets)
+
+        // The two effects the acceptance row names, read directly rather than through behaviour that a
+        // mock would have to reproduce. The drop path ends in a bare `return` between the wake handling
+        // and the ASR, so nothing below it may touch grace: no window opened or reset, and no dispatch
+        // allowance spent. These are `never` because a single call is the defect.
+        verify(gracePeriodSignal, never()).onWakeWordDetected()
+        verify(gracePeriodSignal, never()).onCommandRecognized(any(), any())
+        verify(gracePeriodSignal, never()).issueEscalation()
 
         engine.stop()
     }
@@ -344,13 +568,22 @@ class VoiceAsrEngineTest {
                     // one; and marked as the fallback, which must not restore it.
                     windowGeneration = 1L,
                     origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
+                    // MINTED AT INPUT REGISTRATION: an ordinary cloud dispatch carries its own logical
+                    // identity, before the recognition suspends. Asserted separately below rather than
+                    // as a literal, since it is generated per dispatch.
+                    logicalRequestId = (intents.single() as VoiceIntent.CloudRoute).logicalRequestId,
                 ),
             ),
             intents,
         )
+        assertTrue(
+            "an ordinary ASR cloud dispatch must carry a logical identity, so a retry of it can " +
+                "name the same request (id=${(intents.single() as VoiceIntent.CloudRoute).logicalRequestId})",
+            !(intents.single() as VoiceIntent.CloudRoute).logicalRequestId.isNullOrBlank(),
+        )
         // Escalating is not an error, so no error tone: the answer (or the
         // cloud path's own failure tone) is what the user hears.
-        verify(audioFeedbackRenderer, never()).playEarcon(any())
+        verify(audioFeedbackRenderer, never()).submitEarcon(any())
 
         engine.stop()
     }
@@ -375,7 +608,7 @@ class VoiceAsrEngineTest {
         verify(audioFeedbackRenderer).render(VoiceResponse.Spoken("I didn't catch that."))
         // The WAKE_WORD cue is expected here — it acknowledges the detection. What must not happen
         // is the error tone, because that would mean the engine had no line to speak.
-        verify(audioFeedbackRenderer, never()).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
 
         engine.stop()
     }
@@ -401,7 +634,7 @@ class VoiceAsrEngineTest {
         verify(audioFeedbackRenderer, never()).render(any(), any())
         // No ERROR tone either: that is what the missing-line fallback would play if this capture
         // had reached the router. The WAKE_WORD cue is expected and not asserted against.
-        verify(audioFeedbackRenderer, never()).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
 
         engine.stop()
     }
@@ -463,7 +696,7 @@ class VoiceAsrEngineTest {
         )
 
         assertTrue(intents.isEmpty())
-        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer).submitEarcon(EarconId.ERROR)
         verify(audioFeedbackRenderer, never()).render(any(), any())
 
         engine.stop()
@@ -494,7 +727,7 @@ class VoiceAsrEngineTest {
         // Escalating this would turn a broken install into cloud traffic and
         // make "the model never loaded" look like a healthy turn.
         assertTrue(intents.isEmpty())
-        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer).submitEarcon(EarconId.ERROR)
 
         engine.stop()
     }
@@ -519,7 +752,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,
@@ -544,7 +777,7 @@ class VoiceAsrEngineTest {
             backend = FakeAsrBackend("unclear question"),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = { intents += it },
         )
@@ -552,12 +785,77 @@ class VoiceAsrEngineTest {
 
         // Two failures in one window: the second is refused, and says so.
         assertEquals(1, intents.size)
-        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer).submitEarcon(EarconId.ERROR)
 
         engine.stop()
     }
 
     @Test
+    fun `an escalation after a successor wake is refused and spends no allowance`() = runTest {
+        // @reviewer's suspension case: recognition begins in generation 1, a successor wake opens
+        // generation 2 WHILE it is suspended, and it then returns no intent. The escalation must be
+        // refused -- it belongs to a window that is no longer live, and dispatching under the successor
+        // would let old recognition spend the successor's allowance.
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWakeWordDetected()
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = false,
+                confidence = 0f,
+                completionSample = 4000,
+            ),
+        )
+
+        val intents = mutableListOf<VoiceIntent>()
+        val engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            // The successor wake lands WHILE recognition is suspended.
+            intentRecognizer = SuccessorWakeRecognizer(
+                reason = RouterStageDiagnostic.REASON_CLASSIFY_FAILED,
+            ) { signal.onWakeWordDetected() },
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = signal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+        engine.start(
+            backend = FakeAsrBackend("unclear question"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { intents += it },
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "an escalation from a superseded recognition must not dispatch " +
+                "(intents=${intents.map { (it as? VoiceIntent.CloudRoute)?.windowGeneration }})",
+            intents.none { it is VoiceIntent.CloudRoute },
+        )
+        // THE ALLOWANCE ITSELF IS PINNED AT THE SIGNAL, not here: driving it through the engine
+        // entangles it with the engine's own lifecycle, and in this fixture the window is already
+        // inactive by the time the assertion would run -- so `issueEscalation` returns null for a reason
+        // that has nothing to do with the claim. `GracePeriodSignalTest` asserts the property directly,
+        // where the window state is controlled: a claim for a superseded window is refused AND the
+        // successor's allowance survives it.
+        engine.stop()
+    }
+
     fun `a router that cannot load its model says so and does not escalate`() = runTest {
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
@@ -569,7 +867,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,
@@ -595,7 +893,7 @@ class VoiceAsrEngineTest {
             backend = FakeAsrBackend("unclear question"),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = { intents += it },
         )
@@ -606,7 +904,7 @@ class VoiceAsrEngineTest {
         // capability failure is not something to spend a server call on.
         assertTrue(intents.isEmpty())
         assertEquals(0, recognizer.recognizes)
-        verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer).submitEarcon(EarconId.ERROR)
 
         engine.stop()
     }
@@ -622,7 +920,7 @@ class VoiceAsrEngineTest {
         val engine = startTokenless(recognizer, "Hi, allri.")
 
         assertTrue("the router may see it; the decision is what matters", recognizer.calls.isNotEmpty())
-        verify(audioFeedbackRenderer, never()).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
 
         engine.stop()
     }
@@ -642,7 +940,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = true,
@@ -667,7 +965,7 @@ class VoiceAsrEngineTest {
             backend = FakeAsrBackend(transcript),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.WakeWord,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -700,7 +998,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = wakeDetected,
@@ -730,7 +1028,7 @@ class VoiceAsrEngineTest {
             backend = FakeAsrBackend(transcript),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = { intents += it },
         )
@@ -753,7 +1051,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,
@@ -779,7 +1077,7 @@ class VoiceAsrEngineTest {
             backend = ResultBackend(AsrResult(text = "你好", detectedLanguage = "zh")),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -810,7 +1108,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             WakeWordResult(detected = false, confidence = 0f),
         )
@@ -834,7 +1132,7 @@ class VoiceAsrEngineTest {
             backend = ResultBackend(AsrResult(text = "倒回去3分钟。", detectedLanguage = "zh")),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -862,7 +1160,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             WakeWordResult(detected = false, confidence = 0f),
         )
@@ -883,7 +1181,7 @@ class VoiceAsrEngineTest {
             backend = ResultBackend(AsrResult(text = "pause", detectedLanguage = "en")),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -913,7 +1211,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             WakeWordResult(detected = false, confidence = 0f),
         )
@@ -938,7 +1236,7 @@ class VoiceAsrEngineTest {
             backend = ResultBackend(canaryResult, canTranslateToEnglish = true),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -978,7 +1276,7 @@ class VoiceAsrEngineTest {
                     ),
                 ),
             )
-            `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+            `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
             `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
                 WakeWordResult(detected = false, confidence = 0f),
             )
@@ -1001,7 +1299,7 @@ class VoiceAsrEngineTest {
                 backend = ResultBackend(AsrResult(text = "播放。", detectedLanguage = "yue")),
                 audioRoute = AudioRoute.Speaker,
                 listeningMode = ListeningMode.Continuous,
-                playbackBufferProvider = { FloatArray(0) },
+                playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
                 micExposureProvider = { MicExposure.Exposed },
                 onIntent = {},
             )
@@ -1051,7 +1349,7 @@ class VoiceAsrEngineTest {
                     ),
                 ),
             )
-            `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+            `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
             `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
                 WakeWordResult(detected = false, confidence = 0f),
             )
@@ -1076,7 +1374,7 @@ class VoiceAsrEngineTest {
                 backend = ResultBackend(AsrResult(text = "你好", detectedLanguage = "zh")),
                 audioRoute = AudioRoute.Speaker,
                 listeningMode = ListeningMode.Continuous,
-                playbackBufferProvider = { FloatArray(0) },
+                playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
                 micExposureProvider = { MicExposure.Exposed },
                 onIntent = {},
             )
@@ -1086,7 +1384,7 @@ class VoiceAsrEngineTest {
                 "${case.label}: expected no intent routing, got ${recognizer.calls}",
                 recognizer.calls.isEmpty(),
             )
-            verify(audioFeedbackRenderer).playEarcon(EarconId.ERROR)
+            verify(audioFeedbackRenderer).submitEarcon(EarconId.ERROR)
 
             engine.stop()
             org.mockito.Mockito.reset(audioFeedbackRenderer)
@@ -1106,7 +1404,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
             au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
                 detected = false,
@@ -1130,7 +1428,7 @@ class VoiceAsrEngineTest {
             backend = ResultBackend(AsrResult(text = "pause", detectedLanguage = "en")),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -1157,7 +1455,7 @@ class VoiceAsrEngineTest {
                 ),
             ),
         )
-        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
         kotlinx.coroutines.runBlocking {
             `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(wakeWordResult)
         }
@@ -1199,14 +1497,14 @@ class VoiceAsrEngineTest {
             ),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.WakeWord,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = { handledIntents += it },
         )
         advanceUntilIdle()
 
         verify(gracePeriodSignal).onWakeWordDetected()
-        verify(audioFeedbackRenderer).playEarcon(EarconId.WAKE_WORD)
+        verify(audioFeedbackRenderer).submitEarcon(EarconId.WAKE_WORD)
         assertEquals(listOf("ensureReady", "recognize:skip forward"), recognizer.calls)
         assertEquals(listOf(VoiceIntent.Playback.Pause), handledIntents)
 
@@ -1232,17 +1530,17 @@ class VoiceAsrEngineTest {
             ),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.WakeWord,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
         advanceUntilIdle()
 
         verify(gracePeriodSignal).onWakeWordDetected()
-        verify(audioFeedbackRenderer).playEarcon(EarconId.WAKE_WORD)
+        verify(audioFeedbackRenderer).submitEarcon(EarconId.WAKE_WORD)
         // Nothing was asked: a wake-only capture starts the session, it is not a
         // question that failed, so it plays nothing beyond the wake earcon.
-        verify(audioFeedbackRenderer, never()).playEarcon(EarconId.ERROR)
+        verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
         assertTrue("Expected no intent routing, got ${recognizer.calls}", recognizer.calls.isEmpty())
 
         engine.stop()
@@ -1264,14 +1562,14 @@ class VoiceAsrEngineTest {
             backend = FakeAsrBackend("pause"),
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.WakeWord,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
         advanceUntilIdle()
 
         verify(gracePeriodSignal, never()).onWakeWordDetected()
-        verify(audioFeedbackRenderer, never()).playEarcon(any())
+        verify(audioFeedbackRenderer, never()).submitEarcon(any())
         assertTrue("Expected no ASR calls, got ${recognizer.calls}", recognizer.calls.isEmpty())
 
         engine.stop()
@@ -1294,7 +1592,7 @@ class VoiceAsrEngineTest {
             backend = backend,
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -1314,7 +1612,7 @@ class VoiceAsrEngineTest {
             backend = backend,
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -1339,7 +1637,7 @@ class VoiceAsrEngineTest {
             backend = backend,
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -1366,7 +1664,7 @@ class VoiceAsrEngineTest {
             backend = backend,
             audioRoute = AudioRoute.Speaker,
             listeningMode = ListeningMode.Continuous,
-            playbackBufferProvider = { FloatArray(0) },
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
             micExposureProvider = { MicExposure.Exposed },
             onIntent = {},
         )
@@ -1398,6 +1696,41 @@ class VoiceAsrEngineTest {
     }
 
     /** Reports a routing failure the way the router does: no intent, plus why. */
+    // A recognizer that opens a SUCCESSOR wake window while recognition is suspended, then reports no
+    // intent. Recognition takes real time, so this is the ordinary shape of a wake arriving during it --
+    // and the escalation that follows must not act under the new window.
+    private class SuccessorWakeRecognizer(
+        private val reason: String,
+        private val onSuspended: () -> Unit,
+    ) : VoiceRecognizer {
+        override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+
+        override suspend fun recognize(
+            input: IntentRoutingInput,
+            context: VoiceRecognitionContext,
+        ): VoiceRecognizeResult {
+            onSuspended()
+            return VoiceRecognizeResult(
+                intent = null,
+                diagnostic = RouterStageDiagnostic(
+                    modelRelease = null,
+                    quant = null,
+                    inputFormat = null,
+                    sourceLanguage = null,
+                    translationKind = "none",
+                    classifierLabel = null,
+                    finalOutcome = RouterStageDiagnostic.OUTCOME_NO_INTENT,
+                    failedStage = RouterStageDiagnostic.STAGE_MAPPER_DIALOG,
+                    reason = reason,
+                    stageLatencyMs = emptyMap(),
+                    totalLatencyMs = 5L,
+                ),
+            )
+        }
+
+        override fun release() = Unit
+    }
+
     private class FailingRecognizer(private val reason: String) : VoiceRecognizer {
         override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
 
@@ -1451,9 +1784,16 @@ class VoiceAsrEngineTest {
         private val transcript: String,
         private val tokens: List<AsrToken>? = null,
     ) : AsrBackend {
+        /** Counted so a test can assert a segment never reached transcription. */
+        var transcribeCalls = 0
+            private set
+
         override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
 
-        override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult = AsrResult(transcript, tokens = tokens)
+        override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult {
+            transcribeCalls += 1
+            return AsrResult(transcript, tokens = tokens)
+        }
 
         override val requiredModel: ModelSpec = ModelSpec(files = emptyList(), targetDir = "")
 
@@ -1480,7 +1820,6 @@ class VoiceAsrEngineTest {
         override fun release() = Unit
     }
 
-    /** A platform that opens and starts an external headset stream, so confirmation succeeds. */
     private class FakeAcquisitionPlatform : RouteAcquisitionPlatform {
         var openCalls = 0
         var closeCalls = 0

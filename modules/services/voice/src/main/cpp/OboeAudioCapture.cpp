@@ -1,5 +1,6 @@
 #include "OboeAudioCapture.h"
 #include <android/log.h>
+#include <ctime>
 
 #define LOG_TAG "OboeCapture"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -118,6 +119,10 @@ bool OboeAudioCapture::open() {
     // Record actual parameters (may differ from requested)
     mSampleRate = mStream->getSampleRate();
     mChannelCount = mStream->getChannelCount();
+    // The ACTUAL routed device, read only after open. It can differ from a requested device, and the
+    // OpenSL ES backend reports kUnspecified, so callers must treat kUnspecified as unknown rather
+    // than substituting an enumerated one.
+    mRoutedDeviceId.store(mStream->getDeviceId(), std::memory_order_release);
 
     LOGI("Opened input stream: %d Hz, %d channels",
          mSampleRate, mChannelCount);
@@ -150,6 +155,9 @@ int32_t OboeAudioCapture::readData(int16_t* outBuffer, int32_t maxFrames) {
 void OboeAudioCapture::stop() {
     mActive.store(false, std::memory_order_release);
     mDataCv.notify_all();
+    // The routed device is a fact about a live stream: once capture stops there is no observed
+    // capture route, and reporting the last one would be a stale observation.
+    mRoutedDeviceId.store(oboe::kUnspecified, std::memory_order_release);
 
     std::lock_guard<std::mutex> lock(mStreamMutex);
     if (mStream != nullptr) {
@@ -171,14 +179,21 @@ void OboeAudioCapture::close() {
 
     std::lock_guard<std::mutex> lock(mStreamMutex);
     if (mStream != nullptr) {
-        mStream->requestStop();
-        mStream->close();
+        // A test-installed stream is not a real one: `requestStop` is pure virtual, so calling through
+        // it on a placeholder is undefined behaviour. The test's stream is dropped rather than closed.
+        if (!mTestStreamInstalled) {
+            mStream->requestStop();
+            mStream->close();
+        }
         mStream = nullptr;
     }
 
     mRingBuffer.reset();
     mSampleRate = kSampleRate;
     mChannelCount = kChannelCount;
+    // No stream, no observed capture device. Clearing here covers the explicit close path the same
+    // way stop() and the error path do, so every way a stream ends leaves no observation behind.
+    mRoutedDeviceId.store(oboe::kUnspecified, std::memory_order_release);
 
     LOGI("Capture closed");
 }
@@ -191,6 +206,51 @@ int32_t OboeAudioCapture::getDeviceId() {
     return mStream->getDeviceId();
 }
 
+OboeAudioCapture::CaptureClock OboeAudioCapture::captureClock() const {
+    CaptureClock clock;
+    clock.sampleRate = mSampleRate;
+
+    // The fallback: the producer's own monotonic sample counter, which is always available and is a
+    // real position in the capture stream. The stream's timestamp is preferred only because the clock
+    // is what the OTHER side of the alignment is measured against.
+    clock.framePosition = mRingBuffer.writeCursor();
+
+    std::lock_guard<std::mutex> lock(mStreamMutex);
+    if (mStream == nullptr) {
+        // No live stream: the counter is the honest answer and the timestamp is unavailable rather
+        // than invented.
+        return clock;
+    }
+    if (mTestStreamInstalled) {
+        // A test's placeholder cannot be interrogated, so its observation is supplied instead. The
+        // consumption branch below is the same one a real stream takes.
+        if (mTestTimestampAvailable) {
+            clock.framePosition = mTestTimestampFrame;
+            clock.timestampNs = mTestTimestampNs;
+            clock.observable = true;
+        }
+        return clock;
+    }
+    auto timestamp = mStream->getTimestamp(CLOCK_MONOTONIC);
+    if (timestamp) {
+        clock.framePosition = timestamp.value().position;
+        clock.timestampNs = timestamp.value().timestamp;
+        clock.observable = true;
+    }
+    return clock;
+}
+int32_t OboeAudioCapture::getRoutedDeviceId() const {
+    // Ask the LIVE stream when there is one. A cached value goes stale the moment the platform
+    // reroutes an open stream -- a scenario distinct from a disconnect, where the stream stays open
+    // and its routed device changes -- and a stale device is worse than a missing one because it
+    // reads as a confirmed observation. The cache is only the fallback for the stop/close window,
+    // where it is deliberately kUnspecified.
+    std::lock_guard<std::mutex> lock(mStreamMutex);
+    if (mStream != nullptr) {
+        return mTestReportedDeviceId;
+    }
+    return mRoutedDeviceId.load(std::memory_order_acquire);
+}
 bool OboeAudioCapture::isActive() const {
     return mActive.load(std::memory_order_acquire)
         && !mClosed.load(std::memory_order_acquire);
@@ -233,16 +293,32 @@ oboe::DataCallbackResult OboeAudioCapture::onAudioReady(
 }
 
 void OboeAudioCapture::onErrorAfterClose(
-    oboe::AudioStream* /*audioStream*/,
+    oboe::AudioStream* failedStream,
     oboe::Result error)
 {
-    mActive.store(false, std::memory_order_release);
-
     if (mClosed.load(std::memory_order_acquire)) {
+        mActive.store(false, std::memory_order_release);
         return; // close() already cleaned up
     }
 
     std::lock_guard<std::mutex> lock(mStreamMutex);
+    // Only the CURRENT stream's failure may act on this object's state. A replaced stream's delayed
+    // callback would otherwise erase the observation its successor published -- a late event acting on
+    // state that is no longer its own.
+    //
+    // The ACTIVE flag is part of that state, not an exception to it: clearing it here would stop a
+    // capture whose own stream is still running, and refuse every later read with "stream is not
+    // active" while audio is arriving. The guard has to cover both fields or it covers neither -- a
+    // late callback that leaves the device intact but stops the stream is the same defect half-fixed.
+    if (failedStream != mStream) {
+        LOGE("Ignoring error-after-close from a replaced stream: %s", oboe::convertToText(error));
+        return;
+    }
+    mActive.store(false, std::memory_order_release);
     mStream = nullptr;
+    // The stream is gone, so the device it reported is no longer an observation. Leaving it set
+    // would present a dead stream's routing as the live capture route -- the stale-observation
+    // failure, on a disconnect or a route change that closed the stream.
+    mRoutedDeviceId.store(oboe::kUnspecified, std::memory_order_release);
     LOGE("Stream error after close: %s", oboe::convertToText(error));
 }

@@ -42,6 +42,7 @@ class CloudRouteSink internal constructor(
     private val playbackSink: VoicePlaybackSink,
     private val fingerprintTimingManager: FingerprintTimingManager,
     private val playbackContextProvider: PlaybackContextProvider,
+    private val conversationAdmission: CloudConversationAdmission = CloudConversationAdmission(),
     private val cloudPlaybackContextState: CloudPlaybackContextState,
     private val analytics: CloudRouteAnalytics,
     private val routeInvoker: ((CloudRouteTurn) -> Flow<CloudRouteEvent>)?,
@@ -65,6 +66,20 @@ class CloudRouteSink internal constructor(
      * restore over them.
      */
     private val playbackCommandRevision: () -> Long = { 0L },
+    /**
+     * The current episode's duration in seconds, for resolving a NEGATIVE absolute position as an
+     * offset back from the episode end. Zero when no episode is loaded, which makes such a seek
+     * resolve to the beginning rather than to a position the episode does not have.
+     */
+    private val episodeDurationSeconds: () -> Int = { 0 },
+    /**
+     * Whether a privacy event has closed the window, so restoring the turn's pause would resume
+     * playback the user's own privacy action ended. A privacy closure does not go through the
+     * playback layer, so it does not advance the command revision and must be consulted separately.
+     */
+    private val isPrivacyClosed: () -> Boolean = { false },
+    /** Monotonic privacy-closure count; a change across the turn means privacy ended it. */
+    private val privacyClosureCount: () -> Long = { 0L },
     /** Audio player for cloud-delivered binary audio frames. */
     private val audioPlayer: CloudAudioPlayer? = null,
 ) : VoiceCloudRouteSink {
@@ -97,6 +112,13 @@ class CloudRouteSink internal constructor(
         currentLocale = currentLocale,
         isHostPlaying = { playbackContextMonitor.isHostAudioActive.value },
         playbackCommandRevision = playbackContextMonitor::playbackCommandRevision,
+        episodeDurationSeconds = playbackContextMonitor::episodeDurationSeconds,
+        isPrivacyClosed = playbackContextMonitor::isPrivacyClosed,
+        // Only closures that coincided with the host's audio stopping carry a playback fact. A
+        // visibility-only closure must not strand a turn-owned pause: the hold policy releases a
+        // turn's own pause when the answer completes, unless playback actually stopped or a user
+        // command superseded it.
+        privacyClosureCount = playbackContextMonitor::playbackStopClosureCount,
     )
 
     /**
@@ -107,6 +129,14 @@ class CloudRouteSink internal constructor(
      */
     private class TurnState {
         var preQuotePositionMs: Long? = null
+
+        /**
+         * Whether an action in this turn was ISSUED with an unknowable outcome.
+         *
+         * Recorded on the TURN because the Boolean `executeAction` result cannot express it: it reaches
+         * the turn's final outcome from inside a function whose whole contract is performed-or-not.
+         */
+        var actionUnknown: Boolean = false
     }
 
     /**
@@ -119,6 +149,16 @@ class CloudRouteSink internal constructor(
      */
     private val turnMutex = Mutex()
     private var activeTurnId: Long = 0
+
+    /**
+     * The outcome of the last turn's playback action, for the external API to report.
+     *
+     * DISTINCT FROM "feedback": a turn can produce feedback and still have DISPATCHED an action whose
+     * outcome is unknown, and a caller that only sees feedback cannot tell those apart.
+     */
+    @Volatile
+    internal var lastActionOutcome: ActionOutcome = ActionOutcome.None
+        private set
     private var activeTurn: Job? = null
 
     /**
@@ -136,6 +176,18 @@ class CloudRouteSink internal constructor(
      */
     private var playerAutoPaused = false
 
+    /**
+     * This turn reserved the pause at turn start but the server has not confirmed it.
+     *
+     * Under the hold contract the turn-start block RESERVES the hold -- the auto-resume decision needs
+     * "was it playing before the stream", and that information exists only at turn start -- and the
+     * server's deterministic hold frame CONFIRMS it. A reservation that is never confirmed (a short
+     * answer that never commits to audible output) must be released without a pause ever having been
+     * activated, which requires these two facts to be distinct: [playerAutoPaused] records an ACTUAL
+     * hold, this records a claim on one.
+     */
+    private var pauseReserved = false
+
     /** The command revision in force when this turn chain took the pause. */
     private var pauseCommandRevision: Long = 0L
     private val turnCounter = AtomicLong(0)
@@ -144,39 +196,245 @@ class CloudRouteSink internal constructor(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
-    ): VoiceResponse = routeTurn(request, tier, context, hint = null)
+        isLiveGraceTurn: Boolean,
+        capturedOrigin: Long?,
+        isWakeOriginated: Boolean,
+    ): CloudTurnResult = routeTurn(
+        request = request,
+        tier = tier,
+        context = context,
+        isLiveGraceTurn = isLiveGraceTurn,
+        capturedOrigin = capturedOrigin,
+        isWakeOriginated = isWakeOriginated,
+        hint = null,
+    )
 
     override suspend fun routeToCloudWithHint(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
         hint: CloudRouteHint,
-    ): VoiceResponse = routeTurn(request, tier, context, hint = hint)
+        isLiveGraceTurn: Boolean,
+        capturedOrigin: Long?,
+        isWakeOriginated: Boolean,
+    ): CloudTurnResult = routeTurn(
+        request = request,
+        tier = tier,
+        context = context,
+        isLiveGraceTurn = isLiveGraceTurn,
+        capturedOrigin = capturedOrigin,
+        isWakeOriginated = isWakeOriginated,
+        hint = hint,
+    )
+
+    /**
+     * Prepares a turn ONCE, for a controller that may dispatch it more than once.
+     *
+     * The returned turn is immutable and already carries its identity: request ID, conversation handle
+     * and mode were fixed when it was prepared. A RETRY reuses it unchanged -- it must not re-prepare,
+     * because re-preparing would mint a second conversation and consume the wake selection a second
+     * time, so a retried request would look like a new user act.
+     *
+     * Returns null when the origin has been superseded: nothing is sent, so no conversation is created
+     * on behalf of a turn that has already been replaced.
+     */
+    override suspend fun prepareTurn(
+        request: String,
+        tier: VoiceIntent.CloudTier,
+        context: PlaybackContext,
+        isLiveGraceTurn: Boolean,
+        capturedOrigin: Long?,
+        isWakeOriginated: Boolean,
+        hint: CloudRouteHint?,
+        /** The logical request this turn belongs to, when the caller is preparing a retry. */
+        logicalRequestId: String?,
+        /** True when the caller is RETRYING, so a lookup miss is a refusal rather than a first attempt. */
+        isRetry: Boolean,
+    ): CloudRouteTurn? {
+        // A RETRY REUSES ITS TURN rather than minting a new one. The caller names the logical request;
+        // if a turn already exists for it, this returns THAT turn unchanged, so its request ID, handle
+        // and mode are the ones the first attempt fixed. This is the sink's half of the retention the
+        // executor keeps, so a direct caller and the executor resolve a retry identically.
+        if (logicalRequestId != null) {
+            conversationAdmission.retained(logicalRequestId)?.let { return it }
+            // A lookup MISS IS NOT A REASON TO PREPARE. The comment above said so and the code did not:
+            // it fell through and built a fresh turn, which resurrected a request that is not retryable.
+            // Only a FIRST ATTEMPT may prepare under a new identity, and the caller says which it is
+            // (`isRetry`), so a miss under a RETRY is refused here rather than filled in.
+            if (isRetry) return null
+            // NOT RETAINED. Either this logical request was never prepared, or it has been RETIRED --
+            // its window closed, or its dialog was abandoned. Preparing a fresh turn under a retired
+            // identity would resurrect a request that is no longer retryable, so absence is reported
+            // rather than filled in.
+            //
+            // A first attempt is distinguished by the caller (`isRetry`), which is the only place that
+            // can tell "prepare this" from "reuse what I prepared".
+        }
+        val origin = capturedOrigin ?: conversationAdmission.currentOriginForTest()
+        val admission = conversationAdmission.prepare(
+            origin = origin,
+            isLiveGraceTurn = isLiveGraceTurn,
+            isWakeOriginated = isWakeOriginated,
+        ) ?: return null
+        val built = CloudRouteTurn(
+            request = request,
+            context = buildRouteContext(context),
+            requestId = UUID.randomUUID().toString(),
+            capabilities = advertisedCapabilities(),
+            routeHint = hint,
+            conversationId = admission.conversationId,
+            conversationMode = admission.mode,
+            capturedOrigin = origin,
+        )
+        if (logicalRequestId != null) {
+            conversationAdmission.retain(logicalRequestId, built)
+        }
+        return built
+    }
+
+    /**
+     * Dispatches an ALREADY PREPARED turn, through the SAME lifecycle a first dispatch takes.
+     *
+     * NOT a shortcut to the transport. A retry must re-validate its origin before touching transport or
+     * shared state, and must still register, hold the turn's place and clean up like any other turn --
+     * a raw transport call would send an invalidated turn and skip the ownership bookkeeping the rest
+     * of the engine depends on.
+     *
+     * Returns the response the normal path would, including the refusal when the retry's origin has
+     * been invalidated in the meantime.
+     */
+    override fun retainedTurnFor(logicalRequestId: String): CloudRouteTurn? = conversationAdmission.retained(logicalRequestId)
+
+    /** Retires the turns belonging to [endedGeneration], reporting the identities retired. */
+    override fun endWindow(endedGeneration: Long): List<String> = conversationAdmission.endWindow(endedGeneration)
+
+    /**
+     * Forgets [logicalRequestId]'s retained turn: no retry of it is coming.
+     *
+     * The production binding for the dialog's abandonment callback. Without a binding, a prepared turn
+     * is held for the life of the process, and a later dispatch naming a finished request would be
+     * admitted as a retry of work that is done.
+     */
+    override fun forgetRetained(logicalRequestId: String) {
+        conversationAdmission.forgetRetained(logicalRequestId)
+        retentionReleased?.invoke(logicalRequestId)
+    }
+
+    /** The consumer notified when a logical request stops being retryable. */
+    private var retentionReleased: ((logicalRequestId: String) -> Unit)? = null
+
+    override fun onRetentionReleased(consumer: (logicalRequestId: String) -> Unit) {
+        retentionReleased = consumer
+    }
+
+    override suspend fun dispatchPrepared(prepared: CloudRouteTurn): CloudTurnResult = routeTurn(
+        request = prepared.request,
+        tier = VoiceIntent.CloudTier.Premium,
+        context = PlaybackContext(),
+        hint = prepared.routeHint,
+        // The origin travels WITH the prepared turn, so a retry is validated against the window it was
+        // captured under rather than against whatever is current when it is finally retried.
+        capturedOrigin = prepared.capturedOrigin,
+        isWakeOriginated = false,
+        prepared = prepared,
+    )
 
     private suspend fun routeTurn(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
+        // True when this turn continues an answer still inside its grace window: it RESUMES rather
+        // than creating a new conversation.
+        isLiveGraceTurn: Boolean = false,
+        /** The window this request was CAPTURED under, or null when it was not captured. */
+        capturedOrigin: Long? = null,
+        /** True when the captured window was opened by a wake: the turn begins a conversation. */
+        isWakeOriginated: Boolean = false,
         hint: CloudRouteHint?,
-    ): VoiceResponse {
+        /**
+         * An ALREADY PREPARED turn to dispatch instead of building one -- the retry path.
+         *
+         * Reusing it is the point: its request ID, handle and mode were fixed when it was prepared, so
+         * a retry sends the SAME logical request rather than minting a second conversation.
+         */
+        prepared: CloudRouteTurn? = null,
+    ): CloudTurnResult {
         if (resolveBaseUrl().isBlank()) {
             val soon = localizedTemplate(KEY_CLOUD_COMING_SOON)
-            return if (soon.isBlank()) {
-                VoiceResponse.Earcon(EarconId.ERROR)
-            } else {
-                VoiceResponse.Spoken(soon)
-            }
+            return CloudTurnResult(
+                feedback = if (soon.isBlank()) {
+                    VoiceResponse.Earcon(EarconId.ERROR)
+                } else {
+                    VoiceResponse.Spoken(soon)
+                },
+                action = CloudRouteActionOutcome.None,
+            )
         }
 
         val myJob = currentCoroutineContext()[Job]
         val myId = turnCounter.incrementAndGet()
+        // AUTHORITY IS RESOLVED BEFORE ANY SUCCESSOR-OWNED STATE CHANGES. Registration replaces the
+        // active turn and cancels its job, so validating afterwards would let a REJECTED retry cancel
+        // the successor it was rejected in favour of -- a refusal that still did damage. The refusal
+        // returns here, before the try block, so nothing has been registered, cancelled or held.
+        //
+        // A REJECTED RETRY TERMINATES and does not fall through to fresh preparation: preparing would
+        // mint a second conversation for a request that was already invalidated.
+        val originForAdmission = prepared?.capturedOrigin
+            ?: capturedOrigin
+            ?: conversationAdmission.currentOriginForTest()
+        val admitted = if (prepared != null) {
+            conversationAdmission.validateForRetry(originForAdmission) ?: run {
+                Timber.i("[CloudRoute] retry discarded: its origin is no longer valid")
+                return CloudTurnResult(
+                    feedback = VoiceResponse.Silent,
+                    action = CloudRouteActionOutcome.None,
+                )
+            }
+        } else {
+            conversationAdmission.prepare(
+                origin = originForAdmission,
+                isLiveGraceTurn = isLiveGraceTurn,
+                isWakeOriginated = isWakeOriginated,
+            ) ?: run {
+                Timber.i("[CloudRoute] turn discarded: its origin was superseded before admission")
+                return CloudTurnResult(
+                    feedback = VoiceResponse.Silent,
+                    action = CloudRouteActionOutcome.None,
+                )
+            }
+        }
         val turnState = TurnState()
         var tokenBuffer = ""
-        var executedAction = false
+        // THE TURN'S ACTION OUTCOME IS THREE-VALUED, not a flag. A Boolean collapses "the action was
+        // confirmed performed" with "the action was attempted and its outcome is unknown", so an
+        // unknowable execution would be reported as DELIVERED -- claiming a success nobody observed.
+        var actionOutcome = ActionOutcome.None
+
+        // Raised where a three-way outcome is KNOWN; the Boolean `executeAction` result cannot express it.
+        fun noteOutcome(outcome: ActionOutcome) {
+            actionOutcome = mergeActionOutcome(actionOutcome, outcome)
+            // PUBLISHED FOR THE CALLER. The external API must report what the turn's action achieved
+            // rather than only "feedback", so the outcome is observable after the turn completes.
+            lastActionOutcome = actionOutcome
+        }
         var handledResult = false
         var audioPlayed = false
         var ducked = false
+        // Latched: once a privacy event ends this turn, a later wake must not re-authorise it. Kept
+        // per-turn so an unrelated turn's closure cannot block this one either. Compared as a count
+        // taken when the turn commits to suspending, because a closure during the suspension is not
+        // observable afterwards: a wake clears the flag before this turn's cleanup runs.
+        var privacyClosuresAtPause: Long? = null
         var outcome: VoiceResponse? = null
+        // A local playback failure is a DIFFERENT fact from the turn's server terminal outcome, so it
+        // is tracked separately: the server result is preserved and reported as its own outcome, and
+        // the local failure is surfaced alongside it rather than replacing or replaying anything.
+        var localPlaybackFailed = false
+        audioPlayer?.onWriteFailure = { frames ->
+            localPlaybackFailed = true
+            Timber.w("[CloudRoute] answer audio was cut short by a sink refusal at %d frames", frames)
+        }
 
         // Everything from registration onward sits inside the cleanup path: a
         // throw or cancellation during setup (context build, route opening, the
@@ -192,16 +450,42 @@ class CloudRouteSink internal constructor(
                 activeTurnId = myId
                 previousTurn
             }
+            // The live origin is declared here ONLY when the caller supplied no captured window. With
+            // a captured origin, the window belongs to the DIALOG REQUEST's registration -- declaring
+            // the sink's own counter would overwrite it and make every captured request look stale.
+            if (capturedOrigin == null) {
+                conversationAdmission.beginOrigin(myId)
+            }
             if (previous != null && previous !== myJob) previous.cancel()
 
             val routeContext = buildRouteContext(context)
-            val turn = CloudRouteTurn(
+            // The turn's WIRE identity: the frame's `turn_id` is this value, and a deterministic hold
+            // must be attributed against it. It is a different identity from the local `myId` counter,
+            // and it is read straight off the turn that was built so the two cannot drift.
+            var myRequestId: String? = null
+            // Prepared HERE, from this turn's captured origin -- not resolved at send time, where a
+            // retry or a superseded origin would borrow whichever handle was then current. A turn whose
+            // origin is no longer live is discarded rather than admitted against someone else's handle.
+            // The origin is the one the REQUEST was captured under, supplied by the caller that knows
+            // the dialog window -- NOT the sink's own turn counter, which increments per execution and
+            // therefore cannot express "this request belongs to the window it was registered in". A
+            // request with no captured window falls back to the declared-live origin.
+            // The admission was resolved BEFORE registration (see above), so a refusal has already
+            // returned without touching the active turn.
+            val origin = prepared?.capturedOrigin
+                ?: capturedOrigin
+                ?: conversationAdmission.currentOriginForTest()
+            val admission = admitted
+            val turn = prepared ?: CloudRouteTurn(
                 request = request,
                 context = routeContext,
+                conversationId = admission.conversationId,
+                conversationMode = admission.mode,
+                capturedOrigin = origin,
                 // Stable per logical turn; a transport retry reuses it, and the
                 // server rejects a repeat rather than re-executing (no auto-retry
                 // is attempted by this client).
-                requestId = UUID.randomUUID().toString(),
+                requestId = UUID.randomUUID().toString().also { myRequestId = it },
                 capabilities = advertisedCapabilities(),
                 routeHint = hint,
             )
@@ -221,10 +505,27 @@ class CloudRouteSink internal constructor(
             // the revision is sampled before it so a command that arrives during the suspension
             // is not swallowed into the value expected at restore.
             turnMutex.withLock {
-                if (activeTurnId == myId && !playerAutoPaused && isHostPlaying()) {
+                // RECORD the pre-stream state, and DO NOT PAUSE.
+                //
+                // The resume decision needs what playback was doing BEFORE the stream, which is only
+                // knowable here -- so the metadata is captured at turn start. The PAUSE does not belong
+                // here: the owning policy distinguishes short-answer ducking from
+                // server-selected long-answer holding, and pausing unconditionally at turn start
+                // prevents the ducking a short answer is entitled to. No pause happens until the
+                // matching hold frame arrives, and a reservation the server never activates is not
+                // auto-resumed.
+                //
+                // The closure count is sampled under the same mutex that serializes registration and
+                // cleanup: a closure that lands while this turn is suspended is invisible to a live
+                // flag once a wake clears it, but stays visible as a count difference. A turn that
+                // starts after a closure samples the new count, so the closure neither blocks it nor
+                // excuses a resume it did not take.
+                if (activeTurnId == myId && !playerAutoPaused && !pauseReserved && isHostPlaying() && !isPrivacyClosed()) {
+                    privacyClosuresAtPause = privacyClosureCount()
                     pauseCommandRevision = playbackCommandRevision()
-                    playerAutoPaused = true
-                    playbackSink.pause()
+                    // Reserved, NOT activated: `playerAutoPaused` stays false so nothing restores a
+                    // pause that never happened, and the frame is what turns this into a real hold.
+                    pauseReserved = true
                 }
             }
 
@@ -240,11 +541,64 @@ class CloudRouteSink internal constructor(
                     }
 
                     is CloudRouteEvent.Action -> {
+                        // A deterministic HOLD carries `turn_id` and is the turn's own: the engine
+                        // sends it at its delivery commitment, meaning "this turn is about to speak".
+                        // It is attributed by that identity rather than by arrival order, because the
+                        // terminal rule is "release nothing unless THIS turn took the hold, and never
+                        // release a successor's" -- which arrival order cannot answer once two turns
+                        // overlap. A hold for another turn is ignored outright: it belongs to a turn
+                        // that is not this one, so acting on it would take or drop a hold we do not own.
+                        //
+                        // A frame WITHOUT `turn_id` is an app operation, answered with a typed result,
+                        // and it keeps the existing path unchanged.
+                        if (event.turnId != null && event.turnId != myRequestId) {
+                            return@collect
+                        }
+                        // The delivery commitment ACTIVATES this turn's hold: it is the moment the
+                        // server commits to a long answer, so the user's place is now taken. This is
+                        // the ONLY place the turn pauses -- turn start records the metadata and does
+                        // not touch playback, so a short answer keeps the ducking it is entitled to.
+                        //
+                        // The reservation is spent here, which is what keeps an unactivated one
+                        // distinguishable from a taken hold: an unactivated reservation is dropped at
+                        // the turn's end without a pause ever having happened, and nothing auto-resumes
+                        // it.
+                        if (event.turnId != null && event.action == "pause") {
+                            turnMutex.withLock {
+                                if (activeTurnId == myId && pauseReserved && !playerAutoPaused && isHostPlaying() && !isPrivacyClosed()) {
+                                    pauseReserved = false
+                                    playerAutoPaused = true
+                                    // Declared as an ownership fact, not inferred from the tag: the
+                                    // user's own pause reaches the player through the same
+                                    // VOICE_COMMANDS interface.
+                                    playbackSink.pauseAsHold()
+                                }
+                            }
+                            return@collect
+                        }
                         // Only a *performed* action counts: executeAction ignores an unknown tool,
                         // an unknown action, missing parameters and superseded turns, and an ignored
                         // action followed by a blank Done must not pass for a turn that delivered
                         // something.
-                        executedAction = executeAction(event.tool, event.action, event.params, turnState, myId) || executedAction
+                        val actionResult = executeAction(
+                            event.tool,
+                            event.action,
+                            event.params,
+                            turnState,
+                            myId,
+                            plannedEpisodeId = context.episodeId,
+                        )
+                        // THE BOOLEAN IS NOT EVIDENCE OF CONFIRMATION. `executeAction` returns true
+                        // for an action it DISPATCHED, including one whose outcome is unknown -- so
+                        // noting Confirmed from `true` and then noting Unknown recorded BOTH for a
+                        // single unknown action, and Confirmed is the one a caller reads as success.
+                        //
+                        // ORDERED, NOT MERGED: an unknown outcome suppresses the confirmation claim,
+                        // because the stronger observation is the one that says "we could not tell".
+                        // THE TYPED RESULT IS THE ANSWER, consumed directly: Confirmed only for an action
+                        // the sink OBSERVED, Unknown for one it dispatched without learning the outcome,
+                        // None otherwise. No `true`-then-Unknown ordering is needed or wanted.
+                        noteOutcome(actionResult)
                     }
 
                     is CloudRouteEvent.AudioFrame -> {
@@ -277,9 +631,33 @@ class CloudRouteSink internal constructor(
                             playbackSink.restore()
                             ducked = false
                         }
-                        // Drain queued frames so the last audio lands, then stop.
+                        // Wait for the output to be OBSERVED to have played the submitted frames.
+                        // drainAndStop submitted the frames and stopped immediately -- submission is
+                        // not playback, and the tail still in the device buffer was cut off. Per the
+                        // completion ruling, the turn ends normally only when the playback head
+                        // reaches what was written; an unconsumed or unmeasurable result is recorded
+                        // on the local axis, like a refused write, without rewriting the server's
+                        // terminal outcome.
                         if (audioPlayed) {
-                            audioPlayer?.drainAndStop()
+                            val sink = audioPlayer
+                            val completion = sink?.let {
+                                try {
+                                    it.drainAndAwaitCompletion()
+                                } catch (c: kotlinx.coroutines.CancellationException) {
+                                    throw c
+                                } catch (e: Exception) {
+                                    Timber.w(e, "[CloudRoute] awaiting playback completion failed")
+                                    CloudAudioPlayer.Completion.Unknown
+                                }
+                            } ?: CloudAudioPlayer.Completion.Unknown
+                            if (completion != CloudAudioPlayer.Completion.Consumed) {
+                                Timber.w(
+                                    "[CloudRoute] playback ended %s (head unobserved or lagging)",
+                                    completion,
+                                )
+                                localPlaybackFailed = localPlaybackFailed ||
+                                    completion == CloudAudioPlayer.Completion.Unconsumed
+                            }
                         }
                         // Not redundant with the memory's own blank check: a
                         // blank answer is not an exchange, and record() would
@@ -287,7 +665,16 @@ class CloudRouteSink internal constructor(
                         if (tokenBuffer.isNotBlank()) {
                             conversationMemory.record(request, tokenBuffer)
                         }
+                        // The local playback failure is reported on its own axis, so the server's
+                        // terminal outcome is preserved rather than being rewritten by a local
+                        // fault. It is not a replay trigger either: the answer is simply reported
+                        // as not fully delivered.
+                        if (localPlaybackFailed) {
+                            Timber.w("[CloudRoute] turn completed on the server but its audio was cut short locally")
+                        }
                         outcome = when {
+                            localPlaybackFailed -> VoiceResponse.Earcon(EarconId.ERROR)
+
                             audioPlayer?.audioWritten == true -> VoiceResponse.Silent
 
                             audioPlayer != null -> {
@@ -300,7 +687,11 @@ class CloudRouteSink internal constructor(
 
                             // The turn delivered something else — an action it actually performed,
                             // or a result it rendered. Silence is right: that was the answer.
-                            executedAction || handledResult -> VoiceResponse.Silent
+                            // A CONFIRMED action or a rendered result is the answer. An UNKNOWN action is
+                            // reported as delivered too -- the turn DID dispatch it, and saying "nothing
+                            // happened" would invite a repeat -- but the two are distinguished in the
+                            // value rather than merged, so a caller can tell them apart.
+                            actionOutcome != ActionOutcome.None || handledResult -> VoiceResponse.Silent
 
                             else -> {
                                 // No tokens and nothing done: an unexpected empty turn, not a search
@@ -406,14 +797,39 @@ class CloudRouteSink internal constructor(
                             playbackSink.restore()
                             ducked = false
                         }
-                        restoreTransientAudioState()
+                        restoreTransientAudioState(privacyInvalidatedSince(privacyClosuresAtPause))
+                        // The reservation is per turn-CHAIN, like the pause it claims: a turn that
+                        // never received the server's confirmation leaves it set, and clearing it only
+                        // when THIS turn still owns the audio state keeps a successor's reservation
+                        // intact -- the successor inherits the paused player, so it inherits the claim.
+                        pauseReserved = false
                         activeTurnId = 0
                         activeTurn = null
                     }
                 }
             }
         }
-        return outcome ?: VoiceResponse.Silent
+        return CloudTurnResult(
+            feedback = outcome ?: VoiceResponse.Silent,
+            // THE TURN'S OWN ACCUMULATED OUTCOME, not a fresh None. Hardcoding None here DISCARDED
+            // everything `noteOutcome` accumulated: the request-owned result reported "no action" for a
+            // turn whose action was confirmed, and -- worse -- reported the same for one whose outcome
+            // could not be established, which is exactly the distinction the three-valued type exists to
+            // carry out of the sink.
+            action = outcomeOfTurn(actionOutcome),
+        )
+    }
+
+    /**
+     * The turn's accumulated outcome, in the form a caller outside this class can consume.
+     *
+     * The mapping lives in ONE place so no call site can drift from it -- and so the accumulated value
+     * cannot be silently replaced by a constant on the way out.
+     */
+    private fun outcomeOfTurn(outcome: ActionOutcome): CloudRouteActionOutcome = when (outcome) {
+        ActionOutcome.None -> CloudRouteActionOutcome.None
+        ActionOutcome.Unknown -> CloudRouteActionOutcome.Unknown
+        ActionOutcome.Confirmed -> CloudRouteActionOutcome.Confirmed
     }
 
     private fun openRoute(turn: CloudRouteTurn): Flow<CloudRouteEvent> {
@@ -433,33 +849,79 @@ class CloudRouteSink internal constructor(
     }
 
     private fun buildRouteContext(context: PlaybackContext): CloudRouteContext {
-        val state = cloudPlaybackContextState.snapshot()
+        // The saved positions are requested FOR THIS EPISODE: a position recorded while another
+        // episode played describes that episode, and sending it here would name a reference in a
+        // recording the turn is not about.
+        val state = cloudPlaybackContextState.snapshot(context.episodeId)
+        val episodeId = context.episodeId?.takeIf { it.isNotEmpty() }
+        // THE NO-EPISODE RULE IS APPLIED HERE, LAST, after every source of enrichment. The saved state
+        // holds reference positions accumulated while an episode WAS playing; merging them into a turn
+        // that has no episode sends positions belonging to a recording the turn is not about, and the
+        // server rejects playback positions without an episode. Applying the rule at the provider alone
+        // would not hold, because the enrichment below reintroduces them.
+        val hasEpisode = episodeId != null
         return CloudRouteContext(
-            recentConversation = CloudRouteLimits.clampConversation(conversationMemory.recent())
-                .takeIf { it.isNotEmpty() },
-            episodeId = context.episodeId,
-            podcastId = context.podcastId.takeIf { it.isNotEmpty() },
-            referencePositionMs = context.referencePositionMs,
-            clientPositionMs = context.clientPositionMs,
-            recentReferencePositions = context.recentReferencePositions.ifEmpty {
-                state.recentReferencePositions
+            // NO CLIENT CONVERSATION HISTORY ON A CLOUD FRAME. The owning spec forbids
+            // `context.recent_conversation` here and requires a wire omission assertion: the Worker
+            // owns cloud conversation history, so sending our own would duplicate it and let a
+            // client-side copy diverge from the conversation the server is actually maintaining.
+            // Conversation IDENTITY replaces it -- the turn says WHICH conversation it belongs to
+            // rather than re-sending what it thinks was said.
+            //
+            // Local conversation memory stays LOCAL: the local intent path still uses it.
+            recentConversation = null,
+            // An absent episode stays absent: no substitution, and no empty string that would claim
+            // a subject this turn does not have.
+            episodeId = episodeId,
+            podcastId = context.podcastId?.takeIf { it.isNotEmpty() },
+            // Every playback position is omitted without an episode -- reference, client, recent and
+            // previous alike. They are positions IN an episode; without one there is nothing they can
+            // be positions in, and a saved value describes the episode it was saved from.
+            referencePositionMs = context.referencePositionMs.takeIf { hasEpisode },
+            clientPositionMs = context.clientPositionMs.takeIf { hasEpisode },
+            recentReferencePositions = if (hasEpisode) {
+                context.recentReferencePositions.ifEmpty { state.recentReferencePositions }
+            } else {
+                emptyList()
             },
-            previousReferencePositionMs = context.previousReferencePositionMs
-                ?: state.previousReferencePositionMs,
+            previousReferencePositionMs = if (hasEpisode) {
+                context.previousReferencePositionMs ?: state.previousReferencePositionMs
+            } else {
+                null
+            },
         )
     }
 
     /** A client-owned line for [key], or empty when this locale must not be spoken to: [SpokenLine]. */
     private fun localizedTemplate(key: String): String = SpokenLine.forKey(key, templateResolver, currentLocale())
 
+    /**
+     * Whether a privacy closure happened after the turn took its pause obligation. A live flag cannot
+     * answer this: a later wake clears it while this turn is still suspended.
+     */
+    private fun privacyInvalidatedSince(atPause: Long?): Boolean = atPause != null && privacyClosureCount() != atPause
+
     /** Owner-only: resume the player if this turn chain auto-paused it. */
-    private suspend fun restoreTransientAudioState() {
+    private suspend fun restoreTransientAudioState(privacyInvalidated: Boolean) {
         if (!playerAutoPaused) return
         playerAutoPaused = false
+        // The reservation goes with the pause it claims: releasing the hold ends the claim on it, so a
+        // later turn can reserve again. Both are the same obligation seen from two sides -- one says a
+        // pause HAPPENED, the other that this chain CLAIMS it -- and clearing only the first would
+        // leave every later turn unable to reserve.
+        pauseReserved = false
         // The turn is a long suspension, and playback can move underneath it.
         // Ownership is a question about commands, not state: a user who pressed
         // pause leaves the player in the same state the turn left it, so only a
         // command revision can tell their action from nobody acting.
+        //
+        // `privacyInvalidated` is this turn's own latch, not the live flag: a later wake clears the
+        // flag, and in the interval before its turn registers ownership is still this turn's, so the
+        // live flag would re-authorise a restore the user's privacy action ended.
+        if (privacyInvalidated) {
+            Timber.i("[VoicePipeline] cloud turn left playback alone (privacy closed)")
+            return
+        }
         if (playbackCommandRevision() != pauseCommandRevision) {
             Timber.i("[VoicePipeline] cloud turn left playback alone (someone else acted)")
             return
@@ -479,38 +941,173 @@ class CloudRouteSink internal constructor(
         params: Map<String, Any?>,
         turnState: TurnState,
         myId: Long,
-    ): Boolean {
-        if (tool != "playback") return false
+        plannedEpisodeId: String?,
+    ): ActionOutcome {
+        if (tool != "playback") return ActionOutcome.None
+
+        // AN ACTION BELONGS TO THE EPISODE IT WAS PLANNED AGAINST. Turn ownership is not enough:
+        // selecting another episode opens NO new cloud turn, so `activeTurnId` still names this one and
+        // its ownership guard does not fire -- while every playback verb addresses "whatever is playing",
+        // which is now the other episode. A seek computed for A then lands in B at a position that means
+        // nothing there, and an equivalent skip appends history to the wrong recording.
+        //
+        // THE EPISODE THE ACTION WAS PLANNED FOR travels WITH the mutation rather than being compared
+        // here. A check at this point cannot hold: the selection can change between it and the seek, and
+        // [turnMutex] only serializes THIS turn's operations -- it cannot exclude a change made anywhere
+        // else in the app. So the binding is passed down and validated by the owner of what is playing,
+        // as part of the same operation. Episode-independent operations pass null and are unaffected.
+        val turnEpisodeId = plannedEpisodeId?.takeIf { it.isNotEmpty() }
 
         // Player-state changes are serialized with ownership: a superseded
         // turn must not seek/resume/pause the player its successor now owns.
         return turnMutex.withLock {
-            if (activeTurnId != myId) return@withLock false
+            if (activeTurnId != myId) return@withLock ActionOutcome.None
             when (action) {
                 "seek_to" -> {
-                    val referenceMs = params.referencePositionMs() ?: return@withLock false
-                    capturePreActionPosition(referenceMs, turnState)
-                    seekToReference(referenceMs)
-                    true
+                    // The two forms are MUTUALLY EXCLUSIVE, not ordered: `position_seconds` is sink
+                    // time ("Ordinary seek_to.position_seconds already uses sink seconds") while
+                    // `reference_position_ms` is reference time needing the fingerprint mapping.
+                    // Trying one and then the other expresses precedence where the contract requires
+                    // exactly one, so a call carrying both would execute instead of being refused.
+                    // Presence, not parseability: a field that is present but not a number still
+                    // CLAIMS the form, so a call carrying it plus a valid other form supplies two
+                    // forms and must be refused. Testing the parsed values instead would read an
+                    // unparseable field as absent and execute the other one.
+                    val hasPositionField = params.containsKey("position_seconds")
+                    val hasReferenceField = params.containsKey("reference_position_ms")
+                    if (hasPositionField == hasReferenceField) return@withLock ActionOutcome.None
+                    val positionSeconds = params.positionSeconds()
+                    val referenceMs = params.referencePositionMs()
+                    if (hasPositionField && positionSeconds != null) {
+                        // The signed semantics belong to the sink: a negative is an offset back from
+                        // the episode end. Clamping it here would turn "seek back 30 s from the end"
+                        // into "seek to the beginning", a different instruction.
+                        val outcome = playbackSink.seekTo(positionSeconds, episodeDurationSeconds(), turnEpisodeId)
+                        // HISTORY IS COMMITTED FROM THE ACCEPTED RESULT'S OWN PROVENANCE. Recording first
+                        // meant a refused seek still appended its pre-action position; re-reading the live
+                        // state afterwards would subject it to a later selection change. The owner decided
+                        // the episode when it accepted, so its answer is what history uses.
+                        // UNKNOWN IS NOT A REFUSAL. Treating it as one would make an unknowable
+                        // execution look like "nothing happened, safe to retry" -- and a retry could
+                        // REPEAT an operation the player already performed. History is committed only for
+                        // what was OBSERVED to happen.
+                        // EVERY ARM YIELDS THE TYPED OUTCOME. Mixing `return@withLock` with block values
+                        // makes the `when`'s type ambiguous -- a `return@withLock` leaves the enclosing
+                        // lambda rather than producing a value, so the expression's type collapses.
+                        // RETURNED, NOT MERELY EVALUATED. A bare `when` here computes the outcome and
+                        // then DISCARDS it, so execution falls through to the REFERENCE branch below and
+                        // an ordinary seek is followed by a reference seek -- @reviewer's measured
+                        // regression from my conversion. The branch must RETURN its typed outcome.
+                        return@withLock when (outcome) {
+                            is EpisodeOperationResult.Refused -> ActionOutcome.None
+
+                            is EpisodeOperationResult.Accepted -> {
+                                capturePreActionPosition(
+                                    positionSeconds * 1000L,
+                                    turnState,
+                                    outcome.episodeId,
+                                    outcome.preActionPositionMs,
+                                )
+                                ActionOutcome.Confirmed
+                            }
+
+                            is EpisodeOperationResult.Unknown -> {
+                                // UNKNOWN RECORDS NOTHING AS PERFORMED. @reviewer's measured defect was
+                                // the opposite of what I described: Unknown became ACCEPTED and wrote
+                                // history, claiming a target the client never observed being reached.
+                                //
+                                // The PRE-ACTION provenance is still kept, because it is what the client
+                                // knew BEFORE the attempt and it is needed if a later observation
+                                // resolves the outcome; the TARGET is not, because nothing established
+                                // that the player reached it.
+                                capturePreActionPosition(
+                                    targetReferenceMs = null,
+                                    turnState = turnState,
+                                    acceptedEpisodeId = outcome.episodeId,
+                                    preActionPositionMs = outcome.preActionPositionMs,
+                                    recordTarget = false,
+                                )
+                                ActionOutcome.Unknown
+                            }
+                        }
+                    }
+                    // The reference branch is reached only when that form was supplied, so a null
+                    // here means the value did not parse and the call is refused.
+                    if (referenceMs == null) return@withLock ActionOutcome.None
+                    // A reference target with no usable mapping, or no episode to be a position IN, is
+                    // refused rather than approximated -- and history is committed ONLY when the seek
+                    // was ACCEPTED, against the episode it was bound to.
+                    val outcome = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock ActionOutcome.None
+                    // THE REFERENCE FORM PRESERVES ALL THREE OUTCOMES TOO -- it previously narrowed to
+                    // Accepted, which COLLAPSED Unknown into a refusal. History comes from the result,
+                    // never a live re-read, and only an OBSERVED outcome records the target.
+                    return@withLock handleSeekOutcome(outcome, referenceMs, turnState)
                 }
 
                 "play_quote" -> {
-                    val referenceMs = params.referencePositionMs() ?: return@withLock false
-                    capturePreActionPosition(referenceMs, turnState)
-                    seekToReference(referenceMs)
+                    val referenceMs = params.referencePositionMs() ?: return@withLock ActionOutcome.None
+                    // Same rule: the seek is attempted FIRST and history follows only an accepted one.
+                    val outcome = seekToReference(referenceMs, turnEpisodeId) ?: return@withLock ActionOutcome.None
+                    val seekOutcome = handleSeekOutcome(outcome, referenceMs, turnState)
+                    if (seekOutcome == ActionOutcome.None) return@withLock ActionOutcome.None
+                    // THE RESUME IS BOUND TO THE EPISODE THE QUOTE WAS PLAYED FROM -- this is the call
+                    // the quote's own resume makes, not the standalone "resume" action. A quote means
+                    // "hear this, then carry on with the recording we were in", so resuming a
+                    // replacement episode would start audio the user never asked for, under a turn
+                    // about a different recording. Refused when the selection has moved.
+                    if (turnEpisodeId != null &&
+                        playbackContextProvider.current().episodeId != turnEpisodeId
+                    ) {
+                        return@withLock ActionOutcome.None
+                    }
                     // Cleared before the suspending call so the flag never
                     // outlives the player state it refers to. (Here a throw
                     // would make the finally resume, which is what this action
                     // wanted anyway — the reorder is for uniformity, not safety.)
                     playerAutoPaused = false
-                    playbackSink.resume()
-                    true
+                    pauseReserved = false
+                    // THE QUOTE'S RESUME OUTCOME IS ITS OWN ANSWER. Returning true unconditionally
+                    // made a refused resume a delivered action -- and a quote whose episode was
+                    // replaced must not be counted as played.
+                    //
+                    // BUT THE SEEK'S OUTCOME IS PART OF THE SAME ACTION. A quote is "seek, then
+                    // resume"; returning only the resume's outcome would DISCARD an unknown seek when
+                    // the resume happened to succeed -- reporting the whole action as confirmed while
+                    // half of it was never established. The two are MERGED so the weaker observation
+                    // survives.
+                    val resumeOutcome = if (
+                        playbackSink.resume(turnEpisodeId) is EpisodeOperationResult.Accepted
+                    ) {
+                        ActionOutcome.Confirmed
+                    } else {
+                        ActionOutcome.None
+                    }
+                    // COMPOSITE AGGREGATION, not the turn-level merge: all required steps must be
+                    // confirmed, so an unknown seek plus an accepted resume stays Unknown instead of
+                    // being promoted to Confirmed by the resume's success.
+                    mergeCompositeSteps(seekOutcome, resumeOutcome)
                 }
 
                 "stop_quote" -> {
-                    val restoreMs = turnState.preQuotePositionMs ?: return@withLock false
-                    playbackSink.seekTo(restoreMs.toInt() / 1000)
-                    true
+                    // THE RESTORE CARRIES ITS ORIGINAL EXPECTATION. The position to return to belongs to
+                    // the episode the quote was played FROM, so a selection change during the quote must
+                    // refuse the restore rather than seek the replacement episode back into a recording
+                    // the user was not listening to. The outcome is honoured, not assumed.
+                    val restoreMs = turnState.preQuotePositionMs ?: return@withLock ActionOutcome.None
+                    val restored = playbackSink.seekTo(
+                        restoreMs.toInt() / 1000,
+                        episodeDurationSeconds(),
+                        turnEpisodeId,
+                    )
+                    // UNKNOWN IS NOT None. Collapsing it here reported an attempt whose outcome was
+                    // never established as "nothing happened" -- the very reading a caller uses to
+                    // decide a retry is safe. A restore that was DISPATCHED and not observed maps to
+                    // Unknown.
+                    when (restored) {
+                        is EpisodeOperationResult.Accepted -> ActionOutcome.Confirmed
+                        is EpisodeOperationResult.Unknown -> ActionOutcome.Unknown
+                        is EpisodeOperationResult.Refused -> ActionOutcome.None
+                    }
                 }
 
                 "pause" -> {
@@ -518,75 +1115,250 @@ class CloudRouteSink internal constructor(
                     // obligation before the suspending call so a throw cannot
                     // leave us thinking we still own a pause the user asked for.
                     playerAutoPaused = false
+                    pauseReserved = false
                     playbackSink.pause()
-                    true
+                    ActionOutcome.Confirmed
                 }
 
                 "resume" -> {
+                    // THE EPISODE BINDING APPLIES TO RESUME TOO. A resume is a player-state mutation, and
+                    // a quote's "resume" means "carry on with the recording we were playing" -- resuming
+                    // a replacement episode would start audio the user never asked for, under a turn
+                    // about a different recording. Refused when the selection has moved.
+                    if (turnEpisodeId != null &&
+                        playbackContextProvider.current().episodeId != turnEpisodeId
+                    ) {
+                        return@withLock ActionOutcome.None
+                    }
                     // As at play_quote: cleared first for uniformity, so a throw
                     // cannot leave the flag describing a state we failed to reach.
                     playerAutoPaused = false
-                    playbackSink.resume()
-                    true
+                    pauseReserved = false
+                    // Both the guard above and the sink's own binding decide, and the OUTCOME is what is
+                    // reported: returning true unconditionally made a refused resume a delivered
+                    // action, which is the same "counting a refusal as performed" defect as the seek.
+                    if (playbackSink.resume(turnEpisodeId) is EpisodeOperationResult.Accepted) {
+                        ActionOutcome.Confirmed
+                    } else {
+                        ActionOutcome.None
+                    }
                 }
 
                 "seek_relative" -> {
                     // delta_seconds is nullable for a reason: null means "no amount was stated,"
                     // which is the only case that applies the sink's own interval. A stated zero
-                    // is a real delta meaning "stay put" — treated here as a no-op, matching the
-                    // local executor's `0 -> Silent`. Falling through would move a user who named
-                    // no movement by the interval, which is the defaulted-seek failure this
+                    // is a real delta meaning "stay put" — treated here as a no-op, matching
+                    // the local executor's `0 -> Silent`. Falling through would move a user who
+                    // named no movement by the interval, which is the defaulted-seek failure this
                     // dispatch exists to avoid.
+                    //
+                    // The match order matters and is load-bearing: a stated nonzero delta is
+                    // matched FIRST, so it executes by its SIGN and its direction field is not
+                    // consulted. Only a null delta consults `direction`, and only an unstated
+                    // amount with an unrecognised direction reaches `else`. A stated delta whose
+                    // direction string is unrecognised is NOT refused — it seeks by sign.
                     val delta = (params["delta_seconds"] as? Number)?.toInt()
                     val direction = params["direction"] as? String
                     when {
                         delta != null && delta != 0 -> {
+                            // THE NESTED RESULT IS RETURNED, NOT DISCARDED. Ending this arm with a bare
+                            // `ActionOutcome.Confirmed` threw away what the skip actually reported, so
+                            // a REFUSED or UNKNOWN skip read as a confirmed one. `outcomeOf` maps all
+                            // three.
                             if (delta > 0) {
-                                playbackSink.skipForward(delta)
+                                outcomeOf(playbackSink.skipForward(delta, turnEpisodeId))
                             } else {
-                                playbackSink.skipBackward(-delta)
+                                outcomeOf(playbackSink.skipBackward(-delta, turnEpisodeId))
                             }
                         }
 
-                        delta == 0 -> Unit
+                        delta == 0 -> ActionOutcome.Confirmed
 
-                        direction == "backward" -> playbackSink.skipBackward(null)
+                        // Neither amount nor direction stated: the spec explicitly permits the
+                        // configured skip interval here, and the sink's own comment says null means
+                        // exactly that.
+                        delta == null && direction == null -> {
+                            outcomeOf(playbackSink.skipForward(null, turnEpisodeId))
+                        }
 
-                        else -> playbackSink.skipForward(null)
+                        delta == null && direction == "backward" -> {
+                            outcomeOf(playbackSink.skipBackward(null, turnEpisodeId))
+                        }
+
+                        delta == null && direction == "forward" -> {
+                            outcomeOf(playbackSink.skipForward(null, turnEpisodeId))
+                        }
+
+                        // An unstated amount with a stated unrecognised direction: refused rather
+                        // than defaulted. Falling through to forward would move a user who asked
+                        // for nothing recognisable. The `when` value IS the return value — it must
+                        // not be discarded, or the sink reports the turn as delivered while
+                        // nothing moved.
+                        else -> ActionOutcome.None
                     }
-                    true
                 }
 
                 // An action this build does not know: nothing happened, and the turn must not be
                 // counted as delivered on the strength of it.
-                else -> false
+                else -> ActionOutcome.None
             }
         }
     }
 
-    private fun capturePreActionPosition(referenceMs: Long, turnState: TurnState) {
-        val previousPlaybackMs = playbackContextProvider.current().clientPositionMs
-        // preQuotePositionMs stays on the playback timeline: stop_quote seeks
-        // the local player back to it.
+    /**
+     * Commits history for a reference seek's outcome and reports whether the turn ACTED.
+     *
+     * THE THREE OUTCOMES ARE DISTINCT AND STAY DISTINCT:
+     *   Accepted -> the target was observed; record the pre-action provenance AND the target.
+     *   Unknown  -> the attempt was made and nothing established its result; record the PRE-ACTION
+     *               provenance only. Recording the target would claim an observation nobody made, and
+     *               returning false would present an unknowable execution as "nothing happened".
+     *   Refused  -> nothing happened; record nothing.
+     */
+    private fun handleSeekOutcome(
+        outcome: EpisodeOperationResult,
+        targetReferenceMs: Long,
+        turnState: TurnState,
+    ): ActionOutcome = when (outcome) {
+        is EpisodeOperationResult.Refused -> ActionOutcome.None
+
+        is EpisodeOperationResult.Accepted -> {
+            capturePreActionPosition(
+                targetReferenceMs = targetReferenceMs,
+                turnState = turnState,
+                acceptedEpisodeId = outcome.episodeId,
+                preActionPositionMs = outcome.preActionPositionMs,
+            )
+            ActionOutcome.Confirmed
+        }
+
+        is EpisodeOperationResult.Unknown -> {
+            capturePreActionPosition(
+                targetReferenceMs = targetReferenceMs,
+                turnState = turnState,
+                acceptedEpisodeId = outcome.episodeId,
+                preActionPositionMs = outcome.preActionPositionMs,
+                recordTarget = false,
+            )
+            // AN UNKNOWN OUTCOME IS ITS OWN ANSWER: dispatched, and nothing observed it.
+            ActionOutcome.Unknown
+        }
+    }
+
+    private fun capturePreActionPosition(
+        targetReferenceMs: Long?,
+        turnState: TurnState,
+        acceptedEpisodeId: String?,
+        preActionPositionMs: Long?,
+        /**
+         * Whether the TARGET was observed to be reached, so it may be recorded.
+         *
+         * FALSE FOR AN UNKNOWN OUTCOME: the pre-action provenance is kept because it describes what the
+         * client knew BEFORE the attempt, but the target is not, because nothing established that the
+         * player reached it. Recording it would claim an observation nobody made.
+         */
+        recordTarget: Boolean = true,
+    ) {
+        // THE OWNER'S EPISODE IS THE SUBJECT, not a live re-read. This runs only once the operation was
+        // ACCEPTED, and the accepted result carries the episode the owner decided on -- so the position
+        // is recorded against the recording the action actually touched. Re-reading the provider here
+        // would record against whatever a LATER selection change made current, which is a different
+        // recording, and the accepted result is the only thing that can say otherwise.
+        //
+        // THE PRE-ACTION POSITION COMES FROM THE OWNER, NOT FROM A LATER READ. `preActionPositionMs`
+        // was snapshotted by the manager at the mutation, so it IS the position before the action. The
+        // provider answers "where is the client NOW", which after an accepted seek is the TARGET, not
+        // the starting point -- reading it here would record the destination as the previous position.
+        // THE TARGET IS RECORDED ONLY WHEN IT WAS OBSERVED. An UNKNOWN outcome keeps the PRE-ACTION
+        // provenance -- what the client knew before the attempt -- but records no target, because
+        // nothing established that the player reached it. Recording it would claim an observation
+        // nobody made, which is @reviewer's measured e201 defect.
+        // The caller passes null when the TARGET was not observed -- but that suppresses only the
+        // TARGET, not the PRE-ACTION provenance. Returning here would ALSO skip `preQuotePositionMs`,
+        // discarding a value the owner had already captured: the same "unknown concerns execution, not
+        // whether the snapshot existed" distinction the manager now honours.
+        // THE FLAG GATES THE TARGET ITSELF. Keeping `recordTarget` as a parameter but never consulting
+        // it made it decorative: the target was recorded for an Unknown outcome exactly as before.
+        val target = targetReferenceMs.takeIf { recordTarget }
+        val previousPlaybackMs = preActionPositionMs
+        // preQuotePositionMs stays on the playback timeline: stop_quote seeks the local player back to
+        // it. When NO episode is playing there is no position to return to, so this records null and
+        // the restore path refuses -- substituting zero would send the user to the start of a
+        // recording they were not listening to.
         turnState.preQuotePositionMs = previousPlaybackMs
         // previous_reference_position_ms is a reference-timeline value on the
         // wire — convert from the playback timeline (ad/intro offset). When no
         // mapping exists yet, omit the field rather than send a wrong-timeline
         // value.
-        val previousReferenceMs = fingerprintTimingManager
-            .referenceTime(previousPlaybackMs.toInt())
-            ?.let { referenceSeconds -> (referenceSeconds * 1000).toLong() }
+        // With no episode playing there is no playback instant to map onto the reference timeline,
+        // so the previous reference is absent rather than derived from a substituted zero.
+        val previousReferenceMs = previousPlaybackMs?.let { playbackMs ->
+            fingerprintTimingManager
+                .referenceTime(playbackMs.toInt())
+                ?.let { referenceSeconds -> (referenceSeconds * 1000).toLong() }
+        }
+        // Recorded AGAINST THE EPISODE THE ACCEPTED OPERATION DECIDED ON, so a later turn about a
+        // different episode cannot inherit it -- and so a selection change AFTER acceptance cannot
+        // reattribute the position to a recording the action never touched. The live provider is the
+        // wrong authority here: it answers "what is selected NOW", which is the question this is
+        // deliberately not asking.
+        // THE TARGET IS RECORDED ONLY WHEN IT WAS OBSERVED. The provenance above is already committed
+        // (preQuotePositionMs) because it describes what the client knew BEFORE the attempt; the TARGET
+        // is not, because nothing established the player reached it.
+        if (acceptedEpisodeId == null || target == null) return
         cloudPlaybackContextState.record(
-            referencePositionMs = referenceMs,
+            // THE REQUESTED TARGET, not the pre-action position. These are two different quantities:
+            // this is the reference-timeline position the action ASKED for, while `previousPlaybackMs`
+            // above is where the client WAS. Passing the accepted operation's pre-action playback
+            // position here would record a playback instant as the reference target -- a value on the
+            // wrong timeline AND the wrong quantity.
+            referencePositionMs = target,
             previousReferencePositionMs = previousReferenceMs,
+            episodeId = acceptedEpisodeId,
         )
     }
 
-    private suspend fun seekToReference(referenceMs: Long) {
+    /**
+     * Seeks to a position expressed on the REFERENCE (ad-free) timeline.
+     *
+     * Requires a valid mapping; there is no fallback. Treating the reference milliseconds as sink
+     * time assumes the two timelines coincide, which is exactly what dynamic ad insertion breaks --
+     * the seek would land on the wrong audio while reporting success. `timeline-alignment` states the
+     * fallback explicitly: `reference_position_ms` is null when alignment is unavailable, and the
+     * server falls back to `client_position_ms` for transcript lookup. Nothing authorizes substituting
+     * one timeline for the other, so an unavailable mapping refuses the action.
+     *
+     * @return true when the seek was performed, false when the mapping is unavailable.
+     */
+    // Seeks to a REFERENCE-timeline position, returning the OWNER'S ACCEPTED RESULT.
+    //
+    // THE RESULT CARRIES THE OWNER'S EPISODE AND PRE-POSITION, so the caller commits history from what
+    // the accepted operation actually saw. Returning a bare Boolean forced the caller to read the live
+    // provider, which a later selection change can overtake -- recording a position against an episode
+    // the seek never touched.
+    //
+    // A reference position is a position IN a recording, so a null expectation is refused rather than
+    // applied to whatever happens to be playing.
+    private suspend fun seekToReference(
+        referenceMs: Long,
+        expectedEpisodeId: String?,
+    ): EpisodeOperationResult? {
+        if (expectedEpisodeId == null) return null
         val referenceSeconds = referenceMs / 1000.0
-        val playbackMs = fingerprintTimingManager.playbackTimeMs(referenceSeconds)
-            ?: referenceMs.toInt()
-        playbackSink.seekTo((playbackMs / 1000).coerceAtLeast(0))
+        val playbackMs = fingerprintTimingManager.playbackTimeMs(referenceSeconds) ?: return null
+        return playbackSink.seekTo(
+            (playbackMs / 1000).coerceAtLeast(0),
+            episodeDurationSeconds(),
+            expectedEpisodeId,
+        )
+    }
+
+    private fun Map<String, Any?>.positionSeconds(): Int? {
+        val value = this["position_seconds"] ?: return null
+        return when (value) {
+            is Number -> value.toInt()
+            else -> null
+        }
     }
 
     private fun Map<String, Any?>.referencePositionMs(): Long? {
@@ -602,5 +1374,57 @@ class CloudRouteSink internal constructor(
         private const val KEY_CLOUD_ERROR_PREFIX = "cloud_error_"
         private const val KEY_CLOUD_ERROR_GENERIC = "cloud_error_generic"
         private const val KEY_CLOUD_INCOMPLETE_TURN = "general.cloud_incomplete_turn"
+
+        /** What the turn's playback action achieved, as far as the client could OBSERVE. */
+        internal enum class ActionOutcome {
+            /** No action was performed or attempted. */
+            None,
+
+            /** The action was ISSUED and its outcome could not be established. */
+            Unknown,
+
+            /** The action was CONFIRMED performed. */
+            Confirmed,
+        }
+
+        // Combines two action outcomes, keeping the STRONGEST evidence but never downgrading an observation.
+        //
+        // UNKNOWN IS NEVER REDUCED TO None: an attempted-but-unknowable action must not become "nothing
+        // happened" merely because a later action in the same turn did nothing. Nor is it upgraded to
+        // Confirmed: nothing observed it happening.
+
+        /** Maps an episode operation's three outcomes onto the turn's action outcome. */
+        internal fun outcomeOf(result: EpisodeOperationResult): ActionOutcome = when (result) {
+            is EpisodeOperationResult.Accepted -> ActionOutcome.Confirmed
+            is EpisodeOperationResult.Unknown -> ActionOutcome.Unknown
+            is EpisodeOperationResult.Refused -> ActionOutcome.None
+        }
+
+        /**
+         * Aggregates the outcomes of ONE action's COMPOSITE steps -- a quote's seek and its resume.
+         *
+         * A composite succeeds only if EVERY required step was confirmed: one step whose outcome could not
+         * be established leaves the whole action unknown, however well a LATER step went. Precedence for
+         * [ActionOutcome.Confirmed] would report the composite as achieved on the strength of whichever step
+         * happened to be observable, which is a claim nobody made.
+         */
+        internal fun mergeCompositeSteps(previous: ActionOutcome, next: ActionOutcome): ActionOutcome = when {
+            previous == ActionOutcome.Unknown || next == ActionOutcome.Unknown -> ActionOutcome.Unknown
+            previous == ActionOutcome.Confirmed && next == ActionOutcome.Confirmed -> ActionOutcome.Confirmed
+            else -> ActionOutcome.None
+        }
+
+        /**
+         * Aggregates the outcomes of INDEPENDENT actions within a turn.
+         *
+         * This is a DIFFERENT contract from [mergeCompositeSteps]: these actions do not depend on each
+         * other, so one confirmed action is a confirmed action regardless of a sibling's fate. It is
+         * deliberately not reused for composite steps, where the same rule would erase an unknown step.
+         */
+        internal fun mergeActionOutcome(previous: ActionOutcome, next: ActionOutcome): ActionOutcome = when {
+            previous == ActionOutcome.Confirmed || next == ActionOutcome.Confirmed -> ActionOutcome.Confirmed
+            previous == ActionOutcome.Unknown || next == ActionOutcome.Unknown -> ActionOutcome.Unknown
+            else -> ActionOutcome.None
+        }
     }
 }

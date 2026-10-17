@@ -4,6 +4,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.DialogPromptTurn
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCall
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCallMapper
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.withLogicalRequest
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -11,6 +12,16 @@ import javax.inject.Singleton
 class VoiceDialogManager @Inject constructor(
     private val mapper: ToolCallMapper,
 ) {
+    /**
+     * Called with a logical request's identity when its dialog is ABANDONED or REPLACED, so anything
+     * retaining a prepared turn for it can forget it.
+     *
+     * INJECTED, not left for a caller to remember: a callback that nothing binds is a lifecycle that
+     * does not run, and the retention it was meant to release grows for the life of the process. The
+     * binding is supplied by the graph that owns the retention.
+     */
+    var onRequestAbandoned: ((logicalRequestId: String) -> Unit)? = null
+
     @Volatile
     private var pending: PendingVoiceDialog? = null
 
@@ -54,7 +65,10 @@ class VoiceDialogManager @Inject constructor(
         if (call.name == "dialog_control") {
             return handleDialogControl(call)
         }
-        // If there's a pending dialog and a new dispatchable tool call arrives, cancel the dialog
+        // If there's a pending dialog and a new dispatchable tool call arrives, cancel the dialog.
+        // The abandoned dialog's retained turn is FORGOTTEN: nothing will retry that logical request, so
+        // holding its identity would let a later dispatch be admitted as a retry of finished work.
+        pending?.let { abandoned -> onRequestAbandoned?.invoke(abandoned.logicalRequestId) }
         pending = null
         return mapper.map(call)
     }
@@ -64,8 +78,15 @@ class VoiceDialogManager @Inject constructor(
             "begin" -> {
                 val targetTool = call.stringParam("target_tool") ?: return null
                 val targetAction = call.stringParam("target_action") ?: return null
+                // A REPLACEMENT also abandons: the dialog this one replaces has no retry coming, so its
+                // retained turn must be forgotten for the same reason the cancelled one's is.
+                pending?.let { replaced -> onRequestAbandoned?.invoke(replaced.logicalRequestId) }
                 val isDestructive = targetAction in DESTRUCTIVE_ACTIONS
                 pending = PendingVoiceDialog(
+                    // MINTED AT REGISTRATION: this is the production producer of the logical identity.
+                    // A dialog that is replaced or abandoned starts a NEW one; a retry of the SAME
+                    // request names this value and finds the turn it already prepared.
+                    logicalRequestId = java.util.UUID.randomUUID().toString(),
                     targetTool = targetTool,
                     targetAction = targetAction,
                     requiresConfirmation = isDestructive,
@@ -130,7 +151,9 @@ class VoiceDialogManager @Inject constructor(
             action = dialog.targetAction,
             params = dialog.filledSlots,
         )
-        return mapper.map(call)
+        // The completed intent carries the identity the DIALOG registered, so a retry of this request is
+        // recognised as the same logical request rather than as a new user act.
+        return mapper.map(call)?.withLogicalRequest(dialog.logicalRequestId)
     }
 
     companion object {

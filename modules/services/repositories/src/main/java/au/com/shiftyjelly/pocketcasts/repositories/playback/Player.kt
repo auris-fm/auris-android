@@ -77,6 +77,83 @@ interface Player {
     suspend fun setPlaybackEffects(playbackEffects: PlaybackEffects)
     fun updateAudioOnly() {}
     suspend fun seekToTimeMs(positionMs: Int)
+
+    /**
+     * Seeks [positionMs] ONLY while this player still addresses [expectedEpisodeUuid], reporting whether
+     * it did.
+     *
+     * THE EPISODE IS CHECKED HERE, IN THE PLAYER'S OWN MUTATING OPERATION, because nowhere else can be
+     * early enough. A player is REUSED across episodes, and `seekToTimeMs` SUSPENDS -- so a caller-side
+     * check before or after it can only OBSERVE that the player changed, by which point the seek it
+     * issued has already run on the wrong audio. A returned false cannot undo a mutation.
+     *
+     * RETURNS THE PRE-ACTION POSITION, so the caller attributes history to the value the PLAYER saw at
+     * its own mutation rather than to a read taken around the call. A null result is a refusal.
+     *
+     * THE DEFAULT REFUSES. It cannot enforce the binding, so a player that wants this operation must
+     * override it -- `LocalPlayer` and `CastPlayer` both do, each deciding at its own mutation point and
+     * returning the position it saw there. A player that does not override makes the bound call
+     * UNAVAILABLE, which is what stops a direct caller reaching an unrestricted seek through the
+     * default.
+     */
+    suspend fun seekToTimeMsIfEpisode(positionMs: Int, expectedEpisodeUuid: String): EpisodeSeekOutcome {
+        // THE DEFAULT REFUSES RATHER THAN PRETENDING. It cannot enforce the binding -- it checks and then
+        // delegates, leaving the window this contract exists to close -- so returning a position here
+        // would report an enforcement that did not happen. An implementation that CAN enforce it
+        // overrides this; one that cannot makes the BOUND call unavailable.
+        //
+        // Refusing at the DEFAULT is what stops a direct caller from reaching an unrestricted seek
+        // through it, which the manager's guard alone cannot prevent: a caller that invokes the player
+        // operation without going through the manager is exactly the bypass @reviewer isolated.
+        // REFUSED, NOT THROWN. A throw is a FAULT the caller cannot handle, while an unsupported binding
+        // is an OUTCOME it can act on -- and a throw from a path a future caller reaches would surface as
+        // an uncaught failure far from its cause. The declared refused outcome says the same thing
+        // without making an unsupported player a crash.
+        return EpisodeSeekOutcome.Refused
+    }
+
+    /**
+     * Whether this player can enforce [seekToTimeMsIfEpisode]'s binding itself.
+     *
+     * THE DEFAULT ABOVE IS A FALLBACK, NOT AN ENFORCEMENT. It checks and then delegates, so it carries the
+     * same check-then-act gap the contract exists to close -- it is correct only for an implementation
+     * whose `episodeUuid` cannot change while a seek is in flight. A player that can be RE-POINTED must
+     * report true here and override the operation, which is why [LocalPlayer] and [CastPlayer] both do.
+     *
+     * A BOUND CALLER CAN REFUSE AN UNSUPPORTED PLAYER rather than fall back to an unrestricted seek:
+     * `false` here means "do not rely on the default for a binding".
+     */
+    val enforcesEpisodeBoundSeek: Boolean get() = false
+
+    /**
+     * The outcome of an episode-bound seek: WHETHER IT WAS ACCEPTED, and separately WHERE PLAYBACK WAS.
+     *
+     * THESE ARE TWO FACTS AND MUST NOT SHARE A NULL. A successful load of a new episode has NO pre-action
+     * position on the receiver -- the receiver is still on the old one -- but the load is ACCEPTED. A
+     * nullable position alone cannot express that, so treating null as refusal would reject an operation
+     * about to succeed, and treating null as acceptance would claim a provenance that does not exist.
+     *
+     * [positionMs] being null means UNAVAILABLE, which the history consumer must handle by recording
+     * nothing rather than by substituting a value.
+     */
+    data class EpisodeSeekOutcome(
+        val accepted: Boolean,
+        val positionMs: Long?,
+        /**
+         * True when the operation's EXECUTION IS UNKNOWN: it was issued, and no outcome came back.
+         *
+         * DISTINCT FROM REFUSAL. A refusal is a DECISION, and a caller may act on it; unknown means we do
+         * not know whether it ran, so retrying could REPEAT an operation the other side already performed.
+         * It must stay unknown through every caller rather than becoming a retryable-looking failure.
+         */
+        val unknown: Boolean = false,
+    ) {
+        companion object {
+            val Refused = EpisodeSeekOutcome(accepted = false, positionMs = null)
+            fun accepted(positionMs: Long?) = EpisodeSeekOutcome(accepted = true, positionMs = positionMs)
+            fun unknown(positionMs: Long?) = EpisodeSeekOutcome(accepted = false, positionMs = positionMs, unknown = true)
+        }
+    }
     suspend fun isPlaying(): Boolean
     suspend fun isBuffering(): Boolean
     suspend fun durationMs(): Int?

@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.di
 import android.content.Context
 import android.media.AudioManager
 import android.os.PowerManager
+import android.speech.tts.TextToSpeech
 import android.telephony.TelephonyManager
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
@@ -12,6 +13,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CaptureHardware
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeCaptureHardware
+import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.foreground.ForegroundStateMonitor
@@ -125,8 +127,6 @@ abstract class VoiceControlModule {
 
     @Binds abstract fun bindWakeWordDetector(impl: OpenWakeWordDetector): WakeWordDetector
 
-    @Binds abstract fun bindTtsEngine(impl: AndroidPlatformTtsEngine): TtsEngine
-
     @Binds abstract fun bindTranslationStage(impl: GoogleMlKitTranslator): TranslationStage
 
     companion object {
@@ -217,6 +217,10 @@ abstract class VoiceControlModule {
             // foreign app and closes the microphone seconds after acknowledging a wake word.
             hasEmittedAudio = audioFeedbackRenderer.hasEmittedAudio,
             lastEmittedAtMs = audioFeedbackRenderer.lastEmittedAtMs,
+            // THE TYPED PER-CUE OBSERVATION REACHES ITS PRODUCTION CONSUMER HERE. Without this the
+            // renderer's verdict would have no reader in production, and an unresolved cue would keep
+            // being treated as ended on the strength of the bounded window alone.
+            lastCueObservation = audioFeedbackRenderer.lastCueObservation,
             scope = scope,
         )
 
@@ -257,7 +261,10 @@ abstract class VoiceControlModule {
 
         @Provides
         @Singleton
-        fun provideEarconPlayer(@ApplicationContext context: Context): EarconPlayer = EarconPlayer(context)
+        fun provideEarconPlayer(
+            @ApplicationContext context: Context,
+            playbackBufferRecorder: PlaybackBufferRecorder,
+        ): EarconPlayer = EarconPlayer(context, playbackBufferRecorder)
 
         @Provides
         @Singleton
@@ -266,12 +273,86 @@ abstract class VoiceControlModule {
             ttsEngine: TtsEngine,
         ): AudioFeedbackRenderer = AudioFeedbackRenderer(earconPlayer, ttsEngine)
 
+        /**
+         * Supplies the monitor's spoken-pause seam to Dagger.
+         *
+         * Same reason as the seams below: a default value on an `@Inject` constructor parameter
+         * does NOT satisfy Dagger, so without this binding the graph fails to build
+         * (`[Dagger/MissingBinding]` for `java.lang.Boolean`, injected at `PlaybackContextMonitor`).
+         *
+         * It is `false`, the monitor's own default: the injected predicate is how production reports
+         * that a stop was a user's spoken pause, and the default keeps that report absent rather than
+         * invented. The seam stays on the constructor so a test can present one directly.
+         */
+        @Provides
+        fun provideIsSpokenUserPause(): Boolean = false
+
+        /**
+         * Supplies the TTS engine.
+         *
+         * Provided rather than `@Binds`-bound to an `@Inject` constructor: that constructor takes a
+         * synthesizer seam whose type is a nullable function, and a nullable function type is not a
+         * binding Dagger can match -- the graph asks for a non-null `Function1<Function1<Boolean,
+         * Unit>, TextToSpeech>` and the whole build fails with `[Dagger/MissingBinding]`. Passing the
+         * factory here keeps the seam on the constructor (so a test can present its own) without
+         * asking Dagger to resolve it.
+         *
+         * The factory body is what the engine did when the seam was absent: construct a real
+         * `TextToSpeech` and report whether initialisation succeeded.
+         */
+        @Provides
+        @Singleton
+        fun provideTtsEngine(
+            @ApplicationContext context: Context,
+            playbackBufferRecorder: PlaybackBufferRecorder,
+        ): TtsEngine = AndroidPlatformTtsEngine(
+            context,
+            playbackBufferRecorder,
+        ) { onInitialized ->
+            TextToSpeech(context.applicationContext) { status ->
+                onInitialized(status == TextToSpeech.SUCCESS)
+            }
+        }
+
+        /**
+         * Supplies the monitor's optional enumeration seam to Dagger.
+         *
+         * A default value on an `@Inject` constructor parameter does NOT satisfy Dagger: the graph
+         * still needs a binding for `Function0<EnumeratedDevices>`, and without this one the whole
+         * Hilt graph fails to build (`[Dagger/MissingBinding]` at `hiltJavaCompileDebug`).
+         *
+         * It returns `null`, which is what the monitor's own default was: "no injected enumeration,
+         * use the platform's". Returning an empty enumeration instead would be a behaviour change —
+         * it would report that the device offers no outputs and no inputs, and `readAvailability()`
+         * is built from this. The seam stays on the constructor so a test can present one directly;
+         * `AndroidAudioRouteMonitorTest` does that by constructing the monitor without Hilt.
+         */
+        @Provides
+        fun provideEnumeratedDeviceTypes(): (() -> AndroidAudioRouteMonitor.EnumeratedDevices)? = null
+
+        /**
+         * The live capture route, read from the capture stream's own device id. Provided rather than
+         * defaulted because this is the observation PR124 requires: without it the monitor can only
+         * see device availability, which is not the routing. Null while no capture stream is live,
+         * which the monitor reads as "unknown" rather than as "no microphone".
+         */
+        @Provides
+        fun provideCaptureRoutedDeviceId(): (() -> Int?)? = { au.com.shiftyjelly.pocketcasts.voicecontrol.audio.MicrophoneCapture.routedCaptureDeviceId() }
+
         @Provides
         @Singleton
         fun provideCloudAudioPlayer(
             @ApplicationContext context: Context,
             audioFeedbackRenderer: AudioFeedbackRenderer,
-        ): au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer(context).apply {
+            playbackBufferRecorder: PlaybackBufferRecorder,
+            routedOutputObserver: au.com.shiftyjelly.pocketcasts.voicecontrol.route.RoutedOutputObserver,
+        ): au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer = au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer(
+            context = context,
+            playbackBufferRecorder = playbackBufferRecorder,
+            // The production connection: the monitor reads what this player observes, so a live stream
+            // decides the route instead of the enumerated availability.
+            routedOutputObserver = routedOutputObserver,
+        ).apply {
             // The cloud answer is audible output, but it is not produced by the feedback
             // renderer — so without this the gate's "we are making sound" stamp goes stale
             // while an answer plays, the answer is read as a foreign app, and the microphone

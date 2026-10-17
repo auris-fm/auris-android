@@ -1,11 +1,17 @@
+@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+
 package au.com.shiftyjelly.pocketcasts.voicecontrol.feedback
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsEngine
+import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsPlaybackIncompleteException
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -31,6 +37,67 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `submitEarcon starts coverage ONLY at that cue's admission, never before or on refusal`() {
+        // 35f7e2d8 renderer-boundary control (d58ef6c2: name the missing boundary): with a mocked
+        // player, submit()'s callback is the ONLY thing that may start coverage. Before admission
+        // the shared completion state belongs to no cue -- starting an observer there is exactly
+        // how the shipped bug published a PREDECESSOR's Consumed. A refusal (null token) must
+        // leave coverage unstarted forever.
+        val callbacks = mutableListOf<(EarconPlayer.AdmissionToken?) -> Unit>()
+        org.mockito.kotlin.doAnswer { inv ->
+            @Suppress("UNCHECKED_CAST")
+            callbacks += inv.getArgument<((EarconPlayer.AdmissionToken?) -> Unit)?>(1)!!
+            null // submit returns Unit; the answer just records the callback
+        }.whenever(earconPlayer).submit(org.mockito.kotlin.eq(EarconId.WAKE_WORD), org.mockito.kotlin.any())
+
+        renderer.submitEarcon(EarconId.WAKE_WORD)
+        assertEquals("the renderer must hand submit its own callback", 1, callbacks.size)
+        assertFalse(
+            "coverage must NOT start before the cue is admitted (predecessor-state window)",
+            renderer.coverageIsRunningForTest(),
+        )
+
+        callbacks[0](null) // refusal
+        assertFalse(
+            "a REFUSED cue gets no coverage observer at all",
+            renderer.coverageIsRunningForTest(),
+        )
+
+        renderer.submitEarcon(EarconId.SUCCESS)
+        org.mockito.kotlin.doAnswer { inv ->
+            @Suppress("UNCHECKED_CAST")
+            callbacks += inv.getArgument<((EarconPlayer.AdmissionToken?) -> Unit)?>(1)!!
+            null
+        }.whenever(earconPlayer).submit(org.mockito.kotlin.eq(EarconId.SUCCESS), org.mockito.kotlin.any())
+        renderer.submitEarcon(EarconId.SUCCESS)
+        callbacks.last()(EarconPlayer.AdmissionToken(42L)) // acceptance for THAT cue
+        assertTrue(
+            "coverage starts only from the admitted cue's own result",
+            renderer.coverageIsRunningForTest(),
+        )
+    }
+
+    @Test
+    fun `a REFUSED cue is reported as refused, not accepted`() {
+        // @reviewer: playEarcon returned true even when the player returned null, so a REFUSED cue looked
+        // accepted to every caller -- they could not tell a cue that never sounded from one that did.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(null)
+
+        assertFalse(
+            "a refused cue must not be reported as accepted",
+            renderer.playEarcon(EarconId.WAKE_WORD),
+        )
+        // AND AN ACCEPTED CUE IS REPORTED AS ACCEPTED, so the case is decided by the player's result
+        // rather than by the public result being false for everything.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD))
+            .thenReturn(EarconPlayer.AdmissionToken(1L))
+        assertTrue(
+            "an accepted cue must be reported as accepted",
+            renderer.playEarcon(EarconId.WAKE_WORD),
+        )
+    }
+
+    @Test
     fun `Silent response does nothing`() = runTest {
         renderer.render(VoiceResponse.Silent)
         verifyNoInteractions(earconPlayer)
@@ -39,28 +106,626 @@ class AudioFeedbackRendererTest {
     @Test
     fun `an audible response is reported as emitted audio`() = runTest {
         assertFalse(renderer.hasEmittedAudio.value)
-        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
 
         renderer.render(VoiceResponse.Earcon(EarconId.SUCCESS))
+        // THE HEARTBEAT RUNS ON THE MAIN DISPATCHER, which Robolectric PAUSES: a delayed task is only
+        // run when the looper is advanced past its delay. Idling alone is not enough, because the one
+        // tick this waits for is scheduled a full heartbeat (1000 ms) ahead. `idleFor` advances the
+        // clock, so the tick lands deterministically instead of depending on wall time.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_500))
 
         assertTrue(renderer.hasEmittedAudio.value)
     }
 
     @Test
-    fun `an earcon played outside a response is reported as emitted audio`() = runTest {
-        // The wake and listening cues take this path, and they are the two earcons that sound
-        // while the microphone is open.
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+    fun `an earcon played outside a response is reported as emitted only once it SOUNDS`() = runTest {
+        // The wake and listening cues take this path, and they are the two earcons that sound while the
+        // microphone is open.
+        //
+        // ACCEPTANCE IS NOT SOUNDING. `play` returning true means the sink took the frames; the cue may
+        // sit queued behind earlier audio. Attribution follows OBSERVED progress past the cue's first
+        // frame, so the heartbeat reports it and the acceptance alone does not.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
         assertFalse(renderer.hasEmittedAudio.value)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
 
-        assertTrue(renderer.hasEmittedAudio.value)
+        assertFalse(
+            "a QUEUED cue must not be attributed: the listener has not heard it yet",
+            renderer.hasEmittedAudio.value,
+        )
+    }
+
+    @Test
+    fun `a cue SHORTER than the heartbeat is still observed and attributed`() = runTest {
+        // @spec's short-cue requirement, using @reviewer's 100-frame cue (about 6 ms at 16 kHz).
+        //
+        // A cue shorter than one heartbeat has a bound BELOW one tick, so a loop that required the tick
+        // to fit inside the bound NEVER RAN -- and a cue never observed was never attributed, however
+        // audibly it sounded. The bound is a CEILING on waiting, not a reason to skip looking.
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(6L)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
+
+        renderer.playEarcon(EarconId.SUCCESS)
+        // Well past the cue's own span, because the point is that the observation happens at all.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_500))
+
+        assertTrue(
+            "a cue shorter than the heartbeat must still be observed and attributed " +
+                "(notes=${renderer.emissionNotesForTest()} boundMs=${earconPlayer.emittedDurationMs()})",
+            renderer.emissionNotesForTest() >= 1,
+        )
+    }
+
+    @Test
+    fun `a SHORT cue still QUEUED is not attributed`() = runTest {
+        // The same short cue, before it sounds: the first-frame distinction must hold here too, or the
+        // fix above would attribute every short cue on acceptance -- the submission note by another route.
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(6L)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
+
+        renderer.playEarcon(EarconId.SUCCESS)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_500))
+
+        assertFalse(
+            "a short cue that has not begun sounding must not be attributed",
+            renderer.hasEmittedAudio.value,
+        )
+    }
+
+    @Test
+    fun `a cue observed CONSUMED is attributed, because completion IS measured rendering`() = runTest {
+        // @reviewer's measured case. The head had ALREADY passed every accepted frame when the first
+        // observation happened, so `completion()` reported Consumed immediately. The heartbeat returned
+        // on Consumed WITHOUT noting, so a cue that finished between observations was never attributed --
+        // treated as if completion proved nothing, when it is in fact the STRONGEST evidence of sounding.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(100))
+
+        assertTrue(
+            "a consumed cue must be attributed: the head passing it IS evidence it sounded",
+            renderer.hasEmittedAudio.value,
+        )
+    }
+
+    @Test
+    fun `an OLD observer cannot overwrite its successor's published outcome`() = runTest {
+        // @spec's measured race: `coverageExpiredUnknown` is written by a NON-SUSPENDING assignment after
+        // `completion()` returns, so CANCELLATION ALONE CANNOT PROTECT IT -- an old observer resuming
+        // after a successor has published can overwrite the successor's result.
+        //
+        // THE ORDERING IS THE CASE. The old observer must be AT ITS DEADLINE -- about to publish -- when
+        // the successor publishes its own result, so the two writes genuinely overlap. My first version
+        // idled only 1500 ms, well short of the old deadline, so the old observer never wrote at all and
+        // the ownership check was unnecessary for the outcome; the mutation SURVIVED it.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        // The OLD observer's cue never sounds, so it will expire.
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        // RUN THE OLD OBSERVER TO ITS DEADLINE, where it publishes its expiry.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_100))
+        assertTrue(
+            "the old observer expired, and its expiry is published while it owns the cue",
+            renderer.coverageExpiredUnknownForTest(),
+        )
+
+        // THE SUCCESSOR NOW OWNS THE CUE and observes it CONSUMED, so it publishes "not an expiry".
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(100))
+
+        assertFalse(
+            "the SUCCESSOR's outcome must stand: it observed the cue consumed, so the ending is not an " +
+                "expiry -- the old observer must not be able to overwrite it",
+            renderer.coverageExpiredUnknownForTest(),
+        )
+    }
+
+    @Test
+    fun `an old stop cannot retire a successor cue's observation`() = runTest {
+        // @spec: "an old stop must not retire a successor". The first cue's observation expires to
+        // Unknown; a SECOND cue then takes over and is observed Consumed. The first cue's retirement must
+        // not overwrite the successor's verdict -- otherwise a stale stop would re-open the gate's
+        // attribution on a cue that already finished, or hide one that is still sounding.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_100))
+        assertEquals(
+            AudioFeedbackRenderer.CueObservation.Unknown,
+            renderer.lastCueObservation.value?.observation,
+        )
+
+        // THE SUCCESSOR TAKES OVER and is observed consumed. Its OWN play must be accepted, or the
+        // observation never starts and the case would be about the missing acceptance rather than about
+        // the retirement it is asking about.
+        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        renderer.playEarcon(EarconId.LISTENING_START)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(100))
+        assertEquals(
+            "the successor's own verdict stands",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            renderer.lastCueObservation.value?.observation,
+        )
+
+        // THE OLD OBSERVER'S OWN RETIREMENT CANNOT PUBLISH, because it no longer owns the cue: the
+        // ownership check in `publishObservationIfOwning` refuses it. This is the REAL stale-retirement
+        // path -- `publishEndedIfOwning(observer)` -- not a stop API.
+        renderer.retireObservationForTest(owner = null)
+
+        assertNotEquals(
+            "a stale retirement must not resurrect the old cue's verdict",
+            AudioFeedbackRenderer.CueObservation.Unknown,
+            renderer.lastCueObservation.value?.observation,
+        )
+        assertEquals(
+            "the successor's verdict is untouched by the stale retirement",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            renderer.lastCueObservation.value?.observation,
+        )
+    }
+
+    @Test
+    fun `one cue keeps ONE identity across its verdict changes`() = runTest {
+        // @reviewer: "Consumed→Ended on one cue receives two IDs." An identity must be a property of the
+        // CUE, allocated once at admission -- otherwise a consumer comparing ids reads its own cue
+        // changing its verdict as a DIFFERENT cue and discards the elapsed time it should keep.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_100))
+        val atExpiry = renderer.lastCueObservation.value
+        assertEquals(AudioFeedbackRenderer.CueObservation.Unknown, atExpiry?.observation)
+
+        // THE SAME CUE NOW GETS A SECOND VERDICT, through the session end -- the production path that
+        // retires a cue. Its identity must NOT change.
+        renderer.endSession()
+        val atStop = renderer.lastCueObservation.value
+        assertEquals(AudioFeedbackRenderer.CueObservation.Ended, atStop?.observation)
+        assertEquals(
+            "one cue's verdict change is the SAME cue, not a new one",
+            atExpiry?.cueId,
+            atStop?.cueId,
+        )
+
+        // A GENUINELY NEW CUE GETS A NEW IDENTITY, so the distinction is real rather than the id being
+        // constant for everything.
+        whenever(earconPlayer.play(EarconId.LISTENING_START)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        renderer.playEarcon(EarconId.LISTENING_START)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_100))
+        assertNotEquals(
+            "a DIFFERENT cue must be distinguishable from the first one",
+            atExpiry?.cueId,
+            renderer.lastCueObservation.value?.cueId,
+        )
+    }
+
+    @Test
+    fun `the renderer covers the admission the PLAY returned, not a later one`() = runTest {
+        // @spec 2243570a, the producer-to-owner handoff window: playEarcon called play() and then read
+        // "the current admission" SEPARATELY. Between those two, a SUCCESSOR can take the track -- so the
+        // renderer would hold the successor's token while believing it held its own, and its later stop
+        // would release an admission it never made. The token now comes back FROM the play.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD))
+            .thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(1_000L)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(50))
+
+        // THE PLAYER IS NOT ASKED AGAIN. Re-reading would be the handoff window; the returned token is
+        // the one the renderer must hold.
+        org.mockito.Mockito.verify(earconPlayer, org.mockito.Mockito.never()).currentAdmissionToken()
+    }
+
+    @Test
+    fun `a session end RETIRES the unresolved observation`() = runTest {
+        // The other production retirement path, reached from `stopVoiceControl()`.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_100))
+
+        renderer.endSession()
+
+        assertEquals(
+            "a session end retires the cue it ended: nobody can hear it any more",
+            AudioFeedbackRenderer.CueObservation.Ended,
+            renderer.lastCueObservation.value?.observation,
+        )
+    }
+
+    @Test
+    fun `the observation WAITS OUT the remaining interval to its deadline`() = runTest {
+        // @reviewer's measured case: the observer had ALREADY ENDED at 1_999 ms for a 2_000 ms limit,
+        // because the loop refused any heartbeat that would overshoot and so gave up one tick EARLY --
+        // the cue was never observed AT the boundary. The loop now sleeps exactly as far as the deadline.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        // ONE MILLISECOND SHORT OF THE LIMIT: the observation must still be running.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_999))
+        assertTrue(
+            "the observation must still be waiting at 1_999 ms, not have given up early",
+            renderer.coverageIsRunningForTest(),
+        )
+
+        // AT AND PAST THE LIMIT it ends, and the ending is an EXPIRY -- not evidence of consumed audio.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(100))
+        assertFalse("and it ends at the deadline", renderer.coverageIsRunningForTest())
+        assertTrue(
+            "a deadline expiry is UNKNOWN, not a claim that the cue completed",
+            renderer.coverageExpiredUnknownForTest(),
+        )
+        // THE TYPED PRODUCTION OUTCOME, not just the test flag: a deadline expiry must reach the consumer
+        // as Unknown. Asserting only the flag left the outcome with no production reader.
+        assertEquals(
+            "the expiry must be published as the typed UNKNOWN observation",
+            AudioFeedbackRenderer.CueObservation.Unknown,
+            renderer.lastCueObservation.value?.observation,
+        )
+        // THE PUBLISHED VALUE CARRIES ITS OWN IDENTITY AND INSTANT: the consumer cannot derive either,
+        // and a bound measured from whenever the consumer polled would measure its schedule, not the cue.
+        val published = renderer.lastCueObservation.value
+        assertNotNull("the publication must carry the cue identity", published?.cueId)
+        assertTrue(
+            "the publication must carry the renderer's OWN instant",
+            (published?.publishedAtMs ?: 0L) > 0L,
+        )
+    }
+
+    @Test
+    fun `an observed ending is published as Consumed, not as Unknown`() = runTest {
+        // THE OTHER SIDE OF THE DISCRIMINATION: if every ending published Unknown, the consumer would
+        // hold our audio open forever and the typed outcome would carry no information.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(100))
+
+        assertEquals(
+            "an ending the output MEASURED is Consumed, and only an unresolved one is Unknown",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            renderer.lastCueObservation.value?.observation,
+        )
+    }
+
+    @Test
+    fun `a permanently QUEUED cue is observed for a BOUNDED time, not forever`() = runTest {
+        // @reviewer's measured defect in my policy implementation: my queued limit was computed as
+        // `2_000 + elapsed` EACH PASS, so it grew with the loop and could NEVER be reached -- a
+        // permanently queued cue was observed forever and the deadline was a formality, not a bound.
+        // The limit is ABSOLUTE from submission.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        // Well past the 2_000 ms queued limit.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(6_000))
+
+        // THE OBSERVATION MUST HAVE ENDED: a cue that never began sounding is given up on, and nothing
+        // is attributed, because nothing was observed to sound.
+        assertFalse(
+            "a cue that never began sounding must not be attributed",
+            renderer.hasEmittedAudio.value,
+        )
+        // THE OBSERVATION'S OWN LIFETIME IS THE OBSERVATION. A note count cannot show this -- a queued
+        // cue emits nothing either way, so a deadline that never expires looks identical to one that
+        // does. The job either ended at the bound or it is still running.
+        val atLimit = renderer.emissionNotesForTest()
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(4_000))
+        assertEquals(
+            "and the observation has ENDED rather than sliding (atLimit=$atLimit)",
+            atLimit,
+            renderer.emissionNotesForTest(),
+        )
+        assertFalse(
+            "the queued observation must have ENDED at its bound, not still be running",
+            renderer.coverageIsRunningForTest(),
+        )
+    }
+
+    @Test
+    fun `a cue still QUEUED past its estimate is still observed until it sounds`() = runTest {
+        // @reviewer's second measured case, and the same defect in a different shape: the observation
+        // stopped when the cue's ESTIMATED duration passed, while the cue was still queued. The estimate
+        // is a bound on the WAIT, not a statement that the cue is over -- stopping at it ends the
+        // observation BEFORE the sound it is waiting for.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(6L)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(100))
+        assertFalse("a queued cue is not attributed yet", renderer.hasEmittedAudio.value)
+
+        // It sounds LATER, after the estimate had already passed.
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+
+        assertTrue(
+            "a queued cue that sounds after its estimate must still be attributed",
+            renderer.hasEmittedAudio.value,
+        )
+    }
+
+    @Test
+    fun `a cue observed to be SOUNDING is reported as emitted audio`() = runTest {
+        // The positive control, so the rule above is not satisfied by never attributing anything.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        // THE HEARTBEAT RUNS ON THE MAIN DISPATCHER, which Robolectric PAUSES: a delayed task is only
+        // run when the looper is advanced past its delay. Idling alone is not enough, because the one
+        // tick this waits for is scheduled a full heartbeat (1000 ms) ahead. `idleFor` advances the
+        // clock, so the tick lands deterministically instead of depending on wall time.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_500))
+
+        assertTrue(
+            "a cue the output has progressed through must be attributed",
+            renderer.hasEmittedAudio.value,
+        )
+    }
+
+    @Test
+    fun `an UNOBSERVABLE cue is not reported as emitted audio`() = runTest {
+        // Unavailable progress is not evidence of sounding. Setting the attribution from an unknown
+        // would let the gate read the microphone as ours on no observation at all.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Unknown)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        // THE HEARTBEAT RUNS ON THE MAIN DISPATCHER, which Robolectric PAUSES: a delayed task is only
+        // run when the looper is advanced past its delay. Idling alone is not enough, because the one
+        // tick this waits for is scheduled a full heartbeat (1000 ms) ahead. `idleFor` advances the
+        // clock, so the tick lands deterministically instead of depending on wall time.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_500))
+
+        assertFalse(
+            "an unavailable observation must not be reported as emitted audio",
+            renderer.hasEmittedAudio.value,
+        )
+    }
+
+    @Test
+    fun `a cue longer than the heartbeat window keeps the attribution fresh past its submission`() {
+        // The earcon/output-gate obligation: submission is not the end of the cue. A cue longer than
+        // the gate's attribution window would let the microphone read as a foreign app part-way
+        // through our own cue -- the same failure the speak path covers with a heartbeat.
+        //
+        // The cue here is three heartbeat windows long, so the submission note alone covers only its
+        // first window; anything observing the gate later than that needs the coverage.
+        val clock = java.util.concurrent.atomic.AtomicLong(0)
+        val notes = java.util.concurrent.atomic.AtomicInteger(0)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
+        // Still sounding for the whole observation: the attribution must keep being refreshed, and
+        // only an observed CONSUMPTION may end it.
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
+
+        // A dispatcher the test controls, so the heartbeat's ticks are deterministic rather than
+        // dependent on real-time scheduling. Must be set before the renderer's scope is first used.
+        renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+        renderer.playEarcon(EarconId.WAKE_WORD)
+
+        // NO NOTE AT ACCEPTANCE. The cue was accepted and has not been observed to sound yet, so the
+        // attribution must not be set -- @spec's render-start rule. The coverage is what covers the
+        // queued delay; the ATTRIBUTION follows the first observed frame.
+        assertEquals(
+            "acceptance alone must not be attributed: the cue may still be queued",
+            0,
+            renderer.emissionNotesForTest(),
+        )
+        // The cue is still sounding well past the first window: the attribution must have been
+        // refreshed, which a submission-only note cannot do. The renderer's coverage runs on the Main
+        // dispatcher, so Robolectric's looper must be advanced for it to tick.
+        kotlinx.coroutines.runBlocking {
+            repeat(120) {
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+                kotlinx.coroutines.delay(20)
+            }
+        }
+        assertTrue(
+            "a cue longer than one window must keep the attribution fresh " +
+                "(notes=${renderer.emissionNotesForTest()} clock=${clock.get()})",
+            renderer.emissionNotesForTest() > 1,
+        )
+        renderer.release()
+    }
+
+    @Test
+    fun `a short cue is attributed once it is observed to sound`() = runTest {
+        // The control: the attribution comes from OBSERVED SOUNDING, and a cue whose span is shorter
+        // than one heartbeat is still attributed once the observation reports progress.
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(1_500L)
+        // OBSERVED SOUNDING, then consumed: the note comes from the cue being heard, not from its
+        // submission -- acceptance alone is queued, not audible.
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
+
+        renderer.playEarcon(EarconId.SUCCESS)
+        // THE HEARTBEAT RUNS ON THE MAIN DISPATCHER, which Robolectric PAUSES: a delayed task is only
+        // run when the looper is advanced past its delay. Idling alone is not enough, because the one
+        // tick this waits for is scheduled a full heartbeat (1000 ms) ahead. `idleFor` advances the
+        // clock, so the tick lands deterministically instead of depending on wall time.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_500))
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        // (the consumed observation needs no further draining)
+
+        assertTrue(
+            "a cue observed to sound is attributed",
+            renderer.emissionNotesForTest() >= 1,
+        )
+        renderer.release()
+    }
+
+    @Test
+    fun `attribution ends when the cue is OBSERVED consumed, not when the estimate elapses`() {
+        // @spec's distinction: the accepted-frame duration is an estimate of queued audio, not
+        // completion. The coverage must end on the OUTPUT's report, so a cue that finishes early
+        // stops being attributed early -- and one still sounding keeps the gate informed.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
+        // Still playing at first, then consumed.
+        var consumed = false
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenAnswer {
+            if (consumed) EarconPlayer.EarconCompletion.Consumed else EarconPlayer.EarconCompletion.Playing
+        }
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        // TWO HEARTBEATS while it is still sounding: the attribution must be refreshed more than once.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_500))
+        val notesWhilePlaying = renderer.emissionNotesForTest()
+        assertTrue("a sounding cue keeps the attribution fresh (notes=$notesWhilePlaying)", notesWhilePlaying > 1)
+
+        consumed = true
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_500))
+        // THE CONSUMING OBSERVATION ITSELF IS COUNTED, THEN THE LOOP ENDS. A cue observed Consumed must
+        // be attributed -- completion is the strongest evidence it sounded -- so the boundary adds ONE
+        // note rather than none. What must NOT happen is continued growth: the count is read once more
+        // AFTER that observation to show the loop has stopped.
+        val notesAtConsumption = renderer.emissionNotesForTest()
+        assertTrue(
+            "the consuming observation attributes the cue (whilePlaying=$notesWhilePlaying " +
+                "atConsumption=$notesAtConsumption)",
+            notesAtConsumption >= notesWhilePlaying,
+        )
+
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(2_500))
+        assertEquals(
+            "and once consumed the observation ENDS, so the note count no longer grows " +
+                "(atConsumption=$notesAtConsumption now=${renderer.emissionNotesForTest()})",
+            notesAtConsumption,
+            renderer.emissionNotesForTest(),
+        )
+        renderer.release()
+    }
+
+    @Test
+    fun `attribution ends when the cue stops being consumable rather than covering its estimate`() {
+        // A cue that is stopped, cancelled or failed must end its attribution immediately: covering
+        // it to its nominal length would keep the gate treating a sound the user can no longer hear
+        // as ours. `Unknown` is that state -- the acceptance is gone.
+        renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
+        var stopped = false
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenAnswer {
+            if (stopped) EarconPlayer.EarconCompletion.Unknown else EarconPlayer.EarconCompletion.Playing
+        }
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(1_100) }
+        val beforeStop = renderer.emissionNotesForTest()
+
+        stopped = true
+        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(2_500) }
+        assertEquals(
+            "a stop must end the attribution rather than let the estimate keep covering it " +
+                "(before=$beforeStop after=${renderer.emissionNotesForTest()})",
+            beforeStop,
+            renderer.emissionNotesForTest(),
+        )
+        renderer.release()
+    }
+
+    @Test
+    fun `ending the session stops subsequent cue attribution`() {
+        // @reviewer's lifecycle probe: after endSession, an already-accepted cue must not keep
+        // claiming fresh output -- the session is over, so nothing it was attributed to is still
+        // sounding for the user.
+        renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(3_000L)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(1_100) }
+        renderer.endSession()
+        val before = renderer.emissionNotesForTest()
+        kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(2_500) }
+        assertEquals(
+            "a released earcon must not keep claiming new output " +
+                "(before=$before after=${renderer.emissionNotesForTest()})",
+            before,
+            renderer.emissionNotesForTest(),
+        )
+    }
+
+    @Test
+    fun `a cue stops being observed once its bounded post-start limit is spent`() {
+        // @spec's policy SUPERSEDES the original "own span" ceiling: a cue is observed for at most
+        // max(2_000 ms, accepted PCM duration + 1_000 ms) from its FIRST measured rendering. For a
+        // 1_500 ms cue that is 2_500 ms, so the observation is BOUNDED and does not run forever -- which
+        // is the property the older case was protecting, now stated against the rule that replaced it.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(1_500L)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
+
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        // Run well past the limit. A cue still reporting Playing must NOT be observed indefinitely.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(6_000))
+        val afterLimit = renderer.emissionNotesForTest()
+
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(4_000))
+
+        assertEquals(
+            "once the bounded post-start limit is spent the observation ends, so the note count stops " +
+                "growing (afterLimit=$afterLimit now=${renderer.emissionNotesForTest()})",
+            afterLimit,
+            renderer.emissionNotesForTest(),
+        )
+        renderer.release()
     }
 
     @Test
     fun `an earcon the player refuses is not reported as emitted audio`() = runTest {
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(false)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(null)
 
         renderer.playEarcon(EarconId.WAKE_WORD)
 
@@ -76,7 +741,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `Earcon response plays via EarconPlayer`() = runTest {
-        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(1L))
         renderer.render(VoiceResponse.Earcon(EarconId.SUCCESS))
         verify(earconPlayer).play(EarconId.SUCCESS)
     }
@@ -92,7 +757,7 @@ class AudioFeedbackRendererTest {
     @Test
     fun `Combined response plays earcon then speaks`() = runTest {
         ttsEngine.warmUp("en")
-        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(1L))
         renderer.render(VoiceResponse.Combined(EarconId.SUCCESS, "1.5x speed"), language = "en")
         verify(earconPlayer).play(EarconId.SUCCESS)
         assertEquals("1.5x speed", ttsEngine.lastSpokenText)
@@ -100,7 +765,7 @@ class AudioFeedbackRendererTest {
 
     @Test
     fun `playEarcon delegates to EarconPlayer`() {
-        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(true)
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
         renderer.playEarcon(EarconId.WAKE_WORD)
         verify(earconPlayer).play(EarconId.WAKE_WORD)
     }
@@ -166,4 +831,765 @@ class AudioFeedbackRendererTest {
         assertTrue(silent, silent.contains("kind=silent"))
         assertTrue(earcon, earcon.contains("nothing_spoken"))
     }
+
+    @Test
+    fun `an incomplete spoken reply reaches the caller's failure handling`() = runTest {
+        // Through the connection, not just the throw: a failing TTS engine must arrive at the
+        // renderer's failure callback. Asserting only that speak() throws would pass while the caller
+        // still saw success, which is the trap this test exists to avoid.
+        val failing = object : TtsEngine {
+            override suspend fun warmUp(language: String) = Unit
+            override suspend fun speak(text: String, language: String) {
+                throw TtsPlaybackIncompleteException(framesWritten = 100, framesPlayed = 40)
+            }
+
+            override fun release() = Unit
+        }
+        val renderer = AudioFeedbackRenderer(earconPlayer, failing)
+        var reported: Throwable? = null
+        var delivered = false
+        renderer.onPlaybackFailure = { error ->
+            reported = error
+            delivered = true
+        }
+
+        renderer.render(VoiceResponse.Spoken("a reply that will not finish"))
+        advanceUntilIdle()
+
+        assertTrue("the delivery failure must reach the caller's failure handling", delivered)
+        val error = reported
+        assertTrue("the failure must carry the playback outcome", error is TtsPlaybackIncompleteException)
+        assertEquals(40, (error as TtsPlaybackIncompleteException).framesPlayed)
+    }
+
+    @Test
+    fun `a delivery failure produces user-visible feedback, not just a flag`() = runTest {
+        // The service's handler for an undelivered reply plays the ERROR earcon, which is the same
+        // user-visible feedback the cloud path raises. This asserts the producing half: a renderer
+        // failure whose callback raises feedback. A flag nothing reads would satisfy neither.
+        val failing = object : TtsEngine {
+            override suspend fun warmUp(language: String) = Unit
+            override suspend fun speak(text: String, language: String) {
+                throw TtsPlaybackIncompleteException(framesWritten = 10, framesPlayed = 2)
+            }
+
+            override fun release() = Unit
+        }
+        val feedbackPlayer = mock<EarconPlayer>()
+        val renderer = AudioFeedbackRenderer(feedbackPlayer, failing)
+        // Mirrors VoiceControlServiceWiring.attachPlaybackFailureHandling, which now holds that body.
+        renderer.onPlaybackFailure = { renderer.playEarcon(EarconId.ERROR) }
+
+        renderer.render(VoiceResponse.Spoken("a reply that will not finish"))
+        advanceUntilIdle()
+
+        verify(feedbackPlayer).play(EarconId.ERROR)
+    }
+
+    @Test
+    fun `a RELEASED old observer cannot overwrite the same-sound successor's verdict`() = runTest {
+        // @spec: verify the ACTUAL stale-observer retirement path end to end. Hold A's observer, admit a
+        // SAME-SOUND B, release A, and require B's observation to survive. This is where the ownership
+        // guarantee really lives -- `publishObservationIfOwning` refuses a writer that no longer owns the
+        // cue -- not in a stop API.
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(1_000L)
+
+        // A IS OBSERVED AND ITS VERDICT PUBLISHED.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        // THE LOOP WAITS ONE HEARTBEAT-SCALED INTERVAL BEFORE ITS FIRST OBSERVATION, so a 100 ms idle
+        // samples before A has been observed at all -- the wait must cover that first observation.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        val aVerdict = renderer.lastCueObservation.value
+        assertEquals(
+            "A's own verdict is published before the successor arrives",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            aVerdict?.observation,
+        )
+
+        // B TAKES OVER -- SAME SOUND, a DIFFERENT admission -- and publishes its OWN verdict.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(2L))
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        val bVerdict = renderer.lastCueObservation.value
+        assertNotEquals("B is a distinct cue", aVerdict?.cueId, bVerdict?.cueId)
+
+        // A'S RELEASED OBSERVER RETIRES LATE. It no longer owns the cue, so the attempt is REFUSED.
+        renderer.retireObservationForTest(owner = null)
+
+        assertEquals(
+            "the successor's observation survives a stale retirement",
+            bVerdict,
+            renderer.lastCueObservation.value,
+        )
+    }
+
+    @Test
+    fun `a held continuation that ARRIVED is refused, preserving its successor`() = runTest {
+        // THE CORRECTED CONTROL, per @reviewer's 325d7bd4 and @spec's instruction.
+        //
+        // TWO THINGS THE EARLIER VERSIONS GOT WRONG, both of them preconditions rather than assertions:
+        //  1. `coverageIsRunningForTest` reports only whether the CURRENT job is active. By the time it was
+        //     read, the predecessor had already been replaced, so it could be true for the SUCCESSOR --
+        //     the case asserted an arrival it never established. Arrival is now ACKNOWLEDGED by the
+        //     observer that takes the hold, and that acknowledgement carries A'S OWN JOB.
+        //  2. The barrier sits AFTER the loop's wait, outside `coverageLock`, so A has no further
+        //     suspension before it reads the output and publishes.
+        //
+        // And one thing about the mutant: a surviving cancellation-only mutant is NOT a coverage failure.
+        // With cancellation removed, A still holds `observerRef = A` while B owns `earconCoverageJob`, so
+        // the ownership guard REFUSES A anyway -- the guard, not cancellation, is what preserves B here.
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        renderer.holdObserverForTest = barrier
+        renderer.holdArrivalForTest = arrival
+        whenever(earconPlayer.emittedDurationMs()).thenReturn(1_000L)
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+
+        // A STARTS AND ARRIVES AT THE HOLD.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(1L))
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue("A must actually ARRIVE at the hold", arrival.isCompleted)
+        val aJob = arrival.getCompleted()
+
+        // B TAKES THE SAME SOUND WHILE A IS HELD, and is admitted with its OWN token.
+        whenever(earconPlayer.play(EarconId.WAKE_WORD)).thenReturn(EarconPlayer.AdmissionToken(2L))
+        renderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        val bVerdict = renderer.lastCueObservation.value
+        assertEquals(
+            "B's own verdict is in place while A is held",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            bVerdict?.observation,
+        )
+
+        // THE CANCELLATION IS OBSERVED ON A'S OWN JOB -- the identity the arrival carried, not a probe.
+        assertTrue("admitting B cancels A's continuation", aJob.isCancelled)
+
+        // A RESUMES AND REACHES THE PUBLISH PATH. What it would write is a DIFFERENT verdict, so the
+        // assertion separates "A was refused" from "A published and happened to agree".
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Queued)
+        barrier.complete(Unit)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(3_000))
+
+        assertEquals(
+            "the arrived continuation is REFUSED: the successor's verdict stands",
+            bVerdict,
+            renderer.lastCueObservation.value,
+        )
+        assertEquals(
+            "and the verdict A would have written is NOT what stands",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            renderer.lastCueObservation.value?.observation,
+        )
+
+        // B'S OWN TEARDOWN, through the real session path -- and a barrier completion after cancellation
+        // is NOT evidence that A resumed to publication, so this case claims only the cancellation and the
+        // separate ownership control.
+        renderer.endSession()
+        assertEquals(
+            "session teardown retires the cue it ended",
+            AudioFeedbackRenderer.CueObservation.Ended,
+            renderer.lastCueObservation.value?.observation,
+        )
+        // WHAT THIS CASE DOES NOT ESTABLISH: B's actual TRACK WRITE. The player here is a MOCK, so it has
+        // no track and no write to observe -- that contract is covered in EarconPlayerTest on a real
+        // EarconPlayer (accepted-frames/frontier and completion cases). Asserting it here is structurally
+        // impossible without swapping in the real player, which is the player test's job.
+    }
+
+    @Test
+    fun `B's writes and head progression are observed while A's held job is cancelled`() {
+        // THE COMBINED OUTCOME @spec asked for, which the two separate controls did not provide: a REAL
+        // EarconPlayer and controlled track INSIDE the renderer fixture, so B's accepted writes and
+        // queued-to-consumed progression are observed in the SAME scenario where A's actual job is held
+        // and cancelled. The renderer takes any EarconPlayer, so this swaps the mock for the real one.
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val realPlayer = EarconPlayer(context)
+        val clipClass = Class.forName(EarconPlayer::class.java.name + "\$EarconClip")
+        val clip = clipClass.declaredConstructors.single().apply { isAccessible = true }
+            .newInstance(realPlayer, ShortArray(100), 16000)
+        @Suppress("UNCHECKED_CAST")
+        realPlayer.javaClass.getDeclaredField("clips").apply { isAccessible = true }
+            .set(realPlayer, mapOf(EarconId.WAKE_WORD to clip))
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        realPlayer.javaClass.getDeclaredField("track").apply { isAccessible = true }.set(realPlayer, track)
+        var head = 0
+        realPlayer.readPlaybackHeadFrames = { head }
+
+        val combinedRenderer = AudioFeedbackRenderer(realPlayer, ttsEngine)
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        combinedRenderer.holdObserverForTest = barrier
+        combinedRenderer.holdArrivalForTest = arrival
+
+        // A IS ADMITTED, AND ITS ADMISSION IS READ AFTER ITS SUCCESSFUL PLAY. Reading it BEFORE the play
+        // returned null, and comparing null to B proves nothing about distinctness -- a defect in my
+        // earlier version, caught in review.
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        val aAdmission = realPlayer.currentAdmissionForTest()
+        assertNotNull("A's admission must exist after its successful play", aAdmission)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue("A's observer must actually ARRIVE at the hold", arrival.isCompleted)
+        val aJob = arrival.getCompleted()
+        assertEquals("A's writes are accepted by the real track", 100, realPlayer.emittedFrames)
+
+        // B TAKES THE SAME SOUND WHILE A IS HELD: its OWN writes land, cumulatively, on that track.
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        val bAdmission = realPlayer.currentAdmissionForTest()
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        // BOTH TOKENS MUST EXIST before the comparison: two nulls are equal, so an inequality between
+        // them would prove nothing.
+        assertNotNull("B's admission must exist after its successful play", bAdmission)
+        assertNotEquals(
+            "B is a DISTINCT admission of the same sound, which a label cannot show",
+            aAdmission,
+            bAdmission,
+        )
+        assertEquals("the same-sound cue is what was last admitted", EarconId.WAKE_WORD, realPlayer.lastPlayedId)
+        assertEquals("B wrote its own 100 frames", 100, realPlayer.emittedFrames)
+        assertEquals(
+            "the cumulative frontier is A's writes plus B's",
+            200,
+            realPlayer.javaClass.getDeclaredField("acceptedFramesTotal")
+                .apply { isAccessible = true }
+                .get(realPlayer),
+        )
+        // AND A'S ACTUAL JOB IS CANCELLED while its continuation is held.
+        assertTrue("admitting B cancels A's continuation", aJob.isCancelled)
+
+        // B'S HEAD PROGRESSION, queued and then consumed from ITS OWN cumulative target.
+        // THE HEAD IS CUMULATIVE ACROSS CUES: B's own frames start at A's accepted 100, so a head at 150
+        // means B's audio HAS begun -- Playing, not Queued. Queued would be a head at or below B's own
+        // origin (100), which is the earlier, pre-sounding state.
+        head = 100
+        assertEquals(
+            "B is Queued while the head is still at its own origin",
+            EarconPlayer.EarconCompletion.Queued,
+            realPlayer.completion(),
+        )
+        head = 150
+        assertEquals(
+            "B is Playing once its own frames begin, and not yet consumed",
+            EarconPlayer.EarconCompletion.Playing,
+            realPlayer.completion(),
+        )
+        head = 200
+        assertEquals(
+            "B reaches Consumed at its own cumulative frontier",
+            EarconPlayer.EarconCompletion.Consumed,
+            realPlayer.completion(),
+        )
+
+        // RELEASING THE BARRIER IS NOT EVIDENCE THAT A RESUMED TO PUBLICATION. A's job is CANCELLED (it
+        // was observed above), and completing the barrier does not undo that -- so this asserts only what
+        // the release can show: B's verdict is still the one standing, and nothing retracted it. The
+        // refusal mechanism itself is covered by the sibling ownership cases, which fail when the guard
+        // is defeated.
+        barrier.complete(Unit)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(3_000))
+        assertEquals(
+            "the successor's verdict survives the released continuation",
+            AudioFeedbackRenderer.CueObservation.Consumed,
+            combinedRenderer.lastCueObservation.value?.observation,
+        )
+        assertTrue(
+            "A's job was cancelled, which is what removes the stale continuation",
+            aJob.isCancelled,
+        )
+
+        // TEARDOWN, through the RENDERER's own lifecycle -- not a direct player.release(), which would
+        // bypass the contract this case is about.
+        combinedRenderer.endSession()
+        org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).release()
+    }
+
+    @Test
+    fun `an observer held across a successor's CALLBACK GAP must not publish the successor's completion as its own`() {
+        // 21c36ea8 / reviewer 63f99bed -- THE CALLBACK-GAP RACE, reproduced against UNCHANGED production.
+        //
+        // The interleaving: A's observer is the CURRENT coverage job, parked at the hold seam AFTER its
+        // wait and BEFORE its completion read. B -- the SAME sound, WAKE_WORD -- is admitted and its
+        // write COMPLETES on the player thread, overwriting the shared latest-cue fields
+        // cueHeadOrigin/cueHeadTarget (EarconPlayer.kt :290-292, :323/:327) -- but B's admission
+        // callback has NOT yet run, so the renderer still names A's job as the coverage owner and
+        // currentCueId is still A's. In that window A resumes, reads completion(), and the comparison
+        // runs against B'S interval while the ownership guard (earconCoverageJob === observer) still
+        // admits A's publication: A publishes a Consumed whose evidence belongs to ANOTHER admission.
+        //
+        // The window is created deterministically by taking B's write through the RAW player
+        // (realPlayer.play), which performs exactly the production write/frontier bookkeeping and
+        // mints B's token, but -- unlike the renderer's submitEarcon/playEarcon paths -- never starts
+        // B's coverage. That is the machine state between "B finished writing" and "B's callback
+        // replaced the observer", held open for as long as the case needs.
+        //
+        // THE ASSERTION IS THE OWNERSHIP RULE: a completion read in this window is B's, not A's, so A
+        // must not publish it. With per-admission completion ownership, A's scoped query recognises
+        // that the track's current admission is no longer its own and publishes nothing. Production,
+        // reading the shared fields, publishes Consumed -- which is exactly the failure.
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val realPlayer = EarconPlayer(context)
+        realPlayer.installClipForTest(EarconId.WAKE_WORD, ShortArray(100) { 2 }, 16_000)
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16_000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        realPlayer.trackFactoryForTest = { track }
+        val head = java.util.concurrent.atomic.AtomicInteger(0)
+        realPlayer.readPlaybackHeadFrames = { head.get() }
+
+        val combinedRenderer = AudioFeedbackRenderer(realPlayer, ttsEngine)
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        combinedRenderer.holdObserverForTest = barrier
+        combinedRenderer.holdArrivalForTest = arrival
+
+        // A IS ADMITTED THROUGH THE RENDERER, so its coverage job is REAL, and it ARRIVES at the hold
+        // before ever having read a completion.
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        val aAdmission = realPlayer.currentAdmissionForTest()
+        assertNotNull("A's admission must exist after its successful play", aAdmission)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue("A's observer must actually ARRIVE at the hold", arrival.isCompleted)
+        assertEquals("A's writes are accepted by the real track", 100, realPlayer.emittedFrames)
+        assertNull(
+            "precondition: A has published nothing while held",
+            combinedRenderer.lastCueObservation.value,
+        )
+
+        // B'S WRITE COMPLETES IN A'S CALLBACK GAP. The raw player performs the production write loop,
+        // advances acceptedFramesTotal, and overwrites the shared latest-cue fields to B'S interval
+        // [100, 200] -- while the renderer's coverage owner is still A's job and A's cue id still
+        // stands. currentAdmission is now B's token, which is precisely what a per-admission
+        // completion query can detect and shared fields cannot.
+        val bAdmission = realPlayer.play(EarconId.WAKE_WORD)
+        assertNotNull("B's write must be accepted in the gap", bAdmission)
+        assertNotEquals("B is a DISTINCT admission of the same sound", aAdmission, bAdmission)
+        assertEquals(
+            "B wrote its own 100 frames onto the cumulative frontier",
+            200,
+            realPlayer.javaClass.getDeclaredField("acceptedFramesTotal")
+                .apply { isAccessible = true }
+                .get(realPlayer),
+        )
+        assertEquals(
+            "the shared frontier now names B's interval, written under A's observership",
+            200,
+            realPlayer.javaClass.getDeclaredField("cueHeadTarget")
+                .apply { isAccessible = true }
+                .get(realPlayer),
+        )
+        assertTrue(
+            "and B's callback has NOT replaced the renderer job: A is still the live coverage owner",
+            combinedRenderer.coverageIsRunningForTest(),
+        )
+        assertTrue(
+            "A's own job is the one still running -- B's observer never started",
+            arrival.getCompleted().isActive,
+        )
+        assertNull(
+            "precondition: the gap holds and B's observer has not started",
+            combinedRenderer.lastCueObservation.value,
+        )
+
+        // THE HEAD MOVES INTO B'S INTERVAL, PAST B'S TARGET. A shared-fields completion() now reports
+        // Consumed -- for B. A's OWN interval ended at 100, and this head proves A's frames sounded
+        // too, but the VERDICT A is about to read was computed from B's frontier, not A's admission.
+        head.set(250)
+        assertEquals(
+            "the shared completion in the gap answers for B's interval",
+            EarconPlayer.EarconCompletion.Consumed,
+            realPlayer.completion(),
+        )
+
+        // A RESUMES. Production reads the shared fields and publishes B's Consumed under A's
+        // ownership; the ownership rule says a completion read in this window is not A's to publish.
+        barrier.complete(Unit)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(3_000))
+
+        assertNull(
+            "A must NOT publish the successor's completion as its own verdict",
+            combinedRenderer.lastCueObservation.value,
+        )
+
+        // TEARDOWN, through the RENDERER's own lifecycle.
+        combinedRenderer.endSession()
+        org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).release()
+    }
+
+    @Test
+    fun `a successor's frontier mutation that lands before its admission marker must not steal the current observer's verdict`() {
+        // Reviewer 52b786fe / @spec 3125932c -- THE WRITER-INTERNAL WINDOW the first control cannot
+        // reach. The callback-gap control waits for play() to RETURN, so B's marker has already moved
+        // and A correctly bails. But B's publication is TWO steps -- frontier fields, then the
+        // admission marker -- and marker-last ordering alone does not exclude a reader landing
+        // BETWEEN them: A reads B's bounds while the marker still names A, and the after-read check
+        // accepts the verdict as A's own.
+        //
+        // This case holds that exact mid-publication state deterministically: A admitted and parked;
+        // B's frontier values written while the marker is deliberately left naming A; head at 50.
+        // The two verdicts then DISAGREE, which is what makes the theft observable: A's OWN interval
+        // [0,100] says Playing (the head is past A's first frame), while B's interval [100,200] says
+        // Queued. A QUEUED verdict attributes NOTHING -- the observer loop defers and keeps waiting --
+        // so if A's observation is computed from B's bounds, the cue is never attributed at all. The
+        // assertion is therefore on attribution: A's own verdict must note the emission.
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val realPlayer = EarconPlayer(context)
+        realPlayer.installClipForTest(EarconId.WAKE_WORD, ShortArray(100) { 2 }, 16_000)
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16_000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        realPlayer.trackFactoryForTest = { track }
+        val head = java.util.concurrent.atomic.AtomicInteger(0)
+        realPlayer.readPlaybackHeadFrames = { head.get() }
+
+        val combinedRenderer = AudioFeedbackRenderer(realPlayer, ttsEngine)
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        combinedRenderer.holdObserverForTest = barrier
+        combinedRenderer.holdArrivalForTest = arrival
+
+        // A ADMITTED AND PARKED, having published nothing.
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        val aAdmission = realPlayer.currentAdmissionForTest()
+        assertNotNull("A's admission must exist after its successful play", aAdmission)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue("A's observer must actually ARRIVE at the hold", arrival.isCompleted)
+        assertNull("precondition: A has published nothing while held", combinedRenderer.lastCueObservation.value)
+        assertEquals(0, combinedRenderer.emissionNotesForTest())
+
+        // THE WRITER-INTERNAL WINDOW, HELD BY HAND: B's frontier mutation lands (cumulative target
+        // 200, origin 100 -- exactly what B's write loop would compute) while the admission marker is
+        // deliberately NOT moved. This is the state a marker-last writer produces between its two
+        // steps, now frozen for the reader.
+        val fields = realPlayer.javaClass.getDeclaredField("cueHeadTarget").apply { isAccessible = true }
+        fields.setInt(realPlayer, 200)
+        realPlayer.javaClass.getDeclaredField("cueHeadOrigin").apply { isAccessible = true }
+            .setInt(realPlayer, 100)
+
+        // THE HEAD AT 50 MAKES THE TWO VERDICTS DISAGREE. A's own interval [0,100]: Playing (past its
+        // first frame, not consumed). The written bounds [100,200]: Queued. If A's observation is
+        // computed from the shared slot, it reads Queued, attributes nothing, and keeps waiting.
+        head.set(50)
+
+        // A RESUMES AND TAKES ITS FIRST OBSERVATION. THE CLAIM: the verdict must be A's OWN. A Playing
+        // verdict notes the emission; a stolen Queued verdict does not.
+        barrier.complete(Unit)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(300))
+
+        assertTrue(
+            "A's first observation must be computed from A's OWN bounds: head 50 is INSIDE A's" +
+                " interval and must attribute, not inherit B's Queued",
+            combinedRenderer.emissionNotesForTest() >= 1,
+        )
+
+        // TEARDOWN, through the RENDERER's own lifecycle.
+        combinedRenderer.endSession()
+        org.mockito.Mockito.verify(track, org.mockito.Mockito.atLeastOnce()).release()
+    }
+
+    private fun realPlayerWithControlledHeads(): Triple<EarconPlayer, android.media.AudioTrack, java.util.concurrent.ConcurrentHashMap<android.media.AudioTrack, Int>> {
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val player = EarconPlayer(context)
+        player.installClipForTest(EarconId.WAKE_WORD, ShortArray(100) { 2 }, 16_000)
+        val track = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(track.sampleRate).thenReturn(16_000)
+        org.mockito.Mockito.`when`(
+            track.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        player.trackFactoryForTest = { track }
+        val heads = java.util.concurrent.ConcurrentHashMap<android.media.AudioTrack, Int>()
+        player.readPlaybackHeadFrames = { t -> heads[t] }
+        return Triple(player, track, heads)
+    }
+
+    @Test
+    fun `a rate-change track replacement leaves the old cue's verdict on ITS OWN track, refused successor or not`() {
+        // Reviewer 719c64c8 window: ensureTrack replaces the track on a rate change WITHOUT retiring
+        // the current admission's snapshot. A then reads the NEW track's playback head against A's
+        // OLD bounds. The sharpest form is the REFUSED successor: the replacement happens during
+        // ensureTrack, BEFORE the write, so a refused B leaves the track replaced and the stale
+        // snapshot paired with it indefinitely -- no successful successor ever republishes.
+        // A's REAL audio sounded on ITS track (head 50 of the old track); the new track's head stands
+        // at 0. A verdict computed from the new track says Queued and attributes nothing -- the theft
+        // is observable as a lost attribution, same signature as ddaf3aa7b but from TRACK identity,
+        // not field mixture.
+        val (realPlayer, trackA, heads) = realPlayerWithControlledHeads()
+        val combinedRenderer = AudioFeedbackRenderer(realPlayer, ttsEngine)
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        combinedRenderer.holdObserverForTest = barrier
+        combinedRenderer.holdArrivalForTest = arrival
+
+        // A ADMITTED AND PARKED; its own track has genuinely sounded through half its frames.
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        val aAdmission = realPlayer.currentAdmissionForTest()
+        assertNotNull("A's admission must exist after its successful play", aAdmission)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue("A's observer must actually ARRIVE at the hold", arrival.isCompleted)
+        heads[trackA] = 50
+        assertNull("precondition: A has published nothing while held", combinedRenderer.lastCueObservation.value)
+        assertEquals(0, combinedRenderer.emissionNotesForTest())
+
+        // A SECOND SOUND AT A DIFFERENT RATE FORCES ensureTrack TO REPLACE THE TRACK. Its write is
+        // REFUSED, so play returns null: the track is replaced, no new admission exists, and the
+        // stale snapshot now faces a track A never wrote to. THE REPLACEMENT TRACK'S HEAD STANDS AT
+        // 250, so a verdict sampled from it says Consumed -- a claim about audio A's own track, which
+        // was stopped mid-cue by the replacement, never made.
+        realPlayer.installClipForTest(EarconId.SUCCESS, ShortArray(80) { 1 }, 8_000)
+        val trackB = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(trackB.sampleRate).thenReturn(8_000)
+        org.mockito.Mockito.`when`(
+            trackB.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenReturn(0)
+        val factory = realPlayer.trackFactoryForTest
+        realPlayer.trackFactoryForTest = { trackB }
+        org.mockito.Mockito.`when`(trackB.playbackHeadPosition).thenReturn(250)
+        heads[trackB] = 250
+        val refused = realPlayer.play(EarconId.SUCCESS)
+        realPlayer.trackFactoryForTest = factory
+        assertNull("the successor must be REFUSED by its failed write", refused)
+        assertNotEquals("the rate change must have replaced the track", trackA, currentTrackOf(realPlayer))
+
+        // A RESUMES. Its verdict must come from ITS OWN track -- which the replacement stopped and
+        // destroyed -- so the retired snapshot must produce NO verdict at all. A Consumed computed
+        // from the replacement track's head attributes audio A never played.
+        barrier.complete(Unit)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(300))
+
+        assertNull(
+            "A's verdict must not be sampled from the REPLACEMENT track: a head of 250 on a track" +
+                " A never wrote to must not become A's Consumed",
+            combinedRenderer.lastCueObservation.value,
+        )
+
+        combinedRenderer.endSession()
+    }
+
+    @Test
+    fun `a stop that lands DURING head sampling must not let the sampled head become a verdict`() {
+        // Reviewer 719c64c8: the head read is not validated against stop/release. Land the stop
+        // RE-ENTRANTLY inside the head sample itself -- the sample call performs the stop, then
+        // returns a large head. Without a post-sampling revalidation, the in-flight verdict publishes
+        // Consumed for a cue whose admission was already stopped and retired. (A latch-based handshake
+        // cannot work here: the observer runs on the single Robolectric main dispatcher, so blocking
+        // the sample blocks the test thread too.)
+        val (realPlayer, trackA, heads) = realPlayerWithControlledHeads()
+        val combinedRenderer = AudioFeedbackRenderer(realPlayer, ttsEngine)
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        combinedRenderer.holdObserverForTest = barrier
+        combinedRenderer.holdArrivalForTest = arrival
+        var stopLandedDuringSample = false
+
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue(arrival.isCompleted)
+        heads[trackA] = 250
+
+        // THE HEAD SAMPLE ITSELF LANDS THE STOP: the admission is retired while the read is in
+        // flight, and only then does the sample produce its value.
+        realPlayer.readPlaybackHeadFrames = { _ ->
+            realPlayer.stopNow()
+            stopLandedDuringSample = true
+            heads[trackA]!!
+        }
+        barrier.complete(Unit)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_000))
+
+        assertTrue(
+            "precondition: the stop must have landed inside the head sample",
+            stopLandedDuringSample,
+        )
+        assertNull(
+            "a head sampled against a retired admission is not a verdict: the stopped cue must not" +
+                " be published Consumed by its own in-flight observer",
+            combinedRenderer.lastCueObservation.value,
+        )
+
+        combinedRenderer.endSession()
+    }
+
+    @Test
+    fun `an ACCEPTED rate-change successor holds its write between track replacement and its own snapshot`() {
+        // Reviewer-requested variant (1ecc361b): B is ACCEPTED and its write is HELD between the
+        // track replacement (ensureTrack, done before any write) and B's snapshot publication (end
+        // of the write loop). In that window A must publish and attribute NOTHING: the retired
+        // snapshot cannot vouch, and B has no snapshot yet.
+        val (realPlayer, trackA, heads) = realPlayerWithControlledHeads()
+        val combinedRenderer = AudioFeedbackRenderer(realPlayer, ttsEngine)
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        combinedRenderer.holdObserverForTest = barrier
+        combinedRenderer.holdArrivalForTest = arrival
+
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue(arrival.isCompleted)
+        heads[trackA] = 50
+
+        // B: DIFFERENT RATE -> track replacement; write entered but HELD.
+        realPlayer.installClipForTest(EarconId.SUCCESS, ShortArray(80) { 1 }, 8_000)
+        val trackB = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(trackB.sampleRate).thenReturn(8_000)
+        val writeEntered = java.util.concurrent.CountDownLatch(1)
+        val holdWrite = java.util.concurrent.CountDownLatch(1)
+        org.mockito.Mockito.`when`(
+            trackB.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer {
+            writeEntered.countDown()
+            holdWrite.await()
+            it.getArgument<Int>(2)
+        }
+        val factory = realPlayer.trackFactoryForTest
+        realPlayer.trackFactoryForTest = { trackB }
+        combinedRenderer.submitEarcon(EarconId.SUCCESS)
+        try {
+            assertTrue("B's write must be in flight", writeEntered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            realPlayer.trackFactoryForTest = factory
+            assertNotEquals("the rate change must have replaced the track", trackA, currentTrackOf(realPlayer))
+            // THE REPLACEMENT TRACK'S HEAD IS LIVE AND LARGE: a verdict sampled from it says Consumed.
+            // Without this, a pre-snapshot reader simply finds no head and accidentally bails.
+            heads[trackB] = 250
+            try {
+                // A RESUMES IN THE HELD-WRITE WINDOW: no live snapshot of any admission.
+                barrier.complete(Unit)
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+                    .idleFor(java.time.Duration.ofMillis(300))
+                assertEquals(
+                    "A must not attribute from the retired snapshot while B's write is held",
+                    0,
+                    combinedRenderer.emissionNotesForTest(),
+                )
+                assertNull(
+                    "and A must publish nothing in that window",
+                    combinedRenderer.lastCueObservation.value,
+                )
+            } finally {
+                // THE HELD WRITE MUST ALWAYS BE RELEASED, even on a RED run: an assertion inside the
+                // window would otherwise block the player thread forever and hang the whole suite. ONLY
+                // the latch goes here -- teardown stays at the test's end, so it cannot race ahead of
+                // B's completion and retire B's own frontier before B publishes.
+                holdWrite.countDown()
+            }
+
+            // B'S WRITE COMPLETES; ITS OWN SNAPSHOT AND OBSERVER TAKE OVER. The REPLACEMENT track
+            // restarted the frontier: acceptedFramesTotal was reset to zero at recreation, so B's target
+            // is B's OWN 80 frames (origin 0, target 80), not A's 100 plus B's 80.
+            heads[trackB] = 80
+            // LET B'S CALLBACK LAND BEFORE IDLING: it launches B's observer from the PLAYER thread, and
+            // Robolectric's scheduler misses posts that arrive DURING an idleFor pass.
+            Thread.sleep(300)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+                .idleFor(java.time.Duration.ofMillis(2_500))
+            val bVerdict = combinedRenderer.lastCueObservation.value
+            assertEquals(
+                "B's own observation is published once its write completes",
+                AudioFeedbackRenderer.CueObservation.Consumed,
+                bVerdict?.observation,
+            )
+            assertNotEquals("B is a distinct cue", 1L, bVerdict?.cueId)
+        } finally {
+            // OUTER FINALLY: full lifecycle cleanup (endSession) on ANY assertion failure anywhere
+            // after submission -- the write-in-flight precondition, the window asserts, AND B's
+            // positive publication path -- while keeping all of B's live positive assertions inside
+            // the try. The outer finally counts the latch down BEFORE endSession too: a precondition
+            // failure (write-in-flight await, track-replacement assert) can throw BEFORE the inner
+            // try is ever entered, and endSession must not block behind B's still-held write.
+            // countDown is idempotent, so the inner release is unaffected.
+            holdWrite.countDown()
+            combinedRenderer.endSession()
+        }
+    }
+
+    @Test
+    fun `a RELEASE that lands DURING head sampling must not let the sampled head become a verdict`() {
+        // Reviewer-requested variant (1ecc361b): full player RELEASE inside the head sample. The
+        // post-sampling revalidation must see the retired snapshot; without it, the in-flight verdict
+        // publishes Consumed after the whole session was torn down.
+        val (realPlayer, trackA, heads) = realPlayerWithControlledHeads()
+        val combinedRenderer = AudioFeedbackRenderer(realPlayer, ttsEngine)
+        val barrier = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val arrival = kotlinx.coroutines.CompletableDeferred<kotlinx.coroutines.Job>()
+        combinedRenderer.holdObserverForTest = barrier
+        combinedRenderer.holdArrivalForTest = arrival
+        var releaseLandedDuringSample = false
+
+        combinedRenderer.playEarcon(EarconId.WAKE_WORD)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_100))
+        assertTrue(arrival.isCompleted)
+        heads[trackA] = 250
+
+        realPlayer.readPlaybackHeadFrames = { _ ->
+            realPlayer.release()
+            releaseLandedDuringSample = true
+            heads[trackA]!!
+        }
+        barrier.complete(Unit)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            .idleFor(java.time.Duration.ofMillis(1_000))
+
+        assertTrue("precondition: the release must have landed inside the head sample", releaseLandedDuringSample)
+        assertNull(
+            "a head sampled after full release is not a verdict",
+            combinedRenderer.lastCueObservation.value,
+        )
+
+        combinedRenderer.endSession()
+    }
+
+    private fun currentTrackOf(player: EarconPlayer): android.media.AudioTrack? = player.javaClass.getDeclaredField("track")
+        .apply { isAccessible = true }
+        .get(player) as android.media.AudioTrack?
 }

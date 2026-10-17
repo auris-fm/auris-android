@@ -4,6 +4,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ProducerScope
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.flow.Flow
@@ -48,14 +49,13 @@ class WebSocketCloudTurnTransport(
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (response.code != 101) {
                     Timber.w("Cloud route WebSocket rejected: %d %s", response.code, response.message)
-                    emitOrFail(
+                    emitTerminal(
                         channel,
                         CloudRouteEvent.Error(
                             code = CloudRouteErrorCodes.CONNECTION_LOST,
                             message = "",
                         ),
                     )
-                    close()
                     return
                 }
                 webSocket.send(frame.toJson())
@@ -70,7 +70,10 @@ class WebSocketCloudTurnTransport(
                 val event = CloudRouteEvents.decode(text)
                 if (event == null) {
                     Timber.w("Cloud route frame could not be decoded")
-                    emitOrFail(channel, CloudRouteEvent.Error(code = CloudRouteErrorCodes.INVALID_RESPONSE, message = ""))
+                    emitTerminal(
+                        channel,
+                        CloudRouteEvent.Error(code = CloudRouteErrorCodes.INVALID_RESPONSE, message = ""),
+                    )
                 } else if (event is CloudRouteEvent.Connected) {
                     // The handshake is where the negotiated codec arrives; binary frames carry it.
                     negotiatedCodec.set(event.codec.ifBlank { requestedCodec })
@@ -82,12 +85,16 @@ class WebSocketCloudTurnTransport(
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Timber.w(t, "Cloud route socket failed")
-                emitOrFail(channel, CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""))
-                close()
+                emitTerminal(
+                    channel,
+                    CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
+                )
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                close()
+                // A clean server close ends the turn with no error event: finish the channel so the
+                // consumer drains what it has and then ends the flow.
+                channel.close()
             }
         }
 
@@ -115,6 +122,11 @@ class WebSocketCloudTurnTransport(
                         )
                     }
                 }
+                // The channel is finished (a terminal event ended the turn, or the socket closed):
+                // every buffered frame has now been forwarded, so the flow can end. Closing here
+                // rather than from the listener is what keeps the terminal event from being
+                // cancelled before the consumer forwards it.
+                close()
             } catch (_: CancellationException) {
                 // Normal cancellation — the flow was cancelled.
             } catch (e: Exception) {
@@ -139,6 +151,40 @@ class WebSocketCloudTurnTransport(
      * If even the error can't be delivered, we close the channel to signal
      * termination to any pending receivers.
      */
+    // End the turn: enqueue [event] behind everything already sent, then let the SINGLE consumer
+    // forward it in order and close the flow once the channel drains.
+    //
+    // The terminal event must not be sent straight to the flow: it would jump ahead of frames still
+    // sitting in the channel, and the sink would see an error before the audio that preceded it.
+    // It also must not rely on close() alone: close() cancels the consumer, so an event merely
+    // buffered before it can be cancelled undelivered and the turn completes with NO error in it --
+    // which the sink renders as silence. Enqueuing it and finishing the channel gives both ordering
+    // and delivery, because the consumer, not the caller, decides when the flow ends.
+    private fun ProducerScope<CloudRouteEvent>.emitTerminal(
+        channel: Channel<CloudRouteEvent>,
+        event: CloudRouteEvent,
+    ) {
+        val result = channel.trySend(event)
+        if (result.isFailure) {
+            // The terminal event could not be enqueued, so closing normally would end the turn with
+            // the reason for ending it lost -- the sink turns a missing error into silence. Close
+            // with the CAUSE instead: the consumer surfaces it as a thrown failure, which the sink
+            // can act on, and correctness no longer depends on which buffer filled first.
+            Timber.w(
+                "Cloud route: terminal event could not be enqueued, failing the turn — %s",
+                event::class.simpleName,
+            )
+            channel.close(
+                IllegalStateException(
+                    "Cloud route: channel full, could not deliver terminal " +
+                        "${event::class.simpleName}",
+                ),
+            )
+            return
+        }
+        channel.close()
+    }
+
     private fun emitOrFail(channel: Channel<CloudRouteEvent>, event: CloudRouteEvent) {
         val result = channel.trySend(event)
         if (result.isFailure) {

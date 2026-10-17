@@ -14,6 +14,7 @@ import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioTrackBufferSizeProvider
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import au.com.shiftyjelly.pocketcasts.models.type.TrimMode
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.EpisodeReferenceEligibility
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTapAudioProcessor
 import au.com.shiftyjelly.pocketcasts.repositories.user.StatsManager
@@ -29,6 +30,7 @@ class ShiftyRenderersFactory(
     private var boostVolume: Boolean,
     private val fingerprintPcmTap: FingerprintPcmTap? = null,
     private val fingerprintTapEnabled: () -> Boolean = { false },
+    private val episodeReferenceEligibility: EpisodeReferenceEligibility? = null,
     audioLevelMeterEnabled: () -> Boolean = { false },
 ) : DefaultRenderersFactory(context),
     AnalyticsListener {
@@ -57,7 +59,9 @@ class ShiftyRenderersFactory(
     }
 
     override fun buildAudioSink(context: Context, enableFloatOutput: Boolean, enableAudioOutputPlaybackParameters: Boolean): AudioSink {
-        val tapProcessor = fingerprintPcmTap?.let { FingerprintTapAudioProcessor(it, fingerprintTapEnabled) }
+        val tapProcessor = fingerprintPcmTap?.let {
+            FingerprintTapAudioProcessor(it, fingerprintTapEnabled, episodeReferenceEligibility)
+        }
         processorChain = ShiftyAudioProcessorChain(customAudio, tapProcessor, audioLevelMeter)
         val sink = DefaultAudioSink.Builder(context)
             .setAudioProcessorChain(processorChain!!)

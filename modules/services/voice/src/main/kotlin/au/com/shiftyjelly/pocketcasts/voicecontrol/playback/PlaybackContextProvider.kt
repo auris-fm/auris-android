@@ -19,22 +19,34 @@ class PlaybackManagerPlaybackContextProvider @Inject constructor(
     override fun current(): PlaybackContext {
         val episode = playbackManager.getCurrentEpisode()
         val playbackState = playbackManager.playbackStateRelay.blockingFirst()
-        val clientPositionMs = when {
-            episode == null -> 0L
+        // NO EPISODE MEANS NO POSITION, not position zero: zero is the very start of a recording, and
+        // reporting it for "nothing is playing" places the turn at an instant that does not exist.
+        val clientPositionMs: Long? = when {
+            episode == null -> null
             playbackState.episodeUuid == episode.uuid -> playbackState.positionMs.toLong()
             else -> episode.playedUpToMs.toLong()
         }
-        val referencePositionMs = if (episode != null && fingerprintTimingManager.activeEpisodeUuid == episode.uuid) {
+        val referencePositionMs = if (
+            episode != null &&
+            clientPositionMs != null &&
+            fingerprintTimingManager.activeEpisodeUuid == episode.uuid
+        ) {
             fingerprintTimingManager.matchedReferenceTime(clientPositionMs.toInt())
                 ?.times(1000)
                 ?.toLong()
         } else {
             null
         }
-        val state = cloudPlaybackContextState.snapshot()
+        // Screened by episode for the same reason as the sink's: a saved position belongs to the
+        // episode it was recorded from.
+        val state = cloudPlaybackContextState.snapshot(episode?.uuid)
         return PlaybackContext(
-            episodeId = episode?.uuid.orEmpty(),
-            podcastId = episode?.podcastOrSubstituteUuid.orEmpty(),
+            // Absence is passed through as ABSENCE. `orEmpty()` fabricated an empty identifier that
+            // serializes as a real `episode_id` on the wire, so a discovery turn with nothing playing
+            // claimed a subject it did not have -- and the server cannot tell that from a genuine
+            // blank id.
+            episodeId = episode?.uuid,
+            podcastId = episode?.podcastOrSubstituteUuid,
             referencePositionMs = referencePositionMs,
             clientPositionMs = clientPositionMs,
             recentReferencePositions = state.recentReferencePositions,

@@ -1,8 +1,13 @@
 #include <jni.h>
+#include <android/log.h>
+#include <dlfcn.h>
 #include <mutex>
 #include "OboeAudioCapture.h"
 #include "NativeVadProcessor.h"
 #include "RetireableProcessorHandle.h"
+
+#define LOG_TAG "VoicePipeline"
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "[VoicePipeline] " __VA_ARGS__)
 
 // gCapture is protected by gCaptureMutex. gVadProcessor owns the NativeVadProcessor through a
 // usage-counting handle: the VAD event getters run on the collector thread and can be parked in
@@ -24,12 +29,85 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeIsCaptur
     return (gCapture != nullptr && gCapture->isActive()) ? JNI_TRUE : JNI_FALSE;
 }
 
+// The device the live capture stream is routed to, or kUnspecified when no stream observes one.
+// Read from the opened stream rather than from device enumeration: availability is not routing, and
+// an enumerated device cannot stand in for the one capture actually uses.
+extern "C" JNIEXPORT jint JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeRoutedCaptureDeviceId(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/)
+{
+    std::lock_guard<std::mutex> lock(gCaptureMutex);
+    return gCapture != nullptr ? gCapture->getRoutedDeviceId() : oboe::kUnspecified;
+}
+
+// The live stream's frame/time observation, as [framePosition, timestampNs, sampleRate, observable].
+// Read on the polling thread rather than the audio callback: the platform documents that calling the
+// timestamp API from a data callback is unreliable before Android R, and this value must describe the
+// stream's actual progress rather than the last frame the callback happened to hand over.
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeCaptureClock(
+    JNIEnv* env,
+    jclass /*clazz*/)
+{
+    OboeAudioCapture::CaptureClock clock;
+    {
+        std::lock_guard<std::mutex> lock(gCaptureMutex);
+        if (gCapture != nullptr) {
+            clock = gCapture->captureClock();
+        }
+    }
+
+    jlongArray result = env->NewLongArray(4);
+    if (result == nullptr) {
+        return nullptr;
+    }
+    // The frames and the sample rate are reported even when no timestamp is observable, so a caller
+    // can tell "no time known" from "no capture at all"; the observable flag carries that distinction.
+    const jlong values[4] = {
+        static_cast<jlong>(clock.framePosition),
+        static_cast<jlong>(clock.timestampNs),
+        static_cast<jlong>(clock.sampleRate),
+        clock.observable ? 1 : 0,
+    };
+    env->SetLongArrayRegion(result, 0, 4, values);
+    return result;
+}
+
+// Whether libonnxruntime.so is already loaded in this process. Uses the same RTLD_NOLOAD idiom the
+// capture path uses, so a test can assert the ordering property directly: capture must succeed even
+// when this returns false (i.e. when wake/embedding/transcriber setup has not run first).
+extern "C" JNIEXPORT jboolean JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeIsOrtLoaded(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/)
+{
+    void* ortLib = dlopen("libonnxruntime.so", RTLD_NOLOAD);
+    if (ortLib != nullptr) {
+        dlclose(ortLib);
+        return JNI_TRUE;
+    }
+    return JNI_FALSE;
+}
+
 // ---------------------------------------------------------------------------
 // Combined capture + VAD lifecycle — atomic start/stop to prevent races
 // between route-change restarts and foreground transitions.
 // ---------------------------------------------------------------------------
 
 extern "C" bool vadEnsureInitialized(JNIEnv* env, jobject assetManager);
+extern "C" const char* vadLastError();
+
+// Logs the reason a start step failed. The combined entry is what production calls, so an opaque
+// false here is a failure with no way to tell the asset, the ORT library and the model session
+// apart — the sibling entry already reports its reason, and this one should not be less useful.
+static void logStartFailure(const char* step, const char* reason) {
+    if (reason != nullptr && reason[0] != '\0') {
+        LOGE("Capture/VAD start failed at %s: %s", step, reason);
+    } else {
+        LOGE("Capture/VAD start failed at %s", step);
+    }
+}
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartCaptureAndVad(
@@ -42,6 +120,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartCap
     // Initialize the Silero VAD ONNX session before starting the VAD processor.
     // Uses std::call_once internally — repeated calls are cheap.
     if (!vadEnsureInitialized(env, assetManager)) {
+        logStartFailure("vad init", vadLastError());
         return JNI_FALSE;
     }
 
@@ -87,9 +166,18 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeOpenInpu
 
     auto* capture = new OboeAudioCapture();
     if (!capture->open()) {
+        logStartFailure("oboe open", nullptr);
         delete capture;
         return -1;
     }
+
+    if (!capture->start()) {
+        logStartFailure("oboe start", nullptr);
+        capture->close();
+        delete capture;
+        return JNI_FALSE;
+    }
+
     gCapture = capture;
     return capture->getDeviceId();
 }
@@ -104,6 +192,17 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartInp
     if (gCapture == nullptr) {
         return JNI_FALSE;
     }
+    // The processor is PUBLISHED through the handle, not deleted on failure: the handle's usage
+    // counting is what protects in-flight getters, and a failed start must retire the attempt
+    // rather than leave raw pointer arithmetic behind.
+    gVadProcessor.retire();
+    auto* processor = new NativeVadProcessor(gCapture);
+    if (!processor->start()) {
+        logStartFailure("vad processor thread", nullptr);
+        delete processor;
+        return JNI_FALSE;
+    }
+    gVadProcessor.publish(processor);
     if (gCapture->isActive()) {
         return JNI_TRUE;
     }
@@ -196,6 +295,70 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
     const int result = processor->getSpeechPcmSize();
     gVadProcessor.release();
     return result;
+}
+
+// Frames the VAD has consumed from capture since start. Exposed so a test can assert captured audio
+// reaches the VAD, which a liveness check alone cannot show while no speech event fires.
+extern "C" JNIEXPORT jlong JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetFramesConsumed(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/)
+{
+    auto* processor = gVadProcessor.acquire();
+    if (processor == nullptr) {
+        return 0;
+    }
+    const auto frames = processor->getFramesConsumed();
+    gVadProcessor.release();
+    return static_cast<jlong>(frames);
+}
+
+// Aggregate detector diagnosis for capture debugging, as a long array so ONE call carries the whole
+// snapshot. NOTE: the fields are read INDEPENDENTLY -- there is no atomicity guarantee across them;
+// the array shape is about call economy, not a consistent view. Order: rms, score, speechFrames,
+// silentFrames, drainRemaining, then the three
+// booleans as 0/1 (gatePassed, isSpeech, speechActive). Aggregates only — no audio is exported.
+// Collection is off unless nativeSetVadDiagnosticsEnabled(true) was called, which release builds do
+// not do.
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetVadDiagnostics(
+    JNIEnv* env,
+    jclass /*clazz*/)
+{
+    auto* processor = gVadProcessor.acquire();
+    jlong values[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    if (processor != nullptr) {
+        NativeVadProcessor::VadDiagnostics d = processor->getDiagnostics();
+        // The RMS and score are scaled to integers: a level and a probability do not need float
+        // precision to answer "did the loopback reach the detector".
+        values[0] = static_cast<jlong>(d.lastRms * 1000.0);
+        values[1] = static_cast<jlong>(d.lastScore * 1000.0f);
+        values[2] = d.speechFrames;
+        values[3] = d.silentFrames;
+        values[4] = d.drainRemaining;
+        values[5] = d.lastGatePassed ? 1 : 0;
+        values[6] = d.lastIsSpeech ? 1 : 0;
+        values[7] = d.speechActive ? 1 : 0;
+    }
+    gVadProcessor.release();
+    jlongArray out = env->NewLongArray(8);
+    if (out != nullptr) {
+        env->SetLongArrayRegion(out, 0, 8, values);
+    }
+    return out;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeSetVadDiagnosticsEnabled(
+    JNIEnv* /*env*/,
+    jclass /*clazz*/,
+    jboolean enabled)
+{
+    auto* processor = gVadProcessor.acquire();
+    if (processor != nullptr) {
+        processor->setDiagnosticsEnabled(enabled == JNI_TRUE);
+    }
+    gVadProcessor.release();
 }
 
 extern "C" JNIEXPORT jint JNICALL

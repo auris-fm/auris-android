@@ -5,10 +5,24 @@ import com.squareup.moshi.JsonClass
 
 @JsonClass(generateAdapter = true)
 data class CloudRouteContext(
-    @Json(name = "episode_id") val episodeId: String,
+    /**
+     * The episode the answer concerns, or NULL when there is none -- discovery with nothing playing.
+     *
+     * Null is OMITTED on the wire, which is the honest representation of "no current episode". It is
+     * deliberately not an empty string and not a substitute: a fabricated identifier would claim a
+     * subject the turn does not have, and the server cannot tell that apart from a real episode whose
+     * id happens to be blank.
+     */
+    @Json(name = "episode_id") val episodeId: String? = null,
     @Json(name = "podcast_id") val podcastId: String? = null,
     @Json(name = "reference_position_ms") val referencePositionMs: Long? = null,
-    @Json(name = "client_position_ms") val clientPositionMs: Long,
+    /**
+     * The client's own play position, or null when no episode is playing.
+     *
+     * Absent rather than zero: zero is a real position (the very start), so reporting it for "nothing
+     * is playing" would place the turn at an instant that does not exist.
+     */
+    @Json(name = "client_position_ms") val clientPositionMs: Long? = null,
     @Json(name = "recent_reference_positions") val recentReferencePositions: List<Long> = emptyList(),
     @Json(name = "previous_reference_position_ms") val previousReferencePositionMs: Long? = null,
     /** Null (omitted on the wire) when there is no recent conversation. */
@@ -41,6 +55,19 @@ data class CloudRouteHint(
     val arguments: Map<String, Any?> = emptyMap(),
 )
 
+/**
+ * How a turn relates to the conversation it belongs to.
+ *
+ * The first turn of a conversation CREATES it; a later turn in the same live conversation RESUMES it.
+ * A retry of the same logical turn keeps its identity rather than creating a second conversation, and
+ * a turn whose origin has been superseded is discarded rather than admitted against a handle that now
+ * belongs to a successor.
+ */
+enum class CloudConversationMode(val wireValue: String) {
+    Create("create"),
+    Resume("resume"),
+}
+
 /** One logical turn: the utterance plus its turn-control fields. */
 data class CloudRouteTurn(
     val request: String,
@@ -48,6 +75,23 @@ data class CloudRouteTurn(
     val requestId: String,
     val capabilities: List<String> = emptyList(),
     val routeHint: CloudRouteHint? = null,
+    /**
+     * The conversation this turn belongs to, or null when the caller has not established one.
+     *
+     * Carried with the turn rather than derived from transport state, so a retry or a superseded
+     * origin cannot borrow whichever handle happens to be current when it is finally sent.
+     */
+    val conversationId: String? = null,
+    /** How this turn relates to [conversationId]. Null when there is no conversation to relate to. */
+    val conversationMode: CloudConversationMode? = null,
+    /**
+     * The window this turn was CAPTURED under, or null when it was not captured.
+     *
+     * Carried so a RETRY is validated against the window the turn belongs to rather than against
+     * whichever window is current when it is finally retried -- otherwise a retry of a superseded
+     * request would be admitted under its successor.
+     */
+    val capturedOrigin: Long? = null,
 )
 
 /** Capability names negotiated with the server (cloud-assistant.md). */

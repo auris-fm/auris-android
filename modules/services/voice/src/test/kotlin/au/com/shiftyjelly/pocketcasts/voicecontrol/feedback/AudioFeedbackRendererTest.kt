@@ -1371,7 +1371,9 @@ class AudioFeedbackRendererTest {
 
         // A SECOND SOUND AT A DIFFERENT RATE FORCES ensureTrack TO REPLACE THE TRACK. Its write is
         // REFUSED, so play returns null: the track is replaced, no new admission exists, and the
-        // stale snapshot now faces a track A never wrote to.
+        // stale snapshot now faces a track A never wrote to. THE REPLACEMENT TRACK'S HEAD STANDS AT
+        // 250, so a verdict sampled from it says Consumed -- a claim about audio A's own track, which
+        // was stopped mid-cue by the replacement, never made.
         realPlayer.installClipForTest(EarconId.SUCCESS, ShortArray(80) { 1 }, 8_000)
         val trackB = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
         org.mockito.Mockito.`when`(trackB.sampleRate).thenReturn(8_000)
@@ -1384,22 +1386,24 @@ class AudioFeedbackRendererTest {
         ).thenReturn(0)
         val factory = realPlayer.trackFactoryForTest
         realPlayer.trackFactoryForTest = { trackB }
-        org.mockito.Mockito.`when`(trackB.playbackHeadPosition).thenReturn(0)
+        org.mockito.Mockito.`when`(trackB.playbackHeadPosition).thenReturn(250)
+        heads[trackB] = 250
         val refused = realPlayer.play(EarconId.SUCCESS)
         realPlayer.trackFactoryForTest = factory
         assertNull("the successor must be REFUSED by its failed write", refused)
         assertNotEquals("the rate change must have replaced the track", trackA, currentTrackOf(realPlayer))
 
-        // A RESUMES. Its verdict must come from ITS OWN track's head (50, inside A's interval),
-        // never from the replacement track's state.
+        // A RESUMES. Its verdict must come from ITS OWN track -- which the replacement stopped and
+        // destroyed -- so the retired snapshot must produce NO verdict at all. A Consumed computed
+        // from the replacement track's head attributes audio A never played.
         barrier.complete(Unit)
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             .idleFor(java.time.Duration.ofMillis(300))
 
-        assertTrue(
-            "A's verdict must be computed from ITS OWN track: the old track's head is inside A's" +
-                " interval and must attribute, not the replacement track's zero head",
-            combinedRenderer.emissionNotesForTest() >= 1,
+        assertNull(
+            "A's verdict must not be sampled from the REPLACEMENT track: a head of 250 on a track" +
+                " A never wrote to must not become A's Consumed",
+            combinedRenderer.lastCueObservation.value,
         )
 
         combinedRenderer.endSession()

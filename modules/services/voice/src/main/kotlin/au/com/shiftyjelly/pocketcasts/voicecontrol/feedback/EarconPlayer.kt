@@ -298,10 +298,16 @@ class EarconPlayer(
             // writer-between-fields-and-marker control (ddaf3aa7b) demonstrated for marker-last
             // ordering, where B's fields could land while B's marker had not and A read the mixture
             // as its own. BOUNDS AND ADMISSION MARKER MOVE TOGETHER, IN THE SAME SNAPSHOT.
+            // THE ADMISSION'S OWN TRACK IS BOUND INTO THE SNAPSHOT. The scoped reader samples the
+            // head from THIS track, never from the mutable `track` field: a rate-change replacement
+            // (or any recreation) produces a track this admission never wrote to, and reading its
+            // head against these bounds is exactly the 719c64c8 theft.
             currentFrontier = Frontier(
                 admissionRaw = admitted.raw,
                 origin = acceptedFramesTotal - offset,
                 target = acceptedFramesTotal,
+                track = audioTrack,
+                frames = offset,
             )
             // THE RAW MARKER STAYS IN STEP for the stop-scoping path (stopAdmissionNow compares
             // currentAdmission); completion ownership checks read the snapshot, not this.
@@ -459,6 +465,10 @@ class EarconPlayer(
             // The discarded cue's recorder stream ends with it: close its admission and owe expiry to
             // whatever tail the hardware still plays.
             closeRecorderAdmission()
+            // THE SNAPSHOT IS RETIRED BEFORE THE TRACK IS STOPPED, so an in-flight scoped read
+            // revalidates against the retirement instead of vouching a head sampled from a track
+            // whose admission just ended (719c64c8, stop-during-sampling).
+            currentFrontier = null
             // DISCARDING A TRACK MEANS DISCARDING EVERYTHING IT OWNS, in one step. Nulling the reference
             // after `stop()` alone LEFT THE RESOURCE UNRELEASED -- nothing could release it afterwards,
             // because the only reference was gone -- AND LEFT the track's cumulative frontier standing:
@@ -519,6 +529,8 @@ class EarconPlayer(
         val admissionRaw: Long,
         val origin: Int,
         val target: Int,
+        val track: AudioTrack,
+        val frames: Int,
     )
 
     /**
@@ -561,15 +573,23 @@ class EarconPlayer(
      */
     fun completionFor(admissionRaw: Long?): EarconCompletion {
         if (admissionRaw == null) return EarconCompletion.Unknown
-        val current = track ?: return EarconCompletion.Unknown
         val frontier = currentFrontier ?: return EarconCompletion.Unknown
         if (frontier.admissionRaw != admissionRaw) return EarconCompletion.Unknown
-        if (emittedFrames <= 0) return EarconCompletion.Unknown
-        val head = if (readPlaybackHeadFrames != null) {
-            readPlaybackHeadFrames!!.invoke(current) ?: return EarconCompletion.Unknown
-        } else {
-            current.playbackHeadPosition
-        }
+        if (frontier.frames <= 0) return EarconCompletion.Unknown
+        // THE HEAD IS SAMPLED FROM THE SNAPSHOT'S OWN TRACK, not the current `track` field: the two
+        // diverge the moment a rate change or recreation replaces the track without a new admission.
+        val sampledTrack = frontier.track
+        val head = runCatching {
+            if (readPlaybackHeadFrames != null) {
+                readPlaybackHeadFrames!!.invoke(sampledTrack)
+            } else {
+                sampledTrack.playbackHeadPosition
+            }
+        }.getOrNull() ?: return EarconCompletion.Unknown
+        // THE SNAPSHOT MUST STILL BE LIVE AFTER SAMPLING. A stop or release that lands during the
+        // read retires the frontier; the sampled head then describes audio whose admission no longer
+        // exists, and publishing it would attribute a stopped cue (719c64c8, stop-during-sampling).
+        if (currentFrontier !== frontier) return EarconCompletion.Unknown
         return when {
             head >= frontier.target -> EarconCompletion.Consumed
             head > frontier.origin -> EarconCompletion.Playing
@@ -608,7 +628,10 @@ class EarconPlayer(
      */
     fun release() {
         onPlayerThread {
-            closeRecorderAdmission() // RELEASE IS ATTEMPTED INDEPENDENTLY OF STOP. In one `runCatching` block a THROWING `stop()`
+            closeRecorderAdmission()
+            // RETIRE THE SNAPSHOT BEFORE THE TRACK IS STOPPED, same rule as [stopAdmissionNow].
+            currentFrontier = null
+            // RELEASE IS ATTEMPTED INDEPENDENTLY OF STOP. In one `runCatching` block a THROWING `stop()`
             // skips the release, and the reference is dropped anyway -- so the resource is leaked by
             // exactly the case that most needs releasing. ONE RULE, EVERY CALL SITE.
             track?.runCatching { stop() }
@@ -647,6 +670,10 @@ class EarconPlayer(
             if (current.sampleRate == sampleRateHz) return current
             // The bundled clips share a rate; if one ever differs, recreate rather than play it at
             // the wrong rate, which would change its pitch and duration.
+            // RETIRE THE ADMISSION'S SNAPSHOT BEFORE THE TRACK GOES. Replacement happens BEFORE any
+            // write, so a REFUSED successor still leaves the track replaced; the stale snapshot must
+            // not survive it paired with a track its admission never wrote to (719c64c8).
+            currentFrontier = null
             current.runCatching {
                 stop()
                 release()

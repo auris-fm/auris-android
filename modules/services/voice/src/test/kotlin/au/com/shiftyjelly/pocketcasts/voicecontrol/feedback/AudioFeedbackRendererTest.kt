@@ -1494,52 +1494,59 @@ class AudioFeedbackRendererTest {
         val factory = realPlayer.trackFactoryForTest
         realPlayer.trackFactoryForTest = { trackB }
         combinedRenderer.submitEarcon(EarconId.SUCCESS)
-        assertTrue("B's write must be in flight", writeEntered.await(5, java.util.concurrent.TimeUnit.SECONDS))
-        realPlayer.trackFactoryForTest = factory
-        assertNotEquals("the rate change must have replaced the track", trackA, currentTrackOf(realPlayer))
-        // THE REPLACEMENT TRACK'S HEAD IS LIVE AND LARGE: a verdict sampled from it says Consumed.
-        // Without this, a pre-snapshot reader simply finds no head and accidentally bails.
-        heads[trackB] = 250
         try {
-            // A RESUMES IN THE HELD-WRITE WINDOW: no live snapshot of any admission.
-            barrier.complete(Unit)
+            assertTrue("B's write must be in flight", writeEntered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            realPlayer.trackFactoryForTest = factory
+            assertNotEquals("the rate change must have replaced the track", trackA, currentTrackOf(realPlayer))
+            // THE REPLACEMENT TRACK'S HEAD IS LIVE AND LARGE: a verdict sampled from it says Consumed.
+            // Without this, a pre-snapshot reader simply finds no head and accidentally bails.
+            heads[trackB] = 250
+            try {
+                // A RESUMES IN THE HELD-WRITE WINDOW: no live snapshot of any admission.
+                barrier.complete(Unit)
+                org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+                    .idleFor(java.time.Duration.ofMillis(300))
+                assertEquals(
+                    "A must not attribute from the retired snapshot while B's write is held",
+                    0,
+                    combinedRenderer.emissionNotesForTest(),
+                )
+                assertNull(
+                    "and A must publish nothing in that window",
+                    combinedRenderer.lastCueObservation.value,
+                )
+            } finally {
+                // THE HELD WRITE MUST ALWAYS BE RELEASED, even on a RED run: an assertion inside the
+                // window would otherwise block the player thread forever and hang the whole suite. ONLY
+                // the latch goes here -- teardown stays at the test's end, so it cannot race ahead of
+                // B's completion and retire B's own frontier before B publishes.
+                holdWrite.countDown()
+            }
+
+            // B'S WRITE COMPLETES; ITS OWN SNAPSHOT AND OBSERVER TAKE OVER. The REPLACEMENT track
+            // restarted the frontier: acceptedFramesTotal was reset to zero at recreation, so B's target
+            // is B's OWN 80 frames (origin 0, target 80), not A's 100 plus B's 80.
+            heads[trackB] = 80
+            // LET B'S CALLBACK LAND BEFORE IDLING: it launches B's observer from the PLAYER thread, and
+            // Robolectric's scheduler misses posts that arrive DURING an idleFor pass.
+            Thread.sleep(300)
             org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
-                .idleFor(java.time.Duration.ofMillis(300))
+                .idleFor(java.time.Duration.ofMillis(2_500))
+            val bVerdict = combinedRenderer.lastCueObservation.value
             assertEquals(
-                "A must not attribute from the retired snapshot while B's write is held",
-                0,
-                combinedRenderer.emissionNotesForTest(),
+                "B's own observation is published once its write completes",
+                AudioFeedbackRenderer.CueObservation.Consumed,
+                bVerdict?.observation,
             )
-            assertNull(
-                "and A must publish nothing in that window",
-                combinedRenderer.lastCueObservation.value,
-            )
+            assertNotEquals("B is a distinct cue", 1L, bVerdict?.cueId)
         } finally {
-            // THE HELD WRITE MUST ALWAYS BE RELEASED, even on a RED run: an assertion inside the
-            // window would otherwise block the player thread forever and hang the whole suite. ONLY
-            // the latch goes here -- teardown stays at the test's end, so it cannot race ahead of
-            // B's completion and retire B's own frontier before B publishes.
-            holdWrite.countDown()
+            // OUTER FINALLY: full lifecycle cleanup (endSession) on ANY assertion failure anywhere
+            // after submission -- the write-in-flight precondition, the window asserts, AND B's
+            // positive publication path -- while keeping all of B's live positive assertions inside
+            // the try. The inner finally releases ONLY the held write, so a red window assertion
+            // unblocks the player before the outer cleanup runs.
+            combinedRenderer.endSession()
         }
-
-        // B'S WRITE COMPLETES; ITS OWN SNAPSHOT AND OBSERVER TAKE OVER. The REPLACEMENT track
-        // restarted the frontier: acceptedFramesTotal was reset to zero at recreation, so B's target
-        // is B's OWN 80 frames (origin 0, target 80), not A's 100 plus B's 80.
-        heads[trackB] = 80
-        // LET B'S CALLBACK LAND BEFORE IDLING: it launches B's observer from the PLAYER thread, and
-        // Robolectric's scheduler misses posts that arrive DURING an idleFor pass.
-        Thread.sleep(300)
-        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
-            .idleFor(java.time.Duration.ofMillis(2_500))
-        val bVerdict = combinedRenderer.lastCueObservation.value
-        assertEquals(
-            "B's own observation is published once its write completes",
-            AudioFeedbackRenderer.CueObservation.Consumed,
-            bVerdict?.observation,
-        )
-        assertNotEquals("B is a distinct cue", 1L, bVerdict?.cueId)
-
-        combinedRenderer.endSession()
     }
 
     @Test

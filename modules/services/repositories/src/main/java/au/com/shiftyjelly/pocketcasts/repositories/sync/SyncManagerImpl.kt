@@ -149,8 +149,9 @@ class SyncManagerImpl @Inject constructor(
         getCacheTokenOrLogin { token ->
             val admission = credentialOwnership.authoritySnapshot()
             check(admission.accountName == origin.accountName && admission.session == origin.session) {
-                "Password request refused: identity superseded during token acquisition " +
-                    "(origin=${origin.accountName}/${origin.session}, admitted=${admission.accountName}/${admission.session})"
+                // NO account names / session metadata in the refusal: exceptions can surface
+                // identity fragments through logs.
+                "Password request refused: identity superseded during token acquisition"
             }
             check(admission.token != null && admission.token.value == token.value) {
                 "Password request refused: request token does not match the admitted credential"

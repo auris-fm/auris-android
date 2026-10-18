@@ -148,28 +148,21 @@ class SyncManagerImplCredentialFlowTest {
         assertEquals("b@example.com", syncAccountManager.authoritySnapshot().accountName)
     }
 
-    /**
-     * P4 — the identity switches DURING TOKEN ACQUISITION (reviewer 83471c65): the ORIGINAL
-     * identity is captured before acquisition; A resumes with B's admission → refused BEFORE
-     * the password HTTP request, explicitly, with zero network.
-     */
-    @Test
-    fun `P4 - identity switch DURING token acquisition refuses BEFORE the password request`() = kotlinx.coroutines.runBlocking {
-        val real = syncAccountManager
-        addAccount("a@example.com", "t1")
-        // The ONLY override: the token-acquisition seam performs the real A->B switch, exactly
-        // the awaited gap between the original capture and the admission capture. Everything
-        // else (owner lock, snapshot, conditional publication) is the REAL implementation.
+    // P4 — the identity switches DURING TOKEN ACQUISITION (reviewer 83471c65): the ORIGINAL
+    // identity is captured before acquisition; A resumes with B's admission → refused BEFORE
+    // the password HTTP request, explicitly, with zero network.
+
+    /** Installs a SyncManager whose owner switches the identity AT the acquisition seam. */
+    private fun managerWithAcquisitionSwitch(switch: SyncAccountManagerImpl.() -> Unit): SyncManagerImpl {
         val switchingOwner = object : SyncAccountManagerImpl(mock(), accountManager) {
             override suspend fun getAccessToken(): AccessToken? {
-                synchronized(real) {
-                    real.signOut()
-                    addAccount("b@example.com", "tB")
-                }
+                // The switch drives THIS SAME owner instance — the very one injected below —
+                // so the platform swap moves ITS ledger, not a detached twin's.
+                this.switch()
                 return super.getAccessToken()
             }
         }
-        syncManager = SyncManagerImpl(
+        return SyncManagerImpl(
             eventHorizon = com.automattic.eventhorizon.EventHorizon(au.com.shiftyjelly.pocketcasts.analytics.testing.TestEventSink()),
             context = context,
             settings = mock(),
@@ -179,15 +172,46 @@ class SyncManagerImplCredentialFlowTest {
             moshi = moshiField,
             notificationManager = mock(),
         )
+    }
+
+    @Test
+    fun `P4 - identity switch DURING token acquisition refuses BEFORE the password request`() = kotlinx.coroutines.runBlocking {
+        addAccount("a@example.com", "t1")
+        val manager = managerWithAcquisitionSwitch {
+            signOut()
+            addAccount("b@example.com", "tB") // B replaces A on the SAME owner
+        }
         try {
-            syncManager.updatePassword(newPassword = "np", oldPassword = "op")
+            manager.updatePassword(newPassword = "np", oldPassword = "op")
             fail("identity superseded during acquisition must refuse EXPLICITLY")
         } catch (expected: IllegalStateException) {
             assertTrue(expected.message!!.contains("superseded during token acquisition"))
         }
         assertEquals(0, server.requestCount) // refused BEFORE the password HTTP request
-        assertEquals("tB", real.authoritySnapshot().token!!.value) // B intact; A published nowhere
-        assertEquals("b@example.com", real.authoritySnapshot().accountName)
+        assertEquals("tB", syncAccountManager.authoritySnapshot().token!!.value) // B intact; A published nowhere
+        assertEquals("b@example.com", syncAccountManager.authoritySnapshot().accountName)
+    }
+
+    /**
+     * P5 — SAME-account logout/relogin during acquisition: the account NAME is unchanged, so
+     * only the ORIGINAL-SESSION fence can refuse (b7... name-only checks are insufficient).
+     */
+    @Test
+    fun `P5 - SAME-account relogin DURING token acquisition refuses - session fence is NECESSARY`() = kotlinx.coroutines.runBlocking {
+        addAccount("a@example.com", "t1")
+        val manager = managerWithAcquisitionSwitch {
+            signOut()
+            addAccount("a@example.com", "t2") // same name, NEW session incarnation
+        }
+        try {
+            manager.updatePassword(newPassword = "np", oldPassword = "op")
+            fail("same-account relogin during acquisition must refuse: the session moved")
+        } catch (expected: IllegalStateException) {
+            assertTrue(expected.message!!.contains("superseded during token acquisition"))
+        }
+        assertEquals(0, server.requestCount) // no password HTTP
+        assertEquals("a@example.com", syncAccountManager.authoritySnapshot().accountName) // name alone cannot refuse
+        assertEquals("t2", syncAccountManager.authoritySnapshot().token!!.value) // fresh session's credential intact
     }
 
     /** P3 — refused admission in the REAL fetch flow issues ZERO token-fetch calls. */

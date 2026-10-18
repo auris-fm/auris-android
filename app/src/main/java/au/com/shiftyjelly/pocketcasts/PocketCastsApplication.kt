@@ -114,6 +114,8 @@ class PocketCastsApplication :
 
     @Inject lateinit var defaultPlaylistsInitializer: DefaultPlaylistsInitializer
 
+    @Inject lateinit var voiceSharingPolicyStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyStartup
+
     @Inject lateinit var analyticsController: AnalyticsController
 
     @Inject lateinit var downloadStatisticsReporter: DownloadStatisticsReporter
@@ -239,6 +241,7 @@ class PocketCastsApplication :
         applicationScope.launch {
             try {
                 defaultPlaylistsInitializer.initialize()
+                voiceSharingPolicyStartup.initializeOnAppStart()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

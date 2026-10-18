@@ -161,9 +161,10 @@ class VoiceSharingPolicyProvider(
             }
             activationGeneration = requestGen
             state.value = snapshot
-        }
-        if (enabled) {
-            scheduleLeaseInvalidation(snapshot)
+            // Timer ownership is serialized WITH publication under the same fence: a superseded
+            // refresh never reaches this line, so it can never cancel a newer timer or install a
+            // stale one; a renewal cancels the previous timer here before installing its own.
+            installInvalidationLocked(snapshot)
         }
         return snapshot
     }
@@ -174,9 +175,42 @@ class VoiceSharingPolicyProvider(
             if (requestGen == requestGeneration) {
                 activationGeneration = 0L
                 state.value = DISABLED
+                invalidationJob?.cancel()
+                invalidationJob = null
             }
         }
         return DISABLED
+    }
+
+    /** MUST be called while holding [fence]: timer install/cancel is part of publication. */
+    private fun installInvalidationLocked(snapshot: PolicySnapshot) {
+        invalidationJob?.cancel()
+        if (!snapshot.enabled) {
+            invalidationJob = null
+            return
+        }
+        val gen = snapshot.activationGeneration
+        invalidationJob = scope.launch {
+            while (true) {
+                val before = nowMs()
+                val due = snapshot.activatedAtMonotonicMs + DEFAULT_LEASE_MS - before
+                if (due <= 0) {
+                    break
+                }
+                sleepMs(due)
+                // No-progress guard: a sleep that returns without the monotonic clock moving
+                // cannot prove the lease is alive, and spinning would hang the dispatcher. Fail
+                // closed: publish disabled (fenced).
+                if (nowMs() <= before) break
+            }
+            synchronized(fence) {
+                // Fenced: a renewal (newer generation with its own timer) is never torn down by
+                // this older schedule waking late.
+                if (activationGeneration == gen) {
+                    state.value = DISABLED
+                }
+            }
+        }
     }
 
     /**
@@ -190,36 +224,6 @@ class VoiceSharingPolicyProvider(
         throw cancellation
     } catch (error: Exception) {
         null
-    }
-
-    /**
-     * Wakes when the lease expires — via the injected monotonic sleep — and publishes disabled
-     * so a plain subscriber observes the disable with no refresh and no read. Fenced on the
-     * activation generation so a renewal (a newer enabled snapshot with its own invalidation)
-     * is not torn down by this older schedule.
-     */
-    private fun scheduleLeaseInvalidation(snapshot: PolicySnapshot) {
-        invalidationJob?.cancel()
-        val gen = snapshot.activationGeneration
-        invalidationJob = scope.launch {
-            while (nowMs() < snapshot.activatedAtMonotonicMs + DEFAULT_LEASE_MS) {
-                val before = nowMs()
-                sleepMs(snapshot.activatedAtMonotonicMs + DEFAULT_LEASE_MS - before)
-                // No-progress guard: a sleep that returns without the monotonic clock moving
-                // cannot prove the lease is still alive, and spinning would hang the dispatcher.
-                // Fail closed: publish disabled (fenced), so a stalled schedule can never leave
-                // a stale enabled snapshot on the live StateFlow.
-                if (nowMs() <= before) {
-                    if (activationGeneration == gen) {
-                        state.value = DISABLED
-                    }
-                    return@launch
-                }
-            }
-            if (activationGeneration == gen) {
-                state.value = DISABLED
-            }
-        }
     }
 
     /**

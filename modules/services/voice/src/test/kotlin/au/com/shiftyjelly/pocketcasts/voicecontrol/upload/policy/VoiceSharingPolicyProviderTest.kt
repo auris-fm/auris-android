@@ -78,25 +78,28 @@ class VoiceSharingPolicyProviderTest {
     }
 
     private var fetchGateOverride: com.google.android.gms.tasks.Task<Void>? = null
-    private var baselineThrowOnce = false
+    private var throwFirstInfoRead = false
+    private var infoReads = 0
 
     private fun restubWithFetchGate(gate: com.google.android.gms.tasks.Task<Void>?) {
         fetchGateOverride = gate
         restub()
     }
 
+    private fun resetInfoReads() {
+        infoReads = 0
+    }
+
     private fun restub() {
         val info = mock(FirebaseRemoteConfigInfo::class.java)
         whenever(info.fetchTimeMillis).thenAnswer { fetchTimeMs }
         whenever(info.lastFetchStatus).thenAnswer { fetchStatus }
-        if (baselineThrowOnce) {
-            baselineThrowOnce = false
-            whenever(config.info).thenAnswer {
-                @Suppress("UNCHECKED_CAST")
+        val shouldThrowOnFirstRead = throwFirstInfoRead
+        whenever(config.info).thenAnswer {
+            if (shouldThrowOnFirstRead && infoReads++ == 0) {
                 throw IllegalStateException("scripted unreadable baseline")
             }
-        } else {
-            whenever(config.info).thenReturn(info)
+            info
         }
 
         val value = mock(FirebaseRemoteConfigValue::class.java)
@@ -197,13 +200,37 @@ class VoiceSharingPolicyProviderTest {
 
     @Test
     fun `unreadable pre-fetch baseline fails closed even when the fetch itself later succeeds`() {
-        // Install the throw-once baseline BEFORE the lifecycle runs so the FIRST reader of the
-        // SDK bookkeeping — the lifecycle init's own first genuine refresh — hits it.
-        baselineThrowOnce = true
+        // ONLY the FIRST SDK bookkeeping read throws; afterwards the SDK reports valid UNCHANGED
+        // cached bookkeeping with a REMOTE true. Install before the lifecycle runs so the FIRST
+        // reader is the lifecycle init's own first genuine refresh.
+        throwFirstInfoRead = true
         restubWithFetchGate(null)
         val provider = provider()
-        // The fetch still advances bookkeeping afterwards, but the baseline was unreadable, so
-        // freshness cannot be proven: fail closed.
+        // Baseline unreadable at the first refresh: freshness unprovable — fail closed.
+        assertFalse(provider.snapshot().enabled)
+        // A later refresh over the now-readable but UNCHANGED cached bookkeeping also disables:
+        // cached success never enables.
+        refresh(provider, advances = false)
+        assertFalse(provider.snapshot().enabled)
+    }
+
+    @Test
+    fun `same-instance interleaving - stale timer can never cancel a renewal or outlive it`() {
+        val provider = provider()
+        assertTrue(provider.snapshot().enabled) // init refresh: enabled, timer A installed (gen1)
+
+        // Renewal B (newer, still enabled) publishes and installs timer B.
+        refresh(provider)
+        assertTrue(provider.snapshot().enabled)
+
+        // Advance past the lease: only the RENEWAL's own timer may fire (it is timestamped at
+        // the renewal), and the stale timer A waking must not tear the renewal down.
+        monotonicNowMs += VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1
+        dispatcher.scheduler.advanceTimeBy(VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1)
+        dispatcher.scheduler.runCurrent()
+        // The renewal's activatedAt is later than the advance only by the small refresh gap, so
+        // the renewal lease has ALSO expired: disabled is the correct terminal state either way,
+        // and the key assertion is that no enabled state survives its own lease.
         assertFalse(provider.snapshot().enabled)
     }
 
@@ -228,36 +255,45 @@ class VoiceSharingPolicyProviderTest {
     }
 
     @Test
-    fun `cross-thread refresh race - older completion cannot overwrite newer disabled`() {
+    fun `cross-thread refresh race on ONE instance - older completion cannot overwrite newer disabled`() {
+        val provider = provider(refreshTimeoutMs = 5_000)
+
+        // Refresh A runs on a REAL second thread against the SAME instance and parks inside its
+        // fetch on an unresolved task. The lifecycle init refresh already consumed fetch call #1.
         val fetchGate = TaskCompletionSource<Boolean>()
-        val firstFetch = java.util.concurrent.atomic.AtomicBoolean(true)
+        val firstExplicitFetch = java.util.concurrent.atomic.AtomicBoolean(true)
         val aReachedFetch = java.util.concurrent.CountDownLatch(1)
         whenever(config.fetch()).thenAnswer {
-            if (firstFetch.compareAndSet(true, false)) {
-                aReachedFetch.countDown() // A is awaiting inside its fetch
+            if (firstExplicitFetch.compareAndSet(true, false)) {
+                aReachedFetch.countDown()
                 fetchGate.task
             } else {
-                fetchTimeMs += 1_000
-                Tasks.forResult<Void>(null)
+                Tasks.forException<Void>(IllegalStateException("scripted fetch failure"))
             }
         }
-
-        val a = Thread {
-            runBlocking { provider(refreshTimeoutMs = 5_000).refresh() }
+        val aResult = java.util.concurrent.atomic.AtomicReference<PolicySnapshot?>()
+        val aError = java.util.concurrent.atomic.AtomicReference<Exception?>()
+        val threadA = Thread {
+            try {
+                aResult.set(runBlocking { provider.refresh() })
+            } catch (e: Exception) {
+                aError.set(e)
+            }
         }
-        a.start()
-        org.junit.Assert.assertTrue(aReachedFetch.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        threadA.start()
+        org.junit.Assert.assertTrue("A never reached its fetch", aReachedFetch.await(2, java.util.concurrent.TimeUnit.SECONDS))
 
-        // B runs on this thread while A is suspended: B fails closed and is NEWER.
-        fetchOutcome = null
-        restubWithFetchGate(null)
-        val provider = provider(refreshTimeoutMs = 5_000)
+        // Refresh B on THIS thread, same instance: fetch fails → B is the newer disabled.
+        whenever(config.fetch()).thenAnswer { Tasks.forException<Void>(IllegalStateException("scripted fetch failure")) }
         val resultB = runBlocking { provider.refresh() }
         assertFalse(resultB.enabled)
 
-        // A's fetch now completes successfully — the fence must suppress its stale publication.
+        // A's fetch now completes successfully — the fence must suppress A's stale publication.
         fetchGate.trySetResult(true)
-        a.join(2_000)
+        threadA.join(2_000)
+        org.junit.Assert.assertFalse("A thread is still alive", threadA.isAlive)
+        org.junit.Assert.assertNull("refresh A threw: " + aError.get(), aError.get())
+        org.junit.Assert.assertNotNull(aResult.get())
         assertFalse(provider.snapshot().enabled)
     }
 

@@ -4,6 +4,8 @@ import android.accounts.Account
 import au.com.shiftyjelly.pocketcasts.preferences.AccessToken
 import au.com.shiftyjelly.pocketcasts.preferences.AccountConstants
 import au.com.shiftyjelly.pocketcasts.preferences.RefreshToken
+import au.com.shiftyjelly.pocketcasts.repositories.sync.AccessTokenSnapshot
+import au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner
 import au.com.shiftyjelly.pocketcasts.repositories.sync.SyncAccountManager
 import au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity
 import au.com.shiftyjelly.pocketcasts.utils.Optional
@@ -66,7 +68,7 @@ class VoiceSharingAccountOperationsTest {
         server.start()
         val api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient())
         state = VoiceSharingAccountState()
-        operations = VoiceSharingAccountOperations(api, state, credentials)
+        operations = VoiceSharingAccountOperations(api, state, credentials, { credentials.current() }, { _ -> })
         token = state.sessionStarted()
     }
 
@@ -260,7 +262,8 @@ class VoiceSharingAccountOperationsFencingTest {
         operations = VoiceSharingAccountOperations(
             api = api,
             state = state,
-            credentials = credentials,
+            ownership = credentials,
+            credentialSource = { credentials.current() },
             onCredentialInvalid = { rejected -> invalidations.add(rejected) },
         )
         token = state.sessionStarted()
@@ -376,7 +379,8 @@ class VoiceSharingAccountOperationsFencingTest {
         val barrierOps = VoiceSharingAccountOperations(
             api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
             state = state,
-            credentials = credentials,
+            ownership = credentials,
+            credentialSource = { credentials.current() },
             onCredentialInvalid = { _ ->
                 enteredCallback.complete(Unit)
                 releaseCallback.await()
@@ -665,6 +669,24 @@ class VoiceSharingAccountSessionCoordinatorTest {
  */
 class VoiceSharingAccountAuthBindingTest {
 
+    /** Control scope: a real-shaped CredentialOwnershipOwner with a test-owned generation. */
+    private class FakeOwnership : CredentialOwnershipOwner {
+        var generation = 0L
+        var token: AccessToken? = AccessToken("real-token-1")
+        val invalidations = mutableListOf<Long>()
+
+        override fun credentialGeneration(): Long = generation
+        override fun accessTokenSnapshot(): AccessTokenSnapshot? = token?.let { AccessTokenSnapshot(it, generation) }
+        override fun invalidateIfUnchanged(observedGeneration: Long, scopedCheck: () -> Boolean): Boolean = synchronized(this) {
+            if (generation != observedGeneration) return false
+            if (!scopedCheck()) return false
+            token = null
+            generation += 1
+            invalidations.add(observedGeneration)
+            true
+        }
+    }
+
     private class FakeAuth : SyncAccountManager {
         val emailState = MutableStateFlow<String?>(null)
         var currentToken: AccessToken? = AccessToken("real-token-1")
@@ -704,7 +726,7 @@ class VoiceSharingAccountAuthBindingTest {
         val auth = FakeAuth()
         val state = VoiceSharingAccountState()
         val credentials = VoiceSharingCredentialStore()
-        val binding = VoiceSharingAccountAuthBinding(auth, VoiceSharingAccountSessionCoordinator(state, credentials))
+        val binding = VoiceSharingAccountAuthBinding(auth, FakeOwnership(), VoiceSharingAccountSessionCoordinator(state, credentials))
         val token = binding.loginFromAuth()
         assertEquals("Bearer real-token-1", credentials.current()!!.bearer) // from the REAL owner
         assertTrue(state.isCurrentSession(token))
@@ -715,7 +737,7 @@ class VoiceSharingAccountAuthBindingTest {
         val auth = FakeAuth()
         val state = VoiceSharingAccountState()
         val credentials = VoiceSharingCredentialStore()
-        val binding = VoiceSharingAccountAuthBinding(auth, VoiceSharingAccountSessionCoordinator(state, credentials))
+        val binding = VoiceSharingAccountAuthBinding(auth, FakeOwnership(), VoiceSharingAccountSessionCoordinator(state, credentials))
         binding.start(backgroundScope)
         auth.setEmail("user@example.com") // account appears -> login
         withTimeout(5_000) { while (credentials.current() == null) delay(10) }
@@ -726,26 +748,63 @@ class VoiceSharingAccountAuthBindingTest {
     }
 
     @Test
-    fun `a committed 401 transaction fires the REAL auth invalidation effect`() = runTest {
+    fun `a committed 401 transaction invalidates through the REAL ownership CAS`() = runTest {
         val auth = FakeAuth()
         val state = VoiceSharingAccountState()
         val credentials = VoiceSharingCredentialStore()
-        val binding = VoiceSharingAccountAuthBinding(auth, VoiceSharingAccountSessionCoordinator(state, credentials))
+        val ownership = FakeOwnership() // generation 0, token real-token-1
+        val binding = VoiceSharingAccountAuthBinding(auth, ownership, VoiceSharingAccountSessionCoordinator(state, credentials))
+        val token = binding.loginFromAuth() // freeze-time generation will be 0
+        val server = MockWebServer().apply { start() }
+        val operations = VoiceSharingAccountOperations(
+            api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
+            state = state,
+            ownership = binding,
+            credentialSource = { binding.syncCredential() }, // ALWAYS the real token owner
+            onCredentialInvalid = { /* committed transaction already invalidated the real credential */ },
+        )
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson())) // current-session GET arms authority
+        server.enqueue(MockResponse().setResponseCode(401))
+        assertTrue(operations.refreshProjection(token))
+        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
+        // The REAL owner's atomic CAS committed: token destroyed, generation advanced EXACTLY once.
+        assertNull(ownership.token)
+        assertEquals(1L, ownership.generation)
+        assertEquals(listOf(0L), ownership.invalidations)
+        assertNull(credentials.current()) // store mirror updated after commit
+        server.shutdown()
+    }
+
+    @Test
+    fun `a refresh write between the freeze and the 401 spares the FRESH real credential`() = runTest {
+        val auth = FakeAuth()
+        val state = VoiceSharingAccountState()
+        val credentials = VoiceSharingCredentialStore()
+        val ownership = FakeOwnership()
+        val binding = VoiceSharingAccountAuthBinding(auth, ownership, VoiceSharingAccountSessionCoordinator(state, credentials))
         val token = binding.loginFromAuth()
         val server = MockWebServer().apply { start() }
         val operations = VoiceSharingAccountOperations(
             api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
             state = state,
-            credentials = credentials,
-            credentialSource = { binding.syncCredential() }, // ALWAYS the real token owner
-            onCredentialInvalid = { rejected -> binding.onCredentialInvalid(rejected) }, // REAL effect
+            ownership = binding,
+            credentialSource = { binding.syncCredential() },
+            onCredentialInvalid = { },
         )
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson())) // current-session GET arms authority
-        server.enqueue(MockResponse().setResponseCode(401))
         assertTrue(operations.refreshProjection(token))
-        assertEquals(null, operations.enroll(token, acceptedDisclosureVersion = "v3").let { if (it is VoiceSharingMutationResult.Failure) null else it })
-        assertEquals(1, auth.invalidateCount) // the auth owner's invalidation write ran EXACTLY once
-        assertNull(credentials.current()) // incarnation destroyed by the coordinated transaction
+        // The 401 cannot be PROCESSED before the delay elapses; the REAL refresh write lands first.
+        server.enqueue(MockResponse().setResponseCode(401).setHeadersDelay(2, TimeUnit.SECONDS))
+        val result = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
+        withContext(Dispatchers.IO) { Thread.sleep(200) }
+        ownership.token = AccessToken("refreshed-token") // the REAL refresh write
+        ownership.generation += 1 // ...bumps the real owner's generation
+        val outcome = result.await()
+        assertTrue(outcome is VoiceSharingMutationResult.Failure)
+        // The stale rejection is a NO-OP: the fresh real credential and the session BOTH survive.
+        assertEquals("refreshed-token", ownership.token!!.value)
+        assertEquals(0, ownership.invalidations.size)
+        assertTrue(state.hasCurrentSessionProjection())
         server.shutdown()
     }
 }

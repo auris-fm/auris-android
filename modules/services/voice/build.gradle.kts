@@ -56,6 +56,7 @@ dependencies {
     implementation(projects.modules.services.localization)
     implementation(projects.modules.services.preferences)
     implementation(projects.modules.services.repositories)
+    implementation(projects.modules.services.servers)
     implementation(projects.modules.services.utils)
 
     implementation(platform(libs.compose.bom))

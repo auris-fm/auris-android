@@ -31,7 +31,37 @@ open class SyncAccountManagerImpl @Inject constructor(
     private val tokenErrorNotification: TokenErrorNotification,
     private val accountManager: AccountManager,
 ) : TokenHandler,
-    SyncAccountManager {
+    SyncAccountManager,
+    CredentialOwnershipOwner {
+
+    /**
+     * Credential OWNERSHIP (reviewer a75df7ef): one lock and one non-secret generation guard
+     * EVERY credential write (set/invalidate/login/signOut) and the atomic compare-and-
+     * invalidate other boundaries run their scoped checks inside. External rotations are
+     * therefore never missed by a cached read and never cleared by a stale rejection.
+     */
+    private val credentialWriteLock = Any()
+    private val credentialGenerationCounter = java.util.concurrent.atomic.AtomicLong(0)
+
+    override fun credentialGeneration(): Long = credentialGenerationCounter.get()
+
+    override fun accessTokenSnapshot(): AccessTokenSnapshot? = synchronized(credentialWriteLock) {
+        val account = getAccount() ?: return null
+        peekAccessToken(account)?.let { AccessTokenSnapshot(it, credentialGenerationCounter.get()) }
+    }
+
+    override fun invalidateIfUnchanged(observedGeneration: Long, scopedCheck: () -> Boolean): Boolean = synchronized(credentialWriteLock) {
+        if (credentialGenerationCounter.get() != observedGeneration) return false
+        if (!scopedCheck()) return false
+        val account = getAccount()
+        if (account != null) {
+            peekAccessToken(account)?.let { accessToken ->
+                accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, accessToken.value)
+            }
+        }
+        credentialGenerationCounter.incrementAndGet()
+        true
+    }
     override fun getAccount(): Account? {
         return accountManager.getAccountsByType(AccountConstants.ACCOUNT_TYPE).firstOrNull()
     }
@@ -131,9 +161,12 @@ open class SyncAccountManagerImpl @Inject constructor(
     }
 
     override fun invalidateAccessToken() {
-        val account = getAccount() ?: return
-        val accessToken = peekAccessToken(account) ?: return
-        accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, accessToken.value)
+        synchronized(credentialWriteLock) {
+            val account = getAccount() ?: return
+            val accessToken = peekAccessToken(account) ?: return
+            accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, accessToken.value)
+            credentialGenerationCounter.incrementAndGet()
+        }
     }
 
     override fun getSignInType(account: Account): AccountConstants.SignInType {
@@ -150,7 +183,12 @@ open class SyncAccountManagerImpl @Inject constructor(
             )
             putString(AccountConstants.LOGIN_IDENTITY, loginIdentity.key)
         }
-        val accountAdded = accountManager.addAccountExplicitly(account, refreshToken.value, userData)
+        val accountAdded = synchronized(credentialWriteLock) {
+            val added = accountManager.addAccountExplicitly(account, refreshToken.value, userData)
+            accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
+            credentialGenerationCounter.incrementAndGet()
+            added
+        }
         accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
 
         // When the account was already added, set the sign in type to Tokens because the account
@@ -162,8 +200,11 @@ open class SyncAccountManagerImpl @Inject constructor(
     }
 
     override fun signOut() {
-        accountManager.getAccountsByType(AccountConstants.ACCOUNT_TYPE).forEach { account ->
-            accountManager.removeAccountExplicitly(account)
+        synchronized(credentialWriteLock) {
+            accountManager.getAccountsByType(AccountConstants.ACCOUNT_TYPE).forEach { account ->
+                accountManager.removeAccountExplicitly(account)
+            }
+            credentialGenerationCounter.incrementAndGet()
         }
     }
 
@@ -174,8 +215,11 @@ open class SyncAccountManagerImpl @Inject constructor(
     }
 
     override fun setAccessToken(accessToken: AccessToken) {
-        val account = getAccount() ?: return
-        accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
+        synchronized(credentialWriteLock) {
+            val account = getAccount() ?: return
+            accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
+            credentialGenerationCounter.incrementAndGet()
+        }
     }
 
     override fun getRefreshToken(account: Account?): RefreshToken? = (account ?: getAccount())?.let {

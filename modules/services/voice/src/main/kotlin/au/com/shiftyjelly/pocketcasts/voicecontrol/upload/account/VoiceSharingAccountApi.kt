@@ -48,6 +48,9 @@ interface VoiceSharingAccountApi {
 
     companion object {
         fun create(builder: Retrofit.Builder, client: OkHttpClient): VoiceSharingAccountApi = builder.client(client).build().create(VoiceSharingAccountApi::class.java)
+
+        /** Production overload: the prebuilt gateway retrofit (gateway API URL + cached client). */
+        fun create(retrofit: Retrofit): VoiceSharingAccountApi = retrofit.create(VoiceSharingAccountApi::class.java)
     }
 }
 
@@ -105,9 +108,9 @@ data class DeletionReceipt(val deletionRequestId: String, val status: String)
 class VoiceSharingAccountOperations(
     private val api: VoiceSharingAccountApi,
     private val state: VoiceSharingAccountState,
-    private val credentials: VoiceSharingCredentialStore,
-    private val credentialSource: suspend () -> CredentialIncarnation? = { credentials.current() },
-    private val onCredentialInvalid: suspend (CredentialIncarnation) -> Unit = {},
+    private val ownership: VoiceSharingCredentialOwnership,
+    private val credentialSource: suspend () -> CredentialIncarnation?,
+    private val onCredentialInvalid: suspend (CredentialIncarnation) -> Unit,
 ) {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
@@ -270,7 +273,7 @@ class VoiceSharingAccountOperations(
      */
     private suspend fun handleUnauthorized(op: FrozenOperation) {
         val rejected = op.credential ?: return
-        val committed = credentials.invalidateIfCurrent(rejected) {
+        val committed = ownership.invalidateIfCurrent(rejected) {
             state.processUnauthorized(op.token, op.ticket)
         }
         if (committed) onCredentialInvalid(rejected)

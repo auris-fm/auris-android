@@ -34,7 +34,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.BluetoothCandidate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisitionPlatform
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.NoopSegmentSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
@@ -80,7 +83,9 @@ class VoiceAsrEngineTest {
     private val backend = mock<AsrBackend>()
 
     // Gate OFF by default: the observation layer must not change any pre-existing engine behaviour.
-    private var observer = SegmentObserver(CollectionGate { _, _ -> false }, NoopSegmentSink)
+    private var authority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = false, fullRevocation = true) }
+    private var retentionSink = ContributionRetentionSink()
+    private var observer = SegmentObserver(CollectionGate { _ -> false }, NoopSegmentSink, authority)
     private val translationStage = mock<TranslationStage>()
 
     init {
@@ -120,6 +125,8 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            collectionAuthority = authority,
+            retentionSink = retentionSink,
             segmentObserver = observer,
             context = context,
         )
@@ -310,6 +317,8 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            collectionAuthority = authority,
+            retentionSink = retentionSink,
             segmentObserver = observer,
             context = context,
         )
@@ -547,6 +556,8 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = signal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            collectionAuthority = authority,
+            retentionSink = retentionSink,
             segmentObserver = observer,
             context = context,
         )
@@ -599,6 +610,8 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = GracePeriodSignal(timeoutMs = 30_000L),
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            collectionAuthority = authority,
+            retentionSink = retentionSink,
             segmentObserver = observer,
             context = context,
         )
@@ -672,6 +685,8 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = GracePeriodSignal(timeoutMs = 30_000L),
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            collectionAuthority = authority,
+            retentionSink = retentionSink,
             segmentObserver = observer,
             context = context,
         )
@@ -734,6 +749,8 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = signal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            collectionAuthority = authority,
+            retentionSink = retentionSink,
             segmentObserver = observer,
             context = context,
             templateResolver = templateResolver,
@@ -785,6 +802,8 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            collectionAuthority = authority,
+            retentionSink = retentionSink,
             segmentObserver = observer,
             context = context,
         )
@@ -841,6 +860,8 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            collectionAuthority = authority,
+            retentionSink = retentionSink,
             segmentObserver = observer,
             context = context,
         )
@@ -891,6 +912,8 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            collectionAuthority = authority,
+            retentionSink = retentionSink,
             segmentObserver = observer,
             context = context,
         )
@@ -943,6 +966,8 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            collectionAuthority = authority,
+            retentionSink = retentionSink,
             segmentObserver = observer,
             context = context,
         )
@@ -1011,6 +1036,9 @@ class VoiceAsrEngineTest {
                 gracePeriodSignal = gracePeriodSignal,
                 audioFeedbackRenderer = audioFeedbackRenderer,
                 translationStage = translationStage,
+                collectionAuthority = authority,
+                retentionSink = retentionSink,
+                segmentObserver = observer,
                 context = context,
             )
             engine.scope = this
@@ -1086,6 +1114,9 @@ class VoiceAsrEngineTest {
                 gracePeriodSignal = gracePeriodSignal,
                 audioFeedbackRenderer = audioFeedbackRenderer,
                 translationStage = localTranslation,
+                collectionAuthority = authority,
+                retentionSink = retentionSink,
+                segmentObserver = observer,
                 context = context,
             )
             engine.scope = this
@@ -1140,6 +1171,8 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            collectionAuthority = authority,
+            retentionSink = retentionSink,
             segmentObserver = observer,
             context = context,
         )
@@ -1166,13 +1199,16 @@ class VoiceAsrEngineTest {
     private fun CoroutineScope.createEngineWithSpeech(
         recognizer: VoiceRecognizer,
         wakeWordResult: WakeWordResult,
-    ) = createEngineWithSpeech(observer, recognizer, wakeWordResult)
+    ) = createEngineWithSpeech(observer, retentionSink, authority, recognizer, wakeWordResult)
 
     private fun CoroutineScope.createEngineWithSpeech(
         observer: SegmentObserver,
+        sink: ContributionRetentionSink,
+        authorityOverride: () -> AuthorityDecision,
         recognizer: VoiceRecognizer,
         wakeWordResult: WakeWordResult,
     ) {
+        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(
@@ -1197,6 +1233,8 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            collectionAuthority = authorityOverride,
+            retentionSink = sink,
             segmentObserver = observer,
             context = context,
         )
@@ -1547,21 +1585,27 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `the engine drives REAL segment events through the observer - frozen context, no double gate check`() = runTest {
-        val sink = EngineObservationSink()
+        val retention = ContributionRetentionSink()
         var gateChecks = 0
+        val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
         observer = SegmentObserver(
-            CollectionGate { _, _ ->
+            CollectionGate { _ ->
                 gateChecks++
                 true
             },
-            sink,
+            retention,
+            liveAuthority,
         )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(
             observer,
+            retention,
+            liveAuthority,
             recognizer = recognizer,
             wakeWordResult = WakeWordResult(detected = false, confidence = 0f, completionSample = 4000),
         )
+        // Bleed filter passes: the turn proceeds to ASR like any ordinary capture.
+        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
 
         engine.start(
             backend = FakeAsrBackend("play something"),
@@ -1573,19 +1617,23 @@ class VoiceAsrEngineTest {
         )
         advanceUntilIdle()
 
-        // Gate consulted EXACTLY ONCE per capture, at START — before any PCM allocation.
-        assertEquals(1, gateChecks)
-        val started = sink.started.single()
-        val completed = sink.completed.single()
-        // Context frozen at start is the SAME context carried to completion (immutable).
-        assertEquals(started.context, completed.context)
-        assertEquals("Headset", started.context.routeClass)
-        assertEquals(1L, started.context.captureSession)
-        // Incremental accounting flowed between start and completion.
-        assertEquals(1, sink.incremental.size)
+        // Gate consulted at START and revalidated BEFORE the completion handoff (reviewer
+        // blocker 2: a START-only YES can never authorize retention after authority loss).
+        assertEquals(2, gateChecks)
+        val candidate = retention.retainedSnapshot().single()
+        assertEquals(1L, candidate.context.captureSession)
+        assertEquals("Headset", candidate.context.routeClass)
+        // The engine's per-capture context is threaded through start→incremental→completed;
+        // with no SpeechEnded-sample delta before completion the accounting starts at zero —
+        // the point is that accounting flows under the SAME issued context, not a constant.
+        assertEquals(0L, candidate.incrementalSamplesAccounted)
         // Exactly the VAD's samples — no virtual padding, no playback reference.
-        assertTrue(completed.pcm.contentEquals(shortArrayOf(100, 200, 300, 400)))
-        assertEquals(SegmentObservation.WakeState.NotDetected, completed.wakeState)
+        assertTrue(candidate.pcm!!.contentEquals(shortArrayOf(100, 200, 300, 400)))
+        assertEquals(SegmentObservation.WakeState.NotDetected, candidate.wakeState)
+        // The frozen context travelled the WHOLE ASR → routing → execution chain and every
+        // stage joined by the ISSUED id; the final recorded outcome is Executed.
+        assertEquals(candidate.context.captureId, (candidate.outcome as CollectionOutcome.Executed).captureId)
+        assertTrue((candidate.outcome as CollectionOutcome.Executed).success)
 
         engine.stop()
     }
@@ -1593,7 +1641,8 @@ class VoiceAsrEngineTest {
     @Test
     fun `stop during an open segment CANCELS it - partial discarded, nothing completes`() = runTest {
         val sink = EngineObservationSink()
-        observer = SegmentObserver(CollectionGate { _, _ -> true }, sink)
+        val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
+        observer = SegmentObserver(CollectionGate { true }, sink, liveAuthority)
         val pending = MutableSharedFlow<VoiceSegmenterResult>()
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(pending)
         `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
@@ -1605,6 +1654,8 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            collectionAuthority = liveAuthority,
+            retentionSink = retentionSink,
             segmentObserver = observer,
             context = context,
         )
@@ -1635,10 +1686,14 @@ class VoiceAsrEngineTest {
     @Test
     fun `gate OFF means the pipeline allocates NOTHING for upload across a full turn`() = runTest {
         val sink = EngineObservationSink()
-        observer = SegmentObserver(CollectionGate { _, _ -> false }, sink)
+        val deadSink = ContributionRetentionSink()
+        val deadAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = false, fullRevocation = true) }
+        observer = SegmentObserver(CollectionGate { false }, sink, deadAuthority)
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(
             observer,
+            deadSink,
+            deadAuthority,
             recognizer = recognizer,
             wakeWordResult = WakeWordResult(detected = false, confidence = 0f, completionSample = 4000),
         )
@@ -1657,8 +1712,10 @@ class VoiceAsrEngineTest {
         // Recognition still ran (ordinary pipeline untouched):
         assertEquals(listOf("ensureReady", "recognize:play something"), recognizer.calls)
         // ...yet zero upload-side observations and zero retained PCM exist anywhere.
-        assertTrue(sink.allObservedPcmSamples() == 0)
-        assertTrue(sink.started.isEmpty() && sink.incremental.isEmpty() && sink.completed.isEmpty())
+        assertEquals(0, deadSink.retainedCount())
+        assertEquals(0L, deadSink.retainedBytes())
+        assertEquals(0, sink.started.size + sink.incremental.size + sink.completed.size)
+        assertEquals(0, observer.retainedBytes())
     }
 
     private class EngineObservationSink : au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentSink {
@@ -1676,8 +1733,9 @@ class VoiceAsrEngineTest {
             incremental += observation
         }
 
-        override fun completed(observation: SegmentObservation.Completed) {
+        override fun completed(observation: SegmentObservation.Completed): Boolean {
             completed += observation
+            return true
         }
 
         override fun cancelled(observation: SegmentObservation.Cancelled) {

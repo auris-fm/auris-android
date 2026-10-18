@@ -1,151 +1,180 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
-import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Recording sink + gate spy for the observer controls. */
-private class SpySink : SegmentSink {
-    val started = mutableListOf<SegmentObservation.Started>()
-    val incremental = mutableListOf<SegmentObservation.Incremental>()
-    val completed = mutableListOf<SegmentObservation.Completed>()
-    val cancelled = mutableListOf<SegmentObservation.Cancelled>()
-    var acceptsStarts = true
-
-    override fun started(observation: SegmentObservation.Started): Boolean {
-        started += observation
-        return acceptsStarts
-    }
-
-    override fun incremental(observation: SegmentObservation.Incremental) {
-        incremental += observation
-    }
-
-    override fun completed(observation: SegmentObservation.Completed) {
-        completed += observation
-    }
-
-    override fun cancelled(observation: SegmentObservation.Cancelled) {
-        cancelled += observation
-    }
-}
+private val LIVE = AuthorityDecision(collectionPermitted = true, fullRevocation = false)
+private val DEAD_REVOKED = AuthorityDecision(collectionPermitted = false, fullRevocation = true)
+private val DEAD_DISABLED = AuthorityDecision(collectionPermitted = false, fullRevocation = false)
 
 class SegmentObserverTest {
 
-    @Test
-    fun `gate refusal at START retains NOTHING - zero observations, zero PCM`() {
-        var gateCalls = 0
-        val sink = SpySink()
-        val observer = SegmentObserver(
-            CollectionGate { _, _ ->
-                gateCalls++
-                false
-            },
-            sink,
-        )
-
-        observer.speechStarted(captureSession = 1L, routeClass = "Headset")
-        observer.speechIncremental(160)
-        observer.wakeCompleted(ShortArray(320), 16000, 0, 300, SegmentObservation.WakeState.NotDetected)
-
-        assertEquals(1, gateCalls) // consulted EXACTLY once, at start — before any allocation
-        assertTrue(sink.started.isEmpty())
-        assertTrue(sink.incremental.isEmpty())
-        assertTrue(sink.completed.isEmpty())
-        assertTrue(sink.cancelled.isEmpty())
+    private class FrameSpy {
+        var invocations = 0
+        fun provider(frames: List<ShortArray>, rate: Int): () -> Pair<List<ShortArray>, Int> = {
+            invocations++
+            frames to rate
+        }
     }
 
     @Test
-    fun `context is frozen at START and stays IMMUTABLE through every later event`() {
-        val sink = SpySink()
-        val observer = SegmentObserver(CollectionGate { _, _ -> true }, sink)
+    fun `gate refusal at START allocates NOTHING - frames provider is never invoked`() {
+        val sink = ContributionRetentionSink()
+        val observer = SegmentObserver(CollectionGate { _ -> false }, sink) { DEAD_REVOKED }
+        val spy = FrameSpy()
 
-        val captureId = observer.speechStarted(7L, "Headset")
-        observer.speechIncremental(100)
-        observer.wakeCompleted(ShortArray(10), 16000, 1, 9, SegmentObservation.WakeState.Detected)
+        val context = observer.speechStarted(1L, "Headset")
+        assertNull("refused capture issues no context", context)
+        observer.speechIncremental(context, 160)
+        observer.wakeCompleted(context, 0, 300, SegmentObservation.WakeState.NotDetected, spy.provider(listOf(shortArrayOf(1, 2)), 16000))
 
-        val startedContext = sink.started.single().context
-        val completedContext = sink.completed.single().context
-        assertEquals(captureId, startedContext.captureId)
-        assertEquals(startedContext, completedContext) // same frozen context, unchanged
-        assertEquals(7L, completedContext.captureSession)
-        assertEquals("Headset", completedContext.routeClass)
+        // ALLOCATION PROOF: the flatten/provider ran ZERO times — zero upload-side bytes.
+        assertEquals(0, spy.invocations)
+        assertEquals(0L, observer.retainedBytes())
+        assertEquals(0, sink.retainedCount())
+        assertEquals(0L, sink.retainedBytes())
     }
 
     @Test
-    fun `cancel discards the partial and closes the capture - late completion is a NO-OP`() {
-        val sink = SpySink()
-        val observer = SegmentObserver(CollectionGate { _, _ -> true }, sink)
+    fun `revocation DURING a segment purges everything and refuses handoff - provider not run`() {
+        val sink = ContributionRetentionSink()
+        var live = true
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink) {
+            if (live) LIVE else DEAD_REVOKED
+        }
+        val spy = FrameSpy()
 
-        val id = observer.speechStarted(1L, "Headset")
-        observer.speechIncremental(50)
-        observer.cancelled("TooShort")
-        // A queued LATE outcome for the cancelled capture:
-        observer.wakeCompleted(ShortArray(8), 16000, 0, 7, SegmentObservation.WakeState.NotDetected)
+        val context = observer.speechStarted(2L, "Headset")
+        assertNotNull(context)
+        observer.speechIncremental(context, 50)
+        // External FULL REVOCATION lands mid-segment (withdrawal/disable/expiry/account change).
+        live = false
+        assertTrue(observer.revoked("account-change"))
 
-        assertEquals(1, sink.cancelled.size)
-        assertEquals(id, sink.cancelled.single().context.captureId)
-        assertTrue("late completion after cancel must not retain audio", sink.completed.isEmpty())
-        assertFalse(observer.isOpen(id))
+        // Handoff attempt after revocation: revalidation refuses; NO allocation happens.
+        observer.wakeCompleted(context!!, 0, 99, SegmentObservation.WakeState.Detected, spy.provider(listOf(shortArrayOf(1, 2, 3)), 16000))
+        assertEquals(0, spy.invocations)
+        assertEquals(0, sink.retainedCount())
+        assertEquals(0L, sink.retainedBytes())
+        assertTrue(sink.lossEvents.any { it.startsWith("purge-all:account-change") })
+        assertFalse(observer.isOpen(context.captureId))
     }
 
     @Test
-    fun `incremental accounting is BOUNDED by collector ownership - refusing sink gets nothing more`() {
-        val sink = SpySink().apply { acceptsStarts = false } // sink declines to own retention
-        val observer = SegmentObserver(CollectionGate { _, _ -> true }, sink)
+    fun `cancel A then start B then LATE completion of A cannot join B`() {
+        val sink = ContributionRetentionSink()
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink) { LIVE }
 
-        observer.speechStarted(2L, "Speaker")
-        observer.speechIncremental(100)
-        observer.wakeCompleted(ShortArray(4), 16000, 0, 3, SegmentObservation.WakeState.NotDetected)
+        val a = observer.speechStarted(3L, "Headset")!!
+        observer.cancelled(a, "TooShort")
+        val b = observer.speechStarted(4L, "Speaker")!!
+        // Late outcome for the CANCELLED capture A must not touch open capture B.
+        observer.wakeCompleted(a, 0, 10, SegmentObservation.WakeState.NotDetected) { listOf(shortArrayOf(9)) to 16000 }
 
-        assertEquals(1, sink.started.size) // asked once
-        assertTrue(sink.incremental.isEmpty()) // never fed again after ownership declined
-        assertTrue(sink.completed.isEmpty())
+        assertTrue(observer.isOpen(b.captureId))
+        assertEquals(0, sink.retainedCount()) // B has no completed handoff yet
+        // And the cancelled A's partial was discarded: audit trail records only that discard.
+        assertEquals(1, sink.lossEvents.count { it == "partial-discard:TooShort" })
     }
 
     @Test
-    fun `each capture gets a FRESH identity while the session incarnation is preserved`() {
-        val sink = SpySink()
-        val observer = SegmentObserver(CollectionGate { _, _ -> true }, sink)
+    fun `detector failure still produces EXACTLY ONE terminal - Completed(DetectorFailed)`() {
+        val sink = ContributionRetentionSink()
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink) { LIVE }
 
-        val first = observer.speechStarted(3L, "Headset")
-        observer.cancelled("pipeline-stopped")
-        val second = observer.speechStarted(3L, "Headset")
-        assertNotEquals(first, second)
-        observer.wakeCompleted(ShortArray(2), 16000, 0, 1, SegmentObservation.WakeState.NotDetected)
+        val context = observer.speechStarted(5L, "Headset")!!
+        observer.wakeCompleted(context, 1, 7, SegmentObservation.WakeState.DetectorFailed) { listOf(shortArrayOf(1, 2, 3)) to 16000 }
+        // A stray cancel afterwards finds no open capture: no second terminal.
+        observer.cancelled(context, "wake-detector-failed")
 
-        assertEquals(2, sink.started.size)
-        assertEquals(second, sink.completed.single().context.captureId)
-        assertEquals(3L, sink.completed.single().context.captureSession)
+        val retained = sink.retainedSnapshot().single()
+        assertEquals(SegmentObservation.WakeState.DetectorFailed, retained.wakeState)
+        assertFalse(observer.isOpen(context.captureId))
+        assertTrue(sink.lossEvents.none { it.startsWith("partial-discard:wake-detector-failed") })
     }
 
     @Test
-    fun `events between captures are DROPPED - no orphan context exists`() {
-        val sink = SpySink()
-        val observer = SegmentObserver(CollectionGate { _, _ -> true }, sink)
-        observer.speechIncremental(100)
-        observer.cancelled("stray")
-        assertTrue(sink.incremental.isEmpty())
-        assertTrue(sink.cancelled.isEmpty())
-        assertNull(sink.started.firstOrNull())
+    fun `incremental uses REAL deltas under ownership and the BYTE CAP ends retention early`() {
+        val sink = ContributionRetentionSink(maxBytesPerClip = 8L) // tiny cap for the control
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink) { LIVE }
+        observer.maxRetainedBytes = 16L // 8 samples
+
+        val context = observer.speechStarted(6L, "Headset")!!
+        observer.speechIncremental(context, 6) // 12 bytes ≤ cap → accounted
+        assertEquals(12L, observer.retainedBytes())
+        observer.speechIncremental(context, 5) // would exceed: 12 + 10 > 16 → cap cancels THIS capture
+
+        // Retention ended by the cap, not silently bounded: a cancellation terminal exists.
+        assertFalse(observer.isOpen(context.captureId))
+        assertTrue(sink.lossEvents.any { it == "partial-discard:retention-cap" })
     }
 
     @Test
-    fun `wake observation state rides the completed segment`() {
-        val sink = SpySink()
-        val observer = SegmentObserver(CollectionGate { _, _ -> true }, sink)
-        observer.speechStarted(9L, "BluetoothA2dpOnly")
-        observer.wakeCompleted(ShortArray(16), 16000, 2, 15, SegmentObservation.WakeState.Detected)
+    fun `listening closure discards ONLY the current partial - completed contributions survive`() {
+        val sink = ContributionRetentionSink()
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink) { LIVE }
 
-        val done = sink.completed.single()
-        assertEquals(SegmentObservation.WakeState.Detected, done.wakeState)
-        assertEquals("BluetoothA2dpOnly", done.context.routeClass)
-        assertEquals(16, done.pcm.size) // exactly the VAD's samples
+        // First capture completes normally.
+        val first = observer.speechStarted(7L, "Headset")!!
+        observer.wakeCompleted(first, 0, 3, SegmentObservation.WakeState.NotDetected) { listOf(shortArrayOf(1, 2, 3)) to 16000 }
+        assertEquals(1, sink.retainedCount())
+
+        // Second capture is OPEN when listening closes.
+        val second = observer.speechStarted(7L, "Headset")!!
+        observer.speechIncremental(second, 20)
+        observer.listeningClosed("pipeline-stopped")
+
+        assertEquals(1, sink.retainedCount()) // completed contribution untouched
+        assertEquals(1, sink.retainedSnapshot().count { it.context.captureId == first.captureId })
+        assertFalse(observer.isOpen(second.captureId))
+        assertTrue(sink.lossEvents.any { it == "partial-discard:pipeline-stopped" })
     }
 
-    private fun uuid(): UUID = UUID.randomUUID()
+    @Test
+    fun `deferral deletes NOTHING - ready entries stay`() {
+        val sink = ContributionRetentionSink()
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink) { LIVE }
+        val context = observer.speechStarted(8L, "Headset")!!
+        observer.wakeCompleted(context, 0, 1, SegmentObservation.WakeState.NotDetected) { listOf(shortArrayOf(7, 8)) to 16000 }
+
+        sink.defer(LossReason.Deferral("network-loss"))
+
+        assertEquals(1, sink.retainedCount())
+        assertEquals(4L, sink.retainedBytes())
+        assertTrue(sink.lossEvents.any { it == "defer:network-loss" })
+    }
+
+    @Test
+    fun `outcomes join by ISSUED id only - unknown and closed ids are refused`() {
+        val sink = ContributionRetentionSink()
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink) { LIVE }
+        val context = observer.speechStarted(9L, "Headset")!!
+        observer.wakeCompleted(context, 0, 1, SegmentObservation.WakeState.Detected) { listOf(shortArrayOf(1)) to 16000 }
+
+        assertTrue(sink.joinOutcome(CollectionOutcome.Recognized(context.captureId, "play jazz", "en")))
+        assertTrue(sink.joinOutcome(CollectionOutcome.Routed(context.captureId, "playback", emptyMap())))
+        assertTrue(sink.joinOutcome(CollectionOutcome.Executed(context.captureId, success = true)))
+        // Terminal recorded: further joins refuse; foreign ids refuse.
+        assertFalse(sink.joinOutcome(CollectionOutcome.Recognized(context.captureId, "late", null)))
+        assertFalse(sink.joinOutcome(CollectionOutcome.Recognized(java.util.UUID.randomUUID(), "foreign", null)))
+
+        val candidate = sink.retainedSnapshot().single()
+        assertEquals(context.captureId, candidate.outcome?.captureId)
+        assertTrue(candidate.outcome is CollectionOutcome.Executed)
+    }
+
+    @Test
+    fun `stale incremental for an unknown context is refused - no orphan accounting`() {
+        val sink = ContributionRetentionSink()
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink) { LIVE }
+        val a = observer.speechStarted(10L, "Headset")!!
+        val b = observer.speechStarted(11L, "Speaker")!! // starting while A open rebinds the open capture
+        observer.speechIncremental(a, 100) // A is no longer the open capture
+        assertEquals(0, sink.retainedSnapshot().count { it.incrementalSamplesAccounted > 0 && it.context == a })
+        assertTrue(observer.isOpen(b.captureId))
+    }
 }

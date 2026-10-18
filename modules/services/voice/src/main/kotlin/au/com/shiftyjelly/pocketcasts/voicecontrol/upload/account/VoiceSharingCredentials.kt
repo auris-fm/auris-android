@@ -17,7 +17,11 @@ import kotlinx.coroutines.launch
  * controls.
  */
 interface VoiceSharingCredentialOwnership {
-    fun invalidateIfCurrent(rejected: CredentialIncarnation, scopedCheck: () -> Boolean): Boolean
+    /** The owner's SYNCHRONOUS session incarnation (MIN sentinel when unknown/untracked). */
+    fun sessionGeneration(): Long
+
+    /** Guard-passing CAS: [scopedCheck] MUST consult its guard immediately before committing. */
+    fun invalidateIfCurrent(rejected: CredentialIncarnation, scopedCheck: (commitGuard: () -> Boolean) -> Boolean): Boolean
 }
 
 /**
@@ -30,6 +34,7 @@ class CredentialIncarnation internal constructor(
     internal val bearer: String?,
     internal val authGeneration: Long = Long.MIN_VALUE,
     internal val tokenValue: String? = null,
+    internal val sessionGeneration: Long = Long.MIN_VALUE,
 )
 
 /**
@@ -38,7 +43,10 @@ class CredentialIncarnation internal constructor(
  * [VoiceSharingAccountAuthBinding]). ALL mutations are serialized under ONE transaction lock,
  * so a rotation can never interleave an invalidation transaction.
  */
-class VoiceSharingCredentialStore : VoiceSharingCredentialOwnership {
+class VoiceSharingCredentialStore(
+    /** LIVE owner session-incarnation source; null in control scopes (nothing tracked). */
+    private val sessionAuthority: (() -> Long)? = null,
+) : VoiceSharingCredentialOwnership {
 
     private val transactionLock = Any()
     private val current = AtomicReference<CredentialIncarnation?>(null)
@@ -48,12 +56,19 @@ class VoiceSharingCredentialStore : VoiceSharingCredentialOwnership {
      * auth generation keeps the SAME incarnation (a no-op refresh); a new generation is a NEW
      * incarnation — generation and token value are the identity the 401 CAS compares.
      */
-    fun publish(bearer: String?, authGeneration: Long = Long.MIN_VALUE, tokenValue: String? = null): CredentialIncarnation? = synchronized(transactionLock) {
+    fun publish(
+        bearer: String?,
+        authGeneration: Long = Long.MIN_VALUE,
+        tokenValue: String? = null,
+        sessionGeneration: Long = Long.MIN_VALUE,
+    ): CredentialIncarnation? = synchronized(transactionLock) {
+        // Issuance honors the LIVE owner session incarnation, never collector timing.
+        val liveSession = sessionAuthority?.invoke() ?: sessionGeneration
         val previous = current.get()
         val next = when {
             bearer == null -> null
-            previous?.bearer == bearer && previous.authGeneration == authGeneration -> previous
-            else -> CredentialIncarnation(bearer, authGeneration, tokenValue)
+            previous?.bearer == bearer && previous.authGeneration == authGeneration && previous.sessionGeneration == liveSession -> previous
+            else -> CredentialIncarnation(bearer, authGeneration, tokenValue, liveSession)
         }
         current.set(next)
         next
@@ -66,11 +81,25 @@ class VoiceSharingCredentialStore : VoiceSharingCredentialOwnership {
         publish("Bearer " + snapshot.token.value, snapshot.generation, snapshot.token.value)
     }
 
-    fun current(): CredentialIncarnation? = current.get()
+    fun current(): CredentialIncarnation? {
+        val incarnation = current.get()
+        if (incarnation != null && sessionAuthority != null && incarnation.sessionGeneration != sessionAuthority.invoke()) {
+            synchronized(transactionLock) {
+                if (current.get() === incarnation && current.get()?.sessionGeneration != sessionAuthority.invoke()) {
+                    current.set(null)
+                }
+            }
+            return null // a superseded session incarnation is NOT authority
+        }
+        return incarnation
+    }
 
-    override fun invalidateIfCurrent(rejected: CredentialIncarnation, scopedCheck: () -> Boolean): Boolean = synchronized(transactionLock) {
+    override fun sessionGeneration(): Long = sessionAuthority?.invoke() ?: Long.MIN_VALUE
+
+    override fun invalidateIfCurrent(rejected: CredentialIncarnation, scopedCheck: (commitGuard: () -> Boolean) -> Boolean): Boolean = synchronized(transactionLock) {
         if (current.get() !== rejected) return false
-        if (!scopedCheck()) return false
+        val commitGuard = { current.get() === rejected }
+        if (!scopedCheck(commitGuard)) return false
         current.set(null)
         true
     }
@@ -89,9 +118,14 @@ class VoiceSharingAccountSessionCoordinator(
     private val lifecycleLock = Any()
 
     /** Auth login event: ONE transaction — publish the credential write, issue the session. */
-    fun login(bearer: String?, authGeneration: Long = Long.MIN_VALUE, tokenValue: String? = null): SessionToken = synchronized(lifecycleLock) {
-        credentials.publish(bearer, authGeneration, tokenValue)
-        state.sessionStarted()
+    fun login(
+        bearer: String?,
+        authGeneration: Long = Long.MIN_VALUE,
+        tokenValue: String? = null,
+        sessionGeneration: Long = Long.MIN_VALUE,
+    ): SessionToken = synchronized(lifecycleLock) {
+        credentials.publish(bearer, authGeneration, tokenValue, sessionGeneration)
+        state.sessionStarted(sessionGeneration)
     }
 
     /** Auth token-refresh event: NOT a lifecycle boundary; republishes the credential. */
@@ -156,21 +190,26 @@ class VoiceSharingAccountAuthBinding(
             snapshot?.token?.let { "Bearer " + it.value },
             snapshot?.generation ?: Long.MIN_VALUE,
             snapshot?.token?.value,
+            ownership.sessionGeneration(),
         )
     }
 
     /** Credential freeze source: ALWAYS a fresh generation-stamped read of the real owner. */
     fun syncCredential(): CredentialIncarnation? = coordinator.credentials.publishSnapshot(ownership.accessTokenSnapshot())
 
+    /** The owner's synchronous session incarnation (state revocation consults it at every freeze). */
+    override fun sessionGeneration(): Long = ownership.sessionGeneration()
+
     /**
      * The 401 transaction IS the real owner's atomic compare-and-invalidate: the freeze-time
      * snapshot (generation AND token value) is compared under the ownership lock, the scoped
-     * state check runs inside, and only a full match clears the REAL credential. The store
-     * mirror is updated after commit (bookkeeping, not ownership).
+     * state check runs inside with a COMMIT GUARD that re-reads the authoritative token at the
+     * commit instant, and only a full match clears the REAL credential. The store mirror is
+     * updated after commit (bookkeeping, not ownership).
      */
-    override fun invalidateIfCurrent(rejected: CredentialIncarnation, scopedCheck: () -> Boolean): Boolean {
+    override fun invalidateIfCurrent(rejected: CredentialIncarnation, scopedCheck: (commitGuard: () -> Boolean) -> Boolean): Boolean {
         val committed = rejected.tokenValue?.let { tokenValue ->
-            ownership.invalidateIfUnchanged(AccessTokenSnapshot(AccessToken(tokenValue), rejected.authGeneration)) { scopedCheck() }
+            ownership.invalidateIfUnchanged(AccessTokenSnapshot(AccessToken(tokenValue), rejected.authGeneration), scopedCheck)
         } ?: false
         if (committed) coordinator.credentials.publish(null)
         return committed

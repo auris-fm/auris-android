@@ -188,6 +188,12 @@ class VoiceSharingAccountOperations(
     }
 
     private suspend fun frozen(token: SessionToken, ticket: OperationTicket, route: Route, disclosureVersion: String?): FrozenOperation {
+        // SYNCHRONOUS session-authority check (reviewer efbe0945): the REAL owner's session
+        // incarnation is consulted at EVERY freeze — a REAL signOut/account replacement
+        // revokes the projection HERE, never usable past the owner boundary.
+        if (state.revokeIfSessionMoved(ownership.sessionGeneration())) {
+            return FrozenOperation(token, ticket, null, null, EMPTY_BODY, route)
+        }
         // The credential INCARNATION (not a raw string) is captured at freeze — production
         // sources it from the REAL token owner (VoiceSharingAccountAuthBinding.syncCredential).
         val credential = credentialSource()
@@ -273,8 +279,8 @@ class VoiceSharingAccountOperations(
      */
     private suspend fun handleUnauthorized(op: FrozenOperation) {
         val rejected = op.credential ?: return
-        val committed = ownership.invalidateIfCurrent(rejected) {
-            state.processUnauthorized(op.token, op.ticket)
+        val committed = ownership.invalidateIfCurrent(rejected) { commitGuard ->
+            state.processUnauthorized(op.token, op.ticket, commitGuard)
         }
         if (committed) onCredentialInvalid(rejected)
     }

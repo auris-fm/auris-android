@@ -27,7 +27,11 @@ interface CredentialOwnershipOwner {
      * invalidated ONLY if BOTH the generation and the token VALUE still match [observed]
      * (async platform/authenticator rotation that bypasses the owner therefore refuses too);
      * [scopedCheck] runs INSIDE the lock so the caller's state check and this invalidation
-     * commit together.
+     * commit together. It receives a [commitGuard] the caller MUST consult immediately before
+     * committing its state change: the guard re-reads the authoritative token under the SAME
+     * ownership lock, so an external platform rotation that lands between the owner's peek and
+     * the caller's commit instant REFUSES the whole transaction (credential AND state both
+     * survive) — no check-then-act guess.
      */
-    fun invalidateIfUnchanged(observed: AccessTokenSnapshot, scopedCheck: () -> Boolean): Boolean
+    fun invalidateIfUnchanged(observed: AccessTokenSnapshot, scopedCheck: (commitGuard: () -> Boolean) -> Boolean): Boolean
 }

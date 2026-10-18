@@ -30,6 +30,7 @@ class VoiceSharingAccountState {
 
     /** Observed under [fence]; guards the issued session and revision currency. */
     private var currentToken: SessionToken? = null
+    private var currentSessionGeneration: Long = Long.MIN_VALUE
 
     private val fence = Any()
 
@@ -43,9 +44,10 @@ class VoiceSharingAccountState {
      * the earlier session's projection atomically: a newly authoritative session never starts
      * with the previous session's projection.
      */
-    fun sessionStarted(): SessionToken = synchronized(fence) {
+    fun sessionStarted(sessionGeneration: Long = Long.MIN_VALUE): SessionToken = synchronized(fence) {
         operationGeneration.incrementAndGet() // outstanding tickets die with the old session
         state.value = null
+        currentSessionGeneration = sessionGeneration
         SessionToken().also { currentToken = it }
     }
 
@@ -54,6 +56,23 @@ class VoiceSharingAccountState {
         operationGeneration.incrementAndGet()
         currentToken = null
         state.value = null
+    }
+
+    /**
+     * SYNCHRONOUS authority validation at the owner/state boundary (reviewer efbe0945): if the
+     * REAL owner's session incarnation has moved since this session was armed (REAL signOut /
+     * account replacement), the projection is revoked HERE — at every authority read — instead
+     * of waiting for the async emailFlow collector. Returns true when it revoked.
+     */
+    fun revokeIfSessionMoved(liveSessionGeneration: Long): Boolean = synchronized(fence) {
+        if (currentToken != null && currentSessionGeneration != liveSessionGeneration) {
+            operationGeneration.incrementAndGet()
+            currentToken = null
+            state.value = null
+            true
+        } else {
+            false
+        }
     }
 
     /** Token refresh on the same session: NOT a lifecycle boundary; nothing is invalidated. */
@@ -126,9 +145,17 @@ class VoiceSharingAccountState {
      * this check INSIDE its transaction lock, making credential compare + state invalidation
      * one coordinated transaction. No credential data passes through or is stored.
      */
-    fun processUnauthorized(token: SessionToken, ticket: OperationTicket): Boolean = synchronized(fence) {
+    fun processUnauthorized(
+        token: SessionToken,
+        ticket: OperationTicket,
+        commitGuard: () -> Boolean = { true },
+    ): Boolean = synchronized(fence) {
         if (token !== currentToken) return false
         if (ticket.generation != operationGeneration.get()) return false
+        // COMMIT GUARD: re-verifies the authoritative credential at the commit INSTANT — an
+        // external rotation in the owner's peek->commit gap refuses the whole transaction and
+        // leaves the fresh credential AND the armed state intact.
+        if (!commitGuard()) return false
         operationGeneration.incrementAndGet()
         currentToken = null
         state.value = null

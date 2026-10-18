@@ -66,12 +66,16 @@ open class SyncAccountManagerImpl @Inject constructor(
      * setAccessToken change the platform token without our counter, so the value compare
      * closes that gap — a rotation by ANY writer makes a stale rejection a no-op.
      */
-    override fun invalidateIfUnchanged(observed: AccessTokenSnapshot, scopedCheck: () -> Boolean): Boolean = synchronized(credentialWriteLock) {
+    override fun invalidateIfUnchanged(observed: AccessTokenSnapshot, scopedCheck: (commitGuard: () -> Boolean) -> Boolean): Boolean = synchronized(credentialWriteLock) {
         if (credentialGenerationCounter.get() != observed.generation) return false
         val account = getAccount() ?: return false
         val currentToken = peekAccessToken(account)
         if (currentToken == null || currentToken.value != observed.token.value) return false
-        if (!scopedCheck()) return false
+        // The commit guard re-reads the AUTHORITATIVE token under the SAME lock at the caller's
+        // commit instant: an external platform/authenticator rotation that lands between this
+        // peek and the commit refuses the whole transaction.
+        val commitGuard = { peekAccessToken(account)?.value == observed.token.value }
+        if (!scopedCheck(commitGuard)) return false
         accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, observed.token.value)
         credentialGenerationCounter.incrementAndGet()
         true

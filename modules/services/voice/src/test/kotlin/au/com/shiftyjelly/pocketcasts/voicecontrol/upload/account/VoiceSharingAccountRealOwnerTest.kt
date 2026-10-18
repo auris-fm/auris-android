@@ -5,6 +5,7 @@ import android.accounts.AccountManager
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.preferences.AccessToken
+import au.com.shiftyjelly.pocketcasts.preferences.AccountConstants
 import au.com.shiftyjelly.pocketcasts.preferences.RefreshToken
 import au.com.shiftyjelly.pocketcasts.repositories.sync.SyncAccountManagerImpl
 import au.com.shiftyjelly.pocketcasts.repositories.sync.TokenErrorNotification
@@ -63,25 +64,24 @@ class VoiceSharingAccountRealOwnerTest {
         append("\"withdrawal_state\":\"not_enrolled\"}")
     }
 
-    private fun operations(auth: SyncAccountManagerImpl, state: VoiceSharingAccountState, server: MockWebServer): VoiceSharingAccountOperations {
-        val credentials = VoiceSharingCredentialStore()
-        val binding = VoiceSharingAccountAuthBinding(auth, auth, VoiceSharingAccountSessionCoordinator(state, credentials))
-        return VoiceSharingAccountOperations(
-            api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
-            state = state,
-            ownership = binding,
-            credentialSource = { binding.syncCredential() },
-            onCredentialInvalid = { },
-        )
-    }
+    private fun bindingFor(auth: SyncAccountManagerImpl, state: VoiceSharingAccountState): VoiceSharingAccountAuthBinding = VoiceSharingAccountAuthBinding(auth, auth, VoiceSharingAccountSessionCoordinator(state, VoiceSharingCredentialStore()))
+
+    private fun operations(binding: VoiceSharingAccountAuthBinding, state: VoiceSharingAccountState, server: MockWebServer): VoiceSharingAccountOperations = VoiceSharingAccountOperations(
+        api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
+        state = state,
+        ownership = binding,
+        credentialSource = { binding.syncCredential() },
+        onCredentialInvalid = { },
+    )
 
     @Test
     fun `a committed 401 destroys the REAL platform token and advances the generation EXACTLY once`() = runBlocking {
         val auth = realAuth()
         val state = VoiceSharingAccountState()
         val server = MockWebServer().apply { start() }
-        val operations = operations(auth, state, server)
-        val token = state.sessionStarted()
+        val binding = bindingFor(auth, state)
+        val operations = operations(binding, state, server)
+        val token = binding.loginFromAuth() // the session is born at the REAL owner's session incarnation
 
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         server.enqueue(MockResponse().setResponseCode(401))
@@ -113,8 +113,9 @@ class VoiceSharingAccountRealOwnerTest {
                 return MockResponse().setResponseCode(401)
             }
         }
-        val operations = operations(auth, state, server)
-        val token = state.sessionStarted()
+        val binding = bindingFor(auth, state)
+        val operations = operations(binding, state, server)
+        val token = binding.loginFromAuth() // the session is born at the REAL owner's session incarnation
 
         assertTrue(operations.refreshProjection(token))
         val result = java.util.concurrent.CompletableFuture.supplyAsync {
@@ -132,6 +133,82 @@ class VoiceSharingAccountRealOwnerTest {
         // Only the REAL refresh advanced the real generation (write #1 add, #2 refresh); the
         // fenced stale 401 advanced NOTHING.
         assertEquals(2L, auth.credentialGeneration())
+        server.shutdown()
+    }
+
+    @Test
+    fun `a REAL signOut revokes the projection SYNCHRONOUSLY at the next authority read`() = runBlocking {
+        val auth = realAuth()
+        val state = VoiceSharingAccountState()
+        val server = MockWebServer().apply { start() }
+        val binding = bindingFor(auth, state)
+        val operations = operations(binding, state, server)
+        val token = binding.loginFromAuth()
+
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        assertTrue(operations.refreshProjection(token))
+        assertTrue(state.hasCurrentSessionProjection())
+
+        auth.signOut() // REAL platform sign-out: owner session incarnation moves NOW
+
+        // The next authority read revokes synchronously - no network, no collector timing.
+        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
+        assertFalse(state.hasCurrentSessionProjection())
+        assertEquals(1, server.requestCount) // ONLY the arming GET happened - no request left the boundary
+        server.shutdown()
+    }
+
+    @Test
+    fun `an EXTERNAL platform rotation inside the owner peek-commit gap refuses the WHOLE transaction`() = runBlocking {
+        val auth = realAuth()
+        val state = VoiceSharingAccountState()
+        val server = MockWebServer().apply { start() }
+        val binding = bindingFor(auth, state)
+        val operations = operations(binding, state, server)
+        val token = binding.loginFromAuth()
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        assertTrue(operations.refreshProjection(token))
+
+        val ticket = state.beginOperation(token, requireProjection = true)!!
+        val rejected = binding.syncCredential()!! // exactly the incarnation an in-flight op freezes
+        val platform = AccountManager.get(context)
+        val account = auth.getAccount()!!
+        val committed = binding.invalidateIfCurrent(rejected) { commitGuard ->
+            // EXTERNAL rotation, bypassing the ownership contract entirely (the raw platform
+            // write an authenticator could make) — INSIDE the peek->commit gap.
+            platform.setAuthToken(account, AccountConstants.TOKEN_TYPE, "t2")
+            state.processUnauthorized(token, ticket, commitGuard)
+        }
+
+        // The commit guard saw the rotation at the commit INSTANT: NOTHING was cleared.
+        assertFalse(committed)
+        assertEquals("t2", peekToken(auth)) // fresh EXTERNAL credential intact
+        assertTrue(state.hasCurrentSessionProjection()) // armed state intact
+        assertEquals(1L, auth.credentialGeneration()) // the owner generation never moved
+        server.shutdown()
+    }
+
+    @Test
+    fun `without an external rotation the same transaction COMMITS - guard passes, both cleared`() = runBlocking {
+        val auth = realAuth()
+        val state = VoiceSharingAccountState()
+        val server = MockWebServer().apply { start() }
+        val binding = bindingFor(auth, state)
+        val operations = operations(binding, state, server)
+        val token = binding.loginFromAuth()
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        assertTrue(operations.refreshProjection(token))
+
+        val ticket = state.beginOperation(token, requireProjection = true)!!
+        val rejected = binding.syncCredential()!!
+        val committed = binding.invalidateIfCurrent(rejected) { commitGuard ->
+            state.processUnauthorized(token, ticket, commitGuard)
+        }
+
+        assertTrue(committed)
+        assertNull(peekToken(auth)) // the REAL platform token invalidated
+        assertEquals(2L, auth.credentialGeneration())
+        assertFalse(state.hasCurrentSessionProjection()) // scoped state cleared WITH it
         server.shutdown()
     }
 

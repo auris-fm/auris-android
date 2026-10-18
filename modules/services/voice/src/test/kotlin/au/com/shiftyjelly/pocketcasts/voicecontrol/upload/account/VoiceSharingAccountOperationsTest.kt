@@ -679,10 +679,11 @@ class VoiceSharingAccountAuthBindingTest {
         override fun credentialGeneration(): Long = generation
         override fun sessionGeneration(): Long = sessionGenerationValue
         override fun accessTokenSnapshot(): AccessTokenSnapshot? = token?.let { AccessTokenSnapshot(it, generation) }
-        override fun invalidateIfUnchanged(observed: AccessTokenSnapshot, scopedCheck: () -> Boolean): Boolean = synchronized(this) {
+        override fun invalidateIfUnchanged(observed: AccessTokenSnapshot, scopedCheck: (commitGuard: () -> Boolean) -> Boolean): Boolean = synchronized(this) {
             if (generation != observed.generation) return false
             if (token?.value != observed.token.value) return false // ANY writer rotating the token refuses the stale CAS
-            if (!scopedCheck()) return false
+            val commitGuard = { token?.value == observed.token.value }
+            if (!scopedCheck(commitGuard)) return false
             token = null
             generation += 1
             invalidations.add(observed.generation)

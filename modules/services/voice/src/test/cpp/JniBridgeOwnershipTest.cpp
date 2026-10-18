@@ -101,9 +101,7 @@ int main() {
     std::printf("native capture/VAD start ownership\n");
 
     // Scenario A -- the full production cycle: open, confirm (the caller's job), start, attach.
-    // HEAP-ALLOCATED AND INTENTIONALLY LEAKED: the entries under test own gCapture and delete it
-    // in their teardown paths, so a stack capture would be deleted twice (once by the entry, once
-    // at scope exit). A test process can leak this safely.
+    // Heap-allocated because the real entries own and delete gCapture during teardown.
     {
         auto* capture = new SilentCapture();
         gVadAttachesForTest = 0;
@@ -120,6 +118,12 @@ int main() {
         check(!capturing(),
               "opening the input stream must NOT start capture (confirmation comes between open and start)");
         check(gVadAttachesForTest == 0, "open attaches no VAD processor");
+
+        const jboolean beforeStart =
+            Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartCaptureAndVad(
+                env, nullptr, kTestSampleRate, kChannels, nullptr);
+        check(beforeStart == JNI_FALSE, "engine attach before stream start fails closed");
+        check(gVadAttachesForTest == 0, "refused early attach leaves VAD unattached");
 
         // (2) START moves audio only. The VAD processor belongs to the engine's combined attach;
         //     publishing one here leaves nativeStartCaptureAndVad retiring and recreating it.
@@ -138,13 +142,34 @@ int main() {
         check(attached == JNI_TRUE, "engine attach succeeds on a running stream");
         check(gVadAttachesForTest == 1, "exactly one VAD attachment at engine start");
 
-        // Teardown through the real entries; symmetric cleanup, asserted only for the counter.
+        check(Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartInputStream(
+                  env, nullptr) == JNI_TRUE, "repeated stream start reuses the running stream");
+        check(gVadAttachesForTest == 1, "repeated stream start preserves the engine's VAD attachment");
+
+        // Teardown through the real entries.
         Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStopCaptureAndVad(
             env, nullptr);
+        check(!capturing(), "teardown stops capture");
         setCaptureFactoryOverrideForTest(nullptr);
     }
 
-    // Scenario B -- attach fails closed when NO stream is running. This precondition is identical
+    // Scenario B -- Kotlin rejects the selected input after open. Closing it must never start
+    // audio or attach VAD, and a later start must not resurrect the rejected stream.
+    {
+        setCaptureFactoryOverrideForTest(new SilentCapture());
+        gVadAttachesForTest = 0;
+        JNIEnv* env = host_jni_env();
+        check(Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeOpenInputCapture(
+                  env, nullptr, kTestSampleRate, kChannels) == 41, "rejected input still reports its device id");
+        Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeCloseInputCapture(env, nullptr);
+        check(!capturing(), "rejected input closes without active capture");
+        check(gVadAttachesForTest == 0, "rejected input never attaches VAD");
+        check(Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartInputStream(
+                  env, nullptr) == JNI_FALSE, "closed input cannot be started");
+        setCaptureFactoryOverrideForTest(nullptr);
+    }
+
+    // Scenario C -- attach fails closed when NO stream is running. This precondition is identical
     // on main and the branch; pinned so the fix cannot trade one ordering violation for another.
     {
         JNIEnv* env = host_jni_env();

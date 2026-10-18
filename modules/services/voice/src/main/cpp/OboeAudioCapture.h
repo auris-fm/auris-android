@@ -106,7 +106,9 @@ public:
     // The device the opened stream actually selected. Valid after open(), before start().
     // Returns kUnspecified (0) when unknown (for example on the OpenSL ES backend) and
     // -1 when no stream is open.
-    int32_t getDeviceId();
+    // Virtual for the host JNI-ownership test, whose installed placeholder stream cannot be
+    // interrogated (same substitution pattern as readRingBuffer below).
+    virtual int32_t getDeviceId();
 
     /**
      * The device the opened capture stream is actually routed to, or kUnspecified when the platform
@@ -170,6 +172,14 @@ public:
         mTestStreamInstalled = true;
         mActive.store(true, std::memory_order_release);
     }
+
+    /**
+     * Clears the active flag an installed stream sets, WITHOUT calling stop() -- which would
+     * requestStop() the placeholder and crash (stop() has no test-installed guard; close() does).
+     * The JNI-ownership host test uses this so the entries under test perform the actual start
+     * themselves rather than inheriting one from the seam.
+     */
+    void deactivateForTest() { mActive.store(false, std::memory_order_release); }
 
     /**
      * Supplies the stream's frame/time observation, so the branch that USES it is reachable.

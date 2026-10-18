@@ -139,16 +139,22 @@ class SyncManagerImpl @Inject constructor(
     }
 
     override suspend fun updatePassword(newPassword: String, oldPassword: String) {
-        // The ORIGINAL authority is captured BEFORE the request; BOTH returned tokens are
-        // committed CONDITIONALLY (one lock, ONE credential move). A late A password change
-        // after a B login refuses without writing anything.
-        val observed = credentialOwnership.authoritySnapshot()
-        val response = getCacheTokenOrLogin { token ->
+        // The IDENTITY ORIGIN is captured before token acquisition; the ACTUAL credential
+        // admission is captured INSIDE the call — after the necessary token acquisition
+        // (getCacheTokenOrLogin may legitimately refresh, moving the credential), immediately
+        // before the password request — and preserved across the await. The commit is then
+        // conditional on the ADMISSION snapshot, and a refused commit is reported EXPLICITLY
+        // (never a false success): a late A password response after a B login throws instead
+        // of silently publishing into B.
+        getCacheTokenOrLogin { token ->
+            val admission = credentialOwnership.authoritySnapshot()
             val response = syncServiceManager.updatePassword(newPassword, oldPassword, token)
             eventHorizon.track(UserPasswordUpdatedEvent)
+            check(credentialOwnership.publishCredentials(admission, response.refreshToken, response.accessToken)) {
+                "Password credential publication refused: superseded account/session/credential since admission"
+            }
             response
         }
-        credentialOwnership.publishCredentials(observed, response.refreshToken, response.accessToken)
     }
 
     override fun isLoggedIn(): Boolean = syncAccountManager.isLoggedIn()

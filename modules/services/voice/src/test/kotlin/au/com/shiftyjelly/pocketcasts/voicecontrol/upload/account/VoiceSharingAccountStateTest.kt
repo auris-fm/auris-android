@@ -204,6 +204,71 @@ class VoiceSharingAccountStateTest {
         assertFalse(st.isCurrentRevision("aaa-earlier-looking"))
     }
 
+    // --- reviewer 19dc4b90: lifecycle atomicity + strict-complete parsing ---
+
+    @Test
+    fun `a NEW session token atomically clears the prior projection - no sessionEnded needed`() {
+        val st = state()
+        val a = st.sessionStarted()
+        assertTrue(st.applySessionResponse(a, projectionJson()))
+        assertEquals("rev-abc", st.projection.value!!.membershipRevision)
+
+        st.sessionStarted() // authoritative B starts; A's projection must clear ATOMICALLY
+        assertNull(st.projection.value)
+        assertFalse(st.hasCurrentSessionProjection())
+        // A's token can never re-arm.
+        assertFalse(st.applySessionResponse(a, projectionJson()))
+    }
+
+    @Test
+    fun `epoch and disclosure must be actual JSON null OR nonempty string - non-string types fail`() {
+        val st = state()
+        // A numeric epoch silently coerced to null must NOT be accepted as "not_enrolled".
+        assertNull(st.parseProjection(projectionJson(epoch = "42", withdrawal = "not_enrolled")))
+        assertNull(st.parseProjection(projectionJson(epoch = "true", withdrawal = "not_enrolled")))
+        assertNull(st.parseProjection(projectionJson(epoch = "{}", withdrawal = "not_enrolled")))
+        assertNull(st.parseProjection(projectionJson(disclosure = "42", withdrawal = "not_enrolled")))
+        // Fractional/other numeric schema values are not integers.
+        assertNull(st.parseProjection(projectionJson(schemaVersion = "1.5")))
+    }
+
+    @Test
+    fun `schema_version exact numeric 1 - 1_0 and 1e0 are integers and must be accepted`() {
+        val st = state()
+        assertTrue(st.parseProjection(projectionJson(schemaVersion = "1.0")) != null)
+        assertTrue(st.parseProjection(projectionJson(schemaVersion = "1e0")) != null)
+        assertNull(st.parseProjection(projectionJson(schemaVersion = "true")))
+        assertNull(st.parseProjection(projectionJson(schemaVersion = "\"1\"")))
+        assertNull(st.parseProjection(projectionJson(schemaVersion = "null")))
+    }
+
+    @Test
+    fun `strict complete document - trailing junk and second value fail`() {
+        val st = state()
+        val base = projectionJson()
+        assertNull(st.parseProjection(base + " {}"))
+        assertNull(st.parseProjection(base + "x"))
+        assertNull(st.parseProjection(base + " null"))
+    }
+
+    @Test
+    fun `legal key escapes are decoded - escaped alias of a duplicate key fails, unique escaped key parses`() {
+        val st = state()
+        // The escape decodes to membership_revision, which is also present plainly: duplicate.
+        val dup = """{"schema_version":1,"membership_revision":"a","member\u0073hip_revision":"b","plan":"pro","voice_sharing_enrolled":true,"enrollment_epoch":"e","accepted_disclosure_version":"v","withdrawal_state":"active"}"""
+        assertNull(st.parseProjection(dup))
+        // A single escaped key is a legal spelling and must parse.
+        val alias = """{"schema_version":1,"member\u0073hip_revision":"rev-esc","plan":"pro","voice_sharing_enrolled":true,"enrollment_epoch":"e","accepted_disclosure_version":"v","withdrawal_state":"active"}"""
+        assertEquals("rev-esc", st.parseProjection(alias)?.membershipRevision)
+    }
+
+    @Test
+    fun `unquoted or single-quoted keys fail - strict syntax only`() {
+        val st = state()
+        val unquoted = projectionJson().replace("\"schema_version\":", "schema_version:")
+        assertNull(st.parseProjection(unquoted))
+    }
+
     // --- malformed baseline ---
 
     @Test

@@ -48,6 +48,7 @@ dependencies {
     implementation(libs.timber)
     implementation(libs.mlkit.translate)
 
+    implementation(libs.moshi)
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.config)
     implementation(projects.modules.services.analytics)
@@ -72,6 +73,7 @@ dependencies {
     // Plain-JVM org.json implementation so unit tests exercise real JSON parsing (the
     // android.jar org.json classes throw 'not mocked' without Robolectric).
     testImplementation("org.json:json:20240303")
+    testImplementation(libs.okHttp.mockwebserver)
     testImplementation(libs.turbine)
     testImplementation(projects.modules.services.sharedtest)
 }

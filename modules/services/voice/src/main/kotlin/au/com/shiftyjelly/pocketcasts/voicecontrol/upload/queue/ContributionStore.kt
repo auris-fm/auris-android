@@ -136,9 +136,20 @@ class ContributionStore(
         return liveRecords < limits.maxQueueRecords && bytes + admission.projectedBytes <= limits.maxQueueBytes
     }
 
-    private fun deleteStaging(generation: Long) {
+    /**
+     * Claim the capture's final names for this attempt, refusing when any of them already exist: a live
+     * entry's WAV/metadata/ready marker are immutable, so no duplicate or concurrent attempt may rename
+     * over them. Called only while holding [lock] and after the ownership check passed.
+     */
+    private fun claimFinalNames(wavPart: File, metaPart: File, wavFinal: File, metaFinal: File, readyFile: File): Boolean {
+        if (wavFinal.exists() || metaFinal.exists() || readyFile.exists()) return false
+        return wavPart.renameTo(wavFinal) && metaPart.renameTo(metaFinal)
+    }
+
+    /** Remove only the staging files created by ONE attempt, identified by its reservation id. */
+    private fun deleteStaging(attemptId: String) {
         dir.listFiles()?.forEach { f ->
-            if (f.name.startsWith("$STAGING_PREFIX$generation.")) f.delete()
+            if (f.name.startsWith("$STAGING_PREFIX$attemptId.")) f.delete()
         }
     }
 
@@ -233,8 +244,11 @@ class ContributionStore(
         val createdAt = clock()
         dir.mkdirs()
         // Generation-owned staging: a stale attempt's cleanup can never reach a successor's paths.
-        val staging = "$STAGING_PREFIX$generation.$captureId"
-        synchronized(lock) { stagingOwners.add(generation) }
+        // Staging is keyed by the UNIQUE attempt (the Admission's reservation id), not merely
+        // generation+captureId: two attempts in the same generation for the same capture can never
+        // share a staging path, so one cannot truncate or delete the other's bytes mid-write.
+        val staging = "$STAGING_PREFIX${admission.id}.$generation.$captureId"
+        synchronized(lock) { stagingOwners.add(admission.id) }
         val wavPart = File(dir, "$staging$SUFFIX_PART")
         val metaPart = File(dir, "$staging$SUFFIX_META")
         val wavFinal = File(dir, "$captureId$SUFFIX_WAV")
@@ -272,13 +286,16 @@ class ContributionStore(
             hooks.beforePublication?.invoke(generation)
             val published = fence.guard(generation) {
                 synchronized(lock) {
-                    if (memoryEntries.containsKey(captureId) || !roomForPublicationLocked(admission)) {
+                    // Ownership is decided atomically with publication: a concurrent attempt for the same
+                    // capture that reached its commit point first owns the id, and this one is refused.
+                    val ownedByAnother = preparedIds.contains(captureId) || memoryEntries.containsKey(captureId)
+                    if (ownedByAnother || !roomForPublicationLocked(admission)) {
                         null
                     } else {
-                        // Consume the reservation by adopting its bytes into the durable index.
-                        reservations.remove(admission.id)
-                        released.add(admission.id)
-                        if (!wavPart.renameTo(wavFinal) || !metaPart.renameTo(metaFinal)) {
+                        // The final names are claimed ONLY after ownership is established above, so a
+                        // concurrent or duplicate attempt can never rename over an existing entry's files.
+                        val claimed = claimFinalNames(wavPart, metaPart, wavFinal, metaFinal, readyFile)
+                        if (!claimed) {
                             reservations[admission.id] = admission.projectedBytes
                             null
                         } else {
@@ -304,7 +321,7 @@ class ContributionStore(
                     }
                 }
             }
-            synchronized(lock) { stagingOwners.remove(generation) }
+            synchronized(lock) { stagingOwners.remove(admission.id) }
             if (published == null) {
                 // Fenced off / lost ownership / budget moved: drop OUR staging and give the slot back.
                 wavPart.delete()
@@ -330,6 +347,9 @@ class ContributionStore(
     private var recovered = false
 
     fun totalQueuedBytes(): Long = readyEntries().sumOf { it.audioBytes + it.metadataBytes }
+
+    /** Test seam: the contributions directory this store writes to. */
+    fun dirForTest(): File = dir
 
     /** Expiry removes ONLY expired entries; others are untouched. */
     fun expireOlderThan(): List<String> {
@@ -398,7 +418,7 @@ class ContributionStore(
      */
     fun purgeQueue(reason: String) {
         val ownedIds: Set<String>
-        val stagedGenerations: Set<Long>
+        val stagedAttempts: Set<String>
         synchronized(lock) {
             // Bump FIRST, inside the same critical section as the ownership snapshot: no admission or
             // publication can slip between "revoked" and "purged".
@@ -410,7 +430,7 @@ class ContributionStore(
             reservations.clear()
             released.clear()
             recovered = true // a purged store must not lazily resurrect anything from disk
-            stagedGenerations = stagingOwners.toSet()
+            stagedAttempts = stagingOwners.toSet()
             stagingOwners.clear()
             _purgeReasons.add(reason)
         }
@@ -420,7 +440,7 @@ class ContributionStore(
                 File(dir, "$id$suffix").delete()
             }
         }
-        stagedGenerations.forEach { gen -> deleteStaging(gen) }
+        stagedAttempts.forEach { attempt -> deleteStaging(attempt) }
         countersFile.delete()
         synchronized(lock) { terminalCounters.clear() }
     }
@@ -555,8 +575,8 @@ class ContributionStore(
     /** Reservation ids whose budget has been returned (discarded) or adopted (consumed). */
     private val released = mutableSetOf<String>()
 
-    /** Generations with staging files owned by THIS instance, so purge cleanup stays scoped. */
-    private val stagingOwners = mutableSetOf<Long>()
+    /** Attempt ids with staging files owned by THIS instance, so purge cleanup stays scoped. */
+    private val stagingOwners = mutableSetOf<String>()
 
     // Lock and counter storage are declared BEFORE the init block that reads them: Kotlin runs
     // property initializers and init blocks top-to-bottom, so an init block placed above these

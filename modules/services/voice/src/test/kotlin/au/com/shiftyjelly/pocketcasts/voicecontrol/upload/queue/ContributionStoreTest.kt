@@ -12,6 +12,10 @@ import org.junit.Test
 
 class ContributionStoreTest {
 
+    private val firstName = "first-attempt"
+    private val secondName = "second-attempt"
+
+
     private companion object {
         const val ID_A = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         const val SUCC = "11111111-2222-3333-4444-555555555555"
@@ -343,6 +347,80 @@ class ContributionStoreTest {
         assertTrue("hook never fired - control did not exercise the actual write", hooked)
         assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
         assertNotNull("stale preparation leaked its reservation into a 1-slot queue", store.admit(8, 100))
+    }
+
+    @Test
+    fun `same-generation duplicate attempts do not share staging files`() {
+        // Deterministic staging-collision control (reviewer 32d8012c follow-up): both attempts run in the
+        // SAME generation for the SAME capture id, and the first is HELD INSIDE its staging write until the
+        // second has finished writing. If staging were keyed by generation+captureId, both would open one
+        // path and the first writer would observe the sibling's byte count in its own file. Unique attempt
+        // identity keeps two files with their own sizes.
+        val root = tempRoot()
+        val probeDir = File(root, "contributions")
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val holdFirstOpen = java.util.concurrent.Semaphore(0)
+        val sightings = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val firstWriterFlag = java.util.concurrent.atomic.AtomicBoolean(true)
+        lateinit var theStore: ContributionStore
+        theStore = ContributionStore(
+            root, QueueLimits.defaults(),
+            hooks = StoreHooks(onWavPartWrite = { _ ->
+                val partsNow = probeDir.listFiles()?.filter { it.name.endsWith(".part") }
+                    ?.map { "${it.name}=${it.length()}B" }?.sorted()?.joinToString(" ; ") ?: ""
+                sightings += "${Thread.currentThread().name} -> $partsNow"
+                if (firstWriterFlag.compareAndSet(true, false)) {
+                    gate.countDown()
+                    holdFirstOpen.acquire()
+                }
+            }),
+        )
+        val store = theStore
+        val gen = store.fence.currentGeneration()
+        val large = chunks(4096) // 8236 B payload
+        val small = chunks(8)    //   60 B payload
+        var failure: Throwable? = null
+        val publishedCount = java.util.concurrent.atomic.AtomicInteger()
+        fun run(chunks: List<Pair<ShortArray, Int>>) {
+            try {
+                if (store.prepareAt(gen, ID_A, "epoch-A", chunks, meta(ID_A)) != null) publishedCount.incrementAndGet()
+            } catch (t: Throwable) {
+                failure = t
+            }
+        }
+
+        val first = Thread({ run(large) }, firstName)
+        first.start()
+        assertTrue("first attempt never entered its staging write", gate.await(10, java.util.concurrent.TimeUnit.SECONDS))
+        val second = Thread({ run(small) }, secondName)
+        second.start()
+        second.join(20_000)  // second completes fully while the first is still held inside its write
+        holdFirstOpen.release()
+        first.join(20_000)
+        failure?.let { throw it }
+
+        assertEquals("both attempts must have been observed mid-write", 2, sightings.size)
+        assertTrue("at most one attempt may publish a capture id", publishedCount.get() <= 1)
+
+        val secondSighting = sightings.first { it.startsWith(secondName) }
+        val firstSighting = sightings.first { it.startsWith(firstName) }
+        // The second attempt sees TWO live staging files: its own (60B) and the first one's partial (8xxx B).
+        assertTrue(
+            "second attempt should see the first attempt's separate staging file: $secondSighting",
+            secondSighting.contains("=60B"),
+        )
+        // Sharing one path would make the first writer's OWN file read the sibling's 60 B size.
+        val firstSawOnlySiblingBytes = firstSighting.contains("=60B") && !Regex("""=\d{4,}B""").containsMatchIn(firstSighting)
+        assertFalse(
+            "same-generation attempts shared one staging path; first writer saw truncated bytes: $sightings",
+            firstSawOnlySiblingBytes,
+        )
+        val distinctStagingNames = sightings.flatMap { line ->
+            line.substringAfter("-> ").split(" ; ").filter { it.isNotEmpty() }.map { it.substringBefore("=") }
+        }.distinct()
+        assertEquals(
+            "each attempt must own a distinct staging path; saw $distinctStagingNames", 2, distinctStagingNames.size,
+        )
     }
 
     @Test

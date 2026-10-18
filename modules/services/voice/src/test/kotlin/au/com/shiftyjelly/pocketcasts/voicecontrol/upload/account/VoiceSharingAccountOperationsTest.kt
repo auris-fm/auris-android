@@ -294,7 +294,7 @@ class VoiceSharingAccountOperationsFencingTest {
         bearer = "Bearer token-a" // unchanged at 401 time
         assertFalse(operations.enroll(token, acceptedDisclosureVersion = "v3"))
         assertEquals(1, invalidations.size)
-        assertFalse(invalidations[0].contains("token-a")) // no credential data in evidence
+        assertEquals("Bearer token-a", invalidations[0]) // the ACTUAL rejected bearer, for compare-and-invalidate
     }
 
     @Test
@@ -385,6 +385,73 @@ class VoiceSharingAccountOperationsFencingTest {
         assertNull(access.invoke(ops, "{\"schema_version\":1,\"deletion_request_id\":\"a\",\"status\":\"deletion_pending\"} junk"))
         assertNull(access.invoke(ops, "{\"schema_version\":\"1\",\"deletion_request_id\":\"a\",\"status\":\"deletion_pending\"}"))
         assertNull(access.invoke(ops, "{\"schema_version\":1,\"deletion_request_id\":\"a\",\"status\":\"other\"}"))
+    }
+
+    // --- reviewer 6b1d517f: endpoint-exact bodies ---
+
+    private fun decodedKeys(raw: String): Set<String> = Regex("\\\"([a-z_]+)\\\":").findAll(raw).map { it.groupValues[1] }.toSet()
+
+    @Test
+    fun `enrollment body carries NO epoch - exact decoded key set`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson(epoch = "epoch-9")))
+        assertTrue(operations.refreshProjection(token))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-2")))
+        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        server.takeRequest(5, TimeUnit.SECONDS)!!
+        val body = server.takeRequest(5, TimeUnit.SECONDS)!!.body.readUtf8()
+        assertEquals(setOf("request_id", "expected_membership_revision", "accepted_disclosure_version"), decodedKeys(body))
+        assertFalse(body.contains("epoch"))
+    }
+
+    @Test
+    fun `withdrawal serializes a NULL epoch explicitly - exact decoded key set`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        assertTrue(operations.refreshProjection(token))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-2")))
+        assertTrue(operations.withdraw(token))
+        server.takeRequest(5, TimeUnit.SECONDS)!!
+        val body = server.takeRequest(5, TimeUnit.SECONDS)!!.body.readUtf8()
+        assertEquals(setOf("request_id", "expected_membership_revision", "enrollment_epoch"), decodedKeys(body))
+        assertTrue(body.contains("\"enrollment_epoch\":null"))
+    }
+
+    @Test
+    fun `deletion body carries ONLY the request_id`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        assertTrue(operations.refreshProjection(token))
+        server.enqueue(
+            MockResponse().setResponseCode(202)
+                .setBody("{\"schema_version\":1,\"deletion_request_id\":\"del-1\",\"status\":\"deletion_pending\"}"),
+        )
+        assertTrue(operations.deleteData(token) != null)
+        server.takeRequest(5, TimeUnit.SECONDS)!!
+        val body = server.takeRequest(5, TimeUnit.SECONDS)!!.body.readUtf8()
+        assertEquals(setOf("request_id"), decodedKeys(body))
+    }
+
+    // --- 409 explicit membership-conflict outcome: strictly parsed projection, fenced apply ---
+
+    @Test
+    fun `409 applies the strictly parsed CURRENT projection under the issued token - no replay`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        assertTrue(operations.refreshProjection(token))
+        server.enqueue(
+            MockResponse().setResponseCode(409).setBody(
+                projectionJson("rev-current", withdrawal = "withdrawn", enrolled = false, epoch = "e"),
+            ),
+        )
+        assertFalse(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        assertEquals(2, server.requestCount) // terminal: no retry, no auto re-enroll
+        assertEquals("rev-current", state.projection.value!!.membershipRevision)
+    }
+
+    @Test
+    fun `409 with a malformed projection body applies nothing`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        assertTrue(operations.refreshProjection(token))
+        server.enqueue(MockResponse().setResponseCode(409).setBody("{\"schema_version\":9}"))
+        assertFalse(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        assertEquals("rev-1", state.projection.value!!.membershipRevision)
     }
 
     private fun sentAuthHeaders(): List<String> {

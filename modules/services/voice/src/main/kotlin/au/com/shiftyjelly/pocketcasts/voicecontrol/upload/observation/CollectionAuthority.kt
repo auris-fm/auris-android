@@ -82,13 +82,21 @@ class CollectionAuthority @Inject constructor(
         enrollmentEvidenceMatches(issued)
 
     /**
-     * Handoff validation: owner identity read via the owner lock ONLY (never entered while the
-     * collection fence is held — reviewer c0c45049), then fence-free policy compare. Runs in the
-     * coordinator's Phase 1, before the fence is acquired for observer work.
+     * Handoff validation via ONE coherent acquisition of the SHARED primitive (reviewer
+     * 8273382e): identity + policy snapshot come from [CollectionAuthorityTransaction.coherentAuthority]
+     * — the same outermost lock every account/policy publication uses. The coordinator may call
+     * this with NO inner lock held; reentry under the shared primitive is order-safe because it
+     * IS the outermost tier.
      */
     fun validateIssuedAuthorityLocked(issued: IssuedAuthority): Boolean {
-        val live = accountStartup.authoritySnapshot() // plain owner acquisition, fence NOT held
-        return validateIssuedLocked(live, issued) && enrollmentEvidenceMatches(issued)
+        val c = collectionTx.coherentAuthority()
+        return c.accountName == issued.accountName &&
+            c.session == issued.sessionGeneration &&
+            c.credential == issued.credentialIncarnation &&
+            c.policyEnabled == issued.policyEnabledAtIssue &&
+            c.policyActivationGeneration == issued.policyActivationGeneration &&
+            c.policyActivatedAtMonotonicMs == issued.policyActivatedAtMonotonicMs &&
+            enrollmentEvidenceMatches(issued)
     }
 
     private fun validateIssuedLocked(

@@ -50,6 +50,14 @@ interface CredentialOwnershipBinding {
  * holding its fence outside these transactions.
  */
 interface CredentialOwnershipOwner {
+    /**
+     * THE shared collection serialization primitive (reviewer 8273382e): one and the same lock
+     * object for the COLLECTION → ACCOUNT/POLICY → OBSERVER → SINK order. The collection lane
+     * composes its transaction over THIS object; every owner transition acquires it before the
+     * credential write lock. Nothing may acquire it while holding an inner lock.
+     */
+    val collectionSharedLock: Any
+
     /** ONE-lock atomic read of the authoritative state. */
     fun authoritySnapshot(): AuthoritySnapshot
 

@@ -181,6 +181,21 @@ class ContributionRetentionSink(
     // allocates NOTHING; commit transfers the caller's drained array under the SAME charge;
     // release returns the charge when the copy-out failed. Growth beyond the per-clip cap ends
     // THIS capture with exactly one terminal and releases everything it owned. ---
+
+    /**
+     * Outstanding reservation leases (reviewer 8273382e b4): each lease is the budget charge for
+     * an array the PRODUCER currently holds between reserve and commit/release. A revocation may
+     * MARK a lease cancelled, but MUST NOT release its charge while the producer still holds the
+     * allocated array — inflight live bytes stay charged until the producer's finally-path calls
+     * releaseLease()/commit transfer ownership. Finished buffers purge immediately; leases do not.
+     */
+    private val leases = mutableMapOf<UUID, MutableList<ReservationLease>>()
+
+    /** Total bytes still covered by outstanding (producer-held) leases for a capture. */
+    private fun outstandingFor(captureId: UUID): Long = leases[captureId]?.sumOf { it.bytes } ?: 0L
+
+    private class ReservationLease(val bytes: Long, var cancelled: Boolean = false)
+
     private var pendingDeltaBytes = 0L
 
     override fun reserveDelta(context: CaptureContext, samples: Int): Boolean {
@@ -191,39 +206,80 @@ class ContributionRetentionSink(
             endPrefixWithTerminal(prefix, "budget-exhausted")
             return false
         }
-        synchronized(lock) { pendingDeltaBytes += bytes }
+        synchronized(lock) {
+            pendingDeltaBytes += bytes
+            leases.getOrPut(context.captureId) { mutableListOf() }.add(ReservationLease(bytes))
+        }
         return true
     }
 
-    override fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int) {
+    /** Returns true when the delta was adopted; false when refused (revoked/cancelled lease). */
+    override fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int): Boolean {
         val bytes = copied.toLong() * BYTES_PER_SAMPLE
         val reserved = copied.toLong() * BYTES_PER_SAMPLE // caller reserved exactly `copied` capacity use
-        synchronized(lock) {
-            val prefix = openPrefix?.takeIf { it.context == context } ?: run {
-                budget.release(pendingDeltaBytes.coerceAtLeast(reserved))
-                return
+        return synchronized(lock) {
+            // Stale-commit guard: a lease marked cancelled by revocation may NOT transfer into
+            // retained ownership. The producer still holds the array; its charge leaves ONLY via
+            // releaseDelta when the producer drops it (reviewer 8273382e b4).
+            val cancelledLease = leases[context.captureId]?.any { it.cancelled } == true
+            val prefix = openPrefix?.takeIf { it.context == context && !cancelledLease } ?: run {
+                if (!cancelledLease) {
+                    budget.release(pendingDeltaBytes.coerceAtLeast(reserved))
+                    consumeLeaseLocked(context.captureId, reserved)
+                    pendingDeltaBytes -= minOf(pendingDeltaBytes, reserved)
+                }
+                return false
             }
-            prefix.buffer.add(drained)
+            // ADOPT the caller's drained array (already exactly `copied` samples after the
+            // engine trims); only shrink-copy when the caller handed over a larger buffer.
+            prefix.buffer.add(if (drained.size == copied) drained else drained.copyOf(copied))
             prefix.chargedBytes += bytes
+            // Transfer the lease: the committed array's charge moves from outstanding-lease to
+            // retained-bytes ownership atomically under this lock (no double count, no gap).
+            consumeLeaseLocked(context.captureId, reserved)
             pendingDeltaBytes -= reserved
             if (pendingDeltaBytes > 0) {
                 budget.release(pendingDeltaBytes) // partial copy: uncommitted remainder returns
                 pendingDeltaBytes = 0L
             }
+            true
         }
     }
 
     override fun releaseDelta(context: CaptureContext, samples: Int) {
         val bytes = samples.toLong() * BYTES_PER_SAMPLE
         synchronized(lock) {
-            // Release ONLY a still-outstanding reservation (commit consumes it first; engine's
-            // catch path releases exactly what reserveDelta charged and commit did not consume).
+            // The producer DROPPED the allocated array: now (and only now) may the charge leave
+            // the outstanding-lease set. Cancelled-by-revocation leases release here too.
             if (pendingDeltaBytes >= bytes) {
                 pendingDeltaBytes -= bytes
+                consumeLeaseLocked(context.captureId, bytes)
                 budget.release(bytes)
             }
         }
     }
+
+    private fun consumeLeaseLocked(captureId: java.util.UUID, bytes: Long) {
+        val list = leases[captureId] ?: return
+        var remaining = bytes
+        val it = list.iterator()
+        while (it.hasNext() && remaining > 0) {
+            val lease = it.next()
+            remaining -= lease.bytes
+            it.remove()
+        }
+        if (list.isEmpty()) leases.remove(captureId)
+    }
+
+    /** Revocation marks OUTSTANDING leases cancelled; charges release on producer drop only. */
+    fun markLeasesCancelled(captureId: java.util.UUID): Int = synchronized(lock) {
+        val list = leases[captureId] ?: return@synchronized 0
+        list.forEach { it.cancelled = true }
+        list.size
+    }
+
+    /** Bytes still charged to producer-held arrays (inflight live audio, not yet dropped). */
+    fun outstandingLeaseBytesForTest(): Long = synchronized(lock) { leases.values.sumOf { l -> l.sumOf { it.bytes } } }
 
     /**
      * Completion handoff with ATOMIC charge transfer: the closed segment's exact bytes are
@@ -294,16 +350,30 @@ class ContributionRetentionSink(
     /** Cancellation releases the open prefix's charge completely — nothing survives it. */
     override fun cancelled(observation: SegmentObservation.Cancelled) {
         val prefix = synchronized(lock) { openPrefix?.takeIf { it.context == observation.context } }
-        if (prefix != null) releasePrefix(prefix)
-        synchronized(lock) { if (openPrefix === prefix) openPrefix = null }
+        if (prefix != null) {
+            // Producer-held lease bytes stay charged until the producer drops them; everything
+            // else in the prefix releases now (reviewer 8273382e b4). Lease charges live in
+            // pendingDeltaBytes, NOT in prefix.chargedBytes (commit transfers them), so the whole
+            // finished-prefix charge is releasable immediately.
+            releasePrefix(prefix)
+            synchronized(lock) { if (openPrefix === prefix) openPrefix = null }
+        }
         logLoss("partial-discard:${observation.reason}")
     }
 
     /** FULL REVOCATION: every retained byte (prefix + ready) is released immediately. */
     override fun purgeAllForRevocation(reason: String) {
         synchronized(lock) {
-            openPrefix?.let { releasePrefix(it) }
-            openPrefix = null
+            openPrefix?.let { prefix ->
+                // Finished-buffer bytes release immediately on revocation; the separate
+                // outstanding-lease charge (pendingDeltaBytes) survives until the producer drops.
+                releasePrefix(prefix)
+                openPrefix = null
+            }
+            // Finished/retained buffers purge immediately; OUTSTANDING leases stay charged until
+            // the producer's finally path releases them (reviewer 8273382e b4). Mark them so any
+            // later commit is refused as cancelled.
+            leases.values.flatten().forEach { it.cancelled = true }
             while (candidates.isNotEmpty()) {
                 val c = candidates.pollFirst() ?: break
                 budget.release(c.bytesCharged)

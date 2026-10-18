@@ -51,6 +51,7 @@ import retrofit2.Retrofit
 private class TestOwner(
     @Volatile var accountName: String? = "user@example.com",
 ) : CredentialOwnershipOwner {
+    override val collectionSharedLock = Any()
     private val lock = Any()
     private var session = 1L
     private var credential = 1L

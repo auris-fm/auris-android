@@ -92,7 +92,7 @@ class VoiceAsrEngineTest {
         NoopSegmentSink,
         authority,
         issueAuthority = { issuedAuthorityForTests },
-        handoff = CompletionHandoff { context, onset, end, wake, provider, scope -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+        handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
     )
     private val translationStage = mock<TranslationStage>()
 
@@ -1628,7 +1628,7 @@ class VoiceAsrEngineTest {
             retention,
             liveAuthority,
             issueAuthority = { issuedAuthorityForTests },
-            handoff = CompletionHandoff { context, onset, end, wake, provider, scope -> scope.completeUnderOwner(context, onset, end, wake, provider) },
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) },
         )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(
@@ -1676,7 +1676,7 @@ class VoiceAsrEngineTest {
     fun `stop during an open segment CANCELS it - partial discarded, nothing completes`() = runTest {
         val sink = EngineObservationSink()
         val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        observer = SegmentObserver(CollectionGate { true }, sink, liveAuthority, { issuedAuthorityForTests }, CompletionHandoff { context, onset, end, wake, provider, scope -> scope.completeUnderOwner(context, onset, end, wake, provider) })
+        observer = SegmentObserver(CollectionGate { true }, sink, liveAuthority, { issuedAuthorityForTests }, CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) })
         val pending = MutableSharedFlow<VoiceSegmenterResult>()
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(pending)
         `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
@@ -1722,7 +1722,7 @@ class VoiceAsrEngineTest {
         val sink = EngineObservationSink()
         val deadSink = ContributionRetentionSink(CollectionBudget(1L shl 20))
         val deadAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = false, fullRevocation = true) }
-        observer = SegmentObserver(CollectionGate { false }, sink, deadAuthority, { issuedAuthorityForTests }, CompletionHandoff { context, onset, end, wake, provider, scope -> scope.completeUnderOwner(context, onset, end, wake, provider) })
+        observer = SegmentObserver(CollectionGate { false }, sink, deadAuthority, { issuedAuthorityForTests }, CompletionHandoff { context, onset, end, wake, provider, scope, live -> scope.completeUnderOwner(context, onset, end, wake, provider) })
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(
             observer,

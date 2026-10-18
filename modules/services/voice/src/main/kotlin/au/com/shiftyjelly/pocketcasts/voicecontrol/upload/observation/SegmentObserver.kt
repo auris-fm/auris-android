@@ -58,13 +58,19 @@ class SegmentObserver(
     // this method returns — the engine allocates its ShortArray only afterwards, so an oversized
     // or unaffordable prefix never exists. Refusal leaves observer state untouched and releases
     // any charge it took.
-    fun speechStartedAdmitting(captureSession: Long, routeClass: String, producerSize: Int): CaptureContext? = fenceGate.gate { speechStartedAdmittingLocked(captureSession, routeClass, producerSize) }
+    // Admission path (order shared → observer → sink; reviewer 2e1d5b0b b2): BOTH authority reads
+    // — the frozen ISSUE and the LIVE gate decision — happen under the shared primitive BEFORE
+    // this object's monitor is entered. Inside the lock only local state + sink admit run.
+    fun speechStartedAdmitting(captureSession: Long, routeClass: String, producerSize: Int): CaptureContext? = fenceGate.gate {
+        val issued = issueAuthority() // under the shared primitive, no observer lock yet
+        val permitted = gate.accepts(authority()) // same: decision read before the monitor
+        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted)
+    }
 
-    private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int): CaptureContext? {
-        val issued = issueAuthority() // reentrant under the held collection fence
+    private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int, issued: IssuedAuthority, permitted: Boolean): CaptureContext? {
         val context = CaptureContext(UUID.randomUUID(), captureSession, routeClass, issued)
         return synchronized(lock) {
-            if (open != null || !gate.accepts(authority())) return@speechStartedAdmittingLocked null
+            if (open != null || !permitted) return@speechStartedAdmittingLocked null
             cumulativeAccounted = 0
             retainedForOpen = sink.admit(SegmentObservation.Admission(context, producerSize))
             if (!retainedForOpen) return@speechStartedAdmittingLocked null
@@ -79,10 +85,12 @@ class SegmentObserver(
         sink.adopted(SegmentObservation.Started(context, firstChunk))
     }
 
-    fun speechStarted(captureSession: Long, routeClass: String, firstChunk: ShortArray): CaptureContext? = synchronized(lock) {
+    // Entry WITHOUT any monitor: fenceGate acquires the SHARED primitive first; the observer
+    // lock is taken only INSIDE admission (order shared → observer), never the reverse.
+    fun speechStarted(captureSession: Long, routeClass: String, firstChunk: ShortArray): CaptureContext? {
         val admitted = speechStartedAdmitting(captureSession, routeClass, firstChunk.size)
         if (admitted != null) adoptFirstChunk(admitted, firstChunk)
-        admitted
+        return admitted
     }
 
     // --- Reserve-before-copy delta protocol (blocker b3): reservation is a budget admit that
@@ -94,14 +102,19 @@ class SegmentObserver(
         open?.captureId == context.captureId && retainedForOpen && sink.reserveDelta(context, samples)
     }
 
-    fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int): Unit = synchronized(lock) {
-        if (open?.captureId != context.captureId || !retainedForOpen) return
+    // Producer drop path: even when the capture is already closed/revoked, the sink MUST see the
+    // release so a lease-held charge leaves the budget exactly once (reviewer 8273382e b4).
+    fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int): Boolean = synchronized(lock) {
+        if (open?.captureId != context.captureId || !retainedForOpen) {
+            // Refused commit: the producer still owns the array; its charge leaves ONLY through
+            // releaseDelta when the producer drops it — do not adopt or double-release here.
+            return false
+        }
         cumulativeAccounted += copied
         sink.commitDelta(context, drained.copyOf(copied), copied)
     }
 
-    fun releaseDelta(context: CaptureContext, samples: Int): Unit = synchronized(lock) {
-        if (open?.captureId != context.captureId) return
+    fun releaseDelta(context: CaptureContext, samples: Int) {
         sink.releaseDelta(context, samples)
     }
 
@@ -151,7 +164,11 @@ class SegmentObserver(
                 framesProvider()
             }
         }
-        handoff.handoff(context, speechOnsetSample, speechEndSample, wakeState, oneShot, this)
+        // Single consulted gate for the handoff: the LIVE authority decision (shared primitive
+        // held by fenceGate above). The coordinator re-runs its own validation inside; test and
+        // production paths both see exactly ONE gate consultation per handoff.
+        val liveAllowed = gate.accepts(authority())
+        handoff.handoff(context, speechOnsetSample, speechEndSample, wakeState, oneShot, this, liveAllowed)
     }
 
     /**
@@ -166,6 +183,7 @@ class SegmentObserver(
         wakeState: SegmentObservation.WakeState,
         framesProvider: () -> Pair<List<ShortArray>, Int>,
         admit: Boolean,
+        liveGateAllowed: Boolean,
     ): Boolean = synchronized(lock) {
         val current = open ?: return false
         if (context != null && current.captureId != context.captureId) return false // late: refuse join
@@ -187,8 +205,11 @@ class SegmentObserver(
             totalRetainedBytes = 0L
             return false
         }
-        val decision = authority()
-        if (!gate.accepts(decision)) {
+        // The coordinator ALREADY revalidated ORIGINAL coherent authority under the shared
+        // primitive before entering; the live gate here consumes that SAME decision source via
+        // [liveGate] (a plain boolean read of the frozen+live compare result), never by acquiring
+        // the owner/policy locks from inside this monitor (reviewer 2e1d5b0b b2).
+        if (!liveGateAllowed) {
             // LIVE-gate refusal is ALSO a terminated handoff (blocker b2): provider never runs,
             // exactly one terminal closes the capture, prefix PCM + charge released via cancel.
             sink.cancelled(SegmentObservation.Cancelled(current, "handoff-gate-refused"))

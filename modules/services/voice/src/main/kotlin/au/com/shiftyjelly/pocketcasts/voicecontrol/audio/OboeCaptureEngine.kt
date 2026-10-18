@@ -41,6 +41,9 @@ internal object OboeNative {
     external fun nativeIsCapturing(): Boolean
     external fun nativeWaitForVadEvent(timeoutMs: Int): Int
     external fun nativeGetSpeechPcm(buffer: ShortArray): Int
+
+    /** Ranged copy-out: fills [out] from native speech at offset [fromSample]; returns written. */
+    external fun nativeGetSpeechPcmRange(out: ShortArray, fromSample: Int): Int
     external fun nativeGetSpeechPcmSize(): Int
     external fun nativeGetSpeechOnsetSample(): Int
     external fun nativeGetSpeechEndSample(): Int
@@ -67,6 +70,13 @@ interface CaptureHardware {
 
     fun getSpeechPcm(buffer: ShortArray): Int
 
+    /**
+     * Copies speech samples starting at native offset [fromSample] into [out] (exact reserved
+     * size). Returns the number of samples written; allocates NOTHING on the native side beyond
+     * the direct GetShortArrayElements copy into [out].
+     */
+    fun getSpeechPcmRange(out: ShortArray, fromSample: Int): Int
+
     fun getSpeechPcmSize(): Int
 
     fun getSpeechOnsetSample(): Int
@@ -85,6 +95,7 @@ class OboeCaptureHardware : CaptureHardware {
     override fun isCapturing(): Boolean = OboeNative.nativeIsCapturing()
     override fun waitForVadEvent(timeoutMs: Int): Int = OboeNative.nativeWaitForVadEvent(timeoutMs)
     override fun getSpeechPcm(buffer: ShortArray): Int = OboeNative.nativeGetSpeechPcm(buffer)
+    override fun getSpeechPcmRange(out: ShortArray, fromSample: Int): Int = OboeNative.nativeGetSpeechPcmRange(out, fromSample)
     override fun getSpeechPcmSize(): Int = OboeNative.nativeGetSpeechPcmSize()
     override fun getSpeechOnsetSample(): Int = OboeNative.nativeGetSpeechOnsetSample()
     override fun getSpeechEndSample(): Int = OboeNative.nativeGetSpeechEndSample()

@@ -68,6 +68,9 @@ class VoiceSharingAccountStartup @Inject constructor(
         }, null, false)
     }
 
+    /** THE shared serialization primitive owned by the credential owner (same object identity). */
+    fun sharedCollectionLock(): Any = ownership.collectionSharedLock
+
     /** The REAL owner for one-transaction handoffs (order owner→observer→sink is composed there). */
     fun ownerForHandoff(): CredentialOwnershipOwner = ownership
 

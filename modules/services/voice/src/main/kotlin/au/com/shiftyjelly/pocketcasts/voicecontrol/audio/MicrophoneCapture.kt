@@ -96,13 +96,11 @@ class MicrophoneCapture @Inject constructor(
      * segment drains from; returns the number of samples written to [out].
      */
     fun drainSpeechTail(out: ShortArray, previousTotal: Int, producedSize: Int): Int {
-        if (!isRecording || producedSize <= previousTotal) return 0
-        val buffer = ShortArray(producedSize)
-        val copied = hardware.getSpeechPcm(buffer)
-        if (copied <= previousTotal) return 0
-        val available = (minOf(copied, producedSize) - previousTotal).coerceAtMost(out.size)
-        System.arraycopy(buffer, previousTotal, out, 0, available)
-        return available
+        if (!isRecording || producedSize <= previousTotal || out.isEmpty()) return 0
+        // EXACT-SIZE ranged copy-out (reviewer 2e1d5b0b b3): the native API fills ONLY the
+        // [previousTotal, previousTotal+out.size) range directly into the caller's RESERVED
+        // delta array — no whole-prefix ShortArray, no temp, no second copy.
+        return hardware.getSpeechPcmRange(out, previousTotal)
     }
 
     fun peekSpeechDelta(previousTotal: Int): Pair<Int, ShortArray> {

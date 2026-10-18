@@ -44,29 +44,19 @@ open class SyncAccountManagerImpl @Inject constructor(
     private val credentialWriteLock = Any()
 
     /**
-     * Nested collection-authority fence (reviewer a38421f6): when the COLLECTION lane requests
-     * `collectionFence -> owner` ordering, every owner transition below enters this inner lock
-     * FIRST while the caller already holds the outer collection fence — so an in-flight
-     * handoff copy that holds the collection fence serializes account changes against policy
-     * changes deterministically. The order is ALWAYS collection-fence(outer) → owner(this),
-     * never reversed; nothing here acquires any observer/sink monitor.
+     * SHARED collection serialization primitive (reviewer 8273382e): the SAME lock object is the
+     * account-tier participant of ONE global order: COLLECTION FENCE → ACCOUNT/POLICY → OBSERVER
+     * → SINK. Owner transitions take it BEFORE `credentialWriteLock`; the collection lane takes
+     * its own fence (composed over this same object by DI) before anything else; nothing inside
+     * this class acquires it while already holding `credentialWriteLock`, and no observer/sink
+     * code ever acquires it upward. Both lanes enter the SAME primitive first, so they serialize
+     * with each other and no cross-edge can invert the order.
      */
-    private val collectionNestedLock = Any()
+    override val collectionSharedLock = Any()
 
-    /**
-     * CRITICAL ORDERING FACT (reviewer c0c45049): this nesting is INNERMOST — it acquires the
-     * owner lock FIRST, then the nested lock. It therefore CANNOT be entered while any outer
-     * fence is already held without inverting order against a concurrent holder that took the
-     * outer fence first. So NOTHING on the collection lane enters owner transitions from inside
-     * the collection fence: `collectionTx.transaction` never calls owner methods; coherent reads
-     * take the fence and the owner read SEQUENTIALLY (fence released before owner acquisition),
-     * and handoff validation runs OUTSIDE the fence with the fence re-acquired only for its own
-     * compare. This helper exists solely so future collection-first composition can route owner
-     * writes through `collectionFence → collectionNested → credentialWrite`; until such a
-     * writer exists, every caller here arrives fence-free and the order is trivially respected.
-     */
-    private fun <T> underCollectionNesting(block: () -> T): T = synchronized(credentialWriteLock) {
-        synchronized(collectionNestedLock) { block() }
+    /** Owner transition: shared collection lock FIRST, then the credential write lock (order-safe). */
+    private fun <T> underCollectionNesting(block: () -> T): T = synchronized(collectionSharedLock) {
+        synchronized(credentialWriteLock) { block() }
     }
 
     private val credentialGenerationCounter = java.util.concurrent.atomic.AtomicLong(0)
@@ -341,11 +331,13 @@ open class SyncAccountManagerImpl @Inject constructor(
     }
 
     override fun invalidateAccessToken() {
-        synchronized(credentialWriteLock) {
-            val account = getAccount() ?: return
-            val accessToken = peekAccessToken(account) ?: return
-            accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, accessToken.value)
-            credentialGenerationCounter.incrementAndGet()
+        underCollectionNesting {
+            val account = getAccount()
+            val accessToken = account?.let { peekAccessToken(it) }
+            if (account != null && accessToken != null) {
+                accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, accessToken.value)
+                credentialGenerationCounter.incrementAndGet()
+            }
             publishedToken = null
         }
     }
@@ -364,7 +356,7 @@ open class SyncAccountManagerImpl @Inject constructor(
             )
             putString(AccountConstants.LOGIN_IDENTITY, loginIdentity.key)
         }
-        val accountAdded = synchronized(credentialWriteLock) {
+        val accountAdded = underCollectionNesting {
             val added = accountManager.addAccountExplicitly(account, refreshToken.value, userData)
             accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
             credentialGenerationCounter.incrementAndGet()
@@ -385,7 +377,7 @@ open class SyncAccountManagerImpl @Inject constructor(
     }
 
     override fun signOut() {
-        synchronized(credentialWriteLock) {
+        underCollectionNesting {
             accountManager.getAccountsByType(AccountConstants.ACCOUNT_TYPE).forEach { account ->
                 accountManager.removeAccountExplicitly(account)
             }
@@ -399,22 +391,25 @@ open class SyncAccountManagerImpl @Inject constructor(
     }
 
     override fun setRefreshToken(refreshToken: RefreshToken) {
-        synchronized(credentialWriteLock) {
+        underCollectionNesting {
             // audit b7ad5a9a: the refresh write was UNLOCKED
             reconcileLocked()
-            val account = getAccount() ?: return
-            if (account.name != retainedAccountName) return // never write into a foreign account
-            accountManager.setPassword(account, refreshToken.value)
-            accountManager.setUserData(account, AccountConstants.SIGN_IN_TYPE_KEY, AccountConstants.SignInType.Tokens.value)
+            val account = getAccount()
+            if (account != null && account.name == retainedAccountName) { // never write into a foreign account
+                accountManager.setPassword(account, refreshToken.value)
+                accountManager.setUserData(account, AccountConstants.SIGN_IN_TYPE_KEY, AccountConstants.SignInType.Tokens.value)
+            }
         }
     }
 
     override fun setAccessToken(accessToken: AccessToken) {
-        synchronized(credentialWriteLock) {
-            val account = getAccount() ?: return
-            accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
-            credentialGenerationCounter.incrementAndGet()
-            publishedToken = accessToken
+        underCollectionNesting {
+            val account = getAccount()
+            if (account != null) {
+                accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
+                credentialGenerationCounter.incrementAndGet()
+                publishedToken = accessToken
+            }
         }
     }
 

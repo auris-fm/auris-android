@@ -6,11 +6,9 @@ import java.util.concurrent.locks.ReentrantLock
 import javax.inject.Inject
 import kotlin.concurrent.withLock
 
-/** Narrow read seam for the policy incarnation inside the collection fence. */
-interface PolicyIncarnationReader {
-    fun enabled(): Boolean
-    fun activationGeneration(): Long
-    fun activatedAtMonotonicMs(): Long
+/** Narrow read seam for the policy incarnation: ONE immutable snapshot per acquisition. */
+interface PolicySnapshotReader {
+    fun snapshot(): au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot
 }
 
 /**
@@ -33,10 +31,25 @@ interface PolicyIncarnationReader {
 
 class CollectionAuthorityTransaction @Inject constructor(
     private val ownership: CredentialOwnershipOwner,
-    private val policy: PolicyIncarnationReader,
+    private val policy: PolicySnapshotReader,
+    /** THE SHARED serialization primitive: the SAME object as owner.collectionSharedLock and the
+     * policy provider's sharedCollectionLock (injected by composition). ALWAYS outermost in the
+     * single global order COLLECTION → ACCOUNT/POLICY → OBSERVER → SINK; nothing acquires it
+     * while holding an inner lock, and both authority lanes enter it before any inner tier. */
+    private val sharedLock: Any,
 ) {
 
-    private val fence = ReentrantLock()
+    private val fence = ReentrantLock() // reentrancy-tracking companion for diagnostics only
+
+    private fun <T> withShared(block: () -> T): T = synchronized(sharedLock) {
+        // Nested ONLY for isHeldByCurrentThread bookkeeping (never a second serialization edge).
+        fence.lock()
+        try {
+            block()
+        } finally {
+            fence.unlock()
+        }
+    }
 
     /** True when THIS thread holds the collection fence (entry-path precondition). */
     fun heldByCurrentThread(): Boolean = fence.isHeldByCurrentThread
@@ -49,7 +62,7 @@ class CollectionAuthorityTransaction @Inject constructor(
     }
 
     /** Runs [block] as ONE collection-authority transaction over account + policy state. */
-    fun <T> transaction(block: () -> T): T = fence.withLock { block() }
+    fun <T> transaction(block: () -> T): T = withShared { block() }
 
     /**
      * Owner identity read WITHOUT the fence held (reviewer c0c45049): the fence and the owner
@@ -60,25 +73,31 @@ class CollectionAuthorityTransaction @Inject constructor(
     fun ownerIdentityNow(): au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot = ownership.authoritySnapshot()
 
     /** Coherent authority read: policy incarnation under the fence, owner read sequentially after. */
-    fun coherentAuthority(): CoherentAuthority {
-        val policy = fence.withLock { Triple(policy.enabled(), policy.activationGeneration(), policy.activatedAtMonotonicMs()) }
-        // Fence RELEASED before the owner acquisition: strictly sequential, never nested.
+    fun coherentAuthority(): CoherentAuthority = withShared {
+        // ONE acquisition of the shared primitive covers BOTH tiers: the policy triple comes
+        // from ONE immutable snapshot read (no 3-call getter), the identity from the atomic
+        // AuthoritySnapshot. Both lanes share this single outer primitive, so nesting cannot
+        // invert any order — there is exactly one lock ahead of the account tier.
+        val p = policy.snapshot()
         val live = ownership.authoritySnapshot()
-        return CoherentAuthority(
+        CoherentAuthority(
             accountName = live.accountName,
             session = live.session,
             credential = live.credential,
-            policyEnabled = policy.first,
-            policyActivationGeneration = policy.second,
-            policyActivatedAtMonotonicMs = policy.third,
+            policyEnabled = p.enabled,
+            policyActivationGeneration = p.activationGeneration,
+            policyActivatedAtMonotonicMs = p.activatedAtMonotonicMs,
         )
     }
 
-    /** Policy lease deadline read inside the same fence (expiry decisions serialize with handoffs). */
-    fun policyLeaseDeadlineMs(): Long = fence.withLock {
-        val enabled = policy.enabled()
-        val stamp = policy.activatedAtMonotonicMs()
-        if (!enabled || stamp <= 0) 0L else stamp + VoiceSharingPolicyProvider.DEFAULT_LEASE_MS
+    /** Policy lease deadline read under the shared primitive (serializes with handoffs). */
+    fun policyLeaseDeadlineMs(): Long = withShared {
+        val p = policy.snapshot()
+        if (!p.enabled || p.activatedAtMonotonicMs <= 0) {
+            0L
+        } else {
+            p.activatedAtMonotonicMs + VoiceSharingPolicyProvider.DEFAULT_LEASE_MS
+        }
     }
 }
 

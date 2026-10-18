@@ -38,11 +38,13 @@ object VoiceObservationModule {
         policyProvider: VoiceSharingPolicyProvider,
     ): CollectionAuthorityTransaction = CollectionAuthorityTransaction(
         ownership = accountStartup.ownerForHandoff(),
-        policy = object : PolicyIncarnationReader {
-            override fun enabled() = policyProvider.publishedPolicy.value.enabled
-            override fun activationGeneration() = policyProvider.publishedPolicy.value.activationGeneration
-            override fun activatedAtMonotonicMs() = policyProvider.publishedPolicy.value.activatedAtMonotonicMs
+        policy = object : PolicySnapshotReader {
+            // ONE atomic immutable-snapshot read per acquisition (no 3-call getter).
+            override fun snapshot() = policyProvider.publishedPolicy.value
         },
+        // THE single shared primitive: same object as the owner's collectionSharedLock, injected
+        // through the concrete SyncAccountManagerImpl binding resolved by the startup.
+        sharedLock = accountStartup.sharedCollectionLock(),
     )
 
     @Provides

@@ -122,8 +122,9 @@ interface SegmentSink {
     /** Reserves [samples] delta bytes WITHOUT allocating; false when caps/budget refuse. */
     fun reserveDelta(context: CaptureContext, samples: Int): Boolean = false
 
-    /** Transfers an already-reserved drained array into owned retention (exact [copied] bytes). */
-    fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int) = Unit
+    /** Transfers an already-reserved drained array into owned retention (exact [copied] bytes).
+     * Returns true when adopted; false when refused (revoked/cancelled lease). */
+    fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int): Boolean = false
 
     /** Returns an unused reservation after a failed/refused copy-out. */
     fun releaseDelta(context: CaptureContext, samples: Int) = Unit

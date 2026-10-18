@@ -21,6 +21,8 @@ class HandoffCoordinator(
     private val collectionTx: CollectionAuthorityTransaction,
     /** Coherent ORIGINAL-authority validation executed INSIDE the same collection transaction. */
     private val validateIssuedLocked: (IssuedAuthority) -> Boolean,
+    /** LIVE retention decision source, read under the fence BEFORE entering the observer. */
+    private val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = false, fullRevocation = true) },
 ) : CompletionHandoff {
     override fun handoff(
         context: CaptureContext?,
@@ -29,31 +31,48 @@ class HandoffCoordinator(
         wakeState: SegmentObservation.WakeState,
         framesProvider: () -> Pair<List<ShortArray>, Int>,
         scope: ObserverHandoffScope,
-    ) {
-        // PHASE 1 — validation OUTSIDE the fence (reviewer c0c45049): the validator takes ONLY
-        // the owner lock for its identity compare (plus a fence-free policy read). Nothing on
-        // this lane acquires the fence while holding the owner lock, so no entry inverts order.
+        liveGateAllowed: Boolean,
+    ): Unit = collectionTx.transaction {
+        // ONE transaction on the SHARED outermost primitive (reviewer 8273382e): validation and
+        // observer/sink work run under the SAME acquisition — no two-phase boolean seam. Entering
+        // the account tier here is order-safe because every owner transition acquires THIS SAME
+        // object first; reentrant nesting cannot invert an order with only one outer lock.
+        checkFenceHeld()
         val issued = context?.issuedAuthority
         val authorized = issued != null && issued.accountName != null && validateIssuedLocked(issued)
-        // PHASE 2 — observer/sink work under the fence ALONE (fence → observer → sink). The
-        // coordinator never touches the owner lock here; refusal termination and retention both
-        // serialize against loss fan-out through the same fence.
-        collectionTx.transaction {
-            checkFenceHeld()
-            // Identity check FIRST: a stale/unknown context is a late NO-OP, never a purge of
-            // the current capture's audio.
-            if (context != null && !scope.ownsCapture(context.captureId)) return@transaction
-            if (!authorized) {
-                // Refusal STILL terminates: exactly one terminal, prefix PCM + charge released
-                // via the cancel path — never a silent return leaving live uncharged audio.
-                scope.completeUnderOwner(context, speechOnsetSample, speechEndSample, wakeState, framesProvider, admit = false)
-                return@transaction
-            }
-            // Execute the handoff closure (provider + sink adoption + close) while the fence is
-            // held. A concurrent logout/expiry serializes behind this transaction. completeUnderOwner
-            // takes the observer lock internally as the innermost monitor (never upward).
-            scope.completeUnderOwner(context, speechOnsetSample, speechEndSample, wakeState, framesProvider)
+        // Identity check FIRST: a stale/unknown context is a late NO-OP, never a purge of
+        // the current capture's audio.
+        if (context != null && !scope.ownsCapture(context.captureId)) return@transaction
+        // LIVE gate was evaluated by the observer under the shared primitive BEFORE entering
+        // here and arrives as data ([liveGateAllowed]); the observer monitor is never held when
+        // authority locks are taken, and this object never acquires authority from inside it.
+        val liveAllowed = liveGateAllowed
+        if (!authorized || !liveAllowed) {
+            // Refusal STILL terminates: exactly one terminal, prefix PCM + charge released
+            // via the cancel path — never a silent return leaving live uncharged audio.
+            scope.completeUnderOwner(
+                context,
+                speechOnsetSample,
+                speechEndSample,
+                wakeState,
+                framesProvider,
+                admit = false,
+                liveGateAllowed = liveAllowed,
+            )
+            return@transaction
         }
+        // Execute the handoff closure (provider + sink adoption + close) while the shared
+        // primitive is held. A concurrent logout/expiry serializes behind this transaction;
+        // completeUnderOwner takes the observer lock internally as an INNER monitor only.
+        scope.completeUnderOwner(
+            context,
+            speechOnsetSample,
+            speechEndSample,
+            wakeState,
+            framesProvider,
+            admit = true,
+            liveGateAllowed = true,
+        )
     }
 
     /** Order guard: observer/sink work runs only while THIS thread holds the collection fence. */
@@ -74,10 +93,11 @@ interface ObserverHandoffScope {
     fun ownsCapture(captureId: java.util.UUID): Boolean
 
     /**
-     * Under the observer lock (order owner→observer): revalidate the LIVE decision plus the
-     * original issued authority components against the coherent state read under the owner lock,
-     * run [framesProvider] at most once, adopt into the sink, close the capture. Returns whether
-     * audio was retained.
+     * Under the observer lock (order shared → observer): the coordinator has ALREADY validated
+     * ORIGINAL coherent authority and evaluated the LIVE gate under the shared primitive; those
+     * decisions arrive as data ([admit], [liveGateAllowed]) — the observer never acquires any
+     * authority lock upward. Runs [framesProvider] at most once, adopts into the sink, closes
+     * the capture. Refusals emit exactly one terminal and release charges. Returns retention.
      */
     fun completeUnderOwner(
         context: CaptureContext?,
@@ -85,17 +105,8 @@ interface ObserverHandoffScope {
         speechEndSample: Int,
         wakeState: SegmentObservation.WakeState,
         framesProvider: () -> Pair<List<ShortArray>, Int>,
-    ): Boolean = completeUnderOwner(context, speechOnsetSample, speechEndSample, wakeState, framesProvider, admit = true)
-
-    /** [admit]=false models a REFUSED original-authority validation: close with ZERO retention,
-     * provider NEVER runs, exactly one terminal is emitted (closure), charges released. */
-    fun completeUnderOwner(
-        context: CaptureContext?,
-        speechOnsetSample: Int,
-        speechEndSample: Int,
-        wakeState: SegmentObservation.WakeState,
-        framesProvider: () -> Pair<List<ShortArray>, Int>,
-        admit: Boolean,
+        admit: Boolean = true,
+        liveGateAllowed: Boolean = true,
     ): Boolean
 }
 
@@ -116,6 +127,7 @@ fun interface CompletionHandoff {
         wakeState: SegmentObservation.WakeState,
         framesProvider: () -> Pair<List<ShortArray>, Int>,
         scope: ObserverHandoffScope,
+        liveGateAllowed: Boolean,
     )
 }
 
@@ -128,5 +140,6 @@ object RefuseAllCompletionHandoff : CompletionHandoff {
         wakeState: SegmentObservation.WakeState,
         framesProvider: () -> Pair<List<ShortArray>, Int>,
         scope: ObserverHandoffScope,
+        liveGateAllowed: Boolean,
     ) = Unit
 }

@@ -185,6 +185,37 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeec
 }
 
 extern "C" JNIEXPORT jint JNICALL
+Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeechPcmRange(
+    JNIEnv* env,
+    jclass /*clazz*/,
+    jshortArray jOut,
+    jint fromSample)
+{
+    NativeVadProcessor* processor = gVadProcessor.acquire();
+    if (processor == nullptr) {
+        return 0;
+    }
+
+    jsize capacity = env->GetArrayLength(jOut);
+    jshort* elements = env->GetShortArrayElements(jOut, nullptr);
+    if (elements == nullptr) {
+        gVadProcessor.release();
+        return 0;
+    }
+
+    // EXACT-SIZE ranged copy: native writes directly into the caller's reserved array — no
+    // whole-prefix temp, no second Kotlin-side copy.
+    int32_t copied = processor->getSpeechPcmRange(
+        reinterpret_cast<int16_t*>(elements),
+        static_cast<int32_t>(fromSample),
+        static_cast<int32_t>(capacity));
+
+    env->ReleaseShortArrayElements(jOut, elements, 0); // copy back
+    gVadProcessor.release();
+    return static_cast<jint>(copied);
+}
+
+extern "C" JNIEXPORT jint JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeGetSpeechPcmSize(
     JNIEnv* /*env*/,
     jclass /*clazz*/)

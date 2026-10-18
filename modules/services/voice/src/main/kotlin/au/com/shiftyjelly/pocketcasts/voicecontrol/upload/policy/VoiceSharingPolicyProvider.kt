@@ -52,16 +52,9 @@ class VoiceSharingPolicyProvider(
     private val nowMs: () -> Long,
     private val sleepMs: suspend (Long) -> Unit = { delay(it) },
     private val refreshTimeoutMs: Long = REFRESH_TIMEOUT_MS,
+    /** SHARED serialization primitive: the SAME object as the account tier's collection lock. */
+    private val sharedCollectionLock: Any = Any(),
 ) {
-    // Nested collection fence (reviewer a38421f6): the collection lane acquires
-    // collectionFence -> policyNesting BEFORE any other lane touches publication; every publish
-    // here enters this inner lock while callers may hold the outer fence, so policy transitions
-    // serialize with account transitions and in-flight handoff copies deterministically.
-    private val policyNesting = Any()
-
-    /** Publishes inside the nested fence: order is collection-fence(outer) -> policyNesting. */
-    fun publishUnderNesting(snapshot: PolicySnapshot) = synchronized(policyNesting) { state.value = snapshot }
-
     private val state = MutableStateFlow(DISABLED)
 
     /** Observable at the collection boundary: a refresh emits here before another segment/upload. */
@@ -176,28 +169,32 @@ class VoiceSharingPolicyProvider(
         )
         // Generation allocation and conditional publication share one lock, so a newer request
         // can never interleave between this refresh's check and its publication.
-        synchronized(fence) {
-            if (requestGen != requestGeneration) {
-                return DISABLED // a newer refresh superseded this one while it was awaiting
+        synchronized(sharedCollectionLock) {
+            synchronized(fence) {
+                if (requestGen != requestGeneration) {
+                    return DISABLED // a newer refresh superseded this one while it was awaiting
+                }
+                activationGeneration = requestGen
+                state.value = snapshot
+                // Timer ownership is serialized WITH publication under the same fences: a
+                // superseded refresh never reaches this line, so it can never cancel a newer
+                // timer or install a stale one; a renewal cancels the previous timer here first.
+                installInvalidationLocked(snapshot)
             }
-            activationGeneration = requestGen
-            synchronized(policyNesting) { state.value = snapshot }
-            // Timer ownership is serialized WITH publication under the same fence: a superseded
-            // refresh never reaches this line, so it can never cancel a newer timer or install a
-            // stale one; a renewal cancels the previous timer here before installing its own.
-            installInvalidationLocked(snapshot)
         }
         return snapshot
     }
 
     /** Publishes disabled unless a newer refresh request has started (generation fence). */
     private fun publishDisabled(requestGen: Long): PolicySnapshot {
-        synchronized(fence) {
-            if (requestGen == requestGeneration) {
-                activationGeneration = 0L
-                synchronized(policyNesting) { state.value = DISABLED }
-                invalidationJob?.cancel()
-                invalidationJob = null
+        synchronized(sharedCollectionLock) {
+            synchronized(fence) {
+                if (requestGen == requestGeneration) {
+                    activationGeneration = 0L
+                    state.value = DISABLED
+                    invalidationJob?.cancel()
+                    invalidationJob = null
+                }
             }
         }
         return DISABLED
@@ -224,16 +221,18 @@ class VoiceSharingPolicyProvider(
                 // closed: publish disabled (fenced).
                 if (nowMs() <= before) break
             }
-            synchronized(fence) {
-                // Fenced on the ACTIVATION generation only: when this schedule's own lease truly
-                // expires, the policy MUST disable — an in-flight renewal is not a fresh policy,
-                // and subscribers must see disabled until the renewal installs a valid lease.
-                // The stale-timer hazard (an old wake AFTER a renewal installed a fresh lease,
-                // before that lease's deadline) is prevented by the renewal cancelling this job
-                // inside the fence at publication; if a late wake still slips through (cancellation
-                // lost the race), the activation-generation check refuses to tear down the renewal.
-                if (activationGeneration == gen) {
-                    synchronized(policyNesting) { state.value = DISABLED }
+            synchronized(sharedCollectionLock) {
+                synchronized(fence) {
+                    // Fenced on the ACTIVATION generation only: when this schedule's own lease truly
+                    // expires, the policy MUST disable — an in-flight renewal is not a fresh policy,
+                    // and subscribers must see disabled until the renewal installs a valid lease.
+                    // The stale-timer hazard (an old wake AFTER a renewal installed a fresh lease,
+                    // before that lease's deadline) is prevented by the renewal cancelling this job
+                    // inside the fence at publication; if a late wake still slips through (cancellation
+                    // lost the race), the activation-generation check refuses to tear down the renewal.
+                    if (activationGeneration == gen) {
+                        state.value = DISABLED
+                    }
                 }
             }
         }

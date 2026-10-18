@@ -293,10 +293,18 @@ jobs:
             - Use `gh pr view` for metadata and changed paths, then inspect the relevant
               checked-out files and individual patches. Do not load the entire diff or
               comment history into one response.
-            - Before reviewing, use `gh api graphql` to fetch this PR's unresolved
-              review threads, including their comment bodies and URLs. Paginate through
-              every page and inspect long threads in smaller batches; do not omit open
-              findings because older bot summaries are absent from the initial prompt.
+            - Before reviewing, enumerate every page of issue comments, review summaries
+              and inline review threads, from humans and bots, using `gh api graphql`
+              and `gh api --method GET`. Retrieve IDs, URLs and thread resolution first,
+              then read bodies in small batches, splitting long bodies as needed.
+            - Identify all still-open findings across those sources, including findings
+              present only in a summary or issue comment. Check later replies, thread
+              resolution and written rejections; do not treat omission from the initial
+              prompt as resolution. Do not stop at the first 100 records or filter by actor.
+            - Deduplicate by stable comment/thread ID or a finding's linked source ID,
+              retaining its source URL. Inspect substantive history without silently
+              truncating it. Report any retrieval or coverage gap explicitly rather than
+              claiming the review is complete.
             - Use `gh api --method GET` for focused REST reads as needed. If a prior
               reviewed commit cannot be verified, review the full PR rather than infer
               a baseline from an old comment.

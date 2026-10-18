@@ -101,6 +101,7 @@ class SyncManagerImpl @Inject constructor(
     @ApplicationContext private val context: Context,
     private val settings: Settings,
     private val syncAccountManager: SyncAccountManager,
+    private val credentialOwnership: CredentialOwnershipOwner,
     private val syncServiceManager: SyncServiceManager,
     private val moshi: Moshi,
     private val notificationManager: NotificationManager,
@@ -169,17 +170,23 @@ class SyncManagerImpl @Inject constructor(
         return try {
             val signInType = syncAccountManager.getSignInType(account)
             LogBuffer.i(LogBuffer.TAG_BACKGROUND_TASKS, "Fetching the access token, SignInType: $signInType")
+            // Refresh admission captured BEFORE the network work: the publication commit is
+            // conditional on the account/session/credential still matching, so a late refresh
+            // can neither write into a newer account/session nor overwrite a newer credential,
+            // and a REFUSED publication never hands its token to the platform cache.
+            val lease = credentialOwnership.beginRefresh()
             val tokenResponse = downloadTokens(
                 email = account.name,
                 refreshToken = refreshToken,
                 signInType = signInType,
             )
-
-            // update the refresh token as the expiry may have been increased
-            syncAccountManager.setRefreshToken(tokenResponse.refreshToken)
-
-            syncAccountManager.setAccessToken(tokenResponse.accessToken)
+            if (lease == null || !credentialOwnership.publishRefresh(lease, tokenResponse.refreshToken, tokenResponse.accessToken)) {
+                throw java.io.IOException("Token refresh publication refused: superseded by newer account/session/credential state")
+            }
             tokenResponse.accessToken
+        } catch (ex: java.io.IOException) {
+            LogBuffer.e(LogBuffer.TAG_BACKGROUND_TASKS, ex, "Unable to publish refreshed access token.")
+            throw ex
         } catch (ex: Exception) {
             LogBuffer.e(LogBuffer.TAG_BACKGROUND_TASKS, ex, "Unable to fetch access token.")
             if (isHttpClientError(ex)) {

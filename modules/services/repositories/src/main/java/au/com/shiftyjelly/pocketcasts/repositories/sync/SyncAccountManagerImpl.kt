@@ -35,50 +35,93 @@ open class SyncAccountManagerImpl @Inject constructor(
     CredentialOwnershipOwner {
 
     /**
-     * Credential OWNERSHIP (reviewer a75df7ef): one lock and one non-secret generation guard
-     * EVERY credential write (set/invalidate/login/signOut) and the atomic compare-and-
-     * invalidate other boundaries run their scoped checks inside. External rotations are
-     * therefore never missed by a cached read and never cleared by a stale rejection.
+     * Credential + session OWNERSHIP (reviewers a75df7ef→f1d41730): ONE lock; ONE immutable
+     * AuthoritySnapshot (account, session, credential, owner-published token); lifecycle
+     * transactions fire the narrow synchronous binding INSIDE the lock (owner→voice is THE
+     * single lock order); refresh publication is captured BEFORE the network and conditionally
+     * committed; authority is NEVER reconstructed from a bare platform-cache token.
      */
     private val credentialWriteLock = Any()
     private val credentialGenerationCounter = java.util.concurrent.atomic.AtomicLong(0)
     private val sessionGenerationCounter = java.util.concurrent.atomic.AtomicLong(0)
+    private var publishedToken: AccessToken? = null // owner-attributed; never a bare cache read
+    private var ownershipBinding: CredentialOwnershipBinding? = null
 
-    override fun credentialGeneration(): Long = credentialGenerationCounter.get()
+    fun credentialGeneration(): Long = credentialGenerationCounter.get()
 
-    /**
-     * DISTINCT synchronous SESSION incarnation: increments ONLY on login/logout/account-switch
-     * writes (addAccount, signOut), never on token refresh/rotation. Async session events are
-     * fenced against it: an event observed at generation G is applied only if the generation is
-     * still G after its suspend work, so a late async completion can neither re-arm a logged-out
-     * session nor double-apply churn.
-     */
+    /** DISTINCT session incarnation: changes ONLY on login/logout/account-switch, never on refresh. */
     override fun sessionGeneration(): Long = sessionGenerationCounter.get()
 
-    override fun accessTokenSnapshot(): AccessTokenSnapshot? = synchronized(credentialWriteLock) {
-        val account = getAccount() ?: return null
-        peekAccessToken(account)?.let { AccessTokenSnapshot(it, credentialGenerationCounter.get()) }
+    override fun authoritySnapshot(): AuthoritySnapshot = synchronized(credentialWriteLock) {
+        AuthoritySnapshot(getAccount()?.name, sessionGenerationCounter.get(), credentialGenerationCounter.get(), publishedToken)
     }
 
-    /**
-     * ATOMIC compare-and-invalidate against BOTH the observed generation AND the observed
-     * token VALUE: async AccountManager/authenticator refresh writes that bypass
-     * setAccessToken change the platform token without our counter, so the value compare
-     * closes that gap — a rotation by ANY writer makes a stale rejection a no-op.
-     */
-    override fun invalidateIfUnchanged(observed: AccessTokenSnapshot, scopedCheck: (commitGuard: () -> Boolean) -> Boolean): Boolean = synchronized(credentialWriteLock) {
-        if (credentialGenerationCounter.get() != observed.generation) return false
-        val account = getAccount() ?: return false
-        val currentToken = peekAccessToken(account)
-        if (currentToken == null || currentToken.value != observed.token.value) return false
-        // The commit guard re-reads the AUTHORITATIVE token under the SAME lock at the caller's
-        // commit instant: an external platform/authenticator rotation that lands between this
-        // peek and the commit refuses the whole transaction.
-        val commitGuard = { peekAccessToken(account)?.value == observed.token.value }
-        if (!scopedCheck(commitGuard)) return false
-        accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, observed.token.value)
+    override fun installOwnershipBinding(binding: CredentialOwnershipBinding?): AuthoritySnapshot? = synchronized(credentialWriteLock) {
+        ownershipBinding = binding
+        val account = getAccount()
+        val platformToken = account?.let { peekAccessToken(it) }
+        if (account == null || platformToken == null) {
+            publishedToken = null // fail-closed: nothing to adopt, no authority
+            return null
+        }
+        // Explicit ONE-TIME adoption of the pre-existing platform token at install: attributed
+        // to the CURRENT credential incarnation. A LATER cache copy cannot acquire authority.
+        publishedToken = platformToken
+        binding?.onSessionStarted(sessionGenerationCounter.get())
+        authoritySnapshot()
+    }
+
+    override fun beginRefresh(): RefreshLease? = synchronized(credentialWriteLock) {
+        val account = getAccount() ?: return null
+        RefreshLease(account.name, sessionGenerationCounter.get(), credentialGenerationCounter.get())
+    }
+
+    override fun publishRefresh(lease: RefreshLease, refreshToken: RefreshToken, accessToken: AccessToken): Boolean = synchronized(credentialWriteLock) {
+        val account = getAccount()
+        if (account == null ||
+            account.name != lease.accountName ||
+            sessionGenerationCounter.get() != lease.session || // session moved: NEVER write into it
+            credentialGenerationCounter.get() != lease.credential
+        ) { // superseded account/session OR a newer credential already published (out-of-order completion)
+            return false
+        }
+        accountManager.setPassword(account, refreshToken.value)
+        accountManager.setUserData(account, AccountConstants.SIGN_IN_TYPE_KEY, AccountConstants.SignInType.Tokens.value)
+        accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
+        publishedToken = accessToken
         credentialGenerationCounter.incrementAndGet()
         true
+    }
+
+    override fun <T> transaction(block: () -> T): T = synchronized(credentialWriteLock) { block() }
+
+    override fun invalidateIfCurrent(observed: AuthoritySnapshot, transaction: () -> Boolean): Boolean = synchronized(credentialWriteLock) {
+        val account = getAccount()
+        val rejected = observed.token ?: return false
+        if (account == null ||
+            account.name != observed.accountName ||
+            sessionGenerationCounter.get() != observed.session ||
+            credentialGenerationCounter.get() != observed.credential ||
+            publishedToken?.value != rejected.value
+        ) {
+            return false // stale rejection: invalidates NOTHING
+        }
+        if (!transaction()) return false // scoped voice refusal INSIDE the owner transaction
+        accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, rejected.value)
+        publishedToken = null
+        credentialGenerationCounter.incrementAndGet()
+        true
+    }
+
+    override fun reconcileExternalState(): AuthoritySnapshot = synchronized(credentialWriteLock) {
+        if (getAccount() == null && publishedToken != null) {
+            // Externally removed (OS observation limit: detected only when observed).
+            publishedToken = null
+            credentialGenerationCounter.incrementAndGet()
+            sessionGenerationCounter.incrementAndGet()
+            ownershipBinding?.onSessionEnded(sessionGenerationCounter.get())
+        }
+        authoritySnapshot()
     }
 
     override fun getAccount(): Account? {
@@ -185,6 +228,7 @@ open class SyncAccountManagerImpl @Inject constructor(
             val accessToken = peekAccessToken(account) ?: return
             accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, accessToken.value)
             credentialGenerationCounter.incrementAndGet()
+            publishedToken = null
         }
     }
 
@@ -207,6 +251,8 @@ open class SyncAccountManagerImpl @Inject constructor(
             accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
             credentialGenerationCounter.incrementAndGet()
             sessionGenerationCounter.incrementAndGet()
+            publishedToken = accessToken // owner-published at the login transaction
+            ownershipBinding?.onSessionStarted(sessionGenerationCounter.get()) // INSIDE the owner transaction
             added
         }
 
@@ -225,6 +271,8 @@ open class SyncAccountManagerImpl @Inject constructor(
             }
             credentialGenerationCounter.incrementAndGet()
             sessionGenerationCounter.incrementAndGet()
+            publishedToken = null
+            ownershipBinding?.onSessionEnded(sessionGenerationCounter.get()) // INSIDE the owner transaction
         }
     }
 
@@ -239,6 +287,7 @@ open class SyncAccountManagerImpl @Inject constructor(
             val account = getAccount() ?: return
             accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
             credentialGenerationCounter.incrementAndGet()
+            publishedToken = accessToken
         }
     }
 

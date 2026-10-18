@@ -102,13 +102,16 @@ class VoiceSharingAccountState {
      * captures the projection snapshot, and issues a generation ticket. Mutations require a
      * current-session GET projection; the GET authority-creation path does not.
      */
-    fun beginOperation(token: SessionToken, requireProjection: Boolean): OperationTicket? = synchronized(fence) {
-        if (token !== currentToken) return null
+    fun beginOperation(token: SessionToken, requireProjection: Boolean, ownerSession: Long = Long.MIN_VALUE): OperationTicket? = synchronized(fence) {
+        // OWNER→voice: this runs inside the owner's transaction — the ticket stamps the owner
+        // session incarnation observed under the owner lock, so later checks compare against
+        // the LIVE incarnation, not collector timing.
+        if (token !== currentToken || currentSessionGeneration != ownerSession) return null
         val projection = state.value
         if (requireProjection && projection == null) return null
         // The issued projection snapshot is IMMUTABLE on the ticket: request bodies are
         // serialized from exactly these captured values, never re-read after awaits.
-        OperationTicket(operationGeneration.incrementAndGet(), projection)
+        OperationTicket(operationGeneration.incrementAndGet(), projection, ownerSession)
     }
 
     /**
@@ -116,8 +119,9 @@ class VoiceSharingAccountState {
      * ticket generation, strictly parses, and only then writes — a new same-session intent
      * (which bumps the generation) can never slip between check and write.
      */
-    fun applyOutcome(token: SessionToken, ticket: OperationTicket, json: String): Boolean = synchronized(fence) {
-        if (token !== currentToken || ticket.generation != operationGeneration.get()) return false
+    fun applyOutcome(token: SessionToken, ticket: OperationTicket, json: String, ownerSession: Long = Long.MIN_VALUE): Boolean = synchronized(fence) {
+        // OWNER→voice: ownerSession was read under the owner lock by the caller's transaction.
+        if (token !== currentToken || ticket.generation != operationGeneration.get() || ticket.session != ownerSession) return false
         val projection = parseProjection(json) ?: return false
         state.value = projection
         true
@@ -133,8 +137,8 @@ class VoiceSharingAccountState {
     }
 
     /** Fenced revalidation used before each send and before terminal outcomes. */
-    fun isTicketCurrent(token: SessionToken, ticket: OperationTicket): Boolean = synchronized(fence) {
-        token === currentToken && ticket.generation == operationGeneration.get()
+    fun isTicketCurrent(token: SessionToken, ticket: OperationTicket, ownerSession: Long = Long.MIN_VALUE): Boolean = synchronized(fence) {
+        token === currentToken && ticket.generation == operationGeneration.get() && ticket.session == ownerSession
     }
 
     /**
@@ -145,22 +149,17 @@ class VoiceSharingAccountState {
      * this check INSIDE its transaction lock, making credential compare + state invalidation
      * one coordinated transaction. No credential data passes through or is stored.
      */
-    fun processUnauthorized(
-        token: SessionToken,
-        ticket: OperationTicket,
-        commitGuard: () -> Boolean = { true },
-    ): Boolean = synchronized(fence) {
+    fun processUnauthorized(token: SessionToken, ticket: OperationTicket): Boolean = synchronized(fence) {
         if (token !== currentToken) return false
         if (ticket.generation != operationGeneration.get()) return false
-        // COMMIT GUARD: re-verifies the authoritative credential at the commit INSTANT — an
-        // external rotation in the owner's peek->commit gap refuses the whole transaction and
-        // leaves the fresh credential AND the armed state intact.
-        if (!commitGuard()) return false
         operationGeneration.incrementAndGet()
         currentToken = null
         state.value = null
         true
     }
+
+    /** Test/diagnostic accessor for the current issued session (null when ended). */
+    fun currentSessionTokenForTest(): SessionToken? = synchronized(fence) { currentToken }
 
     fun hasCurrentSessionProjection(): Boolean = synchronized(fence) {
         currentToken != null && state.value != null
@@ -290,10 +289,11 @@ internal object ProjectionJsonParser {
 /** Non-secret lifecycle incarnation: unique per issued session, reference-compared only. */
 class SessionToken internal constructor()
 
-/** Store-issued operation generation: valid only while its session and generation are current. */
+/** Store-issued operation generation: valid only while its session, generation AND owner session incarnation are current. */
 class OperationTicket internal constructor(
     internal val generation: Long,
     internal val projection: VoiceSharingAccountProjection?,
+    internal val session: Long,
 )
 
 /** Server-issued opaque membership revision: never sorted, equality/current-only usage. */

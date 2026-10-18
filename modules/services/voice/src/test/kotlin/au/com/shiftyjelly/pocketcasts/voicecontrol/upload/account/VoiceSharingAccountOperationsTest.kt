@@ -4,9 +4,10 @@ import android.accounts.Account
 import au.com.shiftyjelly.pocketcasts.preferences.AccessToken
 import au.com.shiftyjelly.pocketcasts.preferences.AccountConstants
 import au.com.shiftyjelly.pocketcasts.preferences.RefreshToken
-import au.com.shiftyjelly.pocketcasts.repositories.sync.AccessTokenSnapshot
+import au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot
+import au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipBinding
 import au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner
-import au.com.shiftyjelly.pocketcasts.repositories.sync.SyncAccountManager
+import au.com.shiftyjelly.pocketcasts.repositories.sync.RefreshLease
 import au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity
 import au.com.shiftyjelly.pocketcasts.utils.Optional
 import io.reactivex.Flowable
@@ -41,6 +42,108 @@ import org.junit.Test
 import retrofit2.Retrofit
 
 /**
+ * Full-shape test CredentialOwnershipOwner: mirrors the real owner's contract (one lock, one
+ * immutable snapshot, conditional refresh, owner-transaction 401, narrow binding) so the
+ * focused controls run against the ACTUAL shape of the production boundary.
+ */
+private class TestOwner(
+    @Volatile var accountName: String? = "user@example.com",
+) : CredentialOwnershipOwner {
+    private val lock = Any()
+    private var session = 1L
+    private var credential = 1L
+
+    @Volatile var token: AccessToken? = null
+    var binding: CredentialOwnershipBinding? = null
+    private val credentials = VoiceSharingCredentialStore()
+
+    val invalidations = mutableListOf<AuthoritySnapshot>()
+
+    override fun authoritySnapshot(): AuthoritySnapshot = synchronized(lock) {
+        AuthoritySnapshot(accountName, session, credential, token)
+    }
+
+    override fun installOwnershipBinding(binding: CredentialOwnershipBinding?): AuthoritySnapshot? = synchronized(lock) {
+        this.binding = binding
+        if (accountName == null || token == null) return null
+        binding?.onSessionStarted(session)
+        authoritySnapshot()
+    }
+
+    override fun beginRefresh(): RefreshLease? = synchronized(lock) {
+        accountName?.let { RefreshLease(it, session, credential) }
+    }
+
+    override fun publishRefresh(lease: RefreshLease, refreshToken: RefreshToken, accessToken: AccessToken): Boolean = synchronized(lock) {
+        if (accountName != lease.accountName || session != lease.session || credential != lease.credential) return false
+        token = accessToken
+        credential += 1
+        true
+    }
+
+    override fun <T> transaction(block: () -> T): T = synchronized(lock) { block() }
+
+    override fun invalidateIfCurrent(observed: AuthoritySnapshot, transaction: () -> Boolean): Boolean = synchronized(lock) {
+        val rejected = observed.token ?: return false
+        if (accountName != observed.accountName || session != observed.session ||
+            credential != observed.credential || token?.value != rejected.value
+        ) {
+            return false
+        }
+        if (!transaction()) return false
+        token = null
+        credential += 1
+        invalidations.add(observed)
+        true
+    }
+
+    override fun reconcileExternalState(): AuthoritySnapshot = synchronized(lock) {
+        if (accountName == null && token != null) {
+            token = null
+            credential += 1
+            session += 1
+            binding?.onSessionEnded(session)
+        }
+        authoritySnapshot()
+    }
+
+    override fun sessionGeneration(): Long = synchronized(lock) { session }
+
+    // ---- test drive helpers (simulate the owner's real writes) ----
+
+    /** W3-equivalent: owner-published token + credential bump + mirror. */
+    fun issueToken(value: String) = synchronized(lock) {
+        token = AccessToken(value)
+        credential += 1
+        credentials.publish("Bearer $value")
+    }
+
+    /** W1-equivalent: login/account switch — session + credential incarnations BOTH move. */
+    fun login(value: String?) = synchronized(lock) {
+        token = value?.let { AccessToken(it) }
+        credential += 1
+        session += 1
+        binding?.onSessionStarted(session)
+    }
+
+    /** W1-equivalent session bump without re-arming the binding (test driver). */
+    fun simulateAccountSwitch() = synchronized(lock) {
+        session += 1
+    }
+
+    /** W2-equivalent: logout. */
+    fun logout() = synchronized(lock) {
+        token = null
+        credential += 1
+        session += 1
+        binding?.onSessionEnded(session)
+    }
+
+    fun mirrorCurrent(): CredentialIncarnation? = credentials.current()
+    val mirrorStore: VoiceSharingCredentialStore get() = credentials
+}
+
+/**
  * Task 2 routes/operations controls (real HTTP boundary via MockWebServer):
  *
  * - A current-session GET must succeed before any authority operation: enrollment with no
@@ -60,7 +163,8 @@ class VoiceSharingAccountOperationsTest {
     private lateinit var state: VoiceSharingAccountState
     private lateinit var operations: VoiceSharingAccountOperations
     private lateinit var token: SessionToken
-    private val credentials = VoiceSharingCredentialStore()
+    private lateinit var owner: TestOwner
+    private val credentials get() = owner.mirrorStore
 
     @Before
     fun setUp() {
@@ -68,8 +172,9 @@ class VoiceSharingAccountOperationsTest {
         server.start()
         val api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient())
         state = VoiceSharingAccountState()
-        operations = VoiceSharingAccountOperations(api, state, credentials, { credentials.current() }, { _ -> })
-        token = state.sessionStarted()
+        owner = TestOwner()
+        operations = VoiceSharingAccountOperations(api, state, owner) { _ -> }
+        token = state.sessionStarted(owner.sessionGeneration())
     }
 
     @After
@@ -79,9 +184,9 @@ class VoiceSharingAccountOperationsTest {
 
     private fun assertApplied(result: VoiceSharingMutationResult) = assertTrue(result is VoiceSharingMutationResult.Applied)
 
-    /** Publishes the credential; callers keep using `credentials.current()` / publish to rotate. */
+    /** Owner-published credential (W3-equivalent); the mirror follows. */
     private fun issueBearer(value: String) {
-        credentials.publish(value)
+        owner.issueToken(value.removePrefix("Bearer "))
     }
 
     private fun projectionJson(
@@ -250,8 +355,9 @@ class VoiceSharingAccountOperationsFencingTest {
     private lateinit var state: VoiceSharingAccountState
     private lateinit var operations: VoiceSharingAccountOperations
     private lateinit var token: SessionToken
-    private val credentials = VoiceSharingCredentialStore()
-    private val invalidations = mutableListOf<CredentialIncarnation>()
+    private lateinit var owner: TestOwner
+    private val credentials get() = owner.mirrorStore
+    private val invalidations = mutableListOf<AuthoritySnapshot>()
 
     @Before
     fun setUp() {
@@ -259,14 +365,13 @@ class VoiceSharingAccountOperationsFencingTest {
         server.start()
         val api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient())
         state = VoiceSharingAccountState()
+        owner = TestOwner()
         operations = VoiceSharingAccountOperations(
             api = api,
             state = state,
-            ownership = credentials,
-            credentialSource = { credentials.current() },
-            onCredentialInvalid = { rejected -> invalidations.add(rejected) },
-        )
-        token = state.sessionStarted()
+            ownership = owner,
+        ) { rejected -> invalidations.add(rejected) }
+        token = state.sessionStarted(owner.sessionGeneration())
     }
 
     @After
@@ -276,9 +381,9 @@ class VoiceSharingAccountOperationsFencingTest {
 
     private fun assertApplied(result: VoiceSharingMutationResult) = assertTrue(result is VoiceSharingMutationResult.Applied)
 
-    /** Publishes the credential; callers keep using `credentials.current()` / publish to rotate. */
+    /** Owner-published credential (W3-equivalent); the mirror follows. */
     private fun issueBearer(value: String) {
-        credentials.publish(value)
+        owner.issueToken(value.removePrefix("Bearer "))
     }
 
     private fun projectionJson(revision: String = "rev-1"): String = "{\"schema_version\":1,\"membership_revision\":\"$revision\",\"plan\":\"free\"," +
@@ -331,8 +436,8 @@ class VoiceSharingAccountOperationsFencingTest {
         issueBearer("Bearer token-a") // unchanged at 401 time
         assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
         assertEquals(1, invalidations.size)
-        // The effect carries the ACTUAL rejected incarnation (opaque; the bearer never leaks).
-        assertEquals("Bearer token-a", invalidations[0].bearer)
+        // The effect carries the ACTUAL rejected owner snapshot (opaque; never logged).
+        assertEquals("token-a", invalidations[0].token!!.value)
     }
 
     @Test
@@ -348,50 +453,50 @@ class VoiceSharingAccountOperationsFencingTest {
 
     @Test
     fun `401 after a rotation BEFORE the coordinated transaction invalidates NOTHING`() = runTest {
-        val c1 = credentials.publish("Bearer token-a")!!
+        issueBearer("Bearer token-a")
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
-        assertTrue(operations.refreshProjection(token)) // froze incarnation c1
+        assertTrue(operations.refreshProjection(token)) // froze the owner snapshot at token-a
         // Deterministic margin: the 401 cannot be PROCESSED until the headers delay elapses
         // (2s); the rotation is committed at ~200ms — strictly before the transaction starts.
         server.enqueue(MockResponse().setResponseCode(401).setHeadersDelay(2, TimeUnit.SECONDS))
         val result = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
         withContext(Dispatchers.IO) { Thread.sleep(200) }
-        val fresh = credentials.publish("Bearer token-b")!! // rotation commits first
+        issueBearer("Bearer token-b") // rotation commits first
         assertTrue(result.await() is VoiceSharingMutationResult.Failure)
         // The coordinated transaction refused: NOTHING was invalidated.
-        assertSame(fresh, credentials.current()) // fresh incarnation untouched
-        assertEquals("Bearer token-b", credentials.current()!!.bearer)
+        assertEquals("Bearer token-b", credentials.current()!!.bearer) // fresh credential untouched
         assertTrue(state.hasCurrentSessionProjection()) // session authority untouched
         assertEquals("rev-1", state.projection.value!!.membershipRevision)
         assertTrue(invalidations.isEmpty()) // no credential effect
     }
 
     @Test
-    fun `a session started before the 401 callback survives it - deterministic callback barrier`() = runTest {
-        credentials.publish("Bearer token-a")
+    fun `the post-commit notification has NO authority effects - deterministic barrier`() = runTest {
+        issueBearer("Bearer token-a")
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         assertTrue(operations.refreshProjection(token))
         server.enqueue(MockResponse().setResponseCode(401))
-        // Deterministic barrier AT THE ACTUAL BOUNDARY: the callback itself suspends; while it
-        // is pending we start a NEW session and publish a FRESH incarnation, then release.
+        // Deterministic barrier: the POST-COMMIT notification suspends; while it is pending we
+        // start a NEW owner session and publish a FRESH owner credential, then release.
         val enteredCallback = CompletableDeferred<Unit>()
         val releaseCallback = CompletableDeferred<Unit>()
         val barrierOps = VoiceSharingAccountOperations(
             api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
             state = state,
-            ownership = credentials,
-            credentialSource = { credentials.current() },
+            ownership = owner,
             onCredentialInvalid = { _ ->
                 enteredCallback.complete(Unit)
                 releaseCallback.await()
             },
         )
         val result = async(Dispatchers.IO) { barrierOps.enroll(token, acceptedDisclosureVersion = "v3") }
-        enteredCallback.await() // transaction COMMITTED; effect pending
-        val newSession = state.sessionStarted() // fresh authority starts BEFORE the callback runs
-        credentials.publish("Bearer token-b") // fresh incarnation BEFORE the callback runs
+        enteredCallback.await() // transaction COMMITTED (real credential + scoped state cleared)
+        assertFalse(state.hasCurrentSessionProjection()) // the committed revocation is visible
+        owner.simulateAccountSwitch() // fresh owner session incarnation (W1-equivalent)
+        val newSession = state.sessionStarted(owner.sessionGeneration())
+        owner.issueToken("token-b") // fresh owner credential BEFORE the notification runs
         releaseCallback.complete(Unit)
-        // Both survive the callback: the effect is a notification, never a second invalidation.
+        // Both survive: the notification is a hook, never a second invalidation.
         assertTrue(state.isCurrentSession(newSession))
         assertEquals("Bearer token-b", credentials.current()!!.bearer)
         assertTrue(result.await() is VoiceSharingMutationResult.Failure)
@@ -636,20 +741,6 @@ class VoiceSharingAccountSessionCoordinatorTest {
     }
 
     @Test
-    fun `token refresh keeps the SAME incarnation for the same bearer and rotates for a new bearer`() {
-        val state = VoiceSharingAccountState()
-        val credentials = VoiceSharingCredentialStore()
-        val coordinator = VoiceSharingAccountSessionCoordinator(state, credentials)
-        coordinator.login("Bearer token-a")
-        val same = credentials.current()
-        coordinator.credentialRefreshed("Bearer token-a")
-        assertSame(same, credentials.current()) // refresh is NOT a rotation
-        coordinator.credentialRefreshed("Bearer token-b")
-        assertNotSame(same, credentials.current()) // a different bearer IS a new incarnation
-        assertEquals("Bearer token-b", credentials.current()!!.bearer)
-    }
-
-    @Test
     fun `logout clears the credential AND ends the session together`() {
         val state = VoiceSharingAccountState()
         val credentials = VoiceSharingCredentialStore()
@@ -662,155 +753,112 @@ class VoiceSharingAccountSessionCoordinatorTest {
 }
 
 /**
- * Coordinator atomicity + REAL production ownership (reviewer a65170e7): the binding wires the
- * EXISTING auth owner (SyncAccountManager) to the coordinated session/credential owner; every
- * transition is one transaction; the credential-invalid effect is the auth owner's real
- * invalidation write.
+ * Binding controls (reviewer 504da9ea design): the binding is the owner's NARROW synchronous
+ * binding — session arms/ends INSIDE owner lifecycle transactions; install() bootstraps
+ * fail-closed under the same owner lock. NO async email collector exists (no second authority
+ * writer).
  */
 class VoiceSharingAccountAuthBindingTest {
 
-    /** Control scope: a real-shaped CredentialOwnershipOwner with a test-owned generation. */
-    private class FakeOwnership : CredentialOwnershipOwner {
-        var generation = 0L
-        var sessionGenerationValue = 0L
-        var token: AccessToken? = AccessToken("real-token-1")
-        val invalidations = mutableListOf<Long>()
-
-        override fun credentialGeneration(): Long = generation
-        override fun sessionGeneration(): Long = sessionGenerationValue
-        override fun accessTokenSnapshot(): AccessTokenSnapshot? = token?.let { AccessTokenSnapshot(it, generation) }
-        override fun invalidateIfUnchanged(observed: AccessTokenSnapshot, scopedCheck: (commitGuard: () -> Boolean) -> Boolean): Boolean = synchronized(this) {
-            if (generation != observed.generation) return false
-            if (token?.value != observed.token.value) return false // ANY writer rotating the token refuses the stale CAS
-            val commitGuard = { token?.value == observed.token.value }
-            if (!scopedCheck(commitGuard)) return false
-            token = null
-            generation += 1
-            invalidations.add(observed.generation)
-            true
-        }
-    }
-
-    private class FakeAuth : SyncAccountManager {
-        val emailState = MutableStateFlow<String?>(null)
-        var currentToken: AccessToken? = AccessToken("real-token-1")
-        var invalidateCount = 0
-
-        override suspend fun getAccessToken(): AccessToken? = currentToken
-        override fun addAccount(email: String, uuid: String, refreshToken: RefreshToken, accessToken: AccessToken, loginIdentity: LoginIdentity) = Unit
-        override fun getAccount(): Account? = null
-        override fun getEmail(): String? = emailState.value
-        override fun emailFlow(): Flow<String?> = emailState
-        override fun emailFlowable(): Flowable<Optional<String>> = Flowable.empty()
-        override fun getLoginIdentity(): LoginIdentity? = null
-        override fun getRefreshToken(account: Account?): RefreshToken? = null
-        override fun getSignInType(account: Account): AccountConstants.SignInType = AccountConstants.SignInType.Password
-        override fun getUuid(): String? = null
-        override fun invalidateAccessToken() {
-            invalidateCount++
-            currentToken = null // the REAL effect: the token incarnation is destroyed
-        }
-        override fun isLoggedIn(): Boolean = emailState.value != null
-        override fun peekAccessToken(account: Account): AccessToken? = currentToken
-        override fun setAccessToken(accessToken: AccessToken) {
-            this.currentToken = accessToken
-        }
-        override fun setEmail(email: String) {
-            emailState.value = email
-        }
-        override fun setRefreshToken(refreshToken: RefreshToken) = Unit
-        override fun signOut() {
-            currentToken = null
-            emailState.value = null
-        }
-    }
-
     @Test
-    fun `login through the binding publishes the REAL token and issues the session`() = runTest {
-        val auth = FakeAuth()
+    fun `install adopts the owner snapshot and arms the session UNDER the owner lock`() {
         val state = VoiceSharingAccountState()
         val credentials = VoiceSharingCredentialStore()
-        val binding = VoiceSharingAccountAuthBinding(auth, FakeOwnership(), VoiceSharingAccountSessionCoordinator(state, credentials))
-        val token = binding.loginFromAuth()
-        assertEquals("Bearer real-token-1", credentials.current()!!.bearer) // from the REAL owner
-        assertTrue(state.isCurrentSession(token))
-    }
-
-    @Test
-    fun `account appearance and removal drive coordinated login and logout`() = runTest {
-        val auth = FakeAuth()
-        val state = VoiceSharingAccountState()
-        val credentials = VoiceSharingCredentialStore()
-        val ownership = FakeOwnership()
-        val binding = VoiceSharingAccountAuthBinding(auth, ownership, VoiceSharingAccountSessionCoordinator(state, credentials))
-        binding.start(backgroundScope)
-        auth.setEmail("user@example.com") // account appears -> login
-        withTimeout(5_000) { while (credentials.current() == null) delay(10) }
+        val owner = TestOwner()
+        owner.issueToken("real-token-1")
+        val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
+        val snapshot = binding.install()
+        val armedToken = state.currentSessionTokenForTest()
+        assertEquals("real-token-1", snapshot!!.token!!.value)
         assertEquals("Bearer real-token-1", credentials.current()!!.bearer)
-        auth.signOut() // account removed -> logout (clears token AND ends session)
-        ownership.sessionGenerationValue += 1 // the REAL owner bumps its DISTINCT session incarnation on logout
-        withTimeout(5_000) { while (credentials.current() != null) delay(10) }
+        assertNotNull(armedToken)
+        assertTrue(state.isCurrentSession(armedToken!!)) // session armed synchronously at install
+    }
+
+    @Test
+    fun `install with NO live account or token is FAIL-CLOSED - no session, no authority`() {
+        val state = VoiceSharingAccountState()
+        val credentials = VoiceSharingCredentialStore()
+        val owner = TestOwner(accountName = null) // no account
+        val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
+        assertNull(binding.install())
         assertNull(credentials.current())
     }
 
     @Test
-    fun `a committed 401 transaction invalidates through the REAL ownership CAS`() = runTest {
-        val auth = FakeAuth()
+    fun `owner login and logout transactions drive the binding SYNCHRONOUSLY`() {
         val state = VoiceSharingAccountState()
         val credentials = VoiceSharingCredentialStore()
-        val ownership = FakeOwnership() // generation 0, token real-token-1
-        val binding = VoiceSharingAccountAuthBinding(auth, ownership, VoiceSharingAccountSessionCoordinator(state, credentials))
-        val token = binding.loginFromAuth() // freeze-time generation will be 0
+        val owner = TestOwner()
+        owner.issueToken("real-token-1")
+        val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
+        binding.install()
+        val armedToken = state.currentSessionTokenForTest()!!
+        owner.login("token-2") // W1-equivalent: the owner transaction invokes the binding INSIDE the lock
+        assertEquals("Bearer token-2", credentials.current()!!.bearer)
+        val reloginToken = state.currentSessionTokenForTest()!!
+        assertTrue(state.isCurrentSession(reloginToken)) // the NEW incarnation is armed
+        assertFalse(state.isCurrentSession(armedToken)) // the install-time session was superseded
+        owner.logout() // W2-equivalent: revocation in the SAME transaction
+        assertNull(credentials.current())
+        assertFalse(state.hasCurrentSessionProjection())
+    }
+
+    @Test
+    fun `a committed 401 through the binding path clears the REAL credential and the mirror TOGETHER`() = runTest {
+        val state = VoiceSharingAccountState()
+        val credentials = VoiceSharingCredentialStore()
+        val owner = TestOwner()
+        owner.issueToken("real-token-1")
+        val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
+        binding.install()
         val server = MockWebServer().apply { start() }
         val operations = VoiceSharingAccountOperations(
             api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
             state = state,
-            ownership = binding,
-            credentialSource = { binding.syncCredential() }, // ALWAYS the real token owner
-            onCredentialInvalid = { /* committed transaction already invalidated the real credential */ },
-        )
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson())) // current-session GET arms authority
+            ownership = owner,
+        ) {
+            /* post-commit notification clears the MIRROR only (same wiring as production startup) */
+            credentials.publish(null)
+        }
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         server.enqueue(MockResponse().setResponseCode(401))
+        val token = state.currentSessionTokenForTest()!!
         assertTrue(operations.refreshProjection(token))
         assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
-        // The REAL owner's atomic CAS committed: token destroyed, generation advanced EXACTLY once.
-        assertNull(ownership.token)
-        assertEquals(1L, ownership.generation)
-        assertEquals(listOf(0L), ownership.invalidations)
+        assertNull(owner.authoritySnapshot().token) // REAL credential destroyed by the owner transaction
         assertNull(credentials.current()) // store mirror updated after commit
+        assertFalse(state.hasCurrentSessionProjection())
         server.shutdown()
     }
 
     @Test
-    fun `a refresh write between the freeze and the 401 spares the FRESH real credential`() = runTest {
-        val auth = FakeAuth()
+    fun `a refresh published AFTER the freeze spares the FRESH credential from a stale 401`() = runTest {
         val state = VoiceSharingAccountState()
         val credentials = VoiceSharingCredentialStore()
-        val ownership = FakeOwnership()
-        val binding = VoiceSharingAccountAuthBinding(auth, ownership, VoiceSharingAccountSessionCoordinator(state, credentials))
-        val token = binding.loginFromAuth()
+        val owner = TestOwner()
+        owner.issueToken("real-token-1")
+        val binding = VoiceSharingAccountAuthBinding(owner, VoiceSharingAccountSessionCoordinator(state, credentials))
+        binding.install()
         val server = MockWebServer().apply { start() }
         val operations = VoiceSharingAccountOperations(
             api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
             state = state,
-            ownership = binding,
-            credentialSource = { binding.syncCredential() },
-            onCredentialInvalid = { },
-        )
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson())) // current-session GET arms authority
+            ownership = owner,
+        ) { }
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        val token = state.currentSessionTokenForTest()!!
         assertTrue(operations.refreshProjection(token))
-        // The 401 cannot be PROCESSED before the delay elapses; the REAL refresh write lands first.
         server.enqueue(MockResponse().setResponseCode(401).setHeadersDelay(2, TimeUnit.SECONDS))
         val result = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
         withContext(Dispatchers.IO) { Thread.sleep(200) }
-        ownership.token = AccessToken("refreshed-token") // the REAL refresh write
-        ownership.generation += 1 // ...bumps the real owner's generation
-        val outcome = result.await()
-        assertTrue(outcome is VoiceSharingMutationResult.Failure)
-        // The stale rejection is a NO-OP: the fresh real credential and the session BOTH survive.
-        assertEquals("refreshed-token", ownership.token!!.value)
-        assertEquals(0, ownership.invalidations.size)
-        assertTrue(state.hasCurrentSessionProjection())
+        // REAL refresh write via the lease path (T4): session survives, credential rotates.
+        val lease = owner.beginRefresh()!!
+        assertTrue(owner.publishRefresh(lease, RefreshToken("r2"), AccessToken("real-token-2")))
+        credentials.publish("Bearer real-token-2") // mirror follows the owner publication
+        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
+        assertEquals("Bearer real-token-2", credentials.current()!!.bearer) // FRESH credential intact
+        assertTrue(state.hasCurrentSessionProjection()) // session intact
         server.shutdown()
     }
 }

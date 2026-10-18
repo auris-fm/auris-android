@@ -1,37 +1,93 @@
 package au.com.shiftyjelly.pocketcasts.repositories.sync
 
 import au.com.shiftyjelly.pocketcasts.preferences.AccessToken
-
-/** A synchronous, non-secret snapshot: the current token PLUS the credential generation at which it was written. */
-data class AccessTokenSnapshot(val token: AccessToken, val generation: Long)
+import au.com.shiftyjelly.pocketcasts.preferences.RefreshToken
 
 /**
- * Synchronous, non-secret credential AND session lifecycle OWNERSHIP for the sync account
- * (reviewers a75df7ef / 2008ea39): the real owner exposes a credential generation that
- * increments on EVERY credential write, a DISTINCT session generation that increments ONLY on
- * login/logout/account-switch, a synchronous snapshot read, and an ATOMIC compare-and-
- * invalidate that other boundaries run their scoped checks INSIDE.
+ * ONE immutable owner snapshot (reviewer 504da9ea / spec d91ddd80): the platform account
+ * identity, the session incarnation, the credential incarnation, and the OWNER-PUBLISHED
+ * token — all read under the owner lock in one call. The token is NEVER a bare platform-cache
+ * read relabeled with the latest counter: it is attributed at publication (or at the explicit
+ * fail-closed bootstrap adoption); a later AccountManager cache copy cannot acquire authority.
+ */
+data class AuthoritySnapshot(
+    val accountName: String?,
+    val session: Long,
+    val credential: Long,
+    val token: AccessToken?,
+)
+
+/**
+ * A refresh admission captured BEFORE the network work: the publication commit compares
+ * account, session AND credential against this lease, so concurrent same-session refreshes
+ * are fenced (an older completion cannot overwrite a newer credential) and a late refresh for
+ * a superseded account/session cannot write into it.
+ */
+class RefreshLease(
+    val accountName: String,
+    val session: Long,
+    val credential: Long,
+)
+
+/**
+ * The NARROW synchronous binding (owner→voice is THE single lock order): implemented by the
+ * voice boundary, invoked by the real owner at the tail of lifecycle transactions, INSIDE the
+ * owner lock. It must contain no owner calls other than reentrant snapshot reads and no
+ * arbitrary subscriber work — only the voice state fence.
+ */
+interface CredentialOwnershipBinding {
+    fun onSessionStarted(session: Long)
+    fun onSessionEnded(session: Long)
+}
+
+/**
+ * The actual auth owner (SyncAccountManagerImpl) as the SINGLE authority for the sync
+ * account. Every authority issuance, pre-send validation, response apply and 401 transition
+ * runs as an owner→voice transaction; the voice boundary never takes the owner lock while
+ * holding its fence outside these transactions.
  */
 interface CredentialOwnershipOwner {
-    /** Non-secret generation: changes on every credential write (login/refresh/set/invalidate/signOut). */
-    fun credentialGeneration(): Long
-
-    /** DISTINCT session incarnation: changes ONLY on login/logout/account-switch — never on refresh. */
-    fun sessionGeneration(): Long
-
-    /** Synchronous read of the CURRENT token + its generation. No network, no refresh. */
-    fun accessTokenSnapshot(): AccessTokenSnapshot?
+    /** ONE-lock atomic read of the authoritative state. */
+    fun authoritySnapshot(): AuthoritySnapshot
 
     /**
-     * ATOMIC compare-and-invalidate under the credential ownership lock: the token is
-     * invalidated ONLY if BOTH the generation and the token VALUE still match [observed]
-     * (async platform/authenticator rotation that bypasses the owner therefore refuses too);
-     * [scopedCheck] runs INSIDE the lock so the caller's state check and this invalidation
-     * commit together. It receives a [commitGuard] the caller MUST consult immediately before
-     * committing its state change: the guard re-reads the authoritative token under the SAME
-     * ownership lock, so an external platform rotation that lands between the owner's peek and
-     * the caller's commit instant REFUSES the whole transaction (credential AND state both
-     * survive) — no check-then-act guess.
+     * Install the narrow binding and seed its snapshot UNDER THE SAME OWNER LOCK (fail-closed
+     * bootstrap): the existing platform token is adopted ONCE and attributed to the current
+     * credential incarnation; the session is armed synchronously through the binding. Returns
+     * null when no live account/token exists.
      */
-    fun invalidateIfUnchanged(observed: AccessTokenSnapshot, scopedCheck: (commitGuard: () -> Boolean) -> Boolean): Boolean
+    fun installOwnershipBinding(binding: CredentialOwnershipBinding?): AuthoritySnapshot?
+
+    /** Refresh admission, captured BEFORE the network work; null when there is nothing to refresh. */
+    fun beginRefresh(): RefreshLease?
+
+    /**
+     * Conditional publication of BOTH refreshed tokens: commits only if the account, session
+     * AND credential still match the lease. FALSE means refused — the caller MUST NOT return
+     * the token to the platform (no cache copy of a rejected refresh).
+     */
+    fun publishRefresh(lease: RefreshLease, refreshToken: RefreshToken, accessToken: AccessToken): Boolean
+
+    /** Owner→voice scope: [block] runs under the owner lock (reentrant snapshot reads allowed). */
+    fun <T> transaction(block: () -> T): T
+
+    /**
+     * The 401 owner transaction: compares the observed snapshot atomically, runs
+     * [transaction] (the scoped voice revocation) INSIDE the owner lock, and clears the
+     * rejected token value + advances the credential incarnation ONLY when [transaction]
+     * returned true (the voice scoped check accepted). No second-read guard, no restoration
+     * flags: a stale rejection — snapshot mismatch OR scoped refusal — invalidates NOTHING.
+     */
+    fun invalidateIfCurrent(observed: AuthoritySnapshot, transaction: () -> Boolean): Boolean
+
+    /**
+     * External platform state reconciliation (account removal observed asynchronously): under
+     * the lock, a vanished account ends the session/credential exactly once and drives
+     * subscribed revocation via the binding. New operations reconcile the LAST OBSERVABLE
+     * platform state — a removal racing just after reconciliation remains an OS observation
+     * limit; no real-time notification is promised.
+     */
+    fun reconcileExternalState(): AuthoritySnapshot
+
+    fun sessionGeneration(): Long
 }

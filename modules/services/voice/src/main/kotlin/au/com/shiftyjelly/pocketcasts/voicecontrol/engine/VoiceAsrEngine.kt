@@ -177,15 +177,18 @@ class VoiceAsrEngine @Inject constructor(
                             // Freeze the capture context SYNCHRONOUSLY here — before any await
                             // boundary — and keep the ISSUED value for every later stage of THIS
                             // capture. Refused captures yield null and are excluded downstream.
-                            // The FIRST chunk is the producer's own accumulated buffer drained
-                            // through the SAME native API the completed segment uses — a real
-                            // allocation whose ownership transfers to the observer/sink.
+                            // ADMISSION BEFORE ALLOCATION: read only the native SIZE counter, let
+                            // the observer reserve exact bytes; drain into an admitted array whose
+                            // ownership then transfers to the sink. Refusal allocates NOTHING and
+                            // leaves the recognition buffer untouched.
                             val initialSize = voiceAudioProcessor.speechPcmSize()
-                            val firstChunk = ShortArray(initialSize)
-                            val copied = if (initialSize > 0) voiceAudioProcessor.drainSpeechPcm(firstChunk) else 0
-                            val ownedFirst = if (copied == initialSize) firstChunk else firstChunk.copyOf(copied)
-                            openContext = segmentObserver.speechStarted(captureSessionIncarnation, currentRouteClass, ownedFirst)
-                            accountedSamples = copied
+                            openContext = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize)
+                            if (openContext != null) {
+                                val firstChunk = ShortArray(initialSize)
+                                val copied = if (initialSize > 0) voiceAudioProcessor.drainSpeechPcm(firstChunk) else 0
+                                segmentObserver.adoptFirstChunk(openContext!!, if (copied == initialSize) firstChunk else firstChunk.copyOf(copied))
+                                accountedSamples = copied
+                            }
                         }
 
                         is VoiceSegmenterResult.SpeechContinuing -> {

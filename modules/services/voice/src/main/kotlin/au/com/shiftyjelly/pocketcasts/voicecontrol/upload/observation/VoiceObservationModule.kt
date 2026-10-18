@@ -39,12 +39,16 @@ object VoiceObservationModule {
     fun provideSegmentObserver(
         authority: CollectionAuthority,
         sink: ContributionRetentionSink,
+        accountStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup,
     ): SegmentObserver = SegmentObserver(
         gate = CollectionGate { decision -> decision.shouldRetainNewWork },
         sink = sink,
         authority = authority::decide,
-        issueAuthority = authority::issueAuthority,
-        handoffValidator = HandoffValidator { issued -> authority.validateIssuedAuthority(issued) },
+        issueAuthority = authority::issueAuthorityCoherentLockedIndependent,
+        handoff = HandoffCoordinator(
+            ownership = accountStartup.ownerForHandoff(),
+            validateIssuedLocked = authority::validateIssuedAuthorityLocked,
+        ),
     ).also { observer ->
         sink.onRetentionEnded = { context -> observer.noteRetentionEnded(context) }
     }

@@ -68,6 +68,9 @@ class VoiceSharingAccountStartup @Inject constructor(
         }, null, false)
     }
 
+    /** The REAL owner for one-transaction handoffs (order owner→observer→sink is composed there). */
+    fun ownerForHandoff(): CredentialOwnershipOwner = ownership
+
     /** Reconciles external account state and fires session-end loss to subscribers. */
     fun reconcileAndNotifySessionEnd() {
         val before = ownership.authoritySnapshot().session

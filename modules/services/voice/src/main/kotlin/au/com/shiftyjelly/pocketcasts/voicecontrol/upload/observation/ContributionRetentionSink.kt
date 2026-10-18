@@ -84,6 +84,7 @@ class ContributionRetentionSink(
 
     private val lock = Any()
     private var openPrefix: OpenPrefix? = null
+    private var pendingAdmissionBytes: Long = 0L
     private val candidates = ArrayDeque<RetainedCandidate>()
     private val _lossEvents = mutableListOf<String>()
 
@@ -110,6 +111,41 @@ class ContributionRetentionSink(
                 .apply { chargedBytes = actualBytes }
         }
         return true
+    }
+
+    /** ADMIT reserves exact producer bytes BEFORE any native copy-out; refusal allocates nothing. */
+    override fun admit(observation: SegmentObservation.Admission): Boolean {
+        val bytes = observation.producerSamples.toLong() * BYTES_PER_SAMPLE
+        // Empty prefix (size 0): still admitted — nothing allocated, nothing charged; the
+        // capture retains from deltas onward under the same ownership.
+        if (bytes > maxBytesPerClip || !budget.reserve(bytes)) return false
+        synchronized(lock) { pendingAdmissionBytes = bytes }
+        return true
+    }
+
+    /** Completes an admitted start: the drained array transfers in with NO new reservation. */
+    override fun adopted(observation: SegmentObservation.Started) {
+        val reserved = synchronized(lock) {
+            val b = pendingAdmissionBytes
+            pendingAdmissionBytes = 0L
+            b
+        }
+        val actualBytes = observation.firstChunk.size.toLong() * BYTES_PER_SAMPLE
+        // Reconcile exactly: producer shrank between counter-read and drain -> release the excess;
+        // grew -> charge the difference too (still bounded by the clip cap).
+        when {
+            actualBytes < reserved -> budget.release(reserved - actualBytes)
+
+            actualBytes > reserved -> if (!budget.reserve(actualBytes - reserved)) {
+                // Over-growth beyond cap: end retention explicitly rather than exceed.
+                endPrefixWithTerminal(OpenPrefix(observation.context, mutableListOf()).apply { chargedBytes = reserved }, "adoption-over-cap")
+                return
+            }
+        }
+        synchronized(lock) {
+            openPrefix = OpenPrefix(observation.context, mutableListOf(observation.firstChunk))
+                .apply { chargedBytes = actualBytes }
+        }
     }
 
     /** Appends REAL samples: reserve the delta BEFORE any copy; enforce per-clip + aggregate caps. */

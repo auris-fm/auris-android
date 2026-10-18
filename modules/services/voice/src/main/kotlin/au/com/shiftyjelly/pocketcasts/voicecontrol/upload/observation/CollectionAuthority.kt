@@ -50,25 +50,54 @@ class CollectionAuthority @Inject constructor(
         establishedSession = null
     }
 
-    /** Freeze the ORIGINAL authority for a capture: read current state ONCE, never renewed. */
-    fun issueAuthority(): IssuedAuthority {
-        val ownership = accountStartup.authoritySnapshot()
+    /**
+     * Freeze the ORIGINAL authority COHERENTLY under the owner transaction (reviewer 1d27bcd6
+     * blocker 4): account/session/credential AND the enrollment projection AND the policy
+     * activation incarnation are read as ONE snapshot at issue time. A later enable or a new
+     * policy generation therefore cannot authorize old work: validation compares every frozen
+     * component against live coherent state at the handoff, inside the same lock discipline.
+     */
+    fun issueAuthorityCoherentLockedIndependent(): IssuedAuthority = accountStartup.validateUnderOwnerTransaction { live ->
         val projection = accountStartup.state.projection.value
-        return IssuedAuthority(
-            accountName = ownership.accountName,
-            sessionGeneration = ownership.session,
-            credentialIncarnation = ownership.credential,
+        val policy = policyProvider.publishedPolicy.value
+        IssuedAuthority(
+            accountName = live.accountName,
+            sessionGeneration = live.session,
+            credentialIncarnation = live.credential,
             enrollmentEpoch = projection?.enrollmentEpoch,
             acceptedDisclosureVersion = projection?.acceptedDisclosureVersion,
+            policyActivationGeneration = policy.activationGeneration,
+            policyActivatedAtMonotonicMs = policy.activatedAtMonotonicMs,
+            policyEnabledAtIssue = policy.enabled,
         )
     }
 
+    /** Test/diagnostic alias of the coherent issuer. */
+    fun issueAuthority(): IssuedAuthority = issueAuthorityCoherentLockedIndependent()
+
     /** Handoff check INSIDE the owner transaction against the value frozen at start. */
-    fun validateIssuedAuthority(issued: IssuedAuthority): Boolean = accountStartup.validateUnderOwnerTransaction { live ->
-        live.accountName == issued.accountName &&
-            live.session == issued.sessionGeneration &&
-            live.credential == issued.credentialIncarnation
-    } && enrollmentEvidenceMatches(issued)
+    fun validateIssuedAuthority(issued: IssuedAuthority): Boolean = accountStartup.validateUnderOwnerTransaction { live -> validateIssuedLocked(live, issued) } &&
+        enrollmentEvidenceMatches(issued)
+
+    /** Coherent validation while the OWNER LOCK IS ALREADY HELD (one-transaction handoff). */
+    fun validateIssuedAuthorityLocked(issued: IssuedAuthority): Boolean {
+        val live = accountStartup.authoritySnapshot() // reentrant under the held owner lock
+        return validateIssuedLocked(live, issued) && enrollmentEvidenceMatches(issued)
+    }
+
+    private fun validateIssuedLocked(
+        live: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot,
+        issued: IssuedAuthority,
+    ): Boolean = live.accountName == issued.accountName &&
+        live.session == issued.sessionGeneration &&
+        live.credential == issued.credentialIncarnation &&
+        // Policy incarnation frozen at issue must still be the CURRENT activation: a newer
+        // generation/stamp means the old lease died — old work cannot be reauthorized.
+        policyProvider.publishedPolicy.value.let { p ->
+            p.enabled == issued.policyEnabledAtIssue &&
+                p.activationGeneration == issued.policyActivationGeneration &&
+                p.activatedAtMonotonicMs == issued.policyActivatedAtMonotonicMs
+        }
 
     private fun enrollmentEvidenceMatches(issued: IssuedAuthority): Boolean {
         val projection = accountStartup.state.projection.value ?: return false

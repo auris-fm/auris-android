@@ -31,6 +31,9 @@ sealed interface SegmentObservation {
     val context: CaptureContext
 
     /** VAD reported speech onset: the moment the context is frozen. Zero audio retained. */
+
+    data class Admission(override val context: CaptureContext, val producerSamples: Int) : SegmentObservation
+
     data class Started(
         override val context: CaptureContext,
         /** The production first-chunk array; the sink ADOPTS it (no upload-side copy). */
@@ -100,6 +103,16 @@ fun interface CollectionGate {
 
 /** Sink for the observations of one capture; implemented by the retention owner. */
 interface SegmentSink {
+    /**
+     * Pre-allocation admission: reserve EXACTLY [SegmentObservation.Admission.producerSamples]'s
+     * bytes against the aggregate budget BEFORE the producer copies anything out. True = admitted.
+     * Default derives from [started] for simple sinks that adopt directly.
+     */
+    fun admit(observation: SegmentObservation.Admission): Boolean = true
+
+    /** Receives the admitted-and-drained first chunk; transfers ownership into the prefix. */
+    fun adopted(observation: SegmentObservation.Started) = Unit
+
     /** Returns true while the sink retains incremental audio for this capture. */
     fun started(observation: SegmentObservation.Started): Boolean
 

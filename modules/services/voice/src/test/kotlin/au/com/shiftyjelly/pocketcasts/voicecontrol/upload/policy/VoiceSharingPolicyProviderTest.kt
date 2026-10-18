@@ -215,23 +215,38 @@ class VoiceSharingPolicyProviderTest {
     }
 
     @Test
-    fun `same-instance interleaving - stale timer can never cancel a renewal or outlive it`() {
-        val provider = provider()
-        assertTrue(provider.snapshot().enabled) // init refresh: enabled, timer A installed (gen1)
+    fun `old timer waking while a renewal is in flight or fresh never emits a spurious disable`() {
+        val provider = provider(refreshTimeoutMs = 10 * VoiceSharingPolicyProvider.DEFAULT_LEASE_MS)
+        assertTrue(provider.snapshot().enabled) // init: enabled, timer A due at the init lease
 
-        // Renewal B (newer, still enabled) publishes and installs timer B.
-        refresh(provider)
-        assertTrue(provider.snapshot().enabled)
+        val fetchGate = TaskCompletionSource<Boolean>()
+        whenever(config.fetch()).thenAnswer { fetchGate.task } // park renewal B inside its fetch
 
-        // Advance past the lease: only the RENEWAL's own timer may fire (it is timestamped at
-        // the renewal), and the stale timer A waking must not tear the renewal down.
-        monotonicNowMs += VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1
-        dispatcher.scheduler.advanceTimeBy(VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1)
-        dispatcher.scheduler.runCurrent()
-        // The renewal's activatedAt is later than the advance only by the small refresh gap, so
-        // the renewal lease has ALSO expired: disabled is the correct terminal state either way,
-        // and the key assertion is that no enabled state survives its own lease.
-        assertFalse(provider.snapshot().enabled)
+        val seen = mutableListOf<String>()
+        runBlocking {
+            provider.policy.test {
+                seen += if (awaitItem().enabled) "enabled" else "disabled"
+                // Renewal B allocates generation 2, then parks inside its fetch await.
+                scope.launch { provider.refresh() }
+                // Old timer A wakes NOW: A's own lease has expired, but generation 2 is already
+                // allocated and B's renewal is in flight/fresh — the fence must suppress A's
+                // disable so the subscriber sees NO emission here.
+                monotonicNowMs += VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1
+                dispatcher.scheduler.advanceTimeBy(VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1)
+                dispatcher.scheduler.runCurrent()
+                // Release B: bookkeeping advances, activation succeeds → renewal publishes.
+                fetchTimeMs += 1_000
+                fetchGate.trySetResult(true)
+                seen += if (awaitItem().enabled) "enabled" else "disabled"
+                // Only B's OWN deadline may disable the subscriber.
+                monotonicNowMs += VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1
+                dispatcher.scheduler.advanceTimeBy(VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1)
+                dispatcher.scheduler.runCurrent()
+                seen += if (awaitItem().enabled) "enabled" else "disabled"
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+        org.junit.Assert.assertEquals(listOf("enabled", "enabled", "disabled"), seen)
     }
 
     @Test
@@ -271,6 +286,9 @@ class VoiceSharingPolicyProviderTest {
                 Tasks.forException<Void>(IllegalStateException("scripted fetch failure"))
             }
         }
+        // Releasing A's gate must present A as OTHERWISE VALID AND ENABLING: bookkeeping
+        // advances as a side effect of the release, activation succeeds, value is REMOTE true —
+        // so ONLY the generation fence stands between A and overwriting B's disabled.
         val aResult = java.util.concurrent.atomic.AtomicReference<PolicySnapshot?>()
         val aError = java.util.concurrent.atomic.AtomicReference<Exception?>()
         val threadA = Thread {
@@ -288,7 +306,11 @@ class VoiceSharingPolicyProviderTest {
         val resultB = runBlocking { provider.refresh() }
         assertFalse(resultB.enabled)
 
-        // A's fetch now completes successfully — the fence must suppress A's stale publication.
+        // A's fetch now completes, WITH advancing bookkeeping so A would enable but for the fence.
+        fetchTimeMs += 1_000
+        rawValue = "true"
+        valueSource = FirebaseRemoteConfig.VALUE_SOURCE_REMOTE
+        restub()
         fetchGate.trySetResult(true)
         threadA.join(2_000)
         org.junit.Assert.assertFalse("A thread is still alive", threadA.isAlive)

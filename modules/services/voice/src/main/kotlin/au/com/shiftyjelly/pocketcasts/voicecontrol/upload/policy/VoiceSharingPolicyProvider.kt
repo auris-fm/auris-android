@@ -66,6 +66,15 @@ class VoiceSharingPolicyProvider(
 
     private var invalidationJob: Job? = null
 
+    /**
+     * Serializes generation allocation, conditional publication, and timer install/cancel.
+     * Declared BEFORE the init block: the lifecycle join can begin refresh work the moment the
+     * instance is constructed (an already-completed adapter enters refresh immediately), so
+     * every field refresh uses must already be initialized.
+     */
+    private val fence = Any()
+    private val directExecutor = java.util.concurrent.Executor { command -> command.run() }
+
     init {
         // Lifecycle-owned composition: the join on the real provider's own fetch+activation
         // sequence gates the first policy read, but is BOUNDED — this provider never depends on
@@ -204,9 +213,12 @@ class VoiceSharingPolicyProvider(
                 if (nowMs() <= before) break
             }
             synchronized(fence) {
-                // Fenced: a renewal (newer generation with its own timer) is never torn down by
-                // this older schedule waking late.
-                if (activationGeneration == gen) {
+                // Fenced twice over: this schedule may only disable the activation it was
+                // installed for (activationGeneration == gen) AND only while no newer request is
+                // even in flight (requestGeneration == gen) — otherwise a late wake during an
+                // in-flight renewal would emit a spurious disable (and a stale timer could hide
+                // or fight the renewal's own timer).
+                if (activationGeneration == gen && requestGeneration == gen) {
                     state.value = DISABLED
                 }
             }
@@ -237,11 +249,6 @@ class VoiceSharingPolicyProvider(
             continuation.resume(t.isSuccessful)
         }
     }
-
-    private val directExecutor = java.util.concurrent.Executor { command -> command.run() }
-
-    /** Serializes generation allocation and conditional publication across threads. */
-    private val fence = Any()
 
     companion object {
         /** How long a successfully activated snapshot stays valid in monotonic time. */

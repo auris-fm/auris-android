@@ -57,6 +57,8 @@ data class DeletionReceipt(val deletionRequestId: String, val status: String)
 class VoiceSharingAccountOperations(
     private val api: VoiceSharingAccountApi,
     private val state: VoiceSharingAccountState,
+    private val bearerProvider: suspend () -> String? = { null }, // RED: unused
+    private val onCredentialInvalid: suspend (String) -> Unit = {}, // RED: unused
 ) {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 

@@ -268,6 +268,14 @@ class VoiceSharingAccountStateTest {
         assertNull(st.parseProjection(unquoted))
     }
 
+    // --- reviewer 6bcf0d6e: exact decimal lexeme ---
+
+    @Test
+    fun `schema_version near-1 fraction that ROUNDS to 1_0 fails - exact decimal lexeme`() {
+        assertNull(state().parseProjection(projectionJson(schemaVersion = "1.00000000000000001")))
+        assertNull(state().parseProjection(projectionJson(schemaVersion = "0.999999999999999999")))
+    }
+
     // --- malformed baseline ---
 
     @Test

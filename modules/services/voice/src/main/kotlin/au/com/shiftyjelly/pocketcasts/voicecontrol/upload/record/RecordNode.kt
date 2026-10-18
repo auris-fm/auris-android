@@ -15,8 +15,10 @@ sealed interface RecordNode {
         }
     }
 
-    /** Integers keep exactness through the canonical number formatter. */
-    fun ofInt(value: Long): Num = Num(value.toDouble())
+    companion object {
+        /** Integers keep exactness through the canonical number formatter. */
+        fun ofInt(value: Long): Num = Num(value.toDouble())
+    }
 
     data class Str(val value: String) : RecordNode
     data class Arr(val items: List<RecordNode>) : RecordNode

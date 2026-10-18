@@ -1,5 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record
 
+import kotlin.math.abs
+
 /**
  * RFC 8785 JSON Canonicalization Scheme over the module's immutable [RecordNode] tree. The
  * contribution record never round-trips through a reflection serializer: fields are built as a
@@ -82,29 +84,48 @@ object CanonicalJson {
      * `em`/`e-m` without `+` or leading zeros per RFC 8785 §4.1.
      */
     internal fun formatNumber(value: Double): String {
-        if (value == 0.0) return "0" // covers +0 and -0
-        var s = value.toString()
-        val eIdx = s.indexOf('E').let { if (it >= 0) it else s.indexOf('e') }
-        if (eIdx < 0) {
-            if (s.endsWith(".0")) s = s.dropLast(2)
-            return s
+        if (value == 0.0) return "0" // covers +0 and -0 (ES6 renders -0 as "0")
+        // ECMAScript `Number.prototype.toString()` selects the rendering by EXPONENT bounds
+        // (fixed when -6 <= E < 21), NOT Java's thresholds (scientific below 1e-3 / above 1e7).
+        // Take Java's shortest-round-trip digits, then re-render with ES selection — RFC 8785 4.1.
+        val negative = value < 0.0
+        val repr = java.lang.Double.toString(if (negative) -value else value)
+        val eIdx = repr.indexOf('E')
+        val digits: String
+        val point: Int
+        if (eIdx >= 0) {
+            val mantissa = repr.substring(0, eIdx)
+            val exp = repr.substring(eIdx + 1).toInt()
+            val dot = mantissa.indexOf('.')
+            val intPart = if (dot < 0) mantissa else mantissa.substring(0, dot)
+            val fracPart = if (dot < 0) "" else mantissa.substring(dot + 1).trimEnd('0')
+            digits = intPart + fracPart
+            point = intPart.length + exp
+        } else {
+            val dot = repr.indexOf('.')
+            val intPart = repr.substring(0, dot)
+            val fracPart = repr.substring(dot + 1).trimEnd('0')
+            digits = intPart + fracPart
+            point = intPart.length
         }
-        val mantissaRaw = s.substring(0, eIdx)
-        val expPart = s.substring(eIdx + 1)
-        val negativeExp = expPart.startsWith("-")
-        val expDigits = expPart.removePrefix("+").removePrefix("-").trimStart('0').ifEmpty { "0" }
-        val mantissa = trimMantissa(mantissaRaw)
-        return "$mantissa" + (if (negativeExp) "e-" else "e") + expDigits
+        val sig = digits.indexOfFirst { it != '0' }
+        if (sig < 0) return "0"
+        val d = digits.substring(sig)
+        val n = d.length
+        val exponent = point - sig - 1 // normalized: value = d[0].d[1..] x 10^exponent
+        val body = if (exponent in -6..20) {
+            val k = exponent + 1
+            when {
+                k <= 0 -> "0." + "0".repeat(-k) + d
+                n >= k -> d.substring(0, k) + if (n > k) "." + d.substring(k) else ""
+                else -> d + "0".repeat(k - n)
+            }
+        } else {
+            val mantissa = if (n > 1) "${d[0]}.${d.substring(1)}" else d
+            mantissa + "e" + (if (exponent < 0) "-" else "+") + abs(exponent)
+        }
+        return if (negative) "-$body" else body
     }
 
-    private fun trimMantissa(raw: String): String {
-        var m = raw
-        if (m.endsWith(".0")) m = m.dropLast(2)
-        // Java renders e.g. 1.23456789E7 mantissa with trailing zeros after normalization only
-        // in rare cases; strip trailing zeros after a decimal point for canonical form.
-        if (m.contains('.') && !m.endsWith('.')) {
-            m = m.trimEnd('0').trimEnd('.')
-        }
-        return m
-    }
+    private fun trimTrailing(s: String): String = s.trimEnd('0')
 }

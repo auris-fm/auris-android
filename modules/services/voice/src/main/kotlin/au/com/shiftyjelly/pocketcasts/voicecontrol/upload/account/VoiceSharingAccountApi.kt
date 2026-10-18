@@ -51,6 +51,21 @@ interface VoiceSharingAccountApi {
     }
 }
 
+/**
+ * Typed mutation outcomes (reviewer 290e76ea): membership operations never conflate
+ * applied / conflict / failure into a Boolean. A 409 conflict is a DISTINCT public outcome
+ * carrying the strictly parsed server-current projection; the operation itself was not
+ * accepted (no auto re-enroll / no false success).
+ */
+sealed interface VoiceSharingMutationResult {
+    data class Applied(val projection: VoiceSharingAccountProjection) : VoiceSharingMutationResult
+
+    /** 409 membership conflict: carries the server-CURRENT projection when it parses strictly. */
+    data class MembershipConflict(val currentProjection: VoiceSharingAccountProjection?) : VoiceSharingMutationResult
+
+    data object Failure : VoiceSharingMutationResult
+}
+
 /** 202 receipt of the separate deletion workflow: distinct from withdrawal, which never deletes. */
 data class DeletionReceipt(val deletionRequestId: String, val status: String)
 
@@ -89,31 +104,41 @@ class VoiceSharingAccountOperations(
         }
     }
 
-    suspend fun enroll(token: SessionToken, acceptedDisclosureVersion: String): Boolean {
-        val ticket = state.beginOperation(token, requireProjection = true) ?: return false
+    suspend fun enroll(token: SessionToken, acceptedDisclosureVersion: String): VoiceSharingMutationResult {
+        val ticket = state.beginOperation(token, requireProjection = true) ?: return VoiceSharingMutationResult.Failure
         val op = frozen(token, ticket, Route.ENROLLMENT, acceptedDisclosureVersion)
         return when (val outcome = execute(op) { bearer, payload -> api.postEnrollment(bearer, payload) }) {
-            is Outcome.Body -> state.applyOutcome(token, ticket, outcome.json)
-
-            is Outcome.Conflict -> {
-                // The CURRENT projection is applied fenced; the enrollment itself was NOT
-                // accepted, so the operation reports false either way (no auto re-enroll).
-                state.applyOutcome(token, ticket, outcome.json)
-                false
-            }
-
-            is Outcome.Rejected -> false
+            is Outcome.Body -> appliedOrFailure(token, ticket, outcome.json)
+            is Outcome.Conflict -> conflictOrFailure(token, ticket, outcome.json)
+            is Outcome.Rejected -> VoiceSharingMutationResult.Failure
         }
     }
 
-    suspend fun withdraw(token: SessionToken): Boolean {
-        val ticket = state.beginOperation(token, requireProjection = true) ?: return false
+    suspend fun withdraw(token: SessionToken): VoiceSharingMutationResult {
+        val ticket = state.beginOperation(token, requireProjection = true) ?: return VoiceSharingMutationResult.Failure
         val op = frozen(token, ticket, Route.WITHDRAWAL, null)
         return when (val outcome = execute(op) { bearer, payload -> api.postWithdrawal(bearer, payload) }) {
-            is Outcome.Body -> state.applyOutcome(token, ticket, outcome.json)
-            is Outcome.Conflict -> state.applyOutcome(token, ticket, outcome.json)
-            is Outcome.Rejected -> false
+            is Outcome.Body -> appliedOrFailure(token, ticket, outcome.json)
+            is Outcome.Conflict -> conflictOrFailure(token, ticket, outcome.json)
+            is Outcome.Rejected -> VoiceSharingMutationResult.Failure
         }
+    }
+
+    /** Fenced terminal apply of a 200 body. */
+    private fun appliedOrFailure(token: SessionToken, ticket: OperationTicket, json: String): VoiceSharingMutationResult {
+        val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
+        return if (state.applyOutcome(token, ticket, json)) {
+            VoiceSharingMutationResult.Applied(projection)
+        } else {
+            VoiceSharingMutationResult.Failure
+        }
+    }
+
+    /** 409 conflict: strictly parsed server-current projection applied fenced; NEVER a success. */
+    private fun conflictOrFailure(token: SessionToken, ticket: OperationTicket, json: String): VoiceSharingMutationResult {
+        val projection = state.parseProjection(json)
+        if (projection != null) state.applyOutcome(token, ticket, json)
+        return VoiceSharingMutationResult.MembershipConflict(projection)
     }
 
     suspend fun deleteData(token: SessionToken): DeletionReceipt? {
@@ -145,7 +170,7 @@ class VoiceSharingAccountOperations(
         }
         val body = when (route) {
             Route.GET -> EMPTY_BODY
-            else -> writeBody(token, ticket, route, disclosureVersion)
+            else -> writeBody(ticket, route, disclosureVersion)
         }
         return FrozenOperation(token, ticket, bearer, body, route)
     }
@@ -167,7 +192,6 @@ class VoiceSharingAccountOperations(
             if (!state.isTicketCurrent(op.token, op.ticket)) return Outcome.Rejected
             try {
                 val response = call(op.bearer, op.requestBody)
-                System.err.println("PROBE resp=" + response.code() + " expected=" + expectedStatus)
                 when {
                     response.code() == 401 -> {
                         handleUnauthorized(op)
@@ -177,7 +201,7 @@ class VoiceSharingAccountOperations(
                     response.code() == 409 && expectedStatus == 200 -> {
                         // Non-2xx content lives in errorBody() for Response<ResponseBody>.
                         val body = response.errorBody()?.string() ?: response.body()?.string()
-                        return if (body != null) Outcome.Conflict(body) else Outcome.Rejected
+                        return if (body.isNullOrBlank()) Outcome.Rejected else Outcome.Conflict(body)
                     }
 
                     response.code() == expectedStatus -> return Outcome.Body(response.body()!!.string())
@@ -210,22 +234,23 @@ class VoiceSharingAccountOperations(
     }
 
     /**
-     * Scoped 401 invalidation: compare the ACTUAL rejected bearer against the CURRENT credential
-     * (both awaited; no state mutation in between), then atomically invalidate the issued
-     * session — a session started meanwhile can never be logged out by a stale 401. The
-     * rejected bearer is handed to the compare-and-invalidate operation; nothing is logged.
+     * Scoped 401 invalidation: the current credential is awaited FIRST (no state mutation
+     * while suspended), then the state performs ONE ATOMIC fenced compare — issued TICKET
+     * generation + session + rejected-vs-current credential — and invalidates only on a full
+     * match. A newer same-session operation (generation bump), a superseded session, or a
+     * rotated credential makes the stale 401 a no-op. No credential data is stored or logged.
      */
     private suspend fun handleUnauthorized(op: FrozenOperation) {
-        val rejected = op.bearer ?: return
+        val rejected = op.bearer
         val current = bearerProvider()
-        if (current != rejected) return
-        if (!state.endSessionIfCurrent(op.token)) return
-        onCredentialInvalid(rejected)
+        if (state.processUnauthorized(op.token, op.ticket, rejected, current)) {
+            onCredentialInvalid(rejected!!)
+        }
     }
 
-    /** Established JSON writer; endpoint-EXACT bodies built once and reused byte-identically. */
-    private fun writeBody(token: SessionToken, ticket: OperationTicket, route: Route, disclosureVersion: String?): okhttp3.RequestBody {
-        val projection = state.projection.value
+    /** Endpoint-EXACT bodies from ONLY the ticket-captured values, built once, byte-identical retries. */
+    private fun writeBody(ticket: OperationTicket, route: Route, disclosureVersion: String?): okhttp3.RequestBody {
+        val projection = ticket.projection
         val requestId = UUID.randomUUID().toString()
         val buffer = okio.Buffer()
         val writer = JsonWriter.of(buffer)

@@ -55,6 +55,8 @@ class VoiceSharingAccountOperationsTest {
         server.shutdown()
     }
 
+    private fun assertApplied(result: VoiceSharingMutationResult) = assertTrue(result is VoiceSharingMutationResult.Applied)
+
     private fun projectionJson(
         revision: String = "rev-1",
         withdrawal: String = "not_enrolled",
@@ -86,7 +88,7 @@ class VoiceSharingAccountOperationsTest {
 
     @Test
     fun `enrollment without a current-session projection issues NO network call`() = runTest {
-        assertFalse(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
         assertEquals(0, server.requestCount)
     }
 
@@ -98,7 +100,7 @@ class VoiceSharingAccountOperationsTest {
 
         // 2. Enrollment: request_id UUID, expected_revision = current, disclosure version.
         enqueueProjection(revision = "rev-2")
-        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        assertApplied(operations.enroll(token, acceptedDisclosureVersion = "v3"))
         server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
         val posted = server.takeRequest(5, TimeUnit.SECONDS)!!
         assertEquals("POST", posted.method)
@@ -127,7 +129,7 @@ class VoiceSharingAccountOperationsTest {
         )
         assertTrue(operations.refreshProjection(token))
 
-        assertTrue(operations.withdraw(token))
+        assertApplied(operations.withdraw(token))
         server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
         val posted = server.takeRequest(5, TimeUnit.SECONDS)!!
         assertEquals("POST", posted.method)
@@ -169,7 +171,7 @@ class VoiceSharingAccountOperationsTest {
 
         server.enqueue(MockResponse().setResponseCode(503)) // retryable
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson(revision = "rev-2")))
-        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        assertApplied(operations.enroll(token, acceptedDisclosureVersion = "v3"))
 
         server.takeRequest(5, TimeUnit.SECONDS)!! // the GET
         val attempt1 = server.takeRequest(5, TimeUnit.SECONDS)!!
@@ -193,7 +195,7 @@ class VoiceSharingAccountOperationsTest {
 
         val result = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
         state.sessionEnded()
-        assertFalse(result.await())
+        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
         // The projection was nulled by logout and stays null.
         assertNull(state.projection.value)
     }
@@ -203,7 +205,7 @@ class VoiceSharingAccountOperationsTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         assertTrue(operations.refreshProjection(token))
         server.enqueue(MockResponse().setResponseCode(200).setBody("{\"schema_version\":2}"))
-        assertFalse(operations.withdraw(token))
+        assertTrue(operations.withdraw(token) is VoiceSharingMutationResult.Failure)
         assertEquals("rev-1", state.projection.value!!.membershipRevision)
     }
 }
@@ -244,6 +246,8 @@ class VoiceSharingAccountOperationsFencingTest {
         server.shutdown()
     }
 
+    private fun assertApplied(result: VoiceSharingMutationResult) = assertTrue(result is VoiceSharingMutationResult.Applied)
+
     private fun projectionJson(revision: String = "rev-1"): String = "{\"schema_version\":1,\"membership_revision\":\"$revision\",\"plan\":\"free\"," +
         "\"voice_sharing_enrolled\":false,\"enrollment_epoch\":null," +
         "\"accepted_disclosure_version\":null,\"withdrawal_state\":\"not_enrolled\"}"
@@ -264,7 +268,7 @@ class VoiceSharingAccountOperationsFencingTest {
         withContext(Dispatchers.IO) { Thread.sleep(100) } // let the older op freeze + go in flight
         assertTrue(operations.refreshProjection(token)) // newer intent, later generation
         assertEquals("rev-new", state.projection.value!!.membershipRevision)
-        assertFalse(older.await()) // obsolete generation: never applied
+        assertTrue(older.await() is VoiceSharingMutationResult.Failure) // obsolete generation: never applied
         assertEquals("rev-new", state.projection.value!!.membershipRevision)
     }
 
@@ -275,7 +279,7 @@ class VoiceSharingAccountOperationsFencingTest {
 
         server.enqueue(MockResponse().setResponseCode(500))
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-2")))
-        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        assertApplied(operations.enroll(token, acceptedDisclosureVersion = "v3"))
 
         server.takeRequest(5, TimeUnit.SECONDS)!! // drain GET
         val a1 = server.takeRequest(5, TimeUnit.SECONDS)!!
@@ -292,7 +296,7 @@ class VoiceSharingAccountOperationsFencingTest {
 
         server.enqueue(MockResponse().setResponseCode(401))
         bearer = "Bearer token-a" // unchanged at 401 time
-        assertFalse(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
         assertEquals(1, invalidations.size)
         assertEquals("Bearer token-a", invalidations[0]) // the ACTUAL rejected bearer, for compare-and-invalidate
     }
@@ -304,7 +308,7 @@ class VoiceSharingAccountOperationsFencingTest {
         assertTrue(operations.refreshProjection(token))
         server.enqueue(MockResponse().setResponseCode(401))
         state.sessionEnded()
-        assertFalse(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
         assertTrue(invalidations.isEmpty())
     }
 
@@ -318,7 +322,24 @@ class VoiceSharingAccountOperationsFencingTest {
         val result = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
         withContext(Dispatchers.IO) { Thread.sleep(100) } // let the request go out with token-a
         bearer = "Bearer token-b" // refreshed credentials mid-flight
-        assertFalse(result.await())
+        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
+        assertTrue(invalidations.isEmpty())
+    }
+
+    @Test
+    fun `401 from a superseded same-session operation invalidates NOTHING - generation-fenced`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        assertTrue(operations.refreshProjection(token))
+        // Older enrollment's 401 pauses in flight; a newer same-session op completes first.
+        server.enqueue(MockResponse().setResponseCode(401).setHeadersDelay(500, TimeUnit.MILLISECONDS))
+        val older = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
+        withContext(Dispatchers.IO) { Thread.sleep(100) }
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-2")))
+        assertApplied(operations.withdraw(token)) // newer intent bumps the operation generation
+        assertTrue(older.await() is VoiceSharingMutationResult.Failure)
+        // The stale 401 must not log out the current session or touch the credential.
+        assertTrue(state.hasCurrentSessionProjection())
+        assertEquals("rev-2", state.projection.value!!.membershipRevision)
         assertTrue(invalidations.isEmpty())
     }
 
@@ -327,7 +348,7 @@ class VoiceSharingAccountOperationsFencingTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         assertTrue(operations.refreshProjection(token))
         server.enqueue(MockResponse().setResponseCode(409))
-        assertFalse(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
         assertEquals(2, server.requestCount) // GET + ONE enrollment attempt, no retry
         assertEquals("rev-1", state.projection.value!!.membershipRevision)
     }
@@ -337,7 +358,7 @@ class VoiceSharingAccountOperationsFencingTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         assertTrue(operations.refreshProjection(token))
         server.enqueue(MockResponse().setResponseCode(422))
-        assertFalse(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3") is VoiceSharingMutationResult.Failure)
         assertEquals(2, server.requestCount)
     }
 
@@ -362,7 +383,7 @@ class VoiceSharingAccountOperationsFencingTest {
         val tricky = "v\"3\\x"
         server.enqueue(MockResponse().setResponseCode(500))
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-2")))
-        assertTrue(operations.enroll(token, acceptedDisclosureVersion = tricky))
+        assertApplied(operations.enroll(token, acceptedDisclosureVersion = tricky))
         server.takeRequest(5, TimeUnit.SECONDS)!! // drain GET
         val a1 = server.takeRequest(5, TimeUnit.SECONDS)!!
         val a2 = server.takeRequest(5, TimeUnit.SECONDS)!!
@@ -396,7 +417,7 @@ class VoiceSharingAccountOperationsFencingTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson(epoch = "epoch-9")))
         assertTrue(operations.refreshProjection(token))
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-2")))
-        assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        assertApplied(operations.enroll(token, acceptedDisclosureVersion = "v3"))
         server.takeRequest(5, TimeUnit.SECONDS)!!
         val body = server.takeRequest(5, TimeUnit.SECONDS)!!.body.readUtf8()
         assertEquals(setOf("request_id", "expected_membership_revision", "accepted_disclosure_version"), decodedKeys(body))
@@ -408,7 +429,7 @@ class VoiceSharingAccountOperationsFencingTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         assertTrue(operations.refreshProjection(token))
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-2")))
-        assertTrue(operations.withdraw(token))
+        assertApplied(operations.withdraw(token))
         server.takeRequest(5, TimeUnit.SECONDS)!!
         val body = server.takeRequest(5, TimeUnit.SECONDS)!!.body.readUtf8()
         assertEquals(setOf("request_id", "expected_membership_revision", "enrollment_epoch"), decodedKeys(body))
@@ -440,8 +461,25 @@ class VoiceSharingAccountOperationsFencingTest {
                 projectionJson("rev-current", withdrawal = "withdrawn", enrolled = false, epoch = "e"),
             ),
         )
-        assertFalse(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        val outcome = operations.enroll(token, acceptedDisclosureVersion = "v3")
+        assertTrue(outcome is VoiceSharingMutationResult.MembershipConflict) // NEVER a success
+        assertEquals("rev-current", (outcome as VoiceSharingMutationResult.MembershipConflict).currentProjection!!.membershipRevision)
         assertEquals(2, server.requestCount) // terminal: no retry, no auto re-enroll
+        assertEquals("rev-current", state.projection.value!!.membershipRevision)
+    }
+
+    @Test
+    fun `withdraw 409 conflict is a DISTINCT outcome - never reports success`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        assertTrue(operations.refreshProjection(token))
+        server.enqueue(
+            MockResponse().setResponseCode(409).setBody(
+                projectionJson("rev-current", withdrawal = "withdrawn", enrolled = false, epoch = "e"),
+            ),
+        )
+        val outcome = operations.withdraw(token)
+        assertTrue(outcome is VoiceSharingMutationResult.MembershipConflict)
+        assertEquals(2, server.requestCount) // terminal: no retry
         assertEquals("rev-current", state.projection.value!!.membershipRevision)
     }
 
@@ -450,8 +488,10 @@ class VoiceSharingAccountOperationsFencingTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         assertTrue(operations.refreshProjection(token))
         server.enqueue(MockResponse().setResponseCode(409).setBody("{\"schema_version\":9}"))
-        assertFalse(operations.enroll(token, acceptedDisclosureVersion = "v3"))
-        assertEquals("rev-1", state.projection.value!!.membershipRevision)
+        val outcome = operations.enroll(token, acceptedDisclosureVersion = "v3")
+        assertTrue(outcome is VoiceSharingMutationResult.MembershipConflict)
+        assertNull((outcome as VoiceSharingMutationResult.MembershipConflict).currentProjection)
+        assertEquals("rev-1", state.projection.value!!.membershipRevision) // malformed body applies nothing
     }
 
     private fun sentAuthHeaders(): List<String> {

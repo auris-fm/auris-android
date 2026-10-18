@@ -160,8 +160,10 @@ class VoiceSharingAccountStateTest {
         val issued = st.sessionStarted()
         st.sessionEnded()
         val relogin = st.sessionStarted() // same account, NEW incarnation
-        assertFalse(st.applySessionResponse(issued, projectionJson()))
-        assertTrue(st.applySessionResponse(relogin, projectionJson()))
+        // A stale token gets NO ticket at all - there is nothing to apply with.
+        assertNull(st.beginOperation(issued, requireProjection = false))
+        val reloginTicket = st.beginOperation(relogin, requireProjection = false)!!
+        assertTrue(st.applyOutcome(relogin, reloginTicket, projectionJson()))
         assertEquals("rev-abc", st.projection.value!!.membershipRevision)
     }
 
@@ -169,12 +171,13 @@ class VoiceSharingAccountStateTest {
     fun `logout invalidates synchronously - no flow conflation dependency`() {
         val st = state()
         val issued = st.sessionStarted()
-        assertTrue(st.applySessionResponse(issued, projectionJson()))
+        val issuedTicket = st.beginOperation(issued, requireProjection = false)!!
+        assertTrue(st.applyOutcome(issued, issuedTicket, projectionJson()))
         st.sessionEnded()
         assertNull(st.projection.value)
         assertFalse(st.hasCurrentSessionProjection())
-        // The ended token cannot re-arm anything afterwards.
-        assertFalse(st.applySessionResponse(issued, projectionJson()))
+        // The ended token cannot re-arm anything afterwards: no ticket is issued at all.
+        assertNull(st.beginOperation(issued, requireProjection = false))
     }
 
     @Test
@@ -188,17 +191,20 @@ class VoiceSharingAccountStateTest {
     fun `token refresh without a lifecycle boundary keeps the projection`() {
         val st = state()
         val issued = st.sessionStarted()
-        assertTrue(st.applySessionResponse(issued, projectionJson()))
+        val issuedTicket = st.beginOperation(issued, requireProjection = false)!!
+        assertTrue(st.applyOutcome(issued, issuedTicket, projectionJson()))
         st.onTokenRefresh()
         assertTrue(st.hasCurrentSessionProjection())
-        assertTrue(st.applySessionResponse(issued, projectionJson()))
+        val refreshedTicket = st.beginOperation(issued, requireProjection = false)!!
+        assertTrue(st.applyOutcome(issued, refreshedTicket, projectionJson()))
     }
 
     @Test
     fun `opaque revision equality-only - no ordering surface`() {
         val st = state()
         val issued = st.sessionStarted()
-        st.applySessionResponse(issued, projectionJson(revision = "zzz-later-looking"))
+        val tk = st.beginOperation(issued, requireProjection = false)!!
+        st.applyOutcome(issued, tk, projectionJson(revision = "zzz-later-looking"))
         assertTrue(st.isCurrentRevision("zzz-later-looking"))
         assertFalse(st.isCurrentRevision("aaa-earlier-looking"))
     }
@@ -209,14 +215,15 @@ class VoiceSharingAccountStateTest {
     fun `a NEW session token atomically clears the prior projection - no sessionEnded needed`() {
         val st = state()
         val a = st.sessionStarted()
-        assertTrue(st.applySessionResponse(a, projectionJson()))
+        val aTicket = st.beginOperation(a, requireProjection = false)!!
+        assertTrue(st.applyOutcome(a, aTicket, projectionJson()))
         assertEquals("rev-abc", st.projection.value!!.membershipRevision)
 
         st.sessionStarted() // authoritative B starts; A's projection must clear ATOMICALLY
         assertNull(st.projection.value)
         assertFalse(st.hasCurrentSessionProjection())
-        // A's token can never re-arm.
-        assertFalse(st.applySessionResponse(a, projectionJson()))
+        // A's token can never re-arm: no ticket is issued for a superseded token.
+        assertNull(st.beginOperation(a, requireProjection = false))
     }
 
     @Test
@@ -282,7 +289,8 @@ class VoiceSharingAccountStateTest {
     fun `unparseable body never arms authority`() {
         val st = state()
         val issued = st.sessionStarted()
-        assertFalse(st.applySessionResponse(issued, "garbage"))
+        val issuedTicket = st.beginOperation(issued, requireProjection = false)!!
+        assertFalse(st.applyOutcome(issued, issuedTicket, "garbage"))
         assertNull(st.projection.value)
     }
 }

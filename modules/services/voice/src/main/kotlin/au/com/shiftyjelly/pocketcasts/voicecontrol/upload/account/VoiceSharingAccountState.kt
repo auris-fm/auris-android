@@ -61,21 +61,6 @@ class VoiceSharingAccountState {
         // Deliberately no invalidation; projection and authority survive.
     }
 
-    /**
-     * Applies a response ONLY for the token that was issued when the request went out; a stale
-     * or superseded token never applies, whatever account is current at response time.
-     */
-    fun applySessionResponse(token: SessionToken, json: String): Boolean {
-        val projection = parseProjection(json) ?: return false
-        synchronized(fence) {
-            if (token !== currentToken) {
-                return false
-            }
-            state.value = projection
-        }
-        return true
-    }
-
     /** Strict parse: see [ProjectionJsonParser]. Any defect fails closed. */
     fun parseProjection(json: String): VoiceSharingAccountProjection? = try {
         ProjectionJsonParser.parse(json)
@@ -102,7 +87,9 @@ class VoiceSharingAccountState {
         if (token !== currentToken) return null
         val projection = state.value
         if (requireProjection && projection == null) return null
-        OperationTicket(operationGeneration.incrementAndGet())
+        // The issued projection snapshot is IMMUTABLE on the ticket: request bodies are
+        // serialized from exactly these captured values, never re-read after awaits.
+        OperationTicket(operationGeneration.incrementAndGet(), projection)
     }
 
     /**
@@ -129,6 +116,27 @@ class VoiceSharingAccountState {
     /** Fenced revalidation used before each send and before terminal outcomes. */
     fun isTicketCurrent(token: SessionToken, ticket: OperationTicket): Boolean = synchronized(fence) {
         token === currentToken && ticket.generation == operationGeneration.get()
+    }
+
+    /**
+     * ATOMIC 401 rejection handling under one fence: the issued TICKET generation, the session,
+     * and the rejected-vs-current credential compare all happen here, so a newer same-session
+     * operation (which bumped the generation) or a rotated credential makes a stale 401 a no-op.
+     * Only when everything matches is the session invalidated. No credential data is stored.
+     */
+    fun processUnauthorized(
+        token: SessionToken,
+        ticket: OperationTicket,
+        rejectedBearer: String?,
+        currentBearer: String?,
+    ): Boolean = synchronized(fence) {
+        if (token !== currentToken) return false
+        if (ticket.generation != operationGeneration.get()) return false
+        if (rejectedBearer == null || rejectedBearer != currentBearer) return false
+        operationGeneration.incrementAndGet()
+        currentToken = null
+        state.value = null
+        true
     }
 
     fun hasCurrentSessionProjection(): Boolean = synchronized(fence) {
@@ -260,7 +268,10 @@ internal object ProjectionJsonParser {
 class SessionToken internal constructor()
 
 /** Store-issued operation generation: valid only while its session and generation are current. */
-class OperationTicket internal constructor(internal val generation: Long)
+class OperationTicket internal constructor(
+    internal val generation: Long,
+    internal val projection: VoiceSharingAccountProjection?,
+)
 
 /** Server-issued opaque membership revision: never sorted, equality/current-only usage. */
 data class VoiceSharingAccountProjection(

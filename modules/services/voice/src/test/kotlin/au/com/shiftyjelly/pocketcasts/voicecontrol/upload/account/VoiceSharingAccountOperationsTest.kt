@@ -672,17 +672,20 @@ class VoiceSharingAccountAuthBindingTest {
     /** Control scope: a real-shaped CredentialOwnershipOwner with a test-owned generation. */
     private class FakeOwnership : CredentialOwnershipOwner {
         var generation = 0L
+        var sessionGenerationValue = 0L
         var token: AccessToken? = AccessToken("real-token-1")
         val invalidations = mutableListOf<Long>()
 
         override fun credentialGeneration(): Long = generation
+        override fun sessionGeneration(): Long = sessionGenerationValue
         override fun accessTokenSnapshot(): AccessTokenSnapshot? = token?.let { AccessTokenSnapshot(it, generation) }
-        override fun invalidateIfUnchanged(observedGeneration: Long, scopedCheck: () -> Boolean): Boolean = synchronized(this) {
-            if (generation != observedGeneration) return false
+        override fun invalidateIfUnchanged(observed: AccessTokenSnapshot, scopedCheck: () -> Boolean): Boolean = synchronized(this) {
+            if (generation != observed.generation) return false
+            if (token?.value != observed.token.value) return false // ANY writer rotating the token refuses the stale CAS
             if (!scopedCheck()) return false
             token = null
             generation += 1
-            invalidations.add(observedGeneration)
+            invalidations.add(observed.generation)
             true
         }
     }
@@ -737,12 +740,14 @@ class VoiceSharingAccountAuthBindingTest {
         val auth = FakeAuth()
         val state = VoiceSharingAccountState()
         val credentials = VoiceSharingCredentialStore()
-        val binding = VoiceSharingAccountAuthBinding(auth, FakeOwnership(), VoiceSharingAccountSessionCoordinator(state, credentials))
+        val ownership = FakeOwnership()
+        val binding = VoiceSharingAccountAuthBinding(auth, ownership, VoiceSharingAccountSessionCoordinator(state, credentials))
         binding.start(backgroundScope)
         auth.setEmail("user@example.com") // account appears -> login
         withTimeout(5_000) { while (credentials.current() == null) delay(10) }
         assertEquals("Bearer real-token-1", credentials.current()!!.bearer)
         auth.signOut() // account removed -> logout (clears token AND ends session)
+        ownership.sessionGenerationValue += 1 // the REAL owner bumps its DISTINCT session incarnation on logout
         withTimeout(5_000) { while (credentials.current() != null) delay(10) }
         assertNull(credentials.current())
     }

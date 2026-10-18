@@ -6,26 +6,28 @@ import au.com.shiftyjelly.pocketcasts.preferences.AccessToken
 data class AccessTokenSnapshot(val token: AccessToken, val generation: Long)
 
 /**
- * Synchronous, non-secret credential lifecycle OWNERSHIP for the sync account token
- * (reviewer a75df7ef): the real owner exposes a generation that increments on EVERY credential
- * write (login/refresh/set/invalidate/signOut), a synchronous snapshot read, and an ATOMIC
- * compare-and-invalidate that other owners (voice-sharing account boundary) run their scoped
- * checks INSIDE — so external rotations can neither be missed by a cached read nor be cleared
- * by a stale rejection.
+ * Synchronous, non-secret credential AND session lifecycle OWNERSHIP for the sync account
+ * (reviewers a75df7ef / 2008ea39): the real owner exposes a credential generation that
+ * increments on EVERY credential write, a DISTINCT session generation that increments ONLY on
+ * login/logout/account-switch, a synchronous snapshot read, and an ATOMIC compare-and-
+ * invalidate that other boundaries run their scoped checks INSIDE.
  */
 interface CredentialOwnershipOwner {
-    /** Non-secret generation: changes on every credential write. No secret material. */
+    /** Non-secret generation: changes on every credential write (login/refresh/set/invalidate/signOut). */
     fun credentialGeneration(): Long
+
+    /** DISTINCT session incarnation: changes ONLY on login/logout/account-switch — never on refresh. */
+    fun sessionGeneration(): Long
 
     /** Synchronous read of the CURRENT token + its generation. No network, no refresh. */
     fun accessTokenSnapshot(): AccessTokenSnapshot?
 
     /**
      * ATOMIC compare-and-invalidate under the credential ownership lock: the token is
-     * invalidated ONLY if the generation is still [observedGeneration]; [scopedCheck] runs
-     * INSIDE the lock so a caller's state check and this invalidation commit together. A
-     * refresh or any other write that landed first makes this a no-op that preserves the
-     * fresh credential.
+     * invalidated ONLY if BOTH the generation and the token VALUE still match [observed]
+     * (async platform/authenticator rotation that bypasses the owner therefore refuses too);
+     * [scopedCheck] runs INSIDE the lock so the caller's state check and this invalidation
+     * commit together.
      */
-    fun invalidateIfUnchanged(observedGeneration: Long, scopedCheck: () -> Boolean): Boolean
+    fun invalidateIfUnchanged(observed: AccessTokenSnapshot, scopedCheck: () -> Boolean): Boolean
 }

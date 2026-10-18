@@ -42,26 +42,41 @@ open class SyncAccountManagerImpl @Inject constructor(
      */
     private val credentialWriteLock = Any()
     private val credentialGenerationCounter = java.util.concurrent.atomic.AtomicLong(0)
+    private val sessionGenerationCounter = java.util.concurrent.atomic.AtomicLong(0)
 
     override fun credentialGeneration(): Long = credentialGenerationCounter.get()
+
+    /**
+     * DISTINCT synchronous SESSION incarnation: increments ONLY on login/logout/account-switch
+     * writes (addAccount, signOut), never on token refresh/rotation. Async session events are
+     * fenced against it: an event observed at generation G is applied only if the generation is
+     * still G after its suspend work, so a late async completion can neither re-arm a logged-out
+     * session nor double-apply churn.
+     */
+    override fun sessionGeneration(): Long = sessionGenerationCounter.get()
 
     override fun accessTokenSnapshot(): AccessTokenSnapshot? = synchronized(credentialWriteLock) {
         val account = getAccount() ?: return null
         peekAccessToken(account)?.let { AccessTokenSnapshot(it, credentialGenerationCounter.get()) }
     }
 
-    override fun invalidateIfUnchanged(observedGeneration: Long, scopedCheck: () -> Boolean): Boolean = synchronized(credentialWriteLock) {
-        if (credentialGenerationCounter.get() != observedGeneration) return false
+    /**
+     * ATOMIC compare-and-invalidate against BOTH the observed generation AND the observed
+     * token VALUE: async AccountManager/authenticator refresh writes that bypass
+     * setAccessToken change the platform token without our counter, so the value compare
+     * closes that gap — a rotation by ANY writer makes a stale rejection a no-op.
+     */
+    override fun invalidateIfUnchanged(observed: AccessTokenSnapshot, scopedCheck: () -> Boolean): Boolean = synchronized(credentialWriteLock) {
+        if (credentialGenerationCounter.get() != observed.generation) return false
+        val account = getAccount() ?: return false
+        val currentToken = peekAccessToken(account)
+        if (currentToken == null || currentToken.value != observed.token.value) return false
         if (!scopedCheck()) return false
-        val account = getAccount()
-        if (account != null) {
-            peekAccessToken(account)?.let { accessToken ->
-                accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, accessToken.value)
-            }
-        }
+        accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, observed.token.value)
         credentialGenerationCounter.incrementAndGet()
         true
     }
+
     override fun getAccount(): Account? {
         return accountManager.getAccountsByType(AccountConstants.ACCOUNT_TYPE).firstOrNull()
     }
@@ -187,9 +202,9 @@ open class SyncAccountManagerImpl @Inject constructor(
             val added = accountManager.addAccountExplicitly(account, refreshToken.value, userData)
             accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
             credentialGenerationCounter.incrementAndGet()
+            sessionGenerationCounter.incrementAndGet()
             added
         }
-        accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
 
         // When the account was already added, set the sign in type to Tokens because the account
         // does not seem to get updated with this from the userData in the addAccountExplicitly call
@@ -205,6 +220,7 @@ open class SyncAccountManagerImpl @Inject constructor(
                 accountManager.removeAccountExplicitly(account)
             }
             credentialGenerationCounter.incrementAndGet()
+            sessionGenerationCounter.incrementAndGet()
         }
     }
 

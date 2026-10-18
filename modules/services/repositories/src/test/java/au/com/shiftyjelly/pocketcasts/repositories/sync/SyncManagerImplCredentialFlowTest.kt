@@ -49,6 +49,8 @@ class SyncManagerImplCredentialFlowTest {
     private lateinit var syncManager: SyncManagerImpl
     private val okDispatcher = okhttp3.Dispatcher()
     private val responses = ConcurrentLinkedQueue<MockResponse>()
+    private lateinit var syncServiceManagerField: SyncServiceManager
+    private lateinit var moshiField: com.squareup.moshi.Moshi
 
     /** Token-response body shape shared by loginToken and updatePassword. */
     private fun tokenBody(email: String, access: String, refresh: String) = """
@@ -74,7 +76,8 @@ class SyncManagerImplCredentialFlowTest {
             .client(OkHttpClient())
             .build()
         val cache = Cache(File(context.cacheDir.absolutePath, "HttpCache"), (10 * 1024 * 1024).toLong())
-        val syncServiceManager = SyncServiceManager(retrofit.create(), mock(), Lazy { cache }, mock())
+        syncServiceManagerField = SyncServiceManager(retrofit.create(), mock(), Lazy { cache }, mock())
+        moshiField = moshi
 
         syncAccountManager = SyncAccountManagerImpl(mock(), accountManager)
         syncManager = SyncManagerImpl(
@@ -83,8 +86,8 @@ class SyncManagerImplCredentialFlowTest {
             settings = mock(),
             syncAccountManager = syncAccountManager,
             credentialOwnership = syncAccountManager, // the REAL owner
-            syncServiceManager = syncServiceManager,
-            moshi = moshi,
+            syncServiceManager = syncServiceManagerField,
+            moshi = moshiField,
             notificationManager = mock(),
         )
     }
@@ -143,6 +146,48 @@ class SyncManagerImplCredentialFlowTest {
         // B's credential is untouched; A's password tokens were NEVER published anywhere.
         assertEquals("tB", syncAccountManager.authoritySnapshot().token!!.value)
         assertEquals("b@example.com", syncAccountManager.authoritySnapshot().accountName)
+    }
+
+    /**
+     * P4 — the identity switches DURING TOKEN ACQUISITION (reviewer 83471c65): the ORIGINAL
+     * identity is captured before acquisition; A resumes with B's admission → refused BEFORE
+     * the password HTTP request, explicitly, with zero network.
+     */
+    @Test
+    fun `P4 - identity switch DURING token acquisition refuses BEFORE the password request`() = kotlinx.coroutines.runBlocking {
+        val real = syncAccountManager
+        addAccount("a@example.com", "t1")
+        // The ONLY override: the token-acquisition seam performs the real A->B switch, exactly
+        // the awaited gap between the original capture and the admission capture. Everything
+        // else (owner lock, snapshot, conditional publication) is the REAL implementation.
+        val switchingOwner = object : SyncAccountManagerImpl(mock(), accountManager) {
+            override suspend fun getAccessToken(): AccessToken? {
+                synchronized(real) {
+                    real.signOut()
+                    addAccount("b@example.com", "tB")
+                }
+                return super.getAccessToken()
+            }
+        }
+        syncManager = SyncManagerImpl(
+            eventHorizon = com.automattic.eventhorizon.EventHorizon(au.com.shiftyjelly.pocketcasts.analytics.testing.TestEventSink()),
+            context = context,
+            settings = mock(),
+            syncAccountManager = switchingOwner,
+            credentialOwnership = switchingOwner,
+            syncServiceManager = syncServiceManagerField,
+            moshi = moshiField,
+            notificationManager = mock(),
+        )
+        try {
+            syncManager.updatePassword(newPassword = "np", oldPassword = "op")
+            fail("identity superseded during acquisition must refuse EXPLICITLY")
+        } catch (expected: IllegalStateException) {
+            assertTrue(expected.message!!.contains("superseded during token acquisition"))
+        }
+        assertEquals(0, server.requestCount) // refused BEFORE the password HTTP request
+        assertEquals("tB", real.authoritySnapshot().token!!.value) // B intact; A published nowhere
+        assertEquals("b@example.com", real.authoritySnapshot().accountName)
     }
 
     /** P3 — refused admission in the REAL fetch flow issues ZERO token-fetch calls. */

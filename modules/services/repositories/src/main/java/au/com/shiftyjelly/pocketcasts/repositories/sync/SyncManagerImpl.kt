@@ -139,15 +139,22 @@ class SyncManagerImpl @Inject constructor(
     }
 
     override suspend fun updatePassword(newPassword: String, oldPassword: String) {
-        // The IDENTITY ORIGIN is captured before token acquisition; the ACTUAL credential
-        // admission is captured INSIDE the call — after the necessary token acquisition
-        // (getCacheTokenOrLogin may legitimately refresh, moving the credential), immediately
-        // before the password request — and preserved across the await. The commit is then
-        // conditional on the ADMISSION snapshot, and a refused commit is reported EXPLICITLY
-        // (never a false success): a late A password response after a B login throws instead
-        // of silently publishing into B.
+        // The ORIGINAL identity (account + session) is captured BEFORE token acquisition. The
+        // acquisition await can legitimately refresh (same session) but can also let the
+        // identity move (A initiates → await → B login → A resumes): the ADMISSION is captured
+        // inside the call, AFTER acquisition, and validated against the ORIGINAL session and
+        // the ACTUAL request token BEFORE the HTTP commit; the admission is then frozen through
+        // the commit. Every refusal is EXPLICIT — never a false success.
+        val origin = credentialOwnership.authoritySnapshot()
         getCacheTokenOrLogin { token ->
             val admission = credentialOwnership.authoritySnapshot()
+            check(admission.accountName == origin.accountName && admission.session == origin.session) {
+                "Password request refused: identity superseded during token acquisition " +
+                    "(origin=${origin.accountName}/${origin.session}, admitted=${admission.accountName}/${admission.session})"
+            }
+            check(admission.token != null && admission.token.value == token.value) {
+                "Password request refused: request token does not match the admitted credential"
+            }
             val response = syncServiceManager.updatePassword(newPassword, oldPassword, token)
             eventHorizon.track(UserPasswordUpdatedEvent)
             check(credentialOwnership.publishCredentials(admission, response.refreshToken, response.accessToken)) {

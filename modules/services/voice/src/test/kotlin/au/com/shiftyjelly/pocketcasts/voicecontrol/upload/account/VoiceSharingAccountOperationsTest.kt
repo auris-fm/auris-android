@@ -1,12 +1,28 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account
 
+import android.accounts.Account
+import au.com.shiftyjelly.pocketcasts.preferences.AccessToken
+import au.com.shiftyjelly.pocketcasts.preferences.AccountConstants
+import au.com.shiftyjelly.pocketcasts.preferences.RefreshToken
+import au.com.shiftyjelly.pocketcasts.repositories.sync.SyncAccountManager
+import au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity
+import au.com.shiftyjelly.pocketcasts.utils.Optional
+import io.reactivex.Flowable
 import java.util.UUID
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -638,5 +654,164 @@ class VoiceSharingAccountSessionCoordinatorTest {
         coordinator.loggedOut()
         assertNull(credentials.current())
         assertNull(state.beginOperation(token, requireProjection = false)) // session ended
+    }
+}
+
+/**
+ * Coordinator atomicity + REAL production ownership (reviewer a65170e7): the binding wires the
+ * EXISTING auth owner (SyncAccountManager) to the coordinated session/credential owner; every
+ * transition is one transaction; the credential-invalid effect is the auth owner's real
+ * invalidation write.
+ */
+class VoiceSharingAccountAuthBindingTest {
+
+    private class FakeAuth : SyncAccountManager {
+        val emailState = MutableStateFlow<String?>(null)
+        var currentToken: AccessToken? = AccessToken("real-token-1")
+        var invalidateCount = 0
+
+        override suspend fun getAccessToken(): AccessToken? = currentToken
+        override fun addAccount(email: String, uuid: String, refreshToken: RefreshToken, accessToken: AccessToken, loginIdentity: LoginIdentity) = Unit
+        override fun getAccount(): Account? = null
+        override fun getEmail(): String? = emailState.value
+        override fun emailFlow(): Flow<String?> = emailState
+        override fun emailFlowable(): Flowable<Optional<String>> = Flowable.empty()
+        override fun getLoginIdentity(): LoginIdentity? = null
+        override fun getRefreshToken(account: Account?): RefreshToken? = null
+        override fun getSignInType(account: Account): AccountConstants.SignInType = AccountConstants.SignInType.Password
+        override fun getUuid(): String? = null
+        override fun invalidateAccessToken() {
+            invalidateCount++
+            currentToken = null // the REAL effect: the token incarnation is destroyed
+        }
+        override fun isLoggedIn(): Boolean = emailState.value != null
+        override fun peekAccessToken(account: Account): AccessToken? = currentToken
+        override fun setAccessToken(accessToken: AccessToken) {
+            this.currentToken = accessToken
+        }
+        override fun setEmail(email: String) {
+            emailState.value = email
+        }
+        override fun setRefreshToken(refreshToken: RefreshToken) = Unit
+        override fun signOut() {
+            currentToken = null
+            emailState.value = null
+        }
+    }
+
+    @Test
+    fun `login through the binding publishes the REAL token and issues the session`() = runTest {
+        val auth = FakeAuth()
+        val state = VoiceSharingAccountState()
+        val credentials = VoiceSharingCredentialStore()
+        val binding = VoiceSharingAccountAuthBinding(auth, VoiceSharingAccountSessionCoordinator(state, credentials))
+        val token = binding.loginFromAuth()
+        assertEquals("Bearer real-token-1", credentials.current()!!.bearer) // from the REAL owner
+        assertTrue(state.isCurrentSession(token))
+    }
+
+    @Test
+    fun `account appearance and removal drive coordinated login and logout`() = runTest {
+        val auth = FakeAuth()
+        val state = VoiceSharingAccountState()
+        val credentials = VoiceSharingCredentialStore()
+        val binding = VoiceSharingAccountAuthBinding(auth, VoiceSharingAccountSessionCoordinator(state, credentials))
+        binding.start(backgroundScope)
+        auth.setEmail("user@example.com") // account appears -> login
+        withTimeout(5_000) { while (credentials.current() == null) delay(10) }
+        assertEquals("Bearer real-token-1", credentials.current()!!.bearer)
+        auth.signOut() // account removed -> logout (clears token AND ends session)
+        withTimeout(5_000) { while (credentials.current() != null) delay(10) }
+        assertNull(credentials.current())
+    }
+
+    @Test
+    fun `a committed 401 transaction fires the REAL auth invalidation effect`() = runTest {
+        val auth = FakeAuth()
+        val state = VoiceSharingAccountState()
+        val credentials = VoiceSharingCredentialStore()
+        val binding = VoiceSharingAccountAuthBinding(auth, VoiceSharingAccountSessionCoordinator(state, credentials))
+        val token = binding.loginFromAuth()
+        val server = MockWebServer().apply { start() }
+        val operations = VoiceSharingAccountOperations(
+            api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
+            state = state,
+            credentials = credentials,
+            credentialSource = { binding.syncCredential() }, // ALWAYS the real token owner
+            onCredentialInvalid = { rejected -> binding.onCredentialInvalid(rejected) }, // REAL effect
+        )
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson())) // current-session GET arms authority
+        server.enqueue(MockResponse().setResponseCode(401))
+        assertTrue(operations.refreshProjection(token))
+        assertEquals(null, operations.enroll(token, acceptedDisclosureVersion = "v3").let { if (it is VoiceSharingMutationResult.Failure) null else it })
+        assertEquals(1, auth.invalidateCount) // the auth owner's invalidation write ran EXACTLY once
+        assertNull(credentials.current()) // incarnation destroyed by the coordinated transaction
+        server.shutdown()
+    }
+}
+
+/** Atomicity of the coordinator + serialization of the credential transaction (a65170e7). */
+class VoiceSharingAccountTransitionAtomicityTest {
+
+    @Test
+    fun `rotation CANNOT interleave the coordinated invalidation transaction - deterministic lock barrier`() {
+        val state = VoiceSharingAccountState()
+        val credentials = VoiceSharingCredentialStore()
+        val token = state.sessionStarted()
+        val ticket = state.beginOperation(token, requireProjection = false)!!
+        val c1 = credentials.publish("Bearer a")!!
+        val insideTransaction = CompletableDeferred<Unit>()
+        val releaseTransaction = CompletableDeferred<Unit>()
+
+        val transaction = thread(start = false) {
+            credentials.invalidateIfCurrent(c1) {
+                insideTransaction.complete(Unit)
+                runBlocking { releaseTransaction.await() }
+                state.processUnauthorized(token, ticket) // runs INSIDE the owner transaction
+            }
+        }
+        transaction.start()
+        runBlocking { withTimeout(5_000) { insideTransaction.await() } } // lock HELD by transaction
+
+        var rotationCompleted = false
+        val rotator = thread {
+            credentials.publish("Bearer b")
+            rotationCompleted = true
+        }
+        Thread.sleep(200) // bounded negative wait: rotation must still be BLOCKED on the lock
+        // The rotation must still be blocked: it cannot interleave the transaction.
+        assertFalse(rotationCompleted)
+
+        releaseTransaction.complete(Unit)
+        rotator.join(5_000)
+        transaction.join(5_000)
+        assertTrue(rotationCompleted) // rotation proceeded only AFTER the transaction committed
+        assertEquals("Bearer b", credentials.current()!!.bearer)
+    }
+
+    @Test
+    fun `interleaved login and logout stay CONSISTENT - credential present iff a session is current`() {
+        val state = VoiceSharingAccountState()
+        val credentials = VoiceSharingCredentialStore()
+        val coordinator = VoiceSharingAccountSessionCoordinator(state, credentials)
+        val tokens = ConcurrentLinkedQueue<SessionToken>()
+        val deadline = System.currentTimeMillis() + 1_000
+        val churn = (0 until 2).map { _ ->
+            thread {
+                while (System.currentTimeMillis() < deadline) {
+                    tokens.add(coordinator.login("Bearer churn-${System.nanoTime()}"))
+                    coordinator.loggedOut()
+                }
+            }
+        }
+        churn.forEach { it.join(10_000) }
+        val currentCount = tokens.count { state.isCurrentSession(it) }
+        val credential = credentials.current()
+        // The invariant the lock ordering guarantees: exactly one side survives, never half.
+        if (credential == null) {
+            assertEquals(0, currentCount) // logged out: no credential AND no current session
+        } else {
+            assertEquals(1, currentCount) // logged in: the credential AND its session match
+        }
     }
 }

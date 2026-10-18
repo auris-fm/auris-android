@@ -1,6 +1,10 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account
 
+import au.com.shiftyjelly.pocketcasts.repositories.sync.SyncAccountManager
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 
 /**
  * A credential INCARNATION: an opaque, reference-identity handle for one published bearer
@@ -58,29 +62,78 @@ class VoiceSharingCredentialStore {
 
 /**
  * Production composition for the voice-sharing account boundary: the credential owner and the
- * session authority are coordinated HERE, and auth events drive both. Login publishes the
- * incarnation AND issues the session; a token refresh republishes (same bearer keeps the same
- * incarnation); logout clears the credential AND ends the session. Operations are always built
- * against this coordinator's store — there is no empty fallback owner anywhere.
+ * session authority are coordinated HERE, and auth events drive both. EVERY session+credential
+ * transition is ONE coordinated transaction under [lifecycleLock] (lock order lifecycle ->
+ * credential store -> state fence, the same order as the 401 transaction, so no deadlock): a
+ * concurrent logout can never clear-then-kill a NEW login session and vice versa. Operations
+ * are always built against this coordinator's store — there is no empty fallback owner.
  */
 class VoiceSharingAccountSessionCoordinator(
     val state: VoiceSharingAccountState,
     val credentials: VoiceSharingCredentialStore,
 ) {
-    /** Auth login event: binds the credential write to the session issuance. */
-    fun login(bearer: String?): SessionToken {
+    private val lifecycleLock = Any()
+
+    /** Auth login event: ONE transaction — publish the credential write, issue the session. */
+    fun login(bearer: String?): SessionToken = synchronized(lifecycleLock) {
         credentials.publish(bearer)
-        return state.sessionStarted()
+        state.sessionStarted()
     }
 
     /** Auth token-refresh event: NOT a lifecycle boundary; republishes the credential. */
-    fun credentialRefreshed(bearer: String?) {
+    fun credentialRefreshed(bearer: String?): Unit = synchronized(lifecycleLock) {
         credentials.publish(bearer)
     }
 
-    /** Auth logout event: clears the credential and ends the session together. */
-    fun loggedOut() {
+    /** Auth logout event: ONE transaction — clear the credential AND end the session. */
+    fun loggedOut(): Unit = synchronized(lifecycleLock) {
         credentials.publish(null)
         state.sessionEnded()
+    }
+}
+
+/**
+ * THE production wiring for the account boundary: binds the EXISTING auth owner
+ * ([SyncAccountManager]) to the coordinated session/credential owner.
+ *
+ * - Login/logout come from the auth owner's own account updates ([SyncAccountManager.emailFlow]):
+ *   an account appearing is a login, disappearing is a logout — routed through the coordinator's
+ *   coordinated transactions.
+ * - Every credential freeze reads the REAL token owner ([SyncAccountManager.getAccessToken],
+ *   the existing refresh path) and publishes it — so a token refresh is bound too, and no test
+ *   or parallel helper ever writes the production store.
+ * - The credential-invalid notification effect is bound to the auth owner's REAL invalidation
+ *   write ([SyncAccountManager.invalidateAccessToken]).
+ */
+class VoiceSharingAccountAuthBinding(
+    private val auth: SyncAccountManager,
+    val coordinator: VoiceSharingAccountSessionCoordinator,
+) {
+    /** Subscribes to the auth owner's account updates; call once from an app scope. */
+    fun start(scope: CoroutineScope): Job = scope.launch {
+        auth.emailFlow().collect { email ->
+            if (email == null) {
+                coordinator.loggedOut()
+            } else {
+                loginFromAuth()
+            }
+        }
+    }
+
+    /** Login through the REAL credential read (existing refresh path inside getAccessToken). */
+    suspend fun loginFromAuth(): SessionToken {
+        val bearer = auth.getAccessToken()?.let { "Bearer " + it.value }
+        return coordinator.login(bearer)
+    }
+
+    /** Credential freeze source for operations: ALWAYS the real token owner, never a cache. */
+    suspend fun syncCredential(): CredentialIncarnation? {
+        val bearer = auth.getAccessToken()?.let { "Bearer " + it.value }
+        return coordinator.credentials.publish(bearer)
+    }
+
+    /** The REAL credential-invalid effect: the auth owner's own invalidation write. */
+    suspend fun onCredentialInvalid(rejected: CredentialIncarnation) {
+        auth.invalidateAccessToken()
     }
 }

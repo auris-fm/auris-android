@@ -106,6 +106,7 @@ class VoiceSharingAccountOperations(
     private val api: VoiceSharingAccountApi,
     private val state: VoiceSharingAccountState,
     private val credentials: VoiceSharingCredentialStore,
+    private val credentialSource: suspend () -> CredentialIncarnation? = { credentials.current() },
     private val onCredentialInvalid: suspend (CredentialIncarnation) -> Unit = {},
 ) {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
@@ -184,8 +185,9 @@ class VoiceSharingAccountOperations(
     }
 
     private suspend fun frozen(token: SessionToken, ticket: OperationTicket, route: Route, disclosureVersion: String?): FrozenOperation {
-        // The credential INCARNATION (not a raw string) is captured at freeze.
-        val credential = credentials.current()
+        // The credential INCARNATION (not a raw string) is captured at freeze — production
+        // sources it from the REAL token owner (VoiceSharingAccountAuthBinding.syncCredential).
+        val credential = credentialSource()
         val bearer = credential?.bearer
         // Revalidate the issued ticket AFTER awaiting the credential, before the first send.
         if (!state.isTicketCurrent(token, ticket)) {

@@ -350,6 +350,69 @@ class ContributionStoreTest {
     }
 
     @Test
+    fun `HELD late attempt write and terminal drop are refused after revocation`() {
+        // Full attempt-write fencing: a network callback that captured the OLD generation must not be able
+        // to advance retry state, write the attempts sidecar, or delete an entry once a revocation landed.
+        val root = tempRoot()
+        val fence = QueueFence()
+        var hooked = false
+        lateinit var theStore: ContributionStore
+        theStore = ContributionStore(root, QueueLimits.defaults(), fence = fence,
+            hooks = StoreHooks(beforePublication = { _ ->
+                hooked = true
+                fence.revoke()
+                theStore.purgeQueue("account-change")
+            }))
+        val store = theStore
+        // Revocation lands at the publication instant, so this preparation publishes nothing and the
+        // generation captured by an in-flight callback is now stale.
+        val inflightGen = fence.currentGeneration()
+        assertNull(store.prepareAt(inflightGen, ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertTrue("hook never fired - control did not reach the publication point", hooked)
+        assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
+
+        // A late callback carrying that stale generation must be refused on every mutating surface.
+        // The entry below belongs to THIS (now revoked) owner's index, so only the fence can stop it.
+        val victim = ContributionStore(root, QueueLimits.defaults(), fence = fence)
+        assertNotNull(victim.prepare(ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertEquals(1, victim.readyEntries().size)
+        assertNull("stale recordAttempt must be refused", victim.recordAttempt(inflightGen, ID_A))
+        assertFalse("stale dropEntry must be refused",
+            victim.dropEntry(inflightGen, ID_A, ContributionStore.TerminalReason.SERVER_TERMINAL))
+        assertEquals("stale callback must leave the attempt count alone", 0, victim.readyEntries().single().attempts)
+        assertTrue("stale callback must not delete the entry's files", File(victim.dirForTest(), "$ID_A.recording.wav").isFile)
+    }
+
+    @Test
+    fun `late attempt write cannot touch a successor entry under its own generation`() {
+        // The dangerous shape: revocation + successor commits the SAME capture id, then the old owner's
+        // callback arrives carrying the old generation. It must neither bump nor delete the successor's entry.
+        val root = tempRoot()
+        val fence = QueueFence()
+        val oldStore = ContributionStore(root, QueueLimits.defaults(), fence = fence)
+        assertNotNull(oldStore.prepare(ID_A, "epoch-old", chunks(8), meta(ID_A)))
+        val staleGen = fence.currentGeneration()
+        fence.revoke()
+        oldStore.purgeQueue("account-change")
+
+        val newStore = ContributionStore(root, QueueLimits.defaults(), fence = fence)
+        assertNotNull(newStore.prepare(ID_A, "epoch-new", chunks(8), meta(ID_A)))
+        val succAttempts = newStore.recordAttempt(ID_A)
+        assertEquals(1, succAttempts)
+
+        // Stale callback from the previous owner.
+        assertNull(oldStore.recordAttempt(staleGen, ID_A))
+        assertFalse(oldStore.dropEntry(staleGen, ID_A, ContributionStore.TerminalReason.SERVER_TERMINAL))
+
+        // Successor's entry and its durable attempt count are untouched.
+        val live = newStore.readyEntries().single()
+        assertEquals("successor enrollment epoch changed by stale callback", "epoch-new", live.enrollmentEpoch)
+        assertEquals("successor attempt count changed by stale callback", 1, live.attempts)
+        assertEquals("successor attempts sidecar changed by stale callback", "1",
+            File(newStore.dirForTest(), "$ID_A.attempts").readText())
+    }
+
+    @Test
     fun `same-generation duplicate attempts do not share staging files`() {
         // Deterministic staging-collision control (reviewer 32d8012c follow-up): both attempts run in the
         // SAME generation for the SAME capture id, and the first is HELD INSIDE its staging write until the

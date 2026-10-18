@@ -378,34 +378,56 @@ class ContributionStore(
      * in the index (purged/unknown) OR the durable sidecar write failed — a swallowed write error would
      * silently reset retry budget on the next restart, so failure is reported instead of invented.
      */
-    fun recordAttempt(captureId: String): Int? {
-        val updated = synchronized(lock) {
-            val e = memoryEntries[captureId] ?: return null
-            e.copy(attempts = e.attempts + 1).also { memoryEntries[captureId] = it }
-        }
+    /**
+     * Bump attempt accounting for a READY entry under the SHARED generation boundary [fence]: the write is
+     * refused once a full revocation has bumped the generation, so a late network callback can neither
+     * advance retry state nor touch the attempts sidecar of an entry that no longer belongs to this owner.
+     * Returns the new count, or null when the entry is unknown, the generation went stale, or the durable
+     * sidecar write failed (a swallowed write error would silently reset retry budget on restart).
+     */
+    fun recordAttempt(generation: Long, captureId: String): Int? {
+        val updated = fence.guard(generation) {
+            synchronized(lock) {
+                val e = memoryEntries[captureId] ?: return@guard null
+                e.copy(attempts = e.attempts + 1).also { memoryEntries[captureId] = it }
+            }
+        } ?: return null
         return try {
             File(dir, "$captureId$SUFFIX_ATTEMPTS").writeText(updated.attempts.toString())
             updated.attempts
         } catch (_: Exception) {
-            synchronized(lock) { memoryEntries[captureId] = updated.copy(attempts = updated.attempts - 1) }
+            // Roll back only while this generation still owns the queue; after a revoke the whole index is
+            // gone and inventing a decrement could corrupt a successor's counts.
+            fence.guard(generation) {
+                synchronized(lock) { memoryEntries[captureId]?.let { memoryEntries[captureId] = it.copy(attempts = it.attempts - 1) } }
+            }
             null
         }
     }
 
-    fun dropEntry(captureId: String, reason: TerminalReason): Boolean {
-        val e = synchronized(lock) {
-            memoryEntries.remove(captureId).also { if (it != null) deleteLocked(it) }
-        }
-        if (e == null) return false
-        dropCounterOnly(reason)
-        return true
+    /** Convenience for the current owner generation; prefer the fenced overload in callback paths. */
+    fun recordAttempt(captureId: String): Int? = recordAttempt(fence.currentGeneration(), captureId)
+
+    /**
+     * Remove one READY entry under the SHARED generation boundary [fence]. A stale callback must not be able
+     * to drop an entry that a revocation already purged (or that now belongs to a successor), so the removal
+     * and the file deletion happen inside the same guarded critical section as the ownership check.
+     */
+    fun dropEntry(generation: Long, captureId: String, reason: TerminalReason): Boolean {
+        val removed = fence.guard(generation) {
+            synchronized(lock) { memoryEntries.remove(captureId)?.also { deleteLocked(it) } }
+        } != null
+        if (removed) dropCounterOnly(reason)
+        return removed
     }
+
+    /** Convenience for the current owner generation; prefer the fenced overload in callback paths. */
+    fun dropEntry(captureId: String, reason: TerminalReason): Boolean = dropEntry(fence.currentGeneration(), captureId, reason)
 
     enum class TerminalReason { ATTEMPTS_EXHAUSTED, QUEUE_AGE_EXPIRED, SERVER_TERMINAL, INVALID_ON_RECOVERY }
 
     fun terminalCounter(reason: TerminalReason): Long = synchronized(lock) { terminalCounters[reason] ?: 0L }
 
-    /** FULL REVOCATION (account change / withdrawal / disable / lease loss): everything goes. */
     /**
      * FULL REVOCATION (account change / withdrawal / remote disable / lease loss): this owner's entire
      * queue goes, immediately.

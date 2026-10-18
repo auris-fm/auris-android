@@ -105,29 +105,44 @@ fun interface CollectionGate {
 interface SegmentSink {
     /**
      * Pre-allocation admission: reserve EXACTLY [SegmentObservation.Admission.producerSamples]'s
-     * bytes against the aggregate budget BEFORE the producer copies anything out. True = admitted.
-     * Default derives from [started] for simple sinks that adopt directly.
+     * bytes against the aggregate budget BEFORE the producer copies anything out, and register a
+     * PER-ALLOCATION reservation token carrying that capacity (reviewer 23cae70e b3/b4). The
+     * token — not any global counter — is what commit/release consume. Null = refused.
      */
-    fun admit(observation: SegmentObservation.Admission): Boolean = true
+    fun admit(observation: SegmentObservation.Admission): ReservationToken? = null
 
-    /** Receives the admitted-and-drained first chunk; transfers ownership into the prefix. */
-    fun adopted(observation: SegmentObservation.Started) = Unit
+    /**
+     * Receives the admitted-and-drained first chunk plus its token; transfers the USED range's
+     * charge into the prefix and releases ONLY the token's unused capacity. A refusal or throw
+     * leaves the caller responsible for releaseInitial (finally-path), which returns the token's
+     * full charge exactly once.
+     */
+    fun adopted(observation: SegmentObservation.Started, token: ReservationToken?) = Unit
+
+    /** Producer drop for an initial allocation that never transferred (refusal/throw path). */
+    fun releaseInitial(context: CaptureContext, token: ReservationToken?) = Unit
 
     /** Returns true while the sink retains incremental audio for this capture. */
     fun started(observation: SegmentObservation.Started): Boolean
 
+    /** True when the sink currently holds an OPEN prefix owned by [context]. */
+    fun hasOpenPrefix(context: CaptureContext): Boolean = false
+
     /** Real produced samples appended under ownership; the sink owns bounded retention. */
     fun incremental(observation: SegmentObservation.Incremental, samples: ShortArray)
 
-    /** Reserves [samples] delta bytes WITHOUT allocating; false when caps/budget refuse. */
-    fun reserveDelta(context: CaptureContext, samples: Int): Boolean = false
+    /** Reserves [samples] delta bytes WITHOUT allocating; null when caps/budget refuse.
+     * The returned handle is a PER-ALLOCATION token — commit/release address it, not any global. */
+    fun reserveDelta(context: CaptureContext, samples: Int): ReservationToken? = null
 
-    /** Transfers an already-reserved drained array into owned retention (exact [copied] bytes).
-     * Returns true when adopted; false when refused (revoked/cancelled lease). */
-    fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int): Boolean = false
+    /** Transfers the reservation identified by [token] into owned retention: ADOPTS the original
+     * [drained] array's valid range [0, copied) — no second copy — and releases only the token's
+     * unused capacity. Returns true when adopted; false when refused (revoked/unknown token), in
+     * which case the caller MUST still releaseDelta(token) when it drops the array. */
+    fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int, token: ReservationToken?): Boolean = false
 
-    /** Returns an unused reservation after a failed/refused copy-out. */
-    fun releaseDelta(context: CaptureContext, samples: Int) = Unit
+    /** Returns THAT token's remaining charge after a failed/refused/abandoned copy-out. */
+    fun releaseDelta(context: CaptureContext, token: ReservationToken?) = Unit
 
     /**
      * Receives the PRODUCTION frames for adoption. Returning false declines ownership; the
@@ -136,6 +151,17 @@ interface SegmentSink {
     fun completed(observation: SegmentObservation.Completed): Boolean
     fun cancelled(observation: SegmentObservation.Cancelled)
 }
+
+/**
+ * Per-allocation reservation handle (reviewer 23cae70e b3): identifies ONE reserved capacity
+ * window. Commit/release operations address THIS token; charges can never cross captures or
+ * allocations through a shared counter.
+ */
+class ReservationToken constructor(
+    internal val captureId: java.util.UUID,
+    internal val id: Long,
+    internal var bytes: Long,
+)
 
 /** Runs a block inside the collection authority transaction (composition supplies the fence). */
 interface FenceGate {

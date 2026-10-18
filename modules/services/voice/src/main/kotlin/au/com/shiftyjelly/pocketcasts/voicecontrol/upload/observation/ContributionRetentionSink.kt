@@ -84,12 +84,17 @@ class ContributionRetentionSink(
 
     private val lock = Any()
     private var openPrefix: OpenPrefix? = null
-    private var pendingAdmissionBytes: Long = 0L
     private val candidates = ArrayDeque<RetainedCandidate>()
     private val _lossEvents = mutableListOf<String>()
 
     private class OpenPrefix(val context: CaptureContext, val buffer: MutableList<ShortArray>) {
         var chargedBytes: Long = 0L
+
+        /** Valid length per ADOPTED array (arrays may carry unused reserved capacity at the tail;
+         * readers must slice to this length — reviewer 23cae70e b3: one array, one charge). */
+        val validLengths = java.util.IdentityHashMap<ShortArray, Int>()
+
+        fun samples(): Long = buffer.sumOf { (validLengths[it] ?: it.size).toLong() }
     }
 
     /** Content-free audit trail of loss decisions (cause names only, never audio/text). */
@@ -114,37 +119,71 @@ class ContributionRetentionSink(
     }
 
     /** ADMIT reserves exact producer bytes BEFORE any native copy-out; refusal allocates nothing. */
-    override fun admit(observation: SegmentObservation.Admission): Boolean {
+    override fun admit(observation: SegmentObservation.Admission): ReservationToken? {
         val bytes = observation.producerSamples.toLong() * BYTES_PER_SAMPLE
         // Empty prefix (size 0): still admitted — nothing allocated, nothing charged; the
         // capture retains from deltas onward under the same ownership.
-        if (bytes > maxBytesPerClip || !budget.reserve(bytes)) return false
-        synchronized(lock) { pendingAdmissionBytes = bytes }
-        return true
+        if (bytes > maxBytesPerClip || !budget.reserve(bytes)) return null
+        val token = ReservationToken(observation.context.captureId, nextReservationId(), bytes)
+        synchronized(lock) {
+            tokens[token.id] = token
+            leases.getOrPut(token.captureId) { mutableListOf() }.add(ReservationLease(token.id, bytes))
+        }
+        return token
     }
 
-    /** Completes an admitted start: the drained array transfers in with NO new reservation. */
-    override fun adopted(observation: SegmentObservation.Started) {
-        val reserved = synchronized(lock) {
-            val b = pendingAdmissionBytes
-            pendingAdmissionBytes = 0L
-            b
-        }
-        val actualBytes = observation.firstChunk.size.toLong() * BYTES_PER_SAMPLE
-        // Reconcile exactly: producer shrank between counter-read and drain -> release the excess;
-        // grew -> charge the difference too (still bounded by the clip cap).
-        when {
-            actualBytes < reserved -> budget.release(reserved - actualBytes)
+    /** Completes an admitted start: THIS token's used range transfers in with NO new charge. */
+    override fun hasOpenPrefix(context: CaptureContext): Boolean = synchronized(lock) {
+        openPrefix?.context == context
+    }
 
-            actualBytes > reserved -> if (!budget.reserve(actualBytes - reserved)) {
+    override fun adopted(observation: SegmentObservation.Started, token: ReservationToken?) {
+        if (token == null) return
+        val actualBytes = observation.firstChunk.size.toLong() * BYTES_PER_SAMPLE
+        // Reconcile against THIS allocation only: shrink returns the token's unused capacity;
+        // growth charges the difference to the same token (still bounded by the clip cap).
+        if (actualBytes < token.bytes) {
+            val unused = token.bytes - actualBytes
+            token.bytes = actualBytes
+            budget.release(unused)
+        } else if (actualBytes > token.bytes) {
+            val extra = actualBytes - token.bytes
+            if (!budget.reserve(extra)) {
                 // Over-growth beyond cap: end retention explicitly rather than exceed.
-                endPrefixWithTerminal(OpenPrefix(observation.context, mutableListOf()).apply { chargedBytes = reserved }, "adoption-over-cap")
+                endPrefixWithTerminal(OpenPrefix(observation.context, mutableListOf()).apply { chargedBytes = token.bytes }, "adoption-over-cap")
+                dropTokenLocked(token)
                 return
             }
+            token.bytes = actualBytes
         }
         synchronized(lock) {
+            // Transfer ownership atomically: the token's remaining charge moves into the prefix;
+            // its lease disappears so no later release can double-return it.
+            dropLeaseLocked(token.captureId, token.id)
+            tokens.remove(token.id)
             openPrefix = OpenPrefix(observation.context, mutableListOf(observation.firstChunk))
                 .apply { chargedBytes = actualBytes }
+        }
+    }
+
+    private fun dropTokenLocked(token: ReservationToken) {
+        synchronized(lock) {
+            if (token.bytes > 0) budget.release(token.bytes)
+            token.bytes = 0L
+            dropLeaseLocked(token.captureId, token.id)
+            tokens.remove(token.id)
+        }
+    }
+
+    /** Producer-drop path for an initial allocation that never transferred: releases THAT token. */
+    override fun releaseInitial(context: CaptureContext, token: ReservationToken?) {
+        if (token == null) return
+        synchronized(lock) {
+            val live = tokens[token.id] ?: return
+            if (live.bytes > 0) budget.release(live.bytes)
+            live.bytes = 0L
+            dropLeaseLocked(live.captureId, live.id)
+            tokens.remove(live.id)
         }
     }
 
@@ -194,80 +233,77 @@ class ContributionRetentionSink(
     /** Total bytes still covered by outstanding (producer-held) leases for a capture. */
     private fun outstandingFor(captureId: UUID): Long = leases[captureId]?.sumOf { it.bytes } ?: 0L
 
-    private class ReservationLease(val bytes: Long, var cancelled: Boolean = false)
+    private class ReservationLease(val tokenId: Long, val bytes: Long, var cancelled: Boolean = false)
 
-    private var pendingDeltaBytes = 0L
+    /** Live reservation tokens by id (per-allocation; reviewer 23cae70e b3). */
+    private val tokens = mutableMapOf<Long, ReservationToken>()
+    private var reservationSeq = 0L
+    private fun nextReservationId(): Long = synchronized(lock) { ++reservationSeq }
 
-    override fun reserveDelta(context: CaptureContext, samples: Int): Boolean {
+    override fun reserveDelta(context: CaptureContext, samples: Int): ReservationToken? {
         val bytes = samples.toLong() * BYTES_PER_SAMPLE
-        val prefix = synchronized(lock) { openPrefix?.takeIf { it.context == context } } ?: return false
-        if (prefix.chargedBytes + pendingDeltaBytes + bytes > maxBytesPerClip) return false
+        val prefix = synchronized(lock) { openPrefix?.takeIf { it.context == context } } ?: return null
+        // Per-clip cap accounts for THIS capture's outstanding allocations only (no global
+        // pendingDeltaBytes assumption — reviewer 23cae70e b3).
+        if (prefix.chargedBytes + outstandingFor(context.captureId) + bytes > maxBytesPerClip) return null
         if (!budget.reserve(bytes)) {
             endPrefixWithTerminal(prefix, "budget-exhausted")
-            return false
+            return null
         }
+        val token = ReservationToken(context.captureId, nextReservationId(), bytes)
         synchronized(lock) {
-            pendingDeltaBytes += bytes
-            leases.getOrPut(context.captureId) { mutableListOf() }.add(ReservationLease(bytes))
+            tokens[token.id] = token
+            leases.getOrPut(context.captureId) { mutableListOf() }.add(ReservationLease(token.id, bytes))
         }
-        return true
+        return token
     }
 
-    /** Returns true when the delta was adopted; false when refused (revoked/cancelled lease). */
-    override fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int): Boolean {
-        val bytes = copied.toLong() * BYTES_PER_SAMPLE
-        val reserved = copied.toLong() * BYTES_PER_SAMPLE // caller reserved exactly `copied` capacity use
+    /** Returns true when the delta was adopted; false when refused (revoked or unknown token). */
+    override fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int, token: ReservationToken?): Boolean {
+        if (token == null || token.captureId != context.captureId) return false
+        val usedBytes = copied.toLong() * BYTES_PER_SAMPLE
         return synchronized(lock) {
+            // Token validity FIRST: an already-consumed/released token commits NOTHING.
+            val live = tokens[token.id] ?: return@synchronized false
             // Stale-commit guard: a lease marked cancelled by revocation may NOT transfer into
             // retained ownership. The producer still holds the array; its charge leaves ONLY via
             // releaseDelta when the producer drops it (reviewer 8273382e b4).
-            val cancelledLease = leases[context.captureId]?.any { it.cancelled } == true
-            val prefix = openPrefix?.takeIf { it.context == context && !cancelledLease } ?: run {
-                if (!cancelledLease) {
-                    budget.release(pendingDeltaBytes.coerceAtLeast(reserved))
-                    consumeLeaseLocked(context.captureId, reserved)
-                    pendingDeltaBytes -= minOf(pendingDeltaBytes, reserved)
-                }
-                return false
-            }
-            // ADOPT the caller's drained array (already exactly `copied` samples after the
-            // engine trims); only shrink-copy when the caller handed over a larger buffer.
-            prefix.buffer.add(if (drained.size == copied) drained else drained.copyOf(copied))
-            prefix.chargedBytes += bytes
-            // Transfer the lease: the committed array's charge moves from outstanding-lease to
-            // retained-bytes ownership atomically under this lock (no double count, no gap).
-            consumeLeaseLocked(context.captureId, reserved)
-            pendingDeltaBytes -= reserved
-            if (pendingDeltaBytes > 0) {
-                budget.release(pendingDeltaBytes) // partial copy: uncommitted remainder returns
-                pendingDeltaBytes = 0L
-            }
+            val cancelled = leases[context.captureId]?.any { it.tokenId == token.id && it.cancelled } == true
+            val prefix = openPrefix?.takeIf { it.context == context && !cancelled } ?: return@synchronized false
+            // ADOPT the ORIGINAL array and its valid range — no second array, one charge
+            // (reviewer 23cae70e b3). The sink stores (array, validLength) so trailing unused
+            // capacity is never read as audio.
+            prefix.buffer.add(drained)
+            prefix.validLengths[drained] = copied
+            // Transfer THIS token's used-range charge into the prefix; release ONLY its unused
+            // capacity back to the budget. No global counter participates.
+            val unused = (live.bytes - usedBytes).coerceAtLeast(0L)
+            prefix.chargedBytes += live.bytes - unused
+            live.bytes = unused
+            if (unused > 0) budget.release(unused)
+            dropLeaseLocked(context.captureId, token.id)
+            live.bytes = 0L
+            tokens.remove(token.id)
             true
         }
     }
 
-    override fun releaseDelta(context: CaptureContext, samples: Int) {
-        val bytes = samples.toLong() * BYTES_PER_SAMPLE
+    override fun releaseDelta(context: CaptureContext, token: ReservationToken?) {
+        if (token == null || token.captureId != context.captureId) return
         synchronized(lock) {
-            // The producer DROPPED the allocated array: now (and only now) may the charge leave
-            // the outstanding-lease set. Cancelled-by-revocation leases release here too.
-            if (pendingDeltaBytes >= bytes) {
-                pendingDeltaBytes -= bytes
-                consumeLeaseLocked(context.captureId, bytes)
-                budget.release(bytes)
-            }
+            // The producer DROPPED the allocated array: now (and only now) may THAT token's
+            // remaining charge leave the budget — exactly once, never another capture's bytes.
+            val live = tokens[token.id] ?: return@synchronized
+            if (live.bytes > 0) budget.release(live.bytes)
+            live.bytes = 0L
+            dropLeaseLocked(context.captureId, token.id)
+            tokens.remove(token.id)
         }
     }
 
-    private fun consumeLeaseLocked(captureId: java.util.UUID, bytes: Long) {
+    private fun dropLeaseLocked(captureId: java.util.UUID, tokenId: Long) {
         val list = leases[captureId] ?: return
-        var remaining = bytes
-        val it = list.iterator()
-        while (it.hasNext() && remaining > 0) {
-            val lease = it.next()
-            remaining -= lease.bytes
-            it.remove()
-        }
+        list.removeAll { it.tokenId == tokenId }
         if (list.isEmpty()) leases.remove(captureId)
     }
 
@@ -402,7 +438,7 @@ class ContributionRetentionSink(
 
     /** Test/diagnostic: total bytes currently charged to this sink across all captures. */
     fun totalChargedBytesForTest(): Long = synchronized(lock) {
-        candidates.sumOf { it.bytesCharged } + (openPrefix?.chargedBytes ?: 0L) + pendingDeltaBytes + pendingAdmissionBytes
+        candidates.sumOf { it.bytesCharged } + (openPrefix?.chargedBytes ?: 0L) + tokens.values.sumOf { it.bytes }
     }
 
     fun retainedSnapshot(): List<RetainedCandidate> = synchronized(lock) { candidates.toList() }
@@ -410,7 +446,7 @@ class ContributionRetentionSink(
     fun retainedBytes(): Long = synchronized(lock) { candidates.sumOf { it.bytesCharged } }
 
     /** Samples actually copied into the OPEN prefix buffer (proof of real retention). */
-    fun prefixSamples(): Long = synchronized(lock) { openPrefix?.buffer?.sumOf { it.size }?.toLong() ?: 0L }
+    fun prefixSamples(): Long = synchronized(lock) { openPrefix?.samples() ?: 0L }
 
     /** Bytes currently owned by the OPEN prefix (zero when none). */
     fun openPrefixBytes(): Long = synchronized(lock) { openPrefix?.chargedBytes ?: 0L }

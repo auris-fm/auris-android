@@ -184,10 +184,21 @@ class VoiceAsrEngine @Inject constructor(
                             val initialSize = voiceAudioProcessor.speechPcmSize()
                             openContext = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize)
                             if (openContext != null) {
-                                val firstChunk = ShortArray(initialSize)
-                                val copied = if (initialSize > 0) voiceAudioProcessor.drainSpeechPcm(firstChunk) else 0
-                                segmentObserver.adoptFirstChunk(openContext!!, if (copied == initialSize) firstChunk else firstChunk.copyOf(copied))
-                                accountedSamples = copied
+                                // Lease-protected initial allocation (reviewer 23cae70e b4): the
+                                // admit token's charge leaves EXACTLY ONCE — transferred into the
+                                // prefix on a successful adopt, or returned by releaseInitialChunk
+                                // in the finally on refusal/throw. No unmanaged window.
+                                val ctx = openContext!!
+                                var transferred = false
+                                try {
+                                    val firstChunk = ShortArray(initialSize)
+                                    val copied = if (initialSize > 0) voiceAudioProcessor.drainSpeechPcm(firstChunk) else 0
+                                    val adopted = segmentObserver.adoptFirstChunk(ctx, firstChunk)
+                                    transferred = adopted
+                                    if (adopted) accountedSamples = copied
+                                } finally {
+                                    if (!transferred) segmentObserver.releaseInitialChunk(ctx)
+                                }
                             }
                         }
 
@@ -200,19 +211,21 @@ class VoiceAsrEngine @Inject constructor(
                             if (openContext != null && segmentObserver.isRetaining(openContext!!.captureId)) {
                                 val producedSize = voiceAudioProcessor.speechPcmSize()
                                 val deltaSamples = (producedSize - accountedSamples).coerceAtLeast(0)
-                                if (deltaSamples > 0 && segmentObserver.reserveDelta(openContext!!, deltaSamples)) {
+                                val token = if (deltaSamples > 0) segmentObserver.reserveDelta(openContext!!, deltaSamples) else null
+                                if (token != null) {
+                                    var transferred = false
                                     try {
                                         val delta = ShortArray(deltaSamples)
                                         val copied = voiceAudioProcessor.drainSpeechTail(delta, accountedSamples, producedSize)
                                         if (copied > 0) {
-                                            segmentObserver.commitDelta(openContext!!, delta, copied)
-                                            accountedSamples += copied
-                                        } else {
-                                            segmentObserver.releaseDelta(openContext!!, deltaSamples)
+                                            // Advance accounting ONLY when the sink ACCEPTED the
+                                            // commit (Boolean honored — reviewer 23cae70e b2).
+                                            transferred = segmentObserver.commitDelta(openContext!!, delta, copied, token)
+                                            if (transferred) accountedSamples += copied
                                         }
-                                    } catch (e: Exception) {
-                                        segmentObserver.releaseDelta(openContext!!, deltaSamples)
-                                        throw e
+                                    } finally {
+                                        // Every refusal/throw path returns THIS token exactly once.
+                                        if (!transferred) segmentObserver.releaseDelta(openContext!!, token)
                                     }
                                 } else if (deltaSamples > 0) {
                                     // Refused growth: retention ended by the observer with its own terminal.
@@ -229,16 +242,18 @@ class VoiceAsrEngine @Inject constructor(
                             // already exist (recognition owns them); collection copies ONLY after
                             // admitting the exact tail size, and releases on refusal/failure.
                             if (openContext != null && totalSamples > accountedSamples &&
-                                segmentObserver.isRetaining(openContext!!.captureId) &&
-                                segmentObserver.reserveDelta(openContext!!, totalSamples - accountedSamples)
+                                segmentObserver.isRetaining(openContext!!.captureId)
                             ) {
-                                try {
-                                    val tail = shortTailOf(result.frames, accountedSamples)
-                                    segmentObserver.commitDelta(openContext!!, tail, tail.size)
-                                    accountedSamples = totalSamples
-                                } catch (e: Exception) {
-                                    segmentObserver.releaseDelta(openContext!!, totalSamples - accountedSamples)
-                                    throw e
+                                val finalToken = segmentObserver.reserveDelta(openContext!!, totalSamples - accountedSamples)
+                                if (finalToken != null) {
+                                    var transferred = false
+                                    try {
+                                        val tail = shortTailOf(result.frames, accountedSamples)
+                                        transferred = segmentObserver.commitDelta(openContext!!, tail, tail.size, finalToken)
+                                        if (transferred) accountedSamples = totalSamples
+                                    } finally {
+                                        if (!transferred) segmentObserver.releaseDelta(openContext!!, finalToken)
+                                    }
                                 }
                             }
 

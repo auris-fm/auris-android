@@ -15,6 +15,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -169,7 +170,8 @@ class CollectionFenceContractTest {
         val ctx = observer.speechStartedAdmitting(1L, "Headset", 8)!!
         observer.adoptFirstChunk(ctx, ShortArray(8))
         // Producer reserves a delta and HOLDS the allocated array (mid-copy window).
-        assertTrue(sink.reserveDelta(ctx, 16))
+        val leaseToken = sink.reserveDelta(ctx, 16)
+        assertNotNull(leaseToken)
         val held = ShortArray(16)
         // Lease accounting is BYTES: reserveDelta(16 samples) charges 16 * 2 = 32 bytes.
         assertEquals(32L, sink.outstandingLeaseBytesForTest())
@@ -183,13 +185,75 @@ class CollectionFenceContractTest {
         )
         // Stale commit after revocation must NOT adopt into retained ownership; the partially
         // copied array is dropped by the producer's release path (commit refuses, returns false).
-        assertFalse(sink.commitDelta(ctx, held, 16))
-        // Producer finally drops the array: charge releases exactly then.
-        sink.releaseDelta(ctx, 16)
+        assertFalse(sink.commitDelta(ctx, held, 16, leaseToken))
+        // Producer finally drops the array: charge releases exactly then — THAT token only.
+        sink.releaseDelta(ctx, leaseToken)
         assertEquals(0L, sink.outstandingLeaseBytesForTest())
         // Revocation released the finished prefix (16 bytes) immediately; the producer-held
         // lease (32 bytes) survived it and leaves only on drop → total after both = before − 48.
         assertEquals(beforeRevoke - 48L, sink.totalChargedBytesForTest())
+    }
+
+    @Test
+    fun `token isolation - revoking capture A releases ONLY A tokens, never B charge`() {
+        // Reviewer 23cae70e b3: a global pending counter let one capture's revocation release
+        // ANOTHER capture's outstanding charge. Per-allocation tokens make that impossible.
+        val budget = CollectionBudget(1L shl 20)
+        val sink = ContributionRetentionSink(budget)
+        val owner = FakeOwner()
+        val tx = CollectionAuthorityTransaction(owner, FakePolicyReader(PolicySnapshot(enabled = true, activationGeneration = 7, activatedAtMonotonicMs = 1000)), sharedLock = owner.collectionSharedLock)
+        val observer = SegmentObserver(
+            gate = CollectionGate { true },
+            sink = sink,
+            authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) },
+            issueAuthority = { IssuedAuthority("a@b.c", 1L, 1L, "e1", "d1") },
+            fenceGate = object : FenceGate {
+                override fun <R> gate(block: () -> R): R = tx.transaction(block)
+            },
+        )
+        // Capture A opens and reserves a delta token; then it is revoked mid-copy (producer holds).
+        val ctxA = observer.speechStartedAdmitting(1L, "Headset", 8)!!
+        assertTrue(observer.adoptFirstChunk(ctxA, ShortArray(8)))
+        // Delta reservation requires the sink's OPEN prefix for this exact context object.
+        val tokenA = sink.reserveDelta(ctxA, 16)!!
+        // Capture B opens AFTER A's revoke fan-out begins: fresh context, own tokens only.
+        assertTrue(observer.revoked("account-change"))
+        // Observer state was closed by A's revocation; B opens on a fresh observer. Same sink —
+        // that is the point: B's tokens must be untouched by ANY later revoke of other captures.
+        val observerB = SegmentObserver(
+            gate = CollectionGate { true },
+            sink = sink,
+            authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) },
+            issueAuthority = { IssuedAuthority("a@b.c", 1L, 1L, "e1", "d1") },
+            fenceGate = object : FenceGate {
+                override fun <R> gate(block: () -> R): R = tx.transaction(block)
+            },
+        )
+        val ctxB = observerB.speechStartedAdmitting(2L, "Headset", 8)!!
+        assertTrue(observerB.adoptFirstChunk(ctxB, ShortArray(8)))
+        val tokenB = sink.reserveDelta(ctxB, 32)!!
+        val chargedBefore = sink.totalChargedBytesForTest() // A lease 32 + B prefix 16 + B lease 64 = 112
+        // FULL REVOCATION through the shared sink purges every FINISHED buffer (B's prefix goes),
+        // but producer-held LEASE charges survive — for BOTH captures, each released only by its
+        // own producer drop. No global counter may absorb the wrong bytes (reviewer 23cae70e b3).
+        assertTrue(observerB.revoked("account-change"))
+        assertEquals(chargedBefore - 16L, sink.totalChargedBytesForTest())
+        // Stale commit for B with A's dead token: refuses, releases nothing of B.
+        assertFalse(sink.commitDelta(ctxB, ShortArray(16), 16, tokenA))
+        // Producer drops B's array: exactly B's token charge (32 samples * 2 = 64 bytes) leaves.
+        sink.releaseDelta(ctxB, tokenB)
+        val afterDrop = sink.totalChargedBytesForTest()
+        assertEquals(chargedBefore - 80L, afterDrop)
+        // Remaining charge == A's producer-held lease ONLY; A's finished prefix was purged at its
+        // own revocation before this point.
+        assertEquals(32L, afterDrop)
+        // A's producer finally-path drop releases exactly A's remaining token charge — the ONLY
+        // way that lease leaves the budget (revocation alone never touched it).
+        sink.releaseDelta(ctxA, tokenA)
+        assertEquals(0L, sink.totalChargedBytesForTest())
+        // Double-release of the SAME token returns nothing further (idempotent per token).
+        sink.releaseDelta(ctxB, tokenB)
+        assertEquals(0L, sink.totalChargedBytesForTest())
     }
 
     @Test

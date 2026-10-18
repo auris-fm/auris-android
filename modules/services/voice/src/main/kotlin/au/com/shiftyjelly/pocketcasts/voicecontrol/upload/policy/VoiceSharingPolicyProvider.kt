@@ -52,8 +52,11 @@ class VoiceSharingPolicyProvider(
     private val nowMs: () -> Long,
     private val sleepMs: suspend (Long) -> Unit = { delay(it) },
     private val refreshTimeoutMs: Long = REFRESH_TIMEOUT_MS,
-    /** SHARED serialization primitive: the SAME object as the account tier's collection lock. */
-    private val sharedCollectionLock: Any = Any(),
+    /** SHARED serialization primitive: MUST be the SAME object as the account tier's
+     * collectionSharedLock (reviewer 23cae70e b1). NO default — an independent fallback lock
+     * would silently deserialize policy publication from account transitions. Composition passes
+     * the owner-provided primitive explicitly. */
+    private val sharedCollectionLock: Any,
 ) {
     private val state = MutableStateFlow(DISABLED)
 

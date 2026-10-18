@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy
 
 import android.os.SystemClock
 import au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope
+import au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner
 import au.com.shiftyjelly.pocketcasts.utils.featureflag.providers.FirebaseRemoteFeatureProvider
 import com.google.firebase.remoteconfig.FirebaseRemoteConfig
 import dagger.Module
@@ -33,6 +34,7 @@ object VoiceSharingPolicyModule {
     fun provideVoiceSharingPolicyProvider(
         remoteConfig: FirebaseRemoteConfig,
         featureProvider: FirebaseRemoteFeatureProvider,
+        ownership: CredentialOwnershipOwner,
         @ApplicationScope scope: CoroutineScope,
     ): VoiceSharingPolicyProvider = VoiceSharingPolicyProvider(
         remoteConfig = remoteConfig,
@@ -41,5 +43,8 @@ object VoiceSharingPolicyModule {
         nowMs = { SystemClock.elapsedRealtime() },
         sleepMs = { delay(it) },
         refreshTimeoutMs = VoiceSharingPolicyProvider.REFRESH_TIMEOUT_MS,
+        // THE exact owner primitive — same object identity as the collection transaction's and
+        // every owner transition's outermost lock. No defaults anywhere on this path.
+        sharedCollectionLock = ownership.collectionSharedLock,
     )
 }

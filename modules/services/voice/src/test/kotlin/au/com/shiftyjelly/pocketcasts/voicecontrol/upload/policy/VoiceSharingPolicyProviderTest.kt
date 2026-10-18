@@ -129,6 +129,9 @@ class VoiceSharingPolicyProviderTest {
 
     private var activateOutcome: Unit? = Unit
 
+    /** Explicit shared primitive for tests — mirrors production composition's owner lock. */
+    private val testSharedLock = Any()
+
     private fun provider(
         sleepMs: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
         refreshTimeoutMs: Long = VoiceSharingPolicyProvider.REFRESH_TIMEOUT_MS,
@@ -140,6 +143,7 @@ class VoiceSharingPolicyProviderTest {
             nowMs = { monotonicNowMs },
             sleepMs = sleepMs,
             refreshTimeoutMs = refreshTimeoutMs,
+            sharedCollectionLock = testSharedLock,
         )
         // Run the lifecycle init's bounded join to completion on the virtual scheduler.
         dispatcher.scheduler.advanceTimeBy(VoiceSharingPolicyProvider.INIT_AWAIT_MS + 1)
@@ -372,10 +376,88 @@ class VoiceSharingPolicyProviderTest {
     }
 
     @Test
-    fun `hilt module composes the real provider entry`() {
+    fun `DI identity control - composed provider shares the EXACT owner primitive`() {
+        // Reviewer 23cae70e b1: the REAL composition path must serialize policy on the SAME
+        // object as the account tier — an independent default lock is a silent no-op fence.
+        val snap = au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot(null, 0L, 0L, null)
+        val ownerLock = Any()
+        val ownership = object : au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner {
+            override val collectionSharedLock = ownerLock
+            override fun authoritySnapshot() = snap
+            override fun sessionGeneration(): Long = 0L
+            override fun <T> transaction(block: () -> T): T = synchronized(ownerLock) { block() }
+            override fun installOwnershipBinding(binding: au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipBinding?) = snap
+            override fun beginRefresh(observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot): au.com.shiftyjelly.pocketcasts.repositories.sync.RefreshLease? = null
+            override fun publishRefresh(lease: au.com.shiftyjelly.pocketcasts.repositories.sync.RefreshLease, refreshToken: au.com.shiftyjelly.pocketcasts.preferences.RefreshToken, accessToken: au.com.shiftyjelly.pocketcasts.preferences.AccessToken) = false
+            override fun invalidateIfCurrent(observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot, transaction: () -> Boolean) = false
+            override fun reconcileExternalState() = snap
+            override fun publishCredentials(observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot, refreshToken: au.com.shiftyjelly.pocketcasts.preferences.RefreshToken, accessToken: au.com.shiftyjelly.pocketcasts.preferences.AccessToken) = false
+        }
+
         val composed = VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
             remoteConfig = config,
             featureProvider = FirebaseRemoteFeatureProvider(config, featureScope),
+            ownership = ownership,
+            scope = scope,
+        )
+        // Identity chain: owner primitive === module argument === provider field (reflection on
+        // the ACTUAL composed object — proves the module wired the EXACT lock, not a default).
+        org.junit.Assert.assertSame(ownerLock, ownership.collectionSharedLock)
+        val field = VoiceSharingPolicyProvider::class.java.getDeclaredField("sharedCollectionLock")
+        field.isAccessible = true
+        org.junit.Assert.assertSame(ownerLock, field.get(composed))
+        // Contention on the provider's OWN fenced primitives (reviewer 23cae70e b1): production
+        // publication takes sharedCollectionLock THEN the internal generation fence. Drive that
+        // exact nested acquisition under the held owner lock; then prove the reverse order
+        // (fence-first) inverts against it — the single-lock composition cannot deadlock because
+        // both lanes enter sharedCollectionLock first.
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+        val f = VoiceSharingPolicyProvider::class.java.getDeclaredField("fence")
+        f.isAccessible = true
+        val innerFence = f.get(composed) ?: error("provider fence missing")
+        val holderThread = Thread {
+            synchronized(ownerLock) {
+                synchronized(innerFence) {
+                    gate.countDown()
+                    Thread.sleep(500)
+                }
+            }
+        }.apply { start() }
+        gate.await(2, java.util.concurrent.TimeUnit.SECONDS)
+        val publisher = Thread {
+            synchronized(innerFence) {
+                synchronized(ownerLock) {
+                    finished.set(true) // INVERSION: only reachable if the two are NOT one order
+                }
+            }
+        }.apply { start() }
+        publisher.join(200)
+        org.junit.Assert.assertFalse("fence-first acquisition must block behind shared-first holder", finished.get())
+        holderThread.join(3_000)
+        publisher.join(3_000)
+        org.junit.Assert.assertTrue("publisher proceeds after the shared lock frees", finished.get())
+    }
+
+    @Test
+    fun `hilt module composes the real provider entry`() {
+        val snap = au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot(null, 0L, 0L, null)
+        val ownership = object : au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner {
+            override val collectionSharedLock = testSharedLock
+            override fun authoritySnapshot() = snap
+            override fun sessionGeneration(): Long = 0L
+            override fun <T> transaction(block: () -> T): T = synchronized(testSharedLock) { block() }
+            override fun installOwnershipBinding(binding: au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipBinding?) = snap
+            override fun beginRefresh(observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot): au.com.shiftyjelly.pocketcasts.repositories.sync.RefreshLease? = null
+            override fun publishRefresh(lease: au.com.shiftyjelly.pocketcasts.repositories.sync.RefreshLease, refreshToken: au.com.shiftyjelly.pocketcasts.preferences.RefreshToken, accessToken: au.com.shiftyjelly.pocketcasts.preferences.AccessToken) = false
+            override fun invalidateIfCurrent(observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot, transaction: () -> Boolean) = false
+            override fun reconcileExternalState() = snap
+            override fun publishCredentials(observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot, refreshToken: au.com.shiftyjelly.pocketcasts.preferences.RefreshToken, accessToken: au.com.shiftyjelly.pocketcasts.preferences.AccessToken) = false
+        }
+        val composed = VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
+            remoteConfig = config,
+            featureProvider = FirebaseRemoteFeatureProvider(config, featureScope),
+            ownership = ownership,
             scope = scope,
         )
         // The actual composition entry instantiates and owns the fail-closed provider. (The

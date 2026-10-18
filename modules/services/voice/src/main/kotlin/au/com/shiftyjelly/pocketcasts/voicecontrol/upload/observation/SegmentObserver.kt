@@ -37,6 +37,7 @@ class SegmentObserver(
     private val lock = Any()
     private var open: CaptureContext? = null
     private var retainedForOpen = false
+    private var admissionToken: ReservationToken? = null
     private var cumulativeAccounted = 0
     private var totalRetainedBytes = 0L
 
@@ -72,24 +73,41 @@ class SegmentObserver(
         return synchronized(lock) {
             if (open != null || !permitted) return@speechStartedAdmittingLocked null
             cumulativeAccounted = 0
-            retainedForOpen = sink.admit(SegmentObservation.Admission(context, producerSize))
-            if (!retainedForOpen) return@speechStartedAdmittingLocked null
+            val token = sink.admit(SegmentObservation.Admission(context, producerSize))
+            if (token == null) return@speechStartedAdmittingLocked null
+            admissionToken = token // producer-held initial reservation until adopt/release
             open = context
             context
         }
     }
 
-    /** Transfers the drained first chunk into the reserved prefix; must follow a successful admit. */
-    fun adoptFirstChunk(context: CaptureContext, firstChunk: ShortArray): Unit = synchronized(lock) {
-        if (open?.captureId != context.captureId || !retainedForOpen) return
-        sink.adopted(SegmentObservation.Started(context, firstChunk))
+    /** Transfers the drained first chunk into the reserved prefix using ITS admit token; a
+     * refusal/throw path must call releaseInitialChunk so that token's charge leaves exactly once
+     * (reviewer 23cae70e b4). Returns whether retention was adopted. */
+    fun adoptFirstChunk(context: CaptureContext, firstChunk: ShortArray): Boolean = synchronized(lock) {
+        if (open?.captureId != context.captureId) return false
+        val token = admissionToken ?: return false
+        sink.adopted(SegmentObservation.Started(context, firstChunk), token)
+        admissionToken = null
+        // Retention is live once the prefix exists (sink sets it on adoption); mirror for gates.
+        retainedForOpen = openPrefixExistsFor(context)
+        true
+    }
+
+    /** True when the sink currently holds an OPEN prefix for this capture. */
+    private fun openPrefixExistsFor(context: CaptureContext): Boolean = sink.hasOpenPrefix(context)
+
+    /** Producer drop for an initial allocation that never transferred (engine finally-path). */
+    fun releaseInitialChunk(context: CaptureContext) {
+        val token = synchronized(lock) { admissionToken.takeIf { open?.captureId == context.captureId }?.also { admissionToken = null } }
+        sink.releaseInitial(context, token)
     }
 
     // Entry WITHOUT any monitor: fenceGate acquires the SHARED primitive first; the observer
     // lock is taken only INSIDE admission (order shared → observer), never the reverse.
     fun speechStarted(captureSession: Long, routeClass: String, firstChunk: ShortArray): CaptureContext? {
-        val admitted = speechStartedAdmitting(captureSession, routeClass, firstChunk.size)
-        if (admitted != null) adoptFirstChunk(admitted, firstChunk)
+        val admitted = speechStartedAdmitting(captureSession, routeClass, firstChunk.size) ?: return null
+        if (!adoptFirstChunk(admitted, firstChunk)) releaseInitialChunk(admitted)
         return admitted
     }
 
@@ -98,24 +116,27 @@ class SegmentObserver(
     // owned prefix; release returns bytes when the copy failed or was refused. All three take the
     // observer monitor only — the collection fence was acquired at admission and is NOT re-entered
     // upward from here. ---
-    fun reserveDelta(context: CaptureContext, samples: Int): Boolean = synchronized(lock) {
-        open?.captureId == context.captureId && retainedForOpen && sink.reserveDelta(context, samples)
+    fun reserveDelta(context: CaptureContext, samples: Int): ReservationToken? = synchronized(lock) {
+        if (open?.captureId != context.captureId) return null
+        sink.reserveDelta(context, samples)
     }
 
     // Producer drop path: even when the capture is already closed/revoked, the sink MUST see the
     // release so a lease-held charge leaves the budget exactly once (reviewer 8273382e b4).
-    fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int): Boolean = synchronized(lock) {
-        if (open?.captureId != context.captureId || !retainedForOpen) {
+    // Advances accounting ONLY when the sink actually adopted (reviewer 23cae70e b2).
+    fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int, token: ReservationToken?): Boolean = synchronized(lock) {
+        if (open?.captureId != context.captureId || token == null) {
             // Refused commit: the producer still owns the array; its charge leaves ONLY through
             // releaseDelta when the producer drops it — do not adopt or double-release here.
             return false
         }
-        cumulativeAccounted += copied
-        sink.commitDelta(context, drained.copyOf(copied), copied)
+        val adopted = sink.commitDelta(context, drained, copied, token)
+        if (adopted) cumulativeAccounted += copied
+        adopted
     }
 
-    fun releaseDelta(context: CaptureContext, samples: Int) {
-        sink.releaseDelta(context, samples)
+    fun releaseDelta(context: CaptureContext, token: ReservationToken?) {
+        sink.releaseDelta(context, token)
     }
 
     /** Real sample delta produced by the production producer since the previous accounting point. */
@@ -125,9 +146,15 @@ class SegmentObserver(
         if (!retainedForOpen || samples.isEmpty()) return
         // Reserve-before-copy even on the compatibility path: growth that cannot be reserved ends
         // retention via the sink's own terminal; nothing is copied uncharged.
-        if (!sink.reserveDelta(current, samples.size)) return
-        cumulativeAccounted += samples.size
-        sink.commitDelta(current, samples, samples.size)
+        val token = sink.reserveDelta(current, samples.size) ?: return
+        try {
+            if (sink.commitDelta(current, samples, samples.size, token)) {
+                cumulativeAccounted += samples.size
+            }
+        } finally {
+            // If commit refused/threw, THIS token's charge returns on producer drop.
+            sink.releaseDelta(current, token)
+        }
     }
 
     // * VAD closed [context] (or the detector failed for it). [framesProvider] is invoked AT MOST

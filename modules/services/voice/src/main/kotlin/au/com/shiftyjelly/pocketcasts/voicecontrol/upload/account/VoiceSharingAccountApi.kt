@@ -3,7 +3,6 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account
 import com.squareup.moshi.JsonReader
 import com.squareup.moshi.JsonWriter
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -78,142 +77,176 @@ class VoiceSharingAccountOperations(
     private val onCredentialInvalid: suspend (String) -> Unit = {},
 ) {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
-    private val generation = AtomicLong(0)
 
     /** Current-session GET: the only way the state gains authority. */
     suspend fun refreshProjection(token: SessionToken): Boolean {
-        // No freeze: the GET itself creates authority; it only needs the issued session.
-        if (!state.isCurrentSession(token)) return false
-        val op = frozenGetContext(token)
-        val body = execute(op, op.requestBody) { bearer, _ -> api.getVoiceSharing(bearer) }
-        return body != null && isCurrent(op) && state.applySessionResponse(token, body)
+        // The GET itself creates authority: no projection precondition.
+        val ticket = state.beginOperation(token, requireProjection = false) ?: return false
+        val op = frozen(token, ticket, Route.GET, null)
+        return when (val outcome = execute(op) { bearer, _ -> api.getVoiceSharing(bearer) }) {
+            is Outcome.Body -> state.applyOutcome(token, ticket, outcome.json)
+            else -> false
+        }
     }
 
     suspend fun enroll(token: SessionToken, acceptedDisclosureVersion: String): Boolean {
-        val op = freeze(token, disclosureVersion = acceptedDisclosureVersion) ?: return false
-        val body = execute(op, op.requestBody) { bearer, payload -> api.postEnrollment(bearer, payload) }
-        return body != null && isCurrent(op) && state.applySessionResponse(token, body)
+        val ticket = state.beginOperation(token, requireProjection = true) ?: return false
+        val op = frozen(token, ticket, Route.ENROLLMENT, acceptedDisclosureVersion)
+        return when (val outcome = execute(op) { bearer, payload -> api.postEnrollment(bearer, payload) }) {
+            is Outcome.Body -> state.applyOutcome(token, ticket, outcome.json)
+
+            is Outcome.Conflict -> {
+                // The CURRENT projection is applied fenced; the enrollment itself was NOT
+                // accepted, so the operation reports false either way (no auto re-enroll).
+                state.applyOutcome(token, ticket, outcome.json)
+                false
+            }
+
+            is Outcome.Rejected -> false
+        }
     }
 
     suspend fun withdraw(token: SessionToken): Boolean {
-        val op = freeze(token) ?: return false
-        val body = execute(op, op.requestBody) { bearer, payload -> api.postWithdrawal(bearer, payload) }
-        return body != null && isCurrent(op) && state.applySessionResponse(token, body)
+        val ticket = state.beginOperation(token, requireProjection = true) ?: return false
+        val op = frozen(token, ticket, Route.WITHDRAWAL, null)
+        return when (val outcome = execute(op) { bearer, payload -> api.postWithdrawal(bearer, payload) }) {
+            is Outcome.Body -> state.applyOutcome(token, ticket, outcome.json)
+            is Outcome.Conflict -> state.applyOutcome(token, ticket, outcome.json)
+            is Outcome.Rejected -> false
+        }
     }
 
     suspend fun deleteData(token: SessionToken): DeletionReceipt? {
-        val op = freeze(token) ?: return null
-        val body = execute(op, op.requestBody, expectedStatus = 202) { bearer, payload -> api.deleteData(bearer, payload) }
-            ?: return null
+        val ticket = state.beginOperation(token, requireProjection = true) ?: return null
+        val op = frozen(token, ticket, Route.DELETION, null)
+        val body = execute(op, expectedStatus = 202) { bearer, payload -> api.deleteData(bearer, payload) }
+            .let { (it as? Outcome.Body)?.json } ?: return null
         val receipt = parseDeletionReceipt(body) ?: return null
-        // Fence the terminal outcome too: a session superseded mid-flight discards the receipt.
-        return if (isCurrent(op)) receipt else null
+        // Fence the terminal outcome: a superseded session/generation discards the receipt.
+        return if (state.isTicketCurrent(token, ticket)) receipt else null
     }
 
-    /** Atomically validates the issued session and captures the operation identity. */
-    private suspend fun freeze(token: SessionToken, disclosureVersion: String? = null): FrozenOperation? {
-        if (!state.isCurrentSession(token)) return null
-        val projection = state.projection.value ?: return null // no GET, no authority, no call
-        return frozenContext(token, disclosureVersion)
+    private enum class Route { GET, ENROLLMENT, WITHDRAWAL, DELETION }
+
+    private sealed interface Outcome {
+        data class Body(val json: String) : Outcome
+
+        /** Explicit 409 membership conflict: carries the current projection body. */
+        data class Conflict(val json: String) : Outcome
+
+        data object Rejected : Outcome
     }
 
-    /** Captures generation + bearer + body; mutations require an existing projection. */
-    private suspend fun frozenGetContext(token: SessionToken): FrozenOperation = FrozenOperation(
-        generation = generation.incrementAndGet(),
-        token = token,
-        bearer = bearerProvider(),
-        requestBody = EMPTY_BODY,
-    )
-
-    private suspend fun frozenContext(token: SessionToken, disclosureVersion: String? = null): FrozenOperation {
-        val projection = state.projection.value ?: throw IllegalStateException("projection required")
-        val requestId = UUID.randomUUID().toString()
-        val gen = generation.incrementAndGet()
-        val body = writeBody(
-            requestId = requestId,
-            expectedRevision = projection.membershipRevision,
-            epoch = projection.enrollmentEpoch,
-            disclosureVersion = disclosureVersion,
-        )
-        return FrozenOperation(
-            generation = gen,
-            token = token,
-            bearer = bearerProvider(), // captured BEFORE the await: the bearer actually sent
-            requestBody = body,
-        )
+    private suspend fun frozen(token: SessionToken, ticket: OperationTicket, route: Route, disclosureVersion: String?): FrozenOperation {
+        // Revalidate the issued ticket AFTER awaiting the bearer, before the first send.
+        val bearer = bearerProvider()
+        if (!state.isTicketCurrent(token, ticket)) {
+            return FrozenOperation(token, ticket, bearer, EMPTY_BODY, route)
+        }
+        val body = when (route) {
+            Route.GET -> EMPTY_BODY
+            else -> writeBody(token, ticket, route, disclosureVersion)
+        }
+        return FrozenOperation(token, ticket, bearer, body, route)
     }
-
-    private fun isCurrent(op: FrozenOperation): Boolean = op.generation == generation.get() && state.isCurrentSession(op.token)
 
     /**
-     * Sends with bounded immutable retry (transport/503 only), enforcing the exact endpoint
-     * status; terminal outcomes (401/403/409/422, unexpected statuses) return null without
-     * retry. Returns the response body as a string, or null.
+     * Sends with bounded immutable retry (transport/5xx only), enforcing the exact endpoint
+     * status and revalidating the ticket before EVERY send. 401 scoped invalidation; 409
+     * surfaces as [Outcome.Conflict]; other statuses terminal.
      */
     private suspend fun execute(
         op: FrozenOperation,
-        payload: okhttp3.RequestBody,
         expectedStatus: Int = 200,
         call: suspend (String?, okhttp3.RequestBody) -> Response<ResponseBody>,
-    ): String? {
+    ): Outcome {
         var attempt = 0
         while (attempt < MAX_ATTEMPTS) {
             attempt++
+            // Ticket revalidation happens after every await boundary (bearer included).
+            if (!state.isTicketCurrent(op.token, op.ticket)) return Outcome.Rejected
             try {
                 val response = call(op.bearer, op.requestBody)
-                if (response.code() == 401) {
-                    handleUnauthorized(op)
-                    return null
+                System.err.println("PROBE resp=" + response.code() + " expected=" + expectedStatus)
+                when {
+                    response.code() == 401 -> {
+                        handleUnauthorized(op)
+                        return Outcome.Rejected
+                    }
+
+                    response.code() == 409 && expectedStatus == 200 -> {
+                        // Non-2xx content lives in errorBody() for Response<ResponseBody>.
+                        val body = response.errorBody()?.string() ?: response.body()?.string()
+                        return if (body != null) Outcome.Conflict(body) else Outcome.Rejected
+                    }
+
+                    response.code() == expectedStatus -> return Outcome.Body(response.body()!!.string())
+
+                    response.code() in 500..599 && attempt < MAX_ATTEMPTS -> continue
+
+                    else -> return Outcome.Rejected
                 }
-                if (response.code() == expectedStatus) return response.body()!!.string()
-                if (response.code() in 500..599 && attempt < MAX_ATTEMPTS) continue // retryable
-                return null // 401/403/409/422 and any other status: terminal, no retry
             } catch (e: CancellationException) {
                 throw e
             } catch (e: HttpException) {
-                if (e.code() == 401) {
-                    handleUnauthorized(op)
-                    return null
+                when {
+                    e.code() == 401 -> {
+                        handleUnauthorized(op)
+                        return Outcome.Rejected
+                    }
+
+                    e.code() == 409 && expectedStatus == 200 -> return Outcome.Rejected
+
+                    // no body via HttpException
+                    e.code() in 500..599 && attempt < MAX_ATTEMPTS -> continue
+
+                    else -> return Outcome.Rejected
                 }
-                if (e.code() in 500..599 && attempt < MAX_ATTEMPTS) continue // retryable server error
-                return null // terminal HTTP statuses: no retry
             } catch (_: Exception) {
-                if (attempt == MAX_ATTEMPTS) return null // transport: bounded retry exhausted
+                if (attempt == MAX_ATTEMPTS) return Outcome.Rejected
             }
         }
-        return null
+        return Outcome.Rejected
     }
 
     /**
-     * Scoped 401 authority invalidation: only when the ORIGINATING session is still current and
-     * the captured bearer is still the current credential. Evidence is a fixed literal — the
-     * bearer never enters generations, callbacks, or logs.
+     * Scoped 401 invalidation: compare the ACTUAL rejected bearer against the CURRENT credential
+     * (both awaited; no state mutation in between), then atomically invalidate the issued
+     * session — a session started meanwhile can never be logged out by a stale 401. The
+     * rejected bearer is handed to the compare-and-invalidate operation; nothing is logged.
      */
     private suspend fun handleUnauthorized(op: FrozenOperation) {
-        if (!isCurrent(op)) return
-        val currentBearer = bearerProvider()
-        if (currentBearer == null || currentBearer != op.bearer) return
-        state.sessionEnded()
-        onCredentialInvalid("credential_invalidated")
+        val rejected = op.bearer ?: return
+        val current = bearerProvider()
+        if (current != rejected) return
+        if (!state.endSessionIfCurrent(op.token)) return
+        onCredentialInvalid(rejected)
     }
 
-    /** Established JSON writer: opaque values are properly escaped, built exactly once. */
-    private fun writeBody(
-        requestId: String,
-        expectedRevision: String,
-        epoch: String?,
-        disclosureVersion: String?,
-    ): okhttp3.RequestBody {
+    /** Established JSON writer; endpoint-EXACT bodies built once and reused byte-identically. */
+    private fun writeBody(token: SessionToken, ticket: OperationTicket, route: Route, disclosureVersion: String?): okhttp3.RequestBody {
+        val projection = state.projection.value
+        val requestId = UUID.randomUUID().toString()
         val buffer = okio.Buffer()
         val writer = JsonWriter.of(buffer)
+        if (route == Route.WITHDRAWAL) writer.setSerializeNulls(true) // withdrawal requires explicit null epoch
         writer.beginObject()
         writer.name("request_id").value(requestId)
-        writer.name("expected_membership_revision").value(expectedRevision)
-        if (disclosureVersion != null) {
-            writer.name("accepted_disclosure_version").value(disclosureVersion)
+        when (route) {
+            Route.ENROLLMENT, Route.WITHDRAWAL -> {
+                writer.name("expected_membership_revision").value(projection?.membershipRevision ?: "")
+                if (route == Route.ENROLLMENT && disclosureVersion != null) {
+                    writer.name("accepted_disclosure_version").value(disclosureVersion)
+                }
+                if (route == Route.WITHDRAWAL) {
+                    writer.name("enrollment_epoch")
+                    val epoch = projection?.enrollmentEpoch
+                    if (epoch != null) writer.value(epoch) else writer.nullValue()
+                }
+            }
+
+            else -> Unit // GET sends nothing; deletion carries ONLY the request_id
         }
-        writer.name("enrollment_epoch")
-        if (epoch != null) writer.value(epoch) else writer.nullValue()
         writer.endObject()
         writer.close()
         return buffer.readByteString().toRequestBody(jsonMediaType)
@@ -233,9 +266,8 @@ class VoiceSharingAccountOperations(
             when (key) {
                 "schema_version" -> {
                     if (reader.peek() != com.squareup.moshi.JsonReader.Token.NUMBER) return null
-                    val lexeme = SchemaVersionLexeme.extract(json)
-                    val value = reader.nextDouble()
-                    schemaOk = value == 1.0 && lexeme != null && java.math.BigDecimal(lexeme).compareTo(java.math.BigDecimal.ONE) == 0
+                    val lexeme = reader.nextString() // NUMBER lexeme preserved exactly
+                    schemaOk = java.math.BigDecimal(lexeme).compareTo(java.math.BigDecimal.ONE) == 0
                 }
 
                 "deletion_request_id" -> id = reader.nonEmptyString()
@@ -261,10 +293,11 @@ class VoiceSharingAccountOperations(
 
     /** Everything an operation needs, frozen at creation time — before the first await. */
     private data class FrozenOperation(
-        val generation: Long,
         val token: SessionToken,
+        val ticket: OperationTicket,
         val bearer: String?,
         val requestBody: okhttp3.RequestBody,
+        val route: Route,
     )
 
     private companion object {

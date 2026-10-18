@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account
 import com.squareup.moshi.JsonDataException
 import com.squareup.moshi.JsonReader
 import java.math.BigDecimal
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import okio.Buffer
@@ -32,6 +33,9 @@ class VoiceSharingAccountState {
 
     private val fence = Any()
 
+    /** Store-owned operation generation: bumped on EVERY session lifecycle transition. */
+    private val operationGeneration = AtomicLong(0)
+
     val projection: StateFlow<VoiceSharingAccountProjection?> = state
 
     /**
@@ -40,12 +44,14 @@ class VoiceSharingAccountState {
      * with the previous session's projection.
      */
     fun sessionStarted(): SessionToken = synchronized(fence) {
+        operationGeneration.incrementAndGet() // outstanding tickets die with the old session
         state.value = null
         SessionToken().also { currentToken = it }
     }
 
     /** Ends the session synchronously: invalidates the projection and the token. */
     fun sessionEnded() = synchronized(fence) {
+        operationGeneration.incrementAndGet()
         currentToken = null
         state.value = null
     }
@@ -87,6 +93,44 @@ class VoiceSharingAccountState {
         token === currentToken
     }
 
+    /**
+     * STORE-OWNED atomic operation issuance: under one fence, validates the issued session,
+     * captures the projection snapshot, and issues a generation ticket. Mutations require a
+     * current-session GET projection; the GET authority-creation path does not.
+     */
+    fun beginOperation(token: SessionToken, requireProjection: Boolean): OperationTicket? = synchronized(fence) {
+        if (token !== currentToken) return null
+        val projection = state.value
+        if (requireProjection && projection == null) return null
+        OperationTicket(operationGeneration.incrementAndGet())
+    }
+
+    /**
+     * STORE-OWNED conditional apply: under one fence, validates the issued session AND the
+     * ticket generation, strictly parses, and only then writes — a new same-session intent
+     * (which bumps the generation) can never slip between check and write.
+     */
+    fun applyOutcome(token: SessionToken, ticket: OperationTicket, json: String): Boolean = synchronized(fence) {
+        if (token !== currentToken || ticket.generation != operationGeneration.get()) return false
+        val projection = parseProjection(json) ?: return false
+        state.value = projection
+        true
+    }
+
+    /** Atomic issued-session invalidation: ends the session ONLY if it is still current. */
+    fun endSessionIfCurrent(token: SessionToken): Boolean = synchronized(fence) {
+        if (token !== currentToken) return false
+        operationGeneration.incrementAndGet()
+        currentToken = null
+        state.value = null
+        true
+    }
+
+    /** Fenced revalidation used before each send and before terminal outcomes. */
+    fun isTicketCurrent(token: SessionToken, ticket: OperationTicket): Boolean = synchronized(fence) {
+        token === currentToken && ticket.generation == operationGeneration.get()
+    }
+
     fun hasCurrentSessionProjection(): Boolean = synchronized(fence) {
         currentToken != null && state.value != null
     }
@@ -125,10 +169,11 @@ internal object ProjectionJsonParser {
             when (key) {
                 "schema_version" -> {
                     if (reader.peek() != JsonReader.Token.NUMBER) return null
-                    schemaVersion = reader.nextDouble()
-                    if (schemaVersion != 1.0) return null
-                    // Exact decimal check on the RAW LEXEME below: nextDouble alone would round
-                    // 1.00000000000000001 to exactly 1.0 and wrongly accept it.
+                    // nextString on a NUMBER token returns the exact lexeme; the exact decimal
+                    // comparison below avoids nextDouble rounding (1.00000000000000001 -> 1.0).
+                    val lexeme = reader.nextString()
+                    schemaVersion = lexeme.toDouble()
+                    if (BigDecimal(lexeme).compareTo(BigDecimal.ONE) != 0) return null
                 }
 
                 "membership_revision" -> revision = reader.nonEmptyStringOrNull() ?: return null
@@ -153,11 +198,6 @@ internal object ProjectionJsonParser {
         if (reader.peek() != JsonReader.Token.END_DOCUMENT) return null // trailing junk / 2nd value
 
         if (seen != ALLOWED_KEYS) return null
-        // Exact decimal lexeme check: Moshi has already proven syntax, field set, and that the
-        // value is a single NUMBER; this extraction reads the exact characters of that number
-        // (escape-aware on the key) and compares the exact decimal value.
-        val lexeme = SchemaVersionLexeme.extract(json) ?: return null
-        if (BigDecimal(lexeme).compareTo(BigDecimal.ONE) != 0) return null
         if (plan !in PLANS) return null // exact schema literal, no case coercion
         if (withdrawal !in WITHDRAWAL_STATES) return null
         if (schemaVersion == null || schemaVersion != SCHEMA_VERSION.toDouble()) return null
@@ -216,133 +256,11 @@ internal object ProjectionJsonParser {
     )
 }
 
-/**
- * Extracts the exact character lexeme of the TOP-LEVEL `schema_version` value, decoding legal
- * key escapes. Syntax is owned by the Moshi pass that runs first; this only reads the exact
- * number characters so the decimal comparison is exact (no float rounding).
- */
-internal object SchemaVersionLexeme {
-
-    fun extract(json: String): String? {
-        var i = 0
-        val n = json.length
-        fun ws() {
-            while (i < n && json[i].isWhitespace()) i++
-        }
-        fun readString(): String? {
-            if (json[i] != '"') return null
-            i++
-            val sb = StringBuilder()
-            while (i < n) {
-                when (val c = json[i]) {
-                    '"' -> {
-                        i++
-                        return sb.toString()
-                    }
-
-                    '\\' -> {
-                        i++
-                        when (val e = json.getOrNull(i) ?: return null) {
-                            '"' -> sb.append('"')
-
-                            '\\' -> sb.append('\\')
-
-                            '/' -> sb.append('/')
-
-                            'b' -> sb.append('\b')
-
-                            'f' -> sb.append('\u000C')
-
-                            'n' -> sb.append('\n')
-
-                            'r' -> sb.append('\r')
-
-                            't' -> sb.append('\t')
-
-                            'u' -> {
-                                val hex = json.substringOrNull(i + 1, i + 5) ?: return null
-                                sb.append(hex.toIntOrNull(16)?.toChar() ?: return null)
-                                i += 4
-                            }
-
-                            else -> return null
-                        }
-                        i++
-                    }
-
-                    else -> {
-                        sb.append(c)
-                        i++
-                    }
-                }
-            }
-            return null
-        }
-        fun skipValue() {
-            when (json[i]) {
-                '"' -> readString()
-
-                '{', '[' -> {
-                    val close = if (json[i] == '{') '}' else ']'
-                    var depth = 0
-                    while (i < n) {
-                        when (json[i]) {
-                            '"' -> readString()
-
-                            '{', '[' -> depth++
-
-                            close -> {
-                                depth--
-                                if (depth == 0) {
-                                    i++
-                                    return
-                                }
-                            }
-                        }
-                        i++
-                    }
-                }
-
-                else -> while (i < n && json[i] !in ",}") i++
-            }
-        }
-
-        ws()
-        if (i >= n || json[i] != '{') return null
-        i++
-        while (true) {
-            ws()
-            if (i >= n) return null
-            if (json[i] == '}') return null
-            val key = readString() ?: return null
-            ws()
-            if (i >= n || json[i] != ':') return null
-            i++
-            ws()
-            if (key == "schema_version") {
-                val sb = StringBuilder()
-                while (i < n && (json[i].isDigit() || json[i] in "-+.eE")) {
-                    sb.append(json[i])
-                    i++
-                }
-                return if (sb.isEmpty()) null else sb.toString()
-            }
-            skipValue()
-            ws()
-            if (i >= n) return null
-            when (json[i]) {
-                ',' -> i++
-                '}' -> return null
-                else -> return null
-            }
-        }
-    }
-
-    private fun String.substringOrNull(start: Int, end: Int): String? = if (end <= length) substring(start, end) else null
-}
-
 /** Non-secret lifecycle incarnation: unique per issued session, reference-compared only. */
 class SessionToken internal constructor()
+
+/** Store-issued operation generation: valid only while its session and generation are current. */
+class OperationTicket internal constructor(internal val generation: Long)
 
 /** Server-issued opaque membership revision: never sorted, equality/current-only usage. */
 data class VoiceSharingAccountProjection(

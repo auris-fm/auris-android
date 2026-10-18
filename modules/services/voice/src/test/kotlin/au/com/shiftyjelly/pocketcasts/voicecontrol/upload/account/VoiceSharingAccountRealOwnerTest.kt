@@ -429,5 +429,36 @@ class VoiceSharingAccountRealOwnerTest {
         serverShutdownNothing()
     }
 
+    @Test
+    fun `R9 - identity replacement while the session is CLOSED still clears the retained credential`() {
+        val auth = realAuth()
+        addAccount(auth, email = "a@example.com", token = "tA") // session armed at login
+        // Close the session WITHOUT clearing the credential: the null seed revokes the
+        // binding and its session; publishCredentials re-arms the retained ledger so a
+        // credential EXISTS while no binding is installed (session closed).
+        val binding = bindingFor(auth, VoiceSharingAccountState())
+        binding.install()
+        assertNull(binding.install(null)) // closed: binding revoked, session ended
+        val credentialAtClose = auth.credentialGeneration()
+        assertTrue(auth.publishCredentials(auth.authoritySnapshot(), RefreshToken("rA2"), AccessToken("tA2")))
+        assertEquals("tA2", auth.authoritySnapshot().token!!.value) // credential retained while closed
+        assertNotNull(auth.credentialGeneration())
+
+        // EXTERNAL replacement of the closed identity: raw platform swap behind the owner's back.
+        val platform = AccountManager.get(context)
+        platform.removeAccountExplicitly(auth.getAccount()!!)
+        val accountB = android.accounts.Account("b@example.com", au.com.shiftyjelly.pocketcasts.preferences.AccountConstants.ACCOUNT_TYPE)
+        platform.addAccountExplicitly(accountB, "rB", null)
+        platform.setAuthToken(accountB, au.com.shiftyjelly.pocketcasts.preferences.AccountConstants.TOKEN_TYPE, "tB")
+
+        // The NEXT authority read reconciles FIRST: the retained A credential is voided
+        // (credential moved) even though no session was open to end...
+        val snapshot = auth.reconcileExternalState()
+        assertEquals("b@example.com", snapshot.accountName)
+        assertNull(snapshot.token) // A's retained credential cleared — NOT auto-adopting B's
+        assertTrue(auth.credentialGeneration() > credentialAtClose + 1) // voided: one MORE move beyond the publish
+        serverShutdownNothing()
+    }
+
     private fun serverShutdownNothing() { /* no server in pure owner controls */ }
 }

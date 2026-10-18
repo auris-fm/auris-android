@@ -279,6 +279,7 @@ jobs:
           # Skip Claude GitHub App install; use Actions token for GitHub API.
           github_token: ${{ secrets.GITHUB_TOKEN }}
           track_progress: true
+          show_full_output: true
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ needs.resolve-target.outputs.pr-number }}

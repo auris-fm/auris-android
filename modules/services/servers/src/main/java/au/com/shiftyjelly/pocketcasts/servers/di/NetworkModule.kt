@@ -478,6 +478,10 @@ annotation class TokenInterceptor
 
 @Qualifier
 @Retention(AnnotationRetention.BINARY)
+annotation class UserFileInterceptor
+
+@Qualifier
+@Retention(AnnotationRetention.BINARY)
 annotation class I18nInterceptor
 
 @Qualifier

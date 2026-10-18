@@ -15,8 +15,6 @@ import au.com.shiftyjelly.pocketcasts.repositories.user.UserManager
 import au.com.shiftyjelly.pocketcasts.servers.ServiceManager
 import au.com.shiftyjelly.pocketcasts.servers.discover.GlobalServerSearch
 import au.com.shiftyjelly.pocketcasts.servers.podcast.PodcastCacheServiceManager
-import au.com.shiftyjelly.pocketcasts.utils.featureflag.Feature
-import au.com.shiftyjelly.pocketcasts.utils.featureflag.FeatureFlag
 import com.automattic.eventhorizon.EventHorizon
 import com.automattic.eventhorizon.SearchFailedEvent
 import com.automattic.eventhorizon.SearchPerformedEvent
@@ -40,7 +38,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.rx2.asFlow
-import kotlinx.coroutines.rx2.await
+import kotlinx.coroutines.rx2.rxSingle
 import timber.log.Timber
 
 class SearchHandler @Inject constructor(
@@ -55,7 +53,7 @@ class SearchHandler @Inject constructor(
 ) {
     private var source: SourceView = SourceView.UNKNOWN
     private val searchQuery = BehaviorRelay.create<Query>().apply {
-        accept(if (FeatureFlag.isEnabled(Feature.IMPROVED_SEARCH_SUGGESTIONS)) Query.Suggestions("") else Query.SearchResults(""))
+        accept(Query.Suggestions(""))
     }
 
     private val loadingObservable = BehaviorRelay.create<Boolean>().apply {
@@ -79,8 +77,7 @@ class SearchHandler @Inject constructor(
                 val folderSearch =
                     if (signInState.isSignedInAsPlusOrPatron) {
                         // only show folders if the user has Plus
-                        folderManager.findFoldersSingle()
-                            .subscribeOn(Schedulers.io())
+                        rxSingle { folderManager.getAll() }
                             .flatMapObservable { Observable.fromIterable(it) }
                             .filter { it.name.contains(query, ignoreCase = true) }
                             .switchMapSingle { folder ->
@@ -249,8 +246,8 @@ class SearchHandler @Inject constructor(
             }
         }
         .map { it.term }
-        .switchMap {
-            if (it.length <= 1) {
+        .switchMap { searchTerm ->
+            if (searchTerm.length <= 1) {
                 Observable.just(GlobalServerSearch())
             } else {
                 eventHorizon.track(
@@ -260,18 +257,17 @@ class SearchHandler @Inject constructor(
                 )
                 loadingObservable.accept(true)
 
-                var globalSearch = GlobalServerSearch(searchTerm = it)
-                val podcastServerSearch = serviceManager
-                    .searchForPodcastsRx(it)
+                var globalSearch = GlobalServerSearch(searchTerm = searchTerm)
+                val podcastServerSearch = rxSingle { serviceManager.searchForPodcasts(searchTerm).getOrThrow() }
                     .map { podcastSearch ->
                         globalSearch = globalSearch.copy(podcastSearch = podcastSearch)
                         globalSearch
                     }
                     .toObservable()
 
-                if (!it.startsWith("http")) {
+                if (!searchTerm.startsWith("http")) {
                     val episodesServerSearch = cacheServiceManager
-                        .searchEpisodes(it)
+                        .searchEpisodes(searchTerm)
                         .map { episodeSearch ->
                             globalSearch = globalSearch.copy(episodeSearch = episodeSearch)
                             globalSearch
@@ -367,10 +363,9 @@ class SearchHandler @Inject constructor(
                     emit(SearchUiState.SearchOperation.Loading(searchTerm = query))
                     val subscribedUuids = podcastManager.findSubscribedUuids()
                     if (query.startsWith("http")) {
-                        val podcastSearch = serviceManager
-                            .searchForPodcastsRx(query)
-                            .map { list -> list.searchResults.map { ImprovedSearchResultItem.PodcastItem(uuid = it.uuid, title = it.title, author = it.author, isFollowed = subscribedUuids.contains(it.uuid)) } }
-                            .await()
+                        val podcastSearch = serviceManager.searchForPodcasts(query).getOrThrow()
+                            .searchResults
+                            .map { ImprovedSearchResultItem.PodcastItem(uuid = it.uuid, title = it.title, author = it.author, isFollowed = subscribedUuids.contains(it.uuid)) }
                         eventHorizon.track(
                             SearchPerformedEvent(
                                 source = source.analyticsValue,

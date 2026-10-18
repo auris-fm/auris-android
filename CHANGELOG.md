@@ -1,5 +1,31 @@
+8.22
+-----
+
+8.20
+-----
+*   Updates 
+    *   Allow the skip forward and skip back intents to specify a custom number of seconds
+
 8.21
 -----
+*   New Features
+    *   Browse podcast networks from Discover, search and the podcast page
+        ([#5865](https://github.com/Automattic/pocket-casts-android/pull/5865))
+*   Bug Fixes
+    *   Fix video freezing when rotating into landscape fullscreen and stuttering when resuming from the background
+        ([#5844](https://github.com/Automattic/pocket-casts-android/pull/5844))
+    *   Keep Picture-in-Picture video playing across rotation and config changes, and restore the inline video after closing PiP
+        ([#5912](https://github.com/Automattic/pocket-casts-android/pull/5912))
+    *   Keep the multi-select episode selection when rotating the device on the podcast screen
+        ([#5836](https://github.com/Automattic/pocket-casts-android/pull/5836))
+    *   Prevent the app from being killed in the background on low-memory devices by pausing player UI updates while playing
+        ([#5843](https://github.com/Automattic/pocket-casts-android/pull/5843))
+    *   Closing the transcript search bar now keeps the transcript open at the same scroll position instead of exiting the transcript
+        ([#5835](https://github.com/Automattic/pocket-casts-android/pull/5835))
+    *   Stop "Cache entire playing episode" from silently downloading oversized or video enclosures in the background
+        ([#5868](https://github.com/Automattic/pocket-casts-android/pull/5868))
+    *   Keep the Playback Effects icon visible on the Now Playing screen when a podcast's colours haven't loaded yet
+        ([#5877](https://github.com/Automattic/pocket-casts-android/pull/5877))
 
 8.20
 -----

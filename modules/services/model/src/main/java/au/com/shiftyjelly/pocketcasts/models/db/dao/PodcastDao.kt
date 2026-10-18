@@ -83,10 +83,6 @@ abstract class PodcastDao {
     abstract fun findUnsubscribedBlocking(): List<Podcast>
 
     @Transaction
-    @Query("SELECT podcasts.uuid FROM podcasts WHERE subscribed = 0")
-    abstract fun findUnsubscribedUuidRxFlowable(): Flowable<List<String>>
-
-    @Transaction
     @Query("SELECT * FROM podcasts WHERE subscribed = 1")
     abstract fun findSubscribedRxFlowable(): Flowable<List<Podcast>>
 
@@ -116,7 +112,7 @@ abstract class PodcastDao {
 
     @Transaction
     @Query("SELECT * FROM podcasts WHERE subscribed = 1 AND auto_add_to_up_next > 0 ORDER BY LOWER(title) ASC")
-    abstract fun findAutoAddToUpNextPodcastsRxFlowable(): Flowable<List<Podcast>>
+    abstract fun findAutoAddToUpNextPodcastsFlow(): Flow<List<Podcast>>
 
     @Transaction
     @Query("SELECT * FROM podcasts WHERE auto_add_to_up_next > 0")
@@ -292,8 +288,8 @@ abstract class PodcastDao {
     @Update
     abstract suspend fun updateSuspend(podcast: Podcast)
 
-    @Query("UPDATE podcasts SET title = :title, author = :author, podcast_category = :podcastCategory, podcast_description = :podcastDescription, estimated_next_episode = :estimatedNextEpisode, episode_frequency = :episodeFrequency, refresh_available = :refreshAvailable, funding_url = :fundingUrl, explicit = :explicit, web_feed = :webFeed WHERE uuid = :uuid")
-    abstract suspend fun updateRefresh(uuid: String, title: String, author: String, podcastCategory: String, podcastDescription: String, estimatedNextEpisode: Date?, episodeFrequency: String?, refreshAvailable: Boolean, fundingUrl: String?, explicit: Boolean?, webFeed: Boolean)
+    @Query("UPDATE podcasts SET title = :title, author = :author, podcast_category = :podcastCategory, podcast_description = :podcastDescription, estimated_next_episode = :estimatedNextEpisode, episode_frequency = :episodeFrequency, refresh_available = :refreshAvailable, funding_url = :fundingUrl, explicit = :explicit, web_feed = :webFeed, network_list_id = :networkListId WHERE uuid = :uuid")
+    abstract suspend fun updateRefresh(uuid: String, title: String, author: String, podcastCategory: String, podcastDescription: String, estimatedNextEpisode: Date?, episodeFrequency: String?, refreshAvailable: Boolean, fundingUrl: String?, explicit: Boolean?, webFeed: Boolean, networkListId: String?)
 
     @Query("DELETE FROM podcasts WHERE uuid = :uuid")
     abstract fun deleteByUuidBlocking(uuid: String)

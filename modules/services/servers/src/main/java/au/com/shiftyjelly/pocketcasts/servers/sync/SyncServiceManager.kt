@@ -15,6 +15,7 @@ import au.com.shiftyjelly.pocketcasts.servers.sync.forgotpassword.ForgotPassword
 import au.com.shiftyjelly.pocketcasts.servers.sync.forgotpassword.ForgotPasswordResponse
 import au.com.shiftyjelly.pocketcasts.servers.sync.history.HistoryYearResponse
 import au.com.shiftyjelly.pocketcasts.servers.sync.history.HistoryYearSyncRequest
+import au.com.shiftyjelly.pocketcasts.servers.sync.login.DeviceApproveRequest
 import au.com.shiftyjelly.pocketcasts.servers.sync.login.DeviceAuthorizeRequest
 import au.com.shiftyjelly.pocketcasts.servers.sync.login.DeviceAuthorizeResponse
 import au.com.shiftyjelly.pocketcasts.servers.sync.login.DeviceTokenRequest
@@ -25,6 +26,7 @@ import au.com.shiftyjelly.pocketcasts.servers.sync.login.LoginPocketCastsRequest
 import au.com.shiftyjelly.pocketcasts.servers.sync.login.LoginTokenRequest
 import au.com.shiftyjelly.pocketcasts.servers.sync.login.LoginTokenResponse
 import au.com.shiftyjelly.pocketcasts.servers.sync.register.RegisterRequest
+import au.com.shiftyjelly.pocketcasts.utils.AppPlatform
 import au.com.shiftyjelly.pocketcasts.utils.extensions.parseIsoDate
 import com.google.protobuf.StringValue
 import com.pocketcasts.service.api.BookmarksResponse
@@ -77,11 +79,15 @@ open class SyncServiceManager @Inject constructor(
     val settings: Settings,
     @Cached val cache: Lazy<Cache>,
     private val gatewayUrlProvider: GatewayUrlProvider,
+    appPlatform: AppPlatform,
 ) {
 
     companion object {
         const val SCOPE_MOBILE = "mobile"
         const val SCOPE_TV = "tv"
+
+        // Credentials come from UserFileAuthInterceptor, not from the URL.
+        internal const val USER_FILE_PLAYBACK_PATH = "/files/url/token/"
 
         private val userPodcastListRequest = userPodcastListRequest {
             v = Settings.SYNC_API_VERSION.toString()
@@ -94,18 +100,23 @@ open class SyncServiceManager @Inject constructor(
         }
     }
 
+    private val scope = when (appPlatform) {
+        AppPlatform.Tv -> SCOPE_TV
+        AppPlatform.Phone, AppPlatform.WearOs, AppPlatform.Automotive -> SCOPE_MOBILE
+    }
+
     suspend fun register(email: String, password: String): LoginTokenResponse {
-        val request = RegisterRequest(email = email, password = password, scope = SCOPE_MOBILE)
+        val request = RegisterRequest(email = email, password = password, scope = scope)
         return service.register(request)
     }
 
     suspend fun login(email: String, password: String): LoginTokenResponse {
-        val request = LoginPocketCastsRequest(email = email, password = password, scope = SCOPE_MOBILE)
+        val request = LoginPocketCastsRequest(email = email, password = password, scope = scope)
         return service.loginPocketCasts(request)
     }
 
     suspend fun loginGoogle(idToken: String): LoginTokenResponse {
-        val request = LoginGoogleRequest(idToken = idToken, scope = SCOPE_MOBILE)
+        val request = LoginGoogleRequest(idToken = idToken, scope = scope)
         return service.loginGoogle(request)
     }
 
@@ -114,18 +125,23 @@ open class SyncServiceManager @Inject constructor(
      * If any 4xx is returned the user should be logged out and asked to login.
      */
     suspend fun loginToken(refreshToken: RefreshToken): LoginTokenResponse {
-        val request = LoginTokenRequest(refreshToken = refreshToken, scope = SCOPE_MOBILE)
+        val request = LoginTokenRequest(refreshToken = refreshToken)
         return service.loginToken(request)
     }
 
-    suspend fun deviceAuthorize(scope: String = SCOPE_TV): DeviceAuthorizeResponse {
+    suspend fun deviceAuthorize(): DeviceAuthorizeResponse {
         val request = DeviceAuthorizeRequest(scope = scope)
         return service.deviceAuthorize(request)
     }
 
-    suspend fun deviceToken(deviceCode: String, scope: String = SCOPE_TV): DeviceTokenResponse {
-        val request = DeviceTokenRequest(deviceCode = deviceCode, scope = scope)
+    suspend fun deviceToken(deviceCode: String): DeviceTokenResponse {
+        val request = DeviceTokenRequest(deviceCode = deviceCode)
         return service.deviceToken(request)
+    }
+
+    suspend fun deviceApprove(token: AccessToken, userCode: String, approve: Boolean) {
+        val request = DeviceApproveRequest(userCode = userCode, deny = !approve)
+        service.deviceApprove(addBearer(token), request)
     }
 
     suspend fun forgotPassword(email: String): ForgotPasswordResponse {
@@ -141,7 +157,7 @@ open class SyncServiceManager @Inject constructor(
         val request = EmailChangeRequest(
             newEmail,
             password,
-            SCOPE_MOBILE,
+            scope,
         )
         return service.emailChange(addBearer(token), request)
     }
@@ -149,7 +165,7 @@ open class SyncServiceManager @Inject constructor(
     fun deleteAccount(token: AccessToken): Single<UserChangeResponse> = service.deleteAccount(addBearer(token))
 
     suspend fun updatePassword(newPassword: String, oldPassword: String, token: AccessToken): LoginTokenResponse {
-        val request = UpdatePasswordRequest(newPassword = newPassword, oldPassword = oldPassword, scope = SCOPE_MOBILE)
+        val request = UpdatePasswordRequest(newPassword = newPassword, oldPassword = oldPassword, scope = scope)
         return service.updatePassword(authorization = addBearer(token), request = request)
     }
 
@@ -169,9 +185,6 @@ open class SyncServiceManager @Inject constructor(
     suspend fun upNextSync(request: UpNextSyncRequest, token: AccessToken): UpNextSyncResponse = service.upNextSync(addBearer(token), request)
 
     suspend fun upNextSyncProtobuf(request: com.pocketcasts.service.api.UpNextSyncRequest, token: AccessToken): UpNextResponse = service.upNextSyncProtobuf(addBearer(token), request)
-
-    fun getLastSyncAtRx(token: AccessToken): Single<String> = service.getLastSyncAtRx(addBearer(token), buildBasicRequest())
-        .map { response -> response.lastSyncAt ?: "" }
 
     suspend fun getLastSyncAtOrThrow(token: AccessToken): String = service.getLastSyncAt(addBearer(token), buildBasicRequest()).lastSyncAt ?: ""
 
@@ -265,7 +278,10 @@ open class SyncServiceManager @Inject constructor(
 
     fun deleteFromServer(episode: UserEpisode, token: AccessToken): Single<Response<Void>> = service.deleteFile(addBearer(token), episode.uuid)
 
-    fun getPlaybackUrl(episode: UserEpisode, token: AccessToken): Single<String> = Single.just("${gatewayUrlProvider.serverApiUrl()}/files/url/${episode.uuid}?token=${token.value}")
+    // Auris routes user files through the gateway API host so UserFileAuthInterceptor can attach the bearer token.
+    fun getPlaybackUrl(episode: UserEpisode): String = "${gatewayUrlProvider.serverApiUrl()}$USER_FILE_PLAYBACK_PATH${episode.uuid}"
+
+    suspend fun getSignedPlaybackUrl(episode: UserEpisode, token: AccessToken): String = service.getFilePlaybackUrl(addBearer(token), episode.uuid).url
 
     fun getUserEpisode(uuid: String, token: AccessToken): Single<Response<ServerFile>> = service.getFile(addBearer(token), uuid)
 
@@ -356,8 +372,7 @@ open class SyncServiceManager @Inject constructor(
     }
 
     suspend fun signOut() {
-        val cache = withContext(Dispatchers.Default) { cache.get() }
-        cache.evictAll()
+        withContext(Dispatchers.IO) { cache.get().evictAll() }
     }
 
     private fun buildBasicRequest(): BasicRequest {

@@ -37,12 +37,6 @@ abstract class EpisodeDao {
     @RawQuery(observedEntities = [PodcastEpisode::class, Podcast::class])
     abstract fun findEpisodesBlocking(query: SupportSQLiteQuery): List<PodcastEpisode>
 
-    @RawQuery(observedEntities = [PodcastEpisode::class, Podcast::class])
-    abstract fun findEpisodesRxFlowable(query: SupportSQLiteQuery): Flowable<List<PodcastEpisode>>
-
-    @RawQuery(observedEntities = [PodcastEpisode::class, Podcast::class])
-    abstract fun countRxFlowable(query: SupportSQLiteQuery): Flowable<Int>
-
     @Query("SELECT * FROM podcast_episodes WHERE uuid = :uuid")
     abstract suspend fun findByUuid(uuid: String): PodcastEpisode?
 
@@ -67,10 +61,6 @@ abstract class EpisodeDao {
 
     @Query("SELECT * FROM podcast_episodes WHERE uuid = :uuid")
     abstract fun findByUuidFlow(uuid: String): Flow<PodcastEpisode?>
-
-    @Transaction
-    @Query("SELECT * FROM podcast_episodes WHERE download_task_id IS NOT NULL")
-    abstract fun findDownloadingEpisodesRxFlowable(): Flowable<List<PodcastEpisode>>
 
     @Query("SELECT * FROM podcast_episodes WHERE UPPER(title) = UPPER(:query) LIMIT 1")
     abstract suspend fun findFirstBySearchQuery(query: String): PodcastEpisode?
@@ -266,7 +256,7 @@ abstract class EpisodeDao {
 
     @Transaction
     @Query("SELECT * FROM podcast_episodes WHERE episode_status == :downloadEpisodeDownloadStatus ORDER BY last_download_attempt_date DESC")
-    abstract fun findDownloadedEpisodesRxFlowable(downloadEpisodeDownloadStatus: EpisodeDownloadStatus = EpisodeDownloadStatus.Downloaded): Flowable<List<PodcastEpisode>>
+    abstract fun findDownloadedEpisodesFlow(downloadEpisodeDownloadStatus: EpisodeDownloadStatus = EpisodeDownloadStatus.Downloaded): Flow<List<PodcastEpisode>>
 
     @Query("SELECT COUNT(*) FROM podcast_episodes WHERE episode_status == :downloadEpisodeDownloadStatus AND playing_status == :playingStatus")
     abstract suspend fun downloadedEpisodesThatHaveNotBeenPlayedCount(

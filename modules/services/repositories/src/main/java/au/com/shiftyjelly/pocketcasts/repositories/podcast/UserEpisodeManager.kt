@@ -51,11 +51,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.rx2.await
-import kotlinx.coroutines.rx2.awaitSingleOrNull
 import kotlinx.coroutines.rx2.rxCompletable
 import kotlinx.coroutines.withContext
 import retrofit2.HttpException
@@ -77,8 +77,8 @@ interface UserEpisodeManager {
     fun removeFromCloud(userEpisode: UserEpisode)
     fun cancelUpload(userEpisode: UserEpisode)
     suspend fun syncFiles(playbackManager: PlaybackManager)
-    fun getPlaybackUrlRxSingle(userEpisode: UserEpisode): Single<String>
-    fun downloadUserEpisodesRxFlowable(): Flowable<List<UserEpisode>>
+    fun getPlaybackUrl(userEpisode: UserEpisode): String
+    suspend fun getSignedPlaybackUrl(userEpisode: UserEpisode): String
     suspend fun updateDownloadedFilePath(episode: UserEpisode, filePath: String)
     suspend fun updateFileType(episode: UserEpisode, fileType: String)
     suspend fun updateSizeInBytes(episode: UserEpisode, sizeInBytes: Long)
@@ -87,7 +87,7 @@ interface UserEpisodeManager {
     suspend fun updateDownloadErrorDetails(episode: UserEpisode, errorDetails: String?)
     suspend fun updateDownloadTaskId(episode: UserEpisode, taskId: String?)
     fun accountUsageRxFlowable(): Flowable<Optional<FileAccount>>
-    fun userEpisodesSortedRxFlowable(sortOrder: Settings.CloudSortOrder): Flowable<List<UserEpisode>>
+    fun userEpisodesSortedFlow(sortOrder: Settings.CloudSortOrder): Flow<List<UserEpisode>>
     suspend fun deletePlayedEpisodeIfReq(episode: UserEpisode, playbackManager: PlaybackManager)
     fun autoUploadToCloudIfReq(episode: UserEpisode)
     fun downloadMissingUserEpisodeRxMaybe(uuid: String, placeholderTitle: String?, placeholderPublished: Date?): Maybe<UserEpisode>
@@ -206,19 +206,15 @@ class UserEpisodeManagerImpl @Inject constructor(
         return userEpisodeDao.findUserEpisodesDesc()
     }
 
-    override fun userEpisodesSortedRxFlowable(sortOrder: Settings.CloudSortOrder): Flowable<List<UserEpisode>> {
+    override fun userEpisodesSortedFlow(sortOrder: Settings.CloudSortOrder): Flow<List<UserEpisode>> {
         return when (sortOrder) {
-            Settings.CloudSortOrder.NEWEST_OLDEST -> userEpisodeDao.findUserEpisodesDescRxFlowable()
-            Settings.CloudSortOrder.OLDEST_NEWEST -> userEpisodeDao.findUserEpisodesAscRxFlowable()
-            Settings.CloudSortOrder.A_TO_Z -> userEpisodeDao.findUserEpisodesTitleAscRxFlowable()
-            Settings.CloudSortOrder.Z_TO_A -> userEpisodeDao.findUserEpisodesTitleDescRxFlowable()
-            Settings.CloudSortOrder.SHORT_LONG -> userEpisodeDao.findUserEpisodesDurationAscRxFlowable()
-            Settings.CloudSortOrder.LONG_SHORT -> userEpisodeDao.findUserEpisodesDurationDescRxFlowable()
+            Settings.CloudSortOrder.NEWEST_OLDEST -> userEpisodeDao.findUserEpisodesDescFlow()
+            Settings.CloudSortOrder.OLDEST_NEWEST -> userEpisodeDao.findUserEpisodesAscFlow()
+            Settings.CloudSortOrder.A_TO_Z -> userEpisodeDao.findUserEpisodesTitleAscFlow()
+            Settings.CloudSortOrder.Z_TO_A -> userEpisodeDao.findUserEpisodesTitleDescFlow()
+            Settings.CloudSortOrder.SHORT_LONG -> userEpisodeDao.findUserEpisodesDurationAscFlow()
+            Settings.CloudSortOrder.LONG_SHORT -> userEpisodeDao.findUserEpisodesDurationDescFlow()
         }.map { it.filterNot { episode -> episode.serverStatus == UserEpisodeServerStatus.MISSING } }
-    }
-
-    override fun downloadUserEpisodesRxFlowable(): Flowable<List<UserEpisode>> {
-        return userEpisodeDao.findDownloadingUserEpisodesRxFlowable()
     }
 
     override fun episodeRxFlowable(uuid: String): Flowable<UserEpisode> {
@@ -518,9 +514,9 @@ class UserEpisodeManagerImpl @Inject constructor(
         update(userEpisode)
     }
 
-    override fun getPlaybackUrlRxSingle(userEpisode: UserEpisode): Single<String> {
-        return syncManager.getPlaybackUrlRxSingle(userEpisode)
-    }
+    override fun getPlaybackUrl(userEpisode: UserEpisode) = syncManager.getPlaybackUrl(userEpisode)
+
+    override suspend fun getSignedPlaybackUrl(userEpisode: UserEpisode) = syncManager.getSignedPlaybackUrl(userEpisode)
 
     override suspend fun updateEpisodeStatus(episode: UserEpisode, status: EpisodeDownloadStatus) {
         userEpisodeDao.updateEpisodeStatusBlocking(episode.uuid, status)
@@ -578,7 +574,7 @@ class UserEpisodeManagerImpl @Inject constructor(
     }
 
     override suspend fun removeCloudStatusFromFiles(playbackManager: PlaybackManager) = withContext(Dispatchers.IO) {
-        userEpisodeDao.findUserEpisodesDescRxFlowable().firstElement().awaitSingleOrNull()?.forEach {
+        userEpisodeDao.findUserEpisodesDesc().forEach {
             if (!it.isDownloaded) { // Cloud only
                 delete(it, playbackManager)
             } else if (it.isDownloaded && it.serverStatus == UserEpisodeServerStatus.UPLOADED) {

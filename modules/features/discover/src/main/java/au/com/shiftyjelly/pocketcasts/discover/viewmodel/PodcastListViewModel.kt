@@ -19,12 +19,15 @@ import io.reactivex.Flowable
 import io.reactivex.Single
 import io.reactivex.android.schedulers.AndroidSchedulers
 import io.reactivex.disposables.CompositeDisposable
+import io.reactivex.disposables.Disposable
 import io.reactivex.rxkotlin.addTo
 import io.reactivex.rxkotlin.combineLatest
 import io.reactivex.rxkotlin.subscribeBy
 import io.reactivex.schedulers.Schedulers
 import javax.inject.Inject
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.rx2.rxMaybe
+import kotlinx.coroutines.rx2.rxSingle
 import timber.log.Timber
 
 @HiltViewModel
@@ -39,6 +42,9 @@ class PodcastListViewModel @Inject constructor(
     val state: MutableLiveData<PodcastListViewState> = MutableLiveData()
     val disposables: CompositeDisposable = CompositeDisposable()
 
+    private var lastLoad: LoadRequest? = null
+    private var feedDisposable: Disposable? = null
+
     val listFeed: ListFeed?
         get() = (state.value as? PodcastListViewState.ListLoaded)?.feed
 
@@ -48,6 +54,7 @@ class PodcastListViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        feedDisposable?.dispose()
         disposables.clear()
     }
 
@@ -57,7 +64,15 @@ class PodcastListViewModel @Inject constructor(
             return
         }
 
-        rxMaybe { listRepository.getListFeed(url = sourceUrl, authenticated = authenticated) }
+        lastLoad = LoadRequest(sourceUrl, listStyle, authenticated)
+
+        // a reload keeps whatever is already on screen; only a page with nothing to show falls back to the spinner
+        if (state.value !is PodcastListViewState.ListLoaded) {
+            state.value = PodcastListViewState.Loading()
+        }
+
+        feedDisposable?.dispose()
+        feedDisposable = rxMaybe { listRepository.getListFeed(url = sourceUrl, authenticated = authenticated) }
             .toSingle()
             .subscribeOn(Schedulers.io())
             .observeOn(AndroidSchedulers.mainThread())
@@ -83,7 +98,11 @@ class PodcastListViewModel @Inject constructor(
                     state.postValue(PodcastListViewState.Error(it))
                 },
             )
-            .addTo(disposables)
+    }
+
+    fun retry() {
+        val request = lastLoad ?: return
+        load(request.sourceUrl, request.listStyle, request.authenticated)
     }
 
     private fun addPlaybackStateToList(list: ListFeed): Flowable<ListFeed> {
@@ -105,16 +124,10 @@ class PodcastListViewModel @Inject constructor(
     private fun addColorsToFeed(feed: ListFeed): Single<ListFeed> {
         val podcast = feed.podcasts?.firstOrNull()
         val podcastUuid = podcast?.uuid ?: return Single.just(feed)
-        return colorManager.downloadColors(podcastUuid)
-            .subscribeOn(Schedulers.io())
-            .observeOn(AndroidSchedulers.mainThread())
-            .flatMap {
-                it.ifPresent {
-                    podcast.color = it.background
-                }
-
-                return@flatMap Single.just(feed)
-            }
+        return rxSingle(Dispatchers.Main) {
+            colorManager.downloadColors(podcastUuid)?.let { colors -> podcast.color = colors.background }
+            feed
+        }
     }
 
     private fun addSubscriptionStateToFeed(feed: ListFeed): Flowable<ListFeed> {
@@ -169,6 +182,12 @@ class PodcastListViewModel @Inject constructor(
         playbackManager.stopAsync(sourceView = SourceView.DISCOVER_PODCAST_LIST)
     }
 }
+
+private data class LoadRequest(
+    val sourceUrl: String?,
+    val listStyle: ExpandedStyle,
+    val authenticated: Boolean?,
+)
 
 sealed class PodcastListViewState {
     class Loading : PodcastListViewState()

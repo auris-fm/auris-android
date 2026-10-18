@@ -29,8 +29,8 @@ long long gVadAttachesForTest = 0;
 
 // Test seam: installs [capture] as the live capture WITHOUT opening a real Oboe stream (a host
 // cannot). Ownership is unchanged: open/start/attach still decide when audio flows and when VAD
-// publishes; this only supplies the object those entries would have created. Never null in
-// production; a null argument restores the pristine state between scenarios.
+// publishes; this only supplies the object those entries would have created. Null in production;
+// a null argument restores the pristine state between scenarios.
 static OboeAudioCapture* gCaptureFactoryOverrideForTest = nullptr;
 
 void setCaptureFactoryOverrideForTest(OboeAudioCapture* capture) {
@@ -186,23 +186,14 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeOpenInpu
     // The factory seam stands in for `new OboeAudioCapture()` + its real open() -- which a host
     // cannot perform -- and NOTHING else. The ordering decisions under test (does open start
     // audio? does the entry attach VAD?) remain entirely this function's own.
-    if (gCaptureFactoryOverrideForTest != nullptr) {
-        gCapture = gCaptureFactoryOverrideForTest;
-        return gCapture->getDeviceId();
-    }
-
-    auto* capture = new OboeAudioCapture();
-    if (!capture->open()) {
+    auto* capture = gCaptureFactoryOverrideForTest != nullptr
+        ? gCaptureFactoryOverrideForTest : new OboeAudioCapture();
+    // The host supplies an already-open stream, but must exercise all ordering below open().
+    // Returning early here would hide a premature start from the ownership control.
+    if (gCaptureFactoryOverrideForTest == nullptr && !capture->open()) {
         logStartFailure("oboe open", nullptr);
         delete capture;
         return -1;
-    }
-
-    if (!capture->start()) {
-        logStartFailure("oboe start", nullptr);
-        capture->close();
-        delete capture;
-        return JNI_FALSE;
     }
 
     gCapture = capture;
@@ -219,18 +210,10 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartInp
     if (gCapture == nullptr) {
         return JNI_FALSE;
     }
-    // The processor is PUBLISHED through the handle, not deleted on failure: the handle's usage
-    // counting is what protects in-flight getters, and a failed start must retire the attempt
-    // rather than leave raw pointer arithmetic behind.
-    gVadProcessor.retire();
-    auto* processor = new NativeVadProcessor(gCapture);
-    if (!processor->start()) {
-        logStartFailure("vad processor thread", nullptr);
-        delete processor;
-        return JNI_FALSE;
-    }
-    gVadProcessor.publish(processor);
-    gVadAttachesForTest++;
+    // Starts/reuses the input stream ONLY. The VAD processor belongs to the engine's combined
+    // attach (nativeStartCaptureAndVad), which publishes it against the ALREADY-RUNNING stream
+    // its guard requires. Creating it here would attach VAD before the engine, whose subsequent
+    // attach would retire and recreate it, causing the observed double attachment.
     if (gCapture->isActive()) {
         return JNI_TRUE;
     }

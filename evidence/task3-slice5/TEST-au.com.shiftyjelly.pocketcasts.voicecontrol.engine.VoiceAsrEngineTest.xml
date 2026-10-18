@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" tests="38" skipped="0" failures="0" errors="0" timestamp="2026-10-18T13:13:47.344Z" hostname="MacBook-Pro.local" time="1.562">
+  <properties/>
+  <testcase name="the engine drives REAL segment events through the observer - frozen context, no double gate check" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="1.36"/>
+  <testcase name="translate fail blank and noop drop with ERROR earcon and skip intent" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.024"/>
+  <testcase name="start with BluetoothA2dpOnly starts capture" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.007"/>
+  <testcase name="a pipeline that never attaches reports termination" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.004"/>
+  <testcase name="stop during an open segment CANCELS it - partial discarded, nothing completes" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.008"/>
+  <testcase name="negative detection in WakeWord mode drops segment" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.016"/>
+  <testcase name="a routing failure escalates to the cloud with the transcript verbatim" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.007"/>
+  <testcase name="a pipeline that fails to attach reports the stream was not taken" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.004"/>
+  <testcase name="asr log keeps source lang and text with english only in translate note" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.005"/>
+  <testcase name="a capture inside the completion band is dropped as the wake word alone" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.007"/>
+  <testcase name="only one escalation is dispatched per grace window" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.006"/>
+  <testcase name="zh translation preserves source envelope for rewind phrase" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.005"/>
+  <testcase name="a start that fails to attach closes the confirmed stream and leaves no active capture" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.007"/>
+  <testcase name="a restarted engine prepares the ASR backend again" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.005"/>
+  <testcase name="an empty transcript never reaches the cloud" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.003"/>
+  <testcase name="wake-only detection opens grace and stays silent after an empty command transcript" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.005"/>
+  <testcase name="an unprepared backend does not consume audio" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.003"/>
+  <testcase name="gate OFF means the pipeline allocates NOTHING for upload across a full turn" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.004"/>
+  <testcase name="a processing flow that ends reports termination" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.005"/>
+  <testcase name="a local capability failure stays local and says so" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.003"/>
+  <testcase name="start with WiredHeadset route skips SCO" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.002"/>
+  <testcase name="a capture outside the completion band routes, because speech followed the wake word" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.007"/>
+  <testcase name="wake word detection opens grace plays earcon and forwards full segment to ASR" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.006"/>
+  <testcase name="a router that cannot load its model says so and does not escalate" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.004"/>
+  <testcase name="a segment with no end sample is unknown, not wake-only" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.003"/>
+  <testcase name="non-English transcript translated by stage before intent routing when backend cannot translate" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.005"/>
+  <testcase name="a no_match from the room keeps the earcon and stays local" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.004"/>
+  <testcase name="a no_match from a wake-detected segment speaks the unclear-command line" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.003"/>
+  <testcase name="english transcript bypasses translation stage" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.003"/>
+  <testcase name="transcription initializes recognizer before matching intent" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.003"/>
+  <testcase name="stop keeps the backend warm rather than releasing it" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.003"/>
+  <testcase name="start prepares the ASR backend" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.003"/>
+  <testcase name="english transcript uses none translation kind with identical source and router" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.003"/>
+  <testcase name="a bare wake phrase is rejected silently" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.004"/>
+  <testcase name="a start that attaches hands the confirmed stream to the engine exactly once" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.005"/>
+  <testcase name="canary result semantics yield backend envelope with configured source lang" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.004"/>
+  <testcase name="a pipeline that attaches reports the start took the stream" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.004"/>
+  <testcase name="start with Speaker route skips SCO and starts capture" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngineTest" time="0.003"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[Mockito is currently self-attaching to enable the inline-mock-maker. This will no longer work in future releases of the JDK. Please add Mockito as an agent to your build as described in Mockito's documentation: https://javadoc.io/doc/org.mockito/mockito-core/latest/org.mockito/org/mockito/Mockito.html#0.3
+WARNING: A Java agent has been loaded dynamically (/Users/dev/.gradle/caches/modules-2/files-2.1/net.bytebuddy/byte-buddy-agent/1.17.7/fbf3d6d649ed37fc9e9c59480a05be0a26e3c2da/byte-buddy-agent-1.17.7.jar)
+WARNING: If a serviceability tool is in use, please run with -XX:+EnableDynamicAgentLoading to hide this warning
+WARNING: If a serviceability tool is not in use, please run with -Djdk.instrument.traceUsage for more information
+WARNING: Dynamic loading of agents will be disallowed by default in a future release
+]]></system-err>
+</testsuite>

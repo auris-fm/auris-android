@@ -177,6 +177,54 @@ class ContributionRetentionSink(
         if (ended) endPrefixWithTerminal(prefix, "retention-cap")
     }
 
+    // --- Reserve-before-copy delta protocol (blocker b3): reservation charges the budget but
+    // allocates NOTHING; commit transfers the caller's drained array under the SAME charge;
+    // release returns the charge when the copy-out failed. Growth beyond the per-clip cap ends
+    // THIS capture with exactly one terminal and releases everything it owned. ---
+    private var pendingDeltaBytes = 0L
+
+    override fun reserveDelta(context: CaptureContext, samples: Int): Boolean {
+        val bytes = samples.toLong() * BYTES_PER_SAMPLE
+        val prefix = synchronized(lock) { openPrefix?.takeIf { it.context == context } } ?: return false
+        if (prefix.chargedBytes + pendingDeltaBytes + bytes > maxBytesPerClip) return false
+        if (!budget.reserve(bytes)) {
+            endPrefixWithTerminal(prefix, "budget-exhausted")
+            return false
+        }
+        synchronized(lock) { pendingDeltaBytes += bytes }
+        return true
+    }
+
+    override fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int) {
+        val bytes = copied.toLong() * BYTES_PER_SAMPLE
+        val reserved = copied.toLong() * BYTES_PER_SAMPLE // caller reserved exactly `copied` capacity use
+        synchronized(lock) {
+            val prefix = openPrefix?.takeIf { it.context == context } ?: run {
+                budget.release(pendingDeltaBytes.coerceAtLeast(reserved))
+                return
+            }
+            prefix.buffer.add(drained)
+            prefix.chargedBytes += bytes
+            pendingDeltaBytes -= reserved
+            if (pendingDeltaBytes > 0) {
+                budget.release(pendingDeltaBytes) // partial copy: uncommitted remainder returns
+                pendingDeltaBytes = 0L
+            }
+        }
+    }
+
+    override fun releaseDelta(context: CaptureContext, samples: Int) {
+        val bytes = samples.toLong() * BYTES_PER_SAMPLE
+        synchronized(lock) {
+            // Release ONLY a still-outstanding reservation (commit consumes it first; engine's
+            // catch path releases exactly what reserveDelta charged and commit did not consume).
+            if (pendingDeltaBytes >= bytes) {
+                pendingDeltaBytes -= bytes
+                budget.release(bytes)
+            }
+        }
+    }
+
     /**
      * Completion handoff with ATOMIC charge transfer: the closed segment's exact bytes are
      * reserved BEFORE the prefix charge is released, so a failed reservation leaves the prefix
@@ -281,6 +329,11 @@ class ContributionRetentionSink(
     }
 
     fun retainedCount(): Int = synchronized(lock) { candidates.size }
+
+    /** Test/diagnostic: total bytes currently charged to this sink across all captures. */
+    fun totalChargedBytesForTest(): Long = synchronized(lock) {
+        candidates.sumOf { it.bytesCharged } + (openPrefix?.chargedBytes ?: 0L) + pendingDeltaBytes + pendingAdmissionBytes
+    }
 
     fun retainedSnapshot(): List<RetainedCandidate> = synchronized(lock) { candidates.toList() }
 

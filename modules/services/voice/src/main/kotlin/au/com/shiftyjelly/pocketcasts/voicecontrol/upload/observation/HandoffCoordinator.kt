@@ -17,8 +17,9 @@ import java.util.UUID
  * observer context, never upward.
  */
 class HandoffCoordinator(
-    private val ownership: au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner,
-    /** Coherent ORIGINAL-authority validation executed INSIDE the same owner transaction. */
+    /** THE collection fence: order collectionFence → owner → observer → sink (a38421f6 b1/b4). */
+    private val collectionTx: CollectionAuthorityTransaction,
+    /** Coherent ORIGINAL-authority validation executed INSIDE the same collection transaction. */
     private val validateIssuedLocked: (IssuedAuthority) -> Boolean,
 ) : CompletionHandoff {
     override fun handoff(
@@ -28,13 +29,36 @@ class HandoffCoordinator(
         wakeState: SegmentObservation.WakeState,
         framesProvider: () -> Pair<List<ShortArray>, Int>,
         scope: ObserverHandoffScope,
-    ): Unit = ownership.transaction {
-        // ONE transaction: validate ORIGINAL coherent authority...
+    ): Unit = collectionTx.transaction {
+        // Lock order asserted at entry: collection fence is held; acquiring the owner lock below
+        // continues the single global order collectionFence → owner → observer → sink (b1/b4).
+        checkOwnerOrder()
+        // ONE collection transaction: validate ORIGINAL coherent authority (account + policy in
+        // one acquisition)...
+        // A NULL issued authority is as unauthorized as a null context: both terminate the open
+        // capture through the same refusal path (reviewer b2 — no silent, unterminated handoff).
+        // Identity check FIRST: a stale/unknown context must be a late NO-OP, never a purge of
+        // the current capture's audio (the observer enforces this ordering under its lock too).
         val issued = context?.issuedAuthority
-        if (issued == null || !validateIssuedLocked(issued)) return@transaction
+        if (context != null && !scope.ownsCapture(context.captureId)) return@transaction
+        if (issued == null || issued.accountName == null || !validateIssuedLocked(issued)) {
+            // Refusal STILL completes the capture: exactly one terminal, prefix PCM + charge
+            // released via the cancel path — never a silent return leaving live uncharged audio.
+            scope.completeUnderOwner(context, speechOnsetSample, speechEndSample, wakeState, framesProvider, admit = false)
+            return@transaction
+        }
         // ...then EXECUTE the actual handoff closure (provider + sink adoption + close) while the
-        // owner lock is still held. Revocation racing here serializes behind this transaction.
+        // fence is still held. A concurrent logout/expiry serializes behind this transaction.
+        // NOTE: called WITHOUT the observer lock held (blocker 1): completeUnderOwner takes it
+        // internally as the innermost monitor.
         scope.completeUnderOwner(context, speechOnsetSample, speechEndSample, wakeState, framesProvider)
+    }
+
+    /** Order guard: entering the owner work only while THIS thread holds the collection fence. */
+    private fun checkOwnerOrder() {
+        check(collectionTx.heldByCurrentThread()) {
+            "handoff must run inside the collection authority transaction"
+        }
     }
 }
 
@@ -44,6 +68,9 @@ class HandoffCoordinator(
  * legal (observer module → coordinator protocol, no cycle).
  */
 interface ObserverHandoffScope {
+    /** True when the scope's observer currently holds THIS capture open (stale-guard first). */
+    fun ownsCapture(captureId: java.util.UUID): Boolean
+
     /**
      * Under the observer lock (order owner→observer): revalidate the LIVE decision plus the
      * original issued authority components against the coherent state read under the owner lock,
@@ -68,20 +95,6 @@ interface ObserverHandoffScope {
         framesProvider: () -> Pair<List<ShortArray>, Int>,
         admit: Boolean,
     ): Boolean
-}
-
-/** Coherent authority snapshot frozen under the OWNER lock at issue time (blocker 4). */
-data class IssuedAuthorityV2(
-    val accountName: String?,
-    val sessionGeneration: Long,
-    val credentialIncarnation: Long,
-    val enrollmentEpoch: String?,
-    val acceptedDisclosureVersion: String?,
-    /** Policy activation generation + stamp: a NEW policy cannot authorize OLD work. */
-    val policyActivationGeneration: Long,
-    val policyActivatedAtMonotonicMs: Long,
-) {
-    val captureIdAtIssue: UUID? = null // filled by the observer when binding to a capture
 }
 
 /**

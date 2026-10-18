@@ -54,6 +54,9 @@ class VoiceAudioProcessor @Inject constructor(
 
     fun speechPcmSize(): Int = microphoneCapture.speechPcmSize()
 
+    /** Tail-only drain for admitted collection copies (reserve-before-copy contract). */
+    fun drainSpeechTail(out: ShortArray, previousTotal: Int, producedSize: Int): Int = microphoneCapture.drainSpeechTail(out, previousTotal, producedSize)
+
     /** Drains the producer's speech buffer into [out] (ownership of [out] transfers to caller). */
     fun drainSpeechPcm(out: ShortArray): Int = microphoneCapture.drainSpeechPcm(out)
 

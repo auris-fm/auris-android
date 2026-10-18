@@ -119,10 +119,28 @@ interface SegmentSink {
     /** Real produced samples appended under ownership; the sink owns bounded retention. */
     fun incremental(observation: SegmentObservation.Incremental, samples: ShortArray)
 
+    /** Reserves [samples] delta bytes WITHOUT allocating; false when caps/budget refuse. */
+    fun reserveDelta(context: CaptureContext, samples: Int): Boolean = false
+
+    /** Transfers an already-reserved drained array into owned retention (exact [copied] bytes). */
+    fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int) = Unit
+
+    /** Returns an unused reservation after a failed/refused copy-out. */
+    fun releaseDelta(context: CaptureContext, samples: Int) = Unit
+
     /**
      * Receives the PRODUCTION frames for adoption. Returning false declines ownership; the
      * observer then retains nothing for this capture.
      */
     fun completed(observation: SegmentObservation.Completed): Boolean
     fun cancelled(observation: SegmentObservation.Cancelled)
+}
+
+/** Runs a block inside the collection authority transaction (composition supplies the fence). */
+interface FenceGate {
+    fun <R> gate(block: () -> R): R
+}
+
+val IdentityFenceGate: FenceGate = object : FenceGate {
+    override fun <R> gate(block: () -> R): R = block()
 }

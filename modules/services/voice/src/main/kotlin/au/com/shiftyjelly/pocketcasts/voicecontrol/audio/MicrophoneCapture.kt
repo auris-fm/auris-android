@@ -90,6 +90,21 @@ class MicrophoneCapture @Inject constructor(
     /** DRAIN the native speech buffer into [out]; returns the copied length. Ownership transfers. */
     fun drainSpeechPcm(out: ShortArray): Int = if (isRecording) hardware.getSpeechPcm(out) else 0
 
+    /**
+     * Drains ONLY the tail [previousTotal, producedSize) into [out] (already allocated by the
+     * caller AFTER collection admission). Copies through the same native API the completed
+     * segment drains from; returns the number of samples written to [out].
+     */
+    fun drainSpeechTail(out: ShortArray, previousTotal: Int, producedSize: Int): Int {
+        if (!isRecording || producedSize <= previousTotal) return 0
+        val buffer = ShortArray(producedSize)
+        val copied = hardware.getSpeechPcm(buffer)
+        if (copied <= previousTotal) return 0
+        val available = (minOf(copied, producedSize) - previousTotal).coerceAtMost(out.size)
+        System.arraycopy(buffer, previousTotal, out, 0, available)
+        return available
+    }
+
     fun peekSpeechDelta(previousTotal: Int): Pair<Int, ShortArray> {
         if (!isRecording) return 0 to ShortArray(0)
         val total = hardware.getSpeechPcmSize()

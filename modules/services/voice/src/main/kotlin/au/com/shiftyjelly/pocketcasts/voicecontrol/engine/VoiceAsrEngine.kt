@@ -192,22 +192,54 @@ class VoiceAsrEngine @Inject constructor(
                         }
 
                         is VoiceSegmenterResult.SpeechContinuing -> {
-                            // The native producer accumulates the prefix internally; a continuing
-                            // event means new speech frames exist. Read the ACTUAL produced size
-                            // through the processor's peek hook and forward the real delta.
-                            val (produced, recent) = voiceAudioProcessor.peekSpeechDelta(accountedSamples)
-                            accountedSamples = produced
-                            if (recent.isNotEmpty()) segmentObserver.speechIncremental(openContext, recent)
+                            // RESERVE-BEFORE-COPY (blocker b3): read only the native SIZE counter;
+                            // admit the delta into collection ownership FIRST; allocate + drain the
+                            // tail ONLY for an admitted delta; any failure releases the reservation.
+                            // Not retaining (gate off / cap-ended / refused capture): ZERO collection
+                            // work — no peek array, no copy — recognition continues untouched.
+                            if (openContext != null && segmentObserver.isRetaining(openContext!!.captureId)) {
+                                val producedSize = voiceAudioProcessor.speechPcmSize()
+                                val deltaSamples = (producedSize - accountedSamples).coerceAtLeast(0)
+                                if (deltaSamples > 0 && segmentObserver.reserveDelta(openContext!!, deltaSamples)) {
+                                    try {
+                                        val delta = ShortArray(deltaSamples)
+                                        val copied = voiceAudioProcessor.drainSpeechTail(delta, accountedSamples, producedSize)
+                                        if (copied > 0) {
+                                            segmentObserver.commitDelta(openContext!!, delta, copied)
+                                            accountedSamples += copied
+                                        } else {
+                                            segmentObserver.releaseDelta(openContext!!, deltaSamples)
+                                        }
+                                    } catch (e: Exception) {
+                                        segmentObserver.releaseDelta(openContext!!, deltaSamples)
+                                        throw e
+                                    }
+                                } else if (deltaSamples > 0) {
+                                    // Refused growth: retention ended by the observer with its own terminal.
+                                }
+                                accountedSamples = producedSize.coerceAtMost(accountedSamples) // never regress past drained
+                            }
                         }
 
                         is VoiceSegmenterResult.SpeechEnded -> {
                             val totalSamples = result.frames.sumOf { it.samples.size }
                             val durationMs = totalSamples * 1000L / 16000
                             Timber.i("[VoicePipeline] vad ~%dms (%d samples)", durationMs, totalSamples)
-                            // Real delta from the production producer, not a fixed constant.
-                            if (totalSamples > accountedSamples) {
-                                val tail = shortTailOf(result.frames, accountedSamples)
-                                segmentObserver.speechIncremental(openContext, tail)
+                            // Reserve-before-copy for the final tail too (blocker b3): the frames
+                            // already exist (recognition owns them); collection copies ONLY after
+                            // admitting the exact tail size, and releases on refusal/failure.
+                            if (openContext != null && totalSamples > accountedSamples &&
+                                segmentObserver.isRetaining(openContext!!.captureId) &&
+                                segmentObserver.reserveDelta(openContext!!, totalSamples - accountedSamples)
+                            ) {
+                                try {
+                                    val tail = shortTailOf(result.frames, accountedSamples)
+                                    segmentObserver.commitDelta(openContext!!, tail, tail.size)
+                                    accountedSamples = totalSamples
+                                } catch (e: Exception) {
+                                    segmentObserver.releaseDelta(openContext!!, totalSamples - accountedSamples)
+                                    throw e
+                                }
                             }
 
                             val request = shouldTranscribe(result, openContext)

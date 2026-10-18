@@ -42,6 +42,22 @@ open class SyncAccountManagerImpl @Inject constructor(
      * committed; authority is NEVER reconstructed from a bare platform-cache token.
      */
     private val credentialWriteLock = Any()
+
+    /**
+     * Nested collection-authority fence (reviewer a38421f6): when the COLLECTION lane requests
+     * `collectionFence -> owner` ordering, every owner transition below enters this inner lock
+     * FIRST while the caller already holds the outer collection fence — so an in-flight
+     * handoff copy that holds the collection fence serializes account changes against policy
+     * changes deterministically. The order is ALWAYS collection-fence(outer) → owner(this),
+     * never reversed; nothing here acquires any observer/sink monitor.
+     */
+    private val collectionNestedLock = Any()
+
+    /** Runs [block] with owner state serialized by the nested collection fence (owner→inner). */
+    private fun <T> underCollectionNesting(block: () -> T): T = synchronized(collectionNestedLock) {
+        synchronized(credentialWriteLock) { block() }
+    }
+
     private val credentialGenerationCounter = java.util.concurrent.atomic.AtomicLong(0)
     private val sessionGenerationCounter = java.util.concurrent.atomic.AtomicLong(0)
     private var publishedToken: AccessToken? = null // owner-attributed; never a bare cache read
@@ -53,7 +69,7 @@ open class SyncAccountManagerImpl @Inject constructor(
     fun credentialGeneration(): Long = credentialGenerationCounter.get()
 
     /** DISTINCT session incarnation: changes ONLY on login/logout/account-switch, never on refresh. */
-    override fun publishCredentials(observed: AuthoritySnapshot, refreshToken: RefreshToken, accessToken: AccessToken): Boolean = synchronized(credentialWriteLock) {
+    override fun publishCredentials(observed: AuthoritySnapshot, refreshToken: RefreshToken, accessToken: AccessToken): Boolean = underCollectionNesting {
         reconcileLocked()
         val account = getAccount()
         // CONDITIONAL commit: the observed snapshot (captured BEFORE the request) must still be
@@ -63,7 +79,7 @@ open class SyncAccountManagerImpl @Inject constructor(
             sessionGenerationCounter.get() != observed.session ||
             credentialGenerationCounter.get() != observed.credential
         ) {
-            return false
+            return@underCollectionNesting false
         }
         accountManager.setPassword(account, refreshToken.value)
         accountManager.setUserData(account, AccountConstants.SIGN_IN_TYPE_KEY, AccountConstants.SignInType.Tokens.value)
@@ -75,7 +91,7 @@ open class SyncAccountManagerImpl @Inject constructor(
 
     override fun sessionGeneration(): Long = sessionGenerationCounter.get()
 
-    override fun authoritySnapshot(): AuthoritySnapshot = synchronized(credentialWriteLock) {
+    override fun authoritySnapshot(): AuthoritySnapshot = underCollectionNesting {
         reconcileLocked()
         AuthoritySnapshot(retainedAccountName, sessionGenerationCounter.get(), credentialGenerationCounter.get(), publishedToken)
     }
@@ -104,7 +120,7 @@ open class SyncAccountManagerImpl @Inject constructor(
         }
     }
 
-    override fun installOwnershipBinding(binding: CredentialOwnershipBinding?): AuthoritySnapshot? = synchronized(credentialWriteLock) {
+    override fun installOwnershipBinding(binding: CredentialOwnershipBinding?): AuthoritySnapshot? = underCollectionNesting {
         reconcileLocked()
         if (binding == null) {
             // An explicit null seed REVOKES the previous binding's session.
@@ -117,7 +133,7 @@ open class SyncAccountManagerImpl @Inject constructor(
                 sessionOpen = false
                 previous?.onSessionEnded(sessionGenerationCounter.get())
             }
-            return null // revoked: no authority from a null seed
+            return@underCollectionNesting null // revoked: no authority from a null seed
         }
         if (ownershipInstalled) {
             // REBINDING: an ATOMIC authority transfer under the owner lock — the OLD binding's
@@ -128,9 +144,9 @@ open class SyncAccountManagerImpl @Inject constructor(
             if (sessionOpen) {
                 previous?.onSessionEnded(sessionGenerationCounter.get())
                 binding.onSessionStarted(sessionGenerationCounter.get())
-                return authoritySnapshot()
+                return@underCollectionNesting authoritySnapshot()
             }
-            return null
+            return@underCollectionNesting null
         }
         ownershipInstalled = true
         ownershipBinding = binding // FIRST install: the binding is registered for all future tails
@@ -139,7 +155,7 @@ open class SyncAccountManagerImpl @Inject constructor(
         if (account == null || platformToken == null) {
             publishedToken = null // fail-closed: nothing to adopt, no authority
             retainedAccountName = account?.name
-            return null
+            return@underCollectionNesting null
         }
         // Explicit ONE-TIME adoption of the pre-existing platform token at install: attributed
         // to the CURRENT credential incarnation.
@@ -150,7 +166,7 @@ open class SyncAccountManagerImpl @Inject constructor(
         authoritySnapshot()
     }
 
-    override fun beginRefresh(observed: AuthoritySnapshot): RefreshLease? = synchronized(credentialWriteLock) {
+    override fun beginRefresh(observed: AuthoritySnapshot): RefreshLease? = underCollectionNesting {
         reconcileLocked()
         val current = getAccount()
         // The caller's OBSERVED snapshot (name + session + credential, captured BEFORE the
@@ -161,14 +177,14 @@ open class SyncAccountManagerImpl @Inject constructor(
             sessionGenerationCounter.get() != observed.session ||
             credentialGenerationCounter.get() != observed.credential
         ) {
-            return null
+            return@underCollectionNesting null
         }
-        val refreshToken = getRefreshToken(current) ?: return null
+        val refreshToken = getRefreshToken(current) ?: return@underCollectionNesting null
         val signInType = getSignInType(current)
         RefreshLease(current.name, sessionGenerationCounter.get(), credentialGenerationCounter.get(), refreshToken, signInType)
     }
 
-    override fun publishRefresh(lease: RefreshLease, refreshToken: RefreshToken, accessToken: AccessToken): Boolean = synchronized(credentialWriteLock) {
+    override fun publishRefresh(lease: RefreshLease, refreshToken: RefreshToken, accessToken: AccessToken): Boolean = underCollectionNesting {
         reconcileLocked()
         val account = getAccount()
         if (account == null ||
@@ -177,7 +193,7 @@ open class SyncAccountManagerImpl @Inject constructor(
             sessionGenerationCounter.get() != lease.session || // session moved: NEVER write into it
             credentialGenerationCounter.get() != lease.credential
         ) { // superseded account/session OR a newer credential already published (out-of-order completion)
-            return false
+            return@underCollectionNesting false
         }
         accountManager.setPassword(account, refreshToken.value)
         accountManager.setUserData(account, AccountConstants.SIGN_IN_TYPE_KEY, AccountConstants.SignInType.Tokens.value)
@@ -187,30 +203,30 @@ open class SyncAccountManagerImpl @Inject constructor(
         true
     }
 
-    override fun <T> transaction(block: () -> T): T = synchronized(credentialWriteLock) {
+    override fun <T> transaction(block: () -> T): T = underCollectionNesting {
         reconcileLocked()
         block()
     }
 
-    override fun invalidateIfCurrent(observed: AuthoritySnapshot, transaction: () -> Boolean): Boolean = synchronized(credentialWriteLock) {
+    override fun invalidateIfCurrent(observed: AuthoritySnapshot, transaction: () -> Boolean): Boolean = underCollectionNesting {
         reconcileLocked() // external identity FIRST (b7ad5a9a): removal/replacement revokes
-        val rejected = observed.token ?: return false
+        val rejected = observed.token ?: return@underCollectionNesting false
         // Retained-vs-observed comparisons: NEVER combine a live account B with retained token A.
         if (retainedAccountName != observed.accountName ||
             sessionGenerationCounter.get() != observed.session ||
             credentialGenerationCounter.get() != observed.credential ||
             publishedToken?.value != rejected.value
         ) {
-            return false // stale rejection: invalidates NOTHING
+            return@underCollectionNesting false // stale rejection: invalidates NOTHING
         }
-        if (!transaction()) return false // scoped voice refusal INSIDE the owner transaction
+        if (!transaction()) return@underCollectionNesting false // scoped voice refusal INSIDE the owner transaction
         accountManager.invalidateAuthToken(AccountConstants.ACCOUNT_TYPE, rejected.value)
         publishedToken = null
         credentialGenerationCounter.incrementAndGet()
         true
     }
 
-    override fun reconcileExternalState(): AuthoritySnapshot = synchronized(credentialWriteLock) {
+    override fun reconcileExternalState(): AuthoritySnapshot = underCollectionNesting {
         reconcileLocked()
         authoritySnapshot()
     }

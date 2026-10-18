@@ -25,6 +25,7 @@ import javax.inject.Singleton
 class CollectionAuthority @Inject constructor(
     private val policyProvider: VoiceSharingPolicyProvider,
     private val accountStartup: VoiceSharingAccountStartup,
+    private val collectionTx: CollectionAuthorityTransaction,
 ) {
 
     // Enrollment evidence bound to ONE owner session; any session change clears it fail-closed.
@@ -51,24 +52,25 @@ class CollectionAuthority @Inject constructor(
     }
 
     /**
-     * Freeze the ORIGINAL authority COHERENTLY under the owner transaction (reviewer 1d27bcd6
-     * blocker 4): account/session/credential AND the enrollment projection AND the policy
-     * activation incarnation are read as ONE snapshot at issue time. A later enable or a new
-     * policy generation therefore cannot authorize old work: validation compares every frozen
-     * component against live coherent state at the handoff, inside the same lock discipline.
+     * Freeze the ORIGINAL authority COHERENTLY under the COLLECTION fence in ONE acquisition
+     * (reviewers 1d27bcd6 b4 + a38421f6 b4): account/session/credential, the enrollment
+     * projection and the policy activation incarnation come from a single coherent read through
+     * [CollectionAuthorityTransaction]. A later enable or a new policy generation cannot
+     * authorize old work: validation compares every frozen component against live coherent state
+     * acquired under the same fence at the handoff.
      */
-    fun issueAuthorityCoherentLockedIndependent(): IssuedAuthority = accountStartup.validateUnderOwnerTransaction { live ->
+    fun issueAuthorityCoherentLockedIndependent(): IssuedAuthority = collectionTx.transaction {
+        val coherent = collectionTx.coherentAuthority()
         val projection = accountStartup.state.projection.value
-        val policy = policyProvider.publishedPolicy.value
         IssuedAuthority(
-            accountName = live.accountName,
-            sessionGeneration = live.session,
-            credentialIncarnation = live.credential,
+            accountName = coherent.accountName,
+            sessionGeneration = coherent.session,
+            credentialIncarnation = coherent.credential,
             enrollmentEpoch = projection?.enrollmentEpoch,
             acceptedDisclosureVersion = projection?.acceptedDisclosureVersion,
-            policyActivationGeneration = policy.activationGeneration,
-            policyActivatedAtMonotonicMs = policy.activatedAtMonotonicMs,
-            policyEnabledAtIssue = policy.enabled,
+            policyActivationGeneration = coherent.policyActivationGeneration,
+            policyActivatedAtMonotonicMs = coherent.policyActivatedAtMonotonicMs,
+            policyEnabledAtIssue = coherent.policyEnabled,
         )
     }
 
@@ -108,7 +110,22 @@ class CollectionAuthority @Inject constructor(
             projection.withdrawalState == WithdrawalState.ACTIVE
     }
 
-    fun decide(): AuthorityDecision {
+    /**
+     * Loss-signal decision from the RAW published policy (no lease re-evaluation): used by
+     * revoked()/fan-out where "policy currently disabled" is the trigger, and the exact-deadline
+     * sweep separately guarantees purge at the lease instant even while the flag stays true.
+     */
+    fun decideLossSignal(): Boolean {
+        val p = policyProvider.publishedPolicy.value
+        return !p.enabled
+    }
+
+    /** Fence-wrapped decision for composition callers that must not hold any monitor yet. */
+    fun decideLossSignalWrapped(): AuthorityDecision = collectionTx.transaction { decideLocked() }
+
+    fun decide(): AuthorityDecision = collectionTx.transaction { decideLocked() }
+
+    private fun decideLocked(): AuthorityDecision {
         val permitted = policyProvider.snapshot().enabled
         val ownership = accountStartup.authoritySnapshot()
         val hasSession = ownership.accountName != null && ownership.session > 0L
@@ -123,6 +140,9 @@ class CollectionAuthority @Inject constructor(
         // Full revocation covers: no policy, no session, OR enrollment not established for this
         // session (missing composition fails closed — flag+login alone cannot authorize retention).
         val fullRevocation = !permitted || !hasSession || !enrolledThisSession
-        return AuthorityDecision(collectionPermitted = permitted && hasSession && enrolledThisSession, fullRevocation = fullRevocation)
+        return AuthorityDecision(
+            collectionPermitted = permitted && hasSession && enrolledThisSession,
+            fullRevocation = fullRevocation,
+        )
     }
 }

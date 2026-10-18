@@ -23,12 +23,27 @@ object VoiceObservationModule {
     fun provideCollectionAuthority(
         policyProvider: VoiceSharingPolicyProvider,
         accountStartup: VoiceSharingAccountStartup,
-    ): CollectionAuthority = CollectionAuthority(policyProvider, accountStartup)
+        collectionTx: CollectionAuthorityTransaction,
+    ): CollectionAuthority = CollectionAuthority(policyProvider, accountStartup, collectionTx)
 
     /** Aggregate collection-retention budget: one shared cap across open/ready/queued owners. */
     @Provides
     @Singleton
     fun provideCollectionBudget(): CollectionBudget = CollectionBudget(DEFAULT_TOTAL_RETENTION_BYTES)
+
+    @Provides
+    @Singleton
+    fun provideCollectionTx(
+        accountStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup,
+        policyProvider: VoiceSharingPolicyProvider,
+    ): CollectionAuthorityTransaction = CollectionAuthorityTransaction(
+        ownership = accountStartup.ownerForHandoff(),
+        policy = object : PolicyIncarnationReader {
+            override fun enabled() = policyProvider.publishedPolicy.value.enabled
+            override fun activationGeneration() = policyProvider.publishedPolicy.value.activationGeneration
+            override fun activatedAtMonotonicMs() = policyProvider.publishedPolicy.value.activatedAtMonotonicMs
+        },
+    )
 
     @Provides
     @Singleton
@@ -39,16 +54,21 @@ object VoiceObservationModule {
     fun provideSegmentObserver(
         authority: CollectionAuthority,
         sink: ContributionRetentionSink,
-        accountStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup,
+        collectionTx: CollectionAuthorityTransaction,
     ): SegmentObserver = SegmentObserver(
         gate = CollectionGate { decision -> decision.shouldRetainNewWork },
         sink = sink,
-        authority = authority::decide,
+        // Loss/handoff decisions enter through the collection fence BEFORE any observer monitor:
+        // the wrapped decide acquires the fence internally; callers here never hold a monitor.
+        authority = authority::decideLossSignalWrapped,
         issueAuthority = authority::issueAuthorityCoherentLockedIndependent,
         handoff = HandoffCoordinator(
-            ownership = accountStartup.ownerForHandoff(),
+            collectionTx = collectionTx,
             validateIssuedLocked = authority::validateIssuedAuthorityLocked,
         ),
+        fenceGate = object : FenceGate {
+            override fun <R> gate(block: () -> R): R = collectionTx.transaction(block)
+        },
     ).also { observer ->
         sink.onRetentionEnded = { context -> observer.noteRetentionEnded(context) }
     }

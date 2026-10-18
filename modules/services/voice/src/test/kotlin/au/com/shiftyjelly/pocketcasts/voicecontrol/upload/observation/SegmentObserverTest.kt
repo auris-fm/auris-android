@@ -16,8 +16,6 @@ class SegmentObserverTest {
 
     // Handoff validation is exercised by dedicated controls; lifecycle tests use an accepting
     // validator with authority frozen at start.
-    private fun acceptingValidator(): Pair<() -> IssuedAuthority, HandoffValidator> = { ISSUED } to HandoffValidator { true }
-
     private class FrameSpy {
         var invocations = 0
         fun provider(frames: List<ShortArray>, rate: Int): () -> Pair<List<ShortArray>, Int> = {
@@ -29,7 +27,7 @@ class SegmentObserverTest {
     @Test
     fun `gate refusal at START allocates NOTHING - frames provider is never invoked`() {
         val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
-        val observer = SegmentObserver(CollectionGate { _ -> false }, sink, { DEAD_REVOKED }, { ISSUED }, HandoffValidator { true })
+        val observer = SegmentObserver(CollectionGate { _ -> false }, sink, { DEAD_REVOKED }, { ISSUED }, RefuseAllCompletionHandoff)
         val spy = FrameSpy()
 
         val context = observer.speechStarted(1L, "Headset", ShortArray(0))
@@ -50,7 +48,7 @@ class SegmentObserverTest {
         var live = true
         val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, {
             if (live) LIVE else DEAD_REVOKED
-        }, { ISSUED }, HandoffValidator { true })
+        }, { ISSUED }, CompletionHandoff { context, onset, end, wake, provider, scope -> scope.completeUnderOwner(context, onset, end, wake, provider) })
         val spy = FrameSpy()
 
         val context = observer.speechStarted(2L, "Headset", ShortArray(0))
@@ -72,7 +70,7 @@ class SegmentObserverTest {
     @Test
     fun `cancel A then start B then LATE completion of A cannot join B`() {
         val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
-        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, HandoffValidator { true })
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, CompletionHandoff { context, onset, end, wake, provider, scope -> scope.completeUnderOwner(context, onset, end, wake, provider) })
 
         val a = observer.speechStarted(3L, "Headset", ShortArray(0))!!
         observer.cancelled(a, "TooShort")
@@ -89,7 +87,7 @@ class SegmentObserverTest {
     @Test
     fun `detector failure still produces EXACTLY ONE terminal - Completed(DetectorFailed)`() {
         val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
-        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, HandoffValidator { true })
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, CompletionHandoff { context, onset, end, wake, provider, scope -> scope.completeUnderOwner(context, onset, end, wake, provider) })
 
         val context = observer.speechStarted(5L, "Headset", ShortArray(0))!!
         observer.wakeCompleted(context, 1, 7, SegmentObservation.WakeState.DetectorFailed) { listOf(shortArrayOf(1, 2, 3)) to 16000 }
@@ -107,7 +105,7 @@ class SegmentObserverTest {
         // Budget covers the ADOPTED first chunk (2 samples = 4 bytes) + two 4-byte appends.
         val budget = CollectionBudget(12L)
         val sink = ContributionRetentionSink(budget)
-        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, HandoffValidator { true })
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, CompletionHandoff { context, onset, end, wake, provider, scope -> scope.completeUnderOwner(context, onset, end, wake, provider) })
         sink.onRetentionEnded = { context -> observer.noteRetentionEnded(context) }
 
         // Production's own first allocation transfers IN: no phantom fixed-size reservation.
@@ -142,9 +140,9 @@ class SegmentObserverTest {
             sink,
             { LIVE },
             issueAuthority = { ISSUED },
-            handoffValidator = HandoffValidator {
-                handoffsValidated++
-                false
+            handoff = CompletionHandoff { context, onset, end, wake, provider, scope ->
+                handoffsValidated++ // refusal: validation consumed the token, then NOTHING retains
+                scope.completeUnderOwner(context, onset, end, wake, provider, admit = false)
             },
         )
         val spy = FrameSpy()
@@ -152,10 +150,37 @@ class SegmentObserverTest {
 
         observer.wakeCompleted(context, 0, 300, SegmentObservation.WakeState.NotDetected, spy.provider(listOf(shortArrayOf(1, 2)), 16000))
 
-        assertEquals(1, handoffsValidated) // validated AT the handoff, under the owner transaction
+        assertEquals(1, handoffsValidated) // consulted AT the handoff, inside the owner transaction
         assertEquals(0, sink.retainedCount()) // refused: nothing adopted
-        assertEquals(0L, budget.charged()) // refusal allocated NOTHING on the collection side
+        // The capture CLOSES at the handoff even on refusal (exactly-one-terminal rule), so any
+        // admission charge is released by closure; refusal allocates nothing further.
         assertFalse(observer.isOpen(context.captureId))
+        assertEquals(0L, budget.charged())
+    }
+
+    @Test
+    fun `admission reserves BEFORE the producer allocates - refusal drains NOTHING`() {
+        // Producer counter says 100 samples; budget admits only 90 bytes-worth (45 samples*2...
+        // use exact numbers): reserve happens on ADMIT, allocation only after admission.
+        val budget = CollectionBudget(100L) // 50 samples max
+        val sink = ContributionRetentionSink(budget)
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, CompletionHandoff { c, o, e, w, p, sc -> sc.completeUnderOwner(c, o, e, w, p) })
+        var allocated = false
+        val producerSizeSamples = 80 // 160 bytes > budget: must be refused BEFORE any ShortArray
+
+        val context = observer.speechStartedAdmitting(20L, "Headset", producerSizeSamples)
+
+        assertNull(context) // refused at admission
+        assertEquals(0L, budget.charged()) // nothing reserved, nothing allocated
+        assertFalse(allocated)
+        // Admitted path: size fits, THEN the caller allocates and transfers ownership.
+        val ok = observer.speechStartedAdmitting(21L, "Headset", 40) // 80 bytes <= 100
+        assertNotNull(ok)
+        assertEquals(80L, budget.charged()) // ADMIT reserved exact bytes BEFORE any allocation
+        val chunk = shortArrayOf(1, 2, 3, 4) // producer allocates AFTER admission succeeded
+        allocated = true
+        observer.adoptFirstChunk(ok!!, ShortArray(40).also { chunk.copyInto(it, 0, 0, minOf(chunk.size, 40)) })
+        assertEquals(80L, budget.charged()) // exact adopted bytes charged once
     }
 
     @Test
@@ -164,7 +189,7 @@ class SegmentObserverTest {
         // After adoption EXACTLY 12 bytes stay charged: prefix released, clip reserved once.
         val budget = CollectionBudget(1L shl 20)
         val sink = ContributionRetentionSink(budget)
-        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, HandoffValidator { true })
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, CompletionHandoff { context, onset, end, wake, provider, scope -> scope.completeUnderOwner(context, onset, end, wake, provider) })
         val context = observer.speechStarted(13L, "Headset", shortArrayOf(1, 2))!! // 4 bytes adopted
         observer.speechIncremental(context, shortArrayOf(3, 4)) // +4 => 8 charged
         assertEquals(8L, budget.charged())
@@ -190,7 +215,7 @@ class SegmentObserverTest {
         // leaving an open uncharged buffer — the prefix keeps its exact charge.
         val budget = CollectionBudget(8L) // prefix (4+4) fits; 12-byte clip does not fit extra
         val sink = ContributionRetentionSink(budget)
-        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, HandoffValidator { true })
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, CompletionHandoff { context, onset, end, wake, provider, scope -> scope.completeUnderOwner(context, onset, end, wake, provider) })
         val context = observer.speechStarted(14L, "Headset", shortArrayOf(1, 2))!!
         observer.speechIncremental(context, shortArrayOf(3, 4))
         assertEquals(8L, budget.charged())
@@ -219,7 +244,7 @@ class SegmentObserverTest {
     @Test
     fun `listening closure discards ONLY the current partial - completed contributions survive`() {
         val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
-        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, HandoffValidator { true })
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, CompletionHandoff { context, onset, end, wake, provider, scope -> scope.completeUnderOwner(context, onset, end, wake, provider) })
 
         // First capture completes normally.
         val first = observer.speechStarted(7L, "Headset", ShortArray(0))!!
@@ -240,7 +265,7 @@ class SegmentObserverTest {
     @Test
     fun `deferral deletes NOTHING - ready entries stay`() {
         val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
-        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, HandoffValidator { true })
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, CompletionHandoff { context, onset, end, wake, provider, scope -> scope.completeUnderOwner(context, onset, end, wake, provider) })
         val context = observer.speechStarted(8L, "Headset", ShortArray(0))!!
         observer.wakeCompleted(context, 0, 1, SegmentObservation.WakeState.NotDetected) { listOf(shortArrayOf(7, 8)) to 16000 }
 
@@ -257,7 +282,7 @@ class SegmentObserverTest {
     @Test
     fun `outcomes join by ISSUED id only - unknown and closed ids are refused`() {
         val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
-        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, HandoffValidator { true })
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, CompletionHandoff { context, onset, end, wake, provider, scope -> scope.completeUnderOwner(context, onset, end, wake, provider) })
         val context = observer.speechStarted(9L, "Headset", ShortArray(0))!!
         observer.wakeCompleted(context, 0, 1, SegmentObservation.WakeState.Detected) { listOf(shortArrayOf(1)) to 16000 }
 
@@ -276,11 +301,13 @@ class SegmentObserverTest {
     @Test
     fun `stale incremental for an unknown context is refused - no orphan accounting`() {
         val sink = ContributionRetentionSink(CollectionBudget(1L shl 20))
-        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, HandoffValidator { true })
+        val observer = SegmentObserver(CollectionGate { it.shouldRetainNewWork }, sink, { LIVE }, { ISSUED }, CompletionHandoff { context, onset, end, wake, provider, scope -> scope.completeUnderOwner(context, onset, end, wake, provider) })
         val a = observer.speechStarted(10L, "Headset", ShortArray(0))!!
-        val b = observer.speechStarted(11L, "Speaker", ShortArray(0))!! // starting while A open rebinds the open capture
-        observer.speechIncremental(a, ShortArray(100)) // A is no longer the open capture
+        // Admission is single-occupancy (blocker b1): a second start while A is open is REFUSED —
+        // no context, no charge, and A stays the one open capture. Stale-context deltas are refused.
+        assertNull(observer.speechStartedAdmitting(11L, "Speaker", 0))
+        observer.speechIncremental(a, ShortArray(100)) // reserved? no: sink default reserveDelta refuses -> ignored
         assertEquals(0, sink.retainedSnapshot().count { it.incrementalSamplesAccounted > 0 && it.context == a })
-        assertTrue(observer.isOpen(b.captureId))
+        assertTrue(observer.isOpen(a.captureId))
     }
 }

@@ -85,29 +85,40 @@ class CollectionLossWatcher @Inject constructor(
         // EXACT DEADLINE PURGE: computed from the published activation stamp — no lease/4
         // polling that could lag past the expiry instant. Re-armed per new activation.
         scope.launch {
-            var scheduledFor = -1L
-            while (true) {
-                val snap = policyProvider.publishedPolicy.value
+            var armedFor = -1L
+            policyProvider.publishedPolicy.collect { snap ->
                 if (!snap.enabled || snap.activatedAtMonotonicMs <= 0) {
-                    scheduledFor = -1L
-                    delay(REARM_CHECK_MS) // waiting for an activation to schedule against
-                    continue
+                    deadlineJob?.cancel()
+                    deadlineJob = null
+                    armedFor = -1L
+                    return@collect
                 }
-                if (snap.activatedAtMonotonicMs != scheduledFor) {
-                    scheduledFor = snap.activatedAtMonotonicMs
-                    val remaining = (
-                        snap.activatedAtMonotonicMs + VoiceSharingPolicyProvider.DEFAULT_LEASE_MS -
-                            SystemClock.elapsedRealtime()
-                        ).coerceAtLeast(0L) + 1L
-                    delay(remaining)
-                    observer.revoked("lease-deadline")
-                    scheduledFor = -1L
-                } else {
-                    delay(REARM_CHECK_MS)
-                }
+                if (snap.activatedAtMonotonicMs == armedFor) return@collect
+                // Arm the ONE-shot timer for this activation; on fire, purge under the collection
+                // fence so held-copy-vs-expiry is deterministic (blocker b4): either the handoff
+                // completed its copy before the deadline acquire, or the expiry transaction closes
+                // the capture first and the handoff sees the loss.
+                armedFor = snap.activatedAtMonotonicMs
+                armDeadline(
+                    snap.activatedAtMonotonicMs + VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1L,
+                    onFire = { armedFor = -1L },
+                )
             }
         }
     }
+
+    /** Fires [onFire] once at absolute monotonic [deadlineMs]; rearm replaces the live timer. */
+    private fun armDeadline(deadlineMs: Long, onFire: () -> Unit) {
+        deadlineJob?.cancel()
+        deadlineJob = scope.launch {
+            val remaining = (deadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+            delay(remaining)
+            observer.revoked("lease-deadline")
+            onFire()
+        }
+    }
+
+    private var deadlineJob: kotlinx.coroutines.Job? = null
 
     companion object {
         /** Re-check interval ONLY for waiting on activation changes; never delays a deadline. */

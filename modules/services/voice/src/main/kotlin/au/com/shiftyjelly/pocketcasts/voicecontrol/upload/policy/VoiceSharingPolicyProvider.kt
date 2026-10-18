@@ -53,6 +53,15 @@ class VoiceSharingPolicyProvider(
     private val sleepMs: suspend (Long) -> Unit = { delay(it) },
     private val refreshTimeoutMs: Long = REFRESH_TIMEOUT_MS,
 ) {
+    // Nested collection fence (reviewer a38421f6): the collection lane acquires
+    // collectionFence -> policyNesting BEFORE any other lane touches publication; every publish
+    // here enters this inner lock while callers may hold the outer fence, so policy transitions
+    // serialize with account transitions and in-flight handoff copies deterministically.
+    private val policyNesting = Any()
+
+    /** Publishes inside the nested fence: order is collection-fence(outer) -> policyNesting. */
+    fun publishUnderNesting(snapshot: PolicySnapshot) = synchronized(policyNesting) { state.value = snapshot }
+
     private val state = MutableStateFlow(DISABLED)
 
     /** Observable at the collection boundary: a refresh emits here before another segment/upload. */
@@ -172,7 +181,7 @@ class VoiceSharingPolicyProvider(
                 return DISABLED // a newer refresh superseded this one while it was awaiting
             }
             activationGeneration = requestGen
-            state.value = snapshot
+            synchronized(policyNesting) { state.value = snapshot }
             // Timer ownership is serialized WITH publication under the same fence: a superseded
             // refresh never reaches this line, so it can never cancel a newer timer or install a
             // stale one; a renewal cancels the previous timer here before installing its own.
@@ -186,7 +195,7 @@ class VoiceSharingPolicyProvider(
         synchronized(fence) {
             if (requestGen == requestGeneration) {
                 activationGeneration = 0L
-                state.value = DISABLED
+                synchronized(policyNesting) { state.value = DISABLED }
                 invalidationJob?.cancel()
                 invalidationJob = null
             }
@@ -224,7 +233,7 @@ class VoiceSharingPolicyProvider(
                 // inside the fence at publication; if a late wake still slips through (cancellation
                 // lost the race), the activation-generation check refuses to tear down the renewal.
                 if (activationGeneration == gen) {
-                    state.value = DISABLED
+                    synchronized(policyNesting) { state.value = DISABLED }
                 }
             }
         }

@@ -28,6 +28,8 @@ class SegmentObserver(
      * so an uncomposed observer retains nothing at completion.
      */
     private val handoff: CompletionHandoff = RefuseAllCompletionHandoff,
+    /** Collection-fence wrapper supplied by composition; identity when uncomposed (tests). */
+    private val fenceGate: FenceGate = IdentityFenceGate,
 ) : ObserverHandoffScope {
 
     // All fields below are guarded by [lock]; external callers and the pipeline thread contend
@@ -51,13 +53,24 @@ class SegmentObserver(
     // only then does the caller drain the native buffer into an array whose ownership transfers
     // to the sink ([adoptFirstChunk], called iff this returns non-null). Refusal leaves the
     // producer untouched: recognition keeps its own buffer as before.
-    fun speechStartedAdmitting(captureSession: Long, routeClass: String, producerSize: Int): CaptureContext? = synchronized(lock) {
-        val context = CaptureContext(UUID.randomUUID(), captureSession, routeClass, issueAuthority())
-        open = context
-        cumulativeAccounted = 0
-        retainedForOpen = gate.accepts(authority()) && sink.admit(SegmentObservation.Admission(context, producerSize))
-        if (!retainedForOpen) return null
-        context
+    // Admission path (order collectionFence → owner → observer → sink; blockers b1/b3): the fence
+    // is acquired BEFORE this object's monitor, and the EXACT-SIZE reservation completes BEFORE
+    // this method returns — the engine allocates its ShortArray only afterwards, so an oversized
+    // or unaffordable prefix never exists. Refusal leaves observer state untouched and releases
+    // any charge it took.
+    fun speechStartedAdmitting(captureSession: Long, routeClass: String, producerSize: Int): CaptureContext? = fenceGate.gate { speechStartedAdmittingLocked(captureSession, routeClass, producerSize) }
+
+    private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int): CaptureContext? {
+        val issued = issueAuthority() // reentrant under the held collection fence
+        val context = CaptureContext(UUID.randomUUID(), captureSession, routeClass, issued)
+        return synchronized(lock) {
+            if (open != null || !gate.accepts(authority())) return@speechStartedAdmittingLocked null
+            cumulativeAccounted = 0
+            retainedForOpen = sink.admit(SegmentObservation.Admission(context, producerSize))
+            if (!retainedForOpen) return@speechStartedAdmittingLocked null
+            open = context
+            context
+        }
     }
 
     /** Transfers the drained first chunk into the reserved prefix; must follow a successful admit. */
@@ -72,32 +85,73 @@ class SegmentObserver(
         admitted
     }
 
+    // --- Reserve-before-copy delta protocol (blocker b3): reservation is a budget admit that
+    // allocates NOTHING; commit transfers the caller's drained array (already reserved) into the
+    // owned prefix; release returns bytes when the copy failed or was refused. All three take the
+    // observer monitor only — the collection fence was acquired at admission and is NOT re-entered
+    // upward from here. ---
+    fun reserveDelta(context: CaptureContext, samples: Int): Boolean = synchronized(lock) {
+        open?.captureId == context.captureId && retainedForOpen && sink.reserveDelta(context, samples)
+    }
+
+    fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int): Unit = synchronized(lock) {
+        if (open?.captureId != context.captureId || !retainedForOpen) return
+        cumulativeAccounted += copied
+        sink.commitDelta(context, drained.copyOf(copied), copied)
+    }
+
+    fun releaseDelta(context: CaptureContext, samples: Int): Unit = synchronized(lock) {
+        if (open?.captureId != context.captureId) return
+        sink.releaseDelta(context, samples)
+    }
+
     /** Real sample delta produced by the production producer since the previous accounting point. */
     fun speechIncremental(context: CaptureContext?, samples: ShortArray): Unit = synchronized(lock) {
         val current = open ?: return
         if (context == null || current.captureId != context.captureId) return // stale/unknown: refuse
         if (!retainedForOpen || samples.isEmpty()) return
+        // Reserve-before-copy even on the compatibility path: growth that cannot be reserved ends
+        // retention via the sink's own terminal; nothing is copied uncharged.
+        if (!sink.reserveDelta(current, samples.size)) return
         cumulativeAccounted += samples.size
-        sink.incremental(SegmentObservation.Incremental(current, samples.size, retainedForOpen), samples)
+        sink.commitDelta(current, samples, samples.size)
     }
 
-    /**
-     * VAD closed [context] (or the detector failed for it). [framesProvider] is invoked AT MOST
-     * ONCE and ONLY after the live revalidation passes — with a dead gate it is NEVER called, so
-     * zero upload-side bytes are allocated. It hands over the PRODUCTION frames plus sample rate.
-     */
+    // * VAD closed [context] (or the detector failed for it). [framesProvider] is invoked AT MOST
+    // * ONCE and ONLY after the live revalidation passes — with a dead gate it is NEVER called, so
+    // * zero upload-side bytes are allocated. It hands over the PRODUCTION frames plus sample rate.
     // Completion handoff DELEGATES to [CompletionHandoff]: production runs the whole sequence —
     // original-authority validation, live re-decision, frames materialization, sink adoption,
     // closure — inside ONE owner transaction (owner→observer→sink order). The default refuses
     // everything (fail-closed). No check-then-act seam exists at this boundary anymore.
+
+    /**
+     * Entry WITHOUT the observer lock: the coordinator acquires collectionFence first, then
+     * re-enters this object via completeUnderOwner which takes the observer lock as the INNERMOST
+     * monitor (order collectionFence → owner → observer → sink; blocker a38421f6 b1).
+     * [framesProvider] is wrapped SINGLE-SHOT (blocker b3): the first call drains and hands the
+     * native buffer back; every later call returns EMPTY — no second copy-out can double-run.
+     */
     fun wakeCompleted(
         context: CaptureContext?,
         speechOnsetSample: Int,
         speechEndSample: Int,
         wakeState: SegmentObservation.WakeState,
         framesProvider: () -> Pair<List<ShortArray>, Int>,
-    ): Unit = synchronized(lock) {
-        handoff.handoff(context, speechOnsetSample, speechEndSample, wakeState, framesProvider, this)
+    ): Unit = fenceGate.gate {
+        // The collection fence is held for the ENTIRE handoff including the single copy-out:
+        // reservation vs expiry can never interleave with the drain (blocker b4), and the
+        // provider stays single-shot — a second call returns EMPTY (no re-drain of native state).
+        var drained = false
+        val oneShot: () -> Pair<List<ShortArray>, Int> = {
+            if (drained) {
+                emptyList<ShortArray>() to 0
+            } else {
+                drained = true
+                framesProvider()
+            }
+        }
+        handoff.handoff(context, speechOnsetSample, speechEndSample, wakeState, oneShot, this)
     }
 
     /**
@@ -114,16 +168,30 @@ class SegmentObserver(
         admit: Boolean,
     ): Boolean = synchronized(lock) {
         val current = open ?: return false
-        if (context == null || current.captureId != context.captureId) return false // late: refuse join
-        if (!admit) {
-            // ORIGINAL-authority validation failed under the owner lock: close the capture with
-            // zero retention — provider never runs, prefix charge released via cancellation path.
-            sink.cancelled(SegmentObservation.Cancelled(current, "handoff-authority-refused"))
+        if (context != null && current.captureId != context.captureId) return false // late: refuse join
+        if (context == null) {
+            // No frozen context at all: the handoff cannot be authorized — terminate the OPEN
+            // capture with exactly one terminal and release its prefix (blocker b2), never a
+            // silent return that leaves live uncharged audio.
+            sink.cancelled(SegmentObservation.Cancelled(current, "handoff-without-context"))
             closeLocked()
+            return false
+        }
+        if (!admit) {
+            // ORIGINAL-authority validation failed under the fence: FULL release (blocker b2) —
+            // purge every collection byte (prefix AND ready candidates), close the capture, zero
+            // retention; provider never runs. A refused handoff is a loss event, not a deferral.
+            (sink as? RevocationAware)?.purgeAllForRevocation("handoff-authority-refused")
+                ?: sink.cancelled(SegmentObservation.Cancelled(current, "handoff-authority-refused"))
+            closeLocked()
+            totalRetainedBytes = 0L
             return false
         }
         val decision = authority()
         if (!gate.accepts(decision)) {
+            // LIVE-gate refusal is ALSO a terminated handoff (blocker b2): provider never runs,
+            // exactly one terminal closes the capture, prefix PCM + charge released via cancel.
+            sink.cancelled(SegmentObservation.Cancelled(current, "handoff-gate-refused"))
             closeLocked()
             return false
         }
@@ -144,6 +212,9 @@ class SegmentObserver(
         closeLocked()
     }
 
+    /** True when [captureId] is the CURRENT open capture: stale-guard before any refusal purge. */
+    override fun ownsCapture(captureId: java.util.UUID): Boolean = synchronized(lock) { open?.captureId == captureId }
+
     /** Listening closure: discard ONLY the current partial; retained completions survive. */
     fun listeningClosed(reason: String): Unit = cancelled(null, reason)
 
@@ -151,14 +222,25 @@ class SegmentObserver(
      * External FULL REVOCATION signal (withdrawal/disable/expiry/account change): purges ALL
      * collection PCM including the open partial, immediately, under the same lifecycle lock.
      */
-    fun revoked(reason: String): Boolean = synchronized(lock) {
+    // Loss fan-out enters THROUGH the collection fence first (authority() acquires it), so revoke
+    // serializes against handoff/admission/expiry as ONE authority transaction; only then does it
+    // take the observer monitor (order fence → owner → observer → sink, blocker b1/b4).
+    fun revoked(reason: String): Boolean = fenceGate.gate {
+        // ONE collection transaction covers decide → purge → close: loss fan-out enters through
+        // the fence BEFORE any observer monitor (order fence → owner → observer → sink, b1/b4),
+        // and an in-flight handoff holding the same fence completes its copy before this purge.
+        // Loss causes purge on their OWN signal; expiry does not require the flag to have flipped.
         val decision = authority()
-        if (decision.collectionPermitted && !decision.fullRevocation) return false
-        val purge = sink as? RevocationAware
-        purge?.purgeAllForRevocation(reason)
-        closeLocked()
-        totalRetainedBytes = 0L
-        true
+        if (!revocationCauses.contains(reason) && decision.collectionPermitted && !decision.fullRevocation) {
+            return@gate false
+        }
+        synchronized(lock) {
+            val purge = sink as? RevocationAware
+            purge?.purgeAllForRevocation(reason)
+            closeLocked()
+            totalRetainedBytes = 0L
+            true
+        }
     }
 
     // True while the SINK still owns retention for the open capture (budget may have ended it).
@@ -192,6 +274,15 @@ class SegmentObserver(
     companion object {
         const val DEFAULT_MAX_RETAINED_BYTES: Long = 8L * 1024 * 1024
         private const val BYTES_PER_SAMPLE = 2L
+
+        /** Causes that MUST purge regardless of a live-but-stale-looking gate (loss-driven). */
+        val revocationCauses = setOf(
+            "account-change",
+            "enrollment-change",
+            "policy-disable",
+            "lease-deadline",
+            "policy-inactive",
+        )
     }
 }
 

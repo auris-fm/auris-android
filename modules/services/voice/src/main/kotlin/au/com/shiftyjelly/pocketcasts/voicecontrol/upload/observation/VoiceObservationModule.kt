@@ -7,6 +7,7 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
 
 /**
  * Composition of the collection-retention boundary (plan Task 3): the live authority is read
@@ -24,9 +25,14 @@ object VoiceObservationModule {
         accountStartup: VoiceSharingAccountStartup,
     ): CollectionAuthority = CollectionAuthority(policyProvider, accountStartup)
 
+    /** Aggregate collection-retention budget: one shared cap across open/ready/queued owners. */
     @Provides
     @Singleton
-    fun provideRetentionSink(): ContributionRetentionSink = ContributionRetentionSink()
+    fun provideCollectionBudget(): CollectionBudget = CollectionBudget(DEFAULT_TOTAL_RETENTION_BYTES)
+
+    @Provides
+    @Singleton
+    fun provideRetentionSink(budget: CollectionBudget): ContributionRetentionSink = ContributionRetentionSink(budget)
 
     @Provides
     @Singleton
@@ -37,5 +43,10 @@ object VoiceObservationModule {
         gate = CollectionGate { decision -> decision.shouldRetainNewWork },
         sink = sink,
         authority = authority::decide,
-    )
+    ).also { observer ->
+        sink.onRetentionEnded = { context -> observer.noteRetentionEnded(context) }
+    }
 }
+
+/** 64 MiB aggregate ceiling for upload-owned PCM (queue bounds refine this in Task 5). */
+private const val DEFAULT_TOTAL_RETENTION_BYTES: Long = 64L * 1024 * 1024

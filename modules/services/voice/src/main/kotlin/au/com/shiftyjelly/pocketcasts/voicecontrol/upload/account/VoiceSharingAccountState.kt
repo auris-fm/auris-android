@@ -26,6 +26,8 @@ import okio.Buffer
  * - Every authority apply requires the ORIGINALLY ISSUED token, reference-compared.
  */
 class VoiceSharingAccountState {
+    /** Post-commit notification hook (applied session + projection); mirror bookkeeping only. */
+    var onProjectionApplied: ((VoiceSharingAccountProjection, Long) -> Unit)? = null
     private val state = MutableStateFlow<VoiceSharingAccountProjection?>(null)
 
     /** Observed under [fence]; guards the issued session and revision currency. */
@@ -124,6 +126,7 @@ class VoiceSharingAccountState {
         if (token !== currentToken || ticket.generation != operationGeneration.get() || ticket.session != ownerSession) return false
         val projection = parseProjection(json) ?: return false
         state.value = projection
+        onProjectionApplied?.invoke(projection, ownerSession)
         true
     }
 

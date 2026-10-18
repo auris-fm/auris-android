@@ -44,19 +44,12 @@ class SegmentObserver(
     }
 
     /** Real sample delta produced by the production producer since the previous accounting point. */
-    fun speechIncremental(context: CaptureContext?, samplesDelta: Int): Unit = synchronized(lock) {
+    fun speechIncremental(context: CaptureContext?, samples: ShortArray): Unit = synchronized(lock) {
         val current = open ?: return
         if (context == null || current.captureId != context.captureId) return // stale/unknown: refuse
-        if (!retainedForOpen || samplesDelta <= 0) return
-        // Backpressure: growth beyond the byte cap ends THIS capture's retention only.
-        if (totalRetainedBytes + samplesDelta * BYTES_PER_SAMPLE > maxRetainedBytes) {
-            sink.cancelled(SegmentObservation.Cancelled(current, "retention-cap"))
-            closeLocked()
-            return
-        }
-        cumulativeAccounted += samplesDelta
-        totalRetainedBytes += samplesDelta * BYTES_PER_SAMPLE
-        sink.incremental(SegmentObservation.Incremental(current, samplesDelta, true))
+        if (!retainedForOpen || samples.isEmpty()) return
+        cumulativeAccounted += samples.size
+        sink.incremental(SegmentObservation.Incremental(current, samples.size, retainedForOpen), samples)
     }
 
     /**
@@ -114,7 +107,14 @@ class SegmentObserver(
         true
     }
 
-    /** True while [captureId] is the open capture on this observer. */
+    // True while the SINK still owns retention for the open capture (budget may have ended it).
+    fun isRetaining(captureId: UUID): Boolean = synchronized(lock) { open?.captureId == captureId && retainedForOpen }
+
+    /** The sink ended retention externally (budget/cap): stop forwarding without a new terminal. */
+    fun noteRetentionEnded(context: CaptureContext): Unit = synchronized(lock) {
+        if (open?.captureId == context.captureId) retainedForOpen = false
+    }
+
     fun isOpen(captureId: UUID): Boolean = synchronized(lock) { open?.captureId == captureId }
 
     /** Bytes currently attributed to retained collection audio (test seam for the cap). */

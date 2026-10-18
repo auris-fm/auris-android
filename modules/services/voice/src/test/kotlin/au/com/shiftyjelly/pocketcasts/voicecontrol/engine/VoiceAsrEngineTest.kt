@@ -35,6 +35,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisitionPlatform
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.AuthorityDecision
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionBudget
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
@@ -84,7 +85,7 @@ class VoiceAsrEngineTest {
 
     // Gate OFF by default: the observation layer must not change any pre-existing engine behaviour.
     private var authority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = false, fullRevocation = true) }
-    private var retentionSink = ContributionRetentionSink()
+    private var retentionSink = ContributionRetentionSink(CollectionBudget(1L shl 20))
     private var observer = SegmentObserver(CollectionGate { _ -> false }, NoopSegmentSink, authority)
     private val translationStage = mock<TranslationStage>()
 
@@ -95,6 +96,8 @@ class VoiceAsrEngineTest {
         // By default the native capture pipeline attaches. Tests that exercise a failed or
         // cancelled start override this with false.
         `when`(voiceAudioProcessor.attachCapture()).thenReturn(true)
+        // Native prefix peek: no accumulated samples in unit tests unless a test overrides.
+        `when`(voiceAudioProcessor.peekSpeechDelta(any())).thenReturn(0 to ShortArray(0))
     }
 
     private val captureFlow: Flow<VoiceSegmenterResult> = MutableStateFlow(VoiceSegmenterResult.Silence)
@@ -1585,7 +1588,7 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `the engine drives REAL segment events through the observer - frozen context, no double gate check`() = runTest {
-        val retention = ContributionRetentionSink()
+        val retention = ContributionRetentionSink(CollectionBudget(1L shl 20))
         var gateChecks = 0
         val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
         observer = SegmentObserver(
@@ -1623,17 +1626,17 @@ class VoiceAsrEngineTest {
         val candidate = retention.retainedSnapshot().single()
         assertEquals(1L, candidate.context.captureSession)
         assertEquals("Headset", candidate.context.routeClass)
-        // The engine's per-capture context is threaded through start→incremental→completed;
-        // with no SpeechEnded-sample delta before completion the accounting starts at zero —
-        // the point is that accounting flows under the SAME issued context, not a constant.
-        assertEquals(0L, candidate.incrementalSamplesAccounted)
+        // The engine's per-capture context is threaded through start→incremental→completed:
+        // the 4 samples of the closed segment arrive as the REAL delta (peek reports none), so
+        // the sink prefix accounts exactly what the producer handed over.
+        assertEquals(4L, candidate.incrementalSamplesAccounted)
         // Exactly the VAD's samples — no virtual padding, no playback reference.
         assertTrue(candidate.pcm!!.contentEquals(shortArrayOf(100, 200, 300, 400)))
         assertEquals(SegmentObservation.WakeState.NotDetected, candidate.wakeState)
         // The frozen context travelled the WHOLE ASR → routing → execution chain and every
         // stage joined by the ISSUED id; the final recorded outcome is Executed.
         assertEquals(candidate.context.captureId, (candidate.outcome as CollectionOutcome.Executed).captureId)
-        assertTrue((candidate.outcome as CollectionOutcome.Executed).success)
+        assertTrue((candidate.outcome as CollectionOutcome.Executed).dispatchedWithoutThrowing)
 
         engine.stop()
     }
@@ -1686,7 +1689,7 @@ class VoiceAsrEngineTest {
     @Test
     fun `gate OFF means the pipeline allocates NOTHING for upload across a full turn`() = runTest {
         val sink = EngineObservationSink()
-        val deadSink = ContributionRetentionSink()
+        val deadSink = ContributionRetentionSink(CollectionBudget(1L shl 20))
         val deadAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = false, fullRevocation = true) }
         observer = SegmentObserver(CollectionGate { false }, sink, deadAuthority)
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
@@ -1729,7 +1732,7 @@ class VoiceAsrEngineTest {
             return true
         }
 
-        override fun incremental(observation: SegmentObservation.Incremental) {
+        override fun incremental(observation: SegmentObservation.Incremental, samples: ShortArray) {
             incremental += observation
         }
 

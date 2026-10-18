@@ -90,7 +90,9 @@ fun interface CollectionGate {
 interface SegmentSink {
     /** Returns true while the sink retains incremental audio for this capture. */
     fun started(observation: SegmentObservation.Started): Boolean
-    fun incremental(observation: SegmentObservation.Incremental)
+
+    /** Real produced samples appended under ownership; the sink owns bounded retention. */
+    fun incremental(observation: SegmentObservation.Incremental, samples: ShortArray)
 
     /**
      * Receives the PRODUCTION frames for adoption. Returning false declines ownership; the

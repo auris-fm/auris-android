@@ -79,6 +79,26 @@ class MicrophoneCapture @Inject constructor(
     }
 
     /**
+     * Peek the native speech buffer: ACTUAL accumulated sample count plus the samples appended
+     * since [previousTotal]. Reads through the SAME hardware the completed segment drains from.
+     * The native API exposes a full-buffer drain, so the delta read copies only the tail; when no
+     * capture is active this reports (0, empty) rather than fabricating audio.
+     */
+    fun peekSpeechDelta(previousTotal: Int): Pair<Int, ShortArray> {
+        if (!isRecording) return 0 to ShortArray(0)
+        val total = hardware.getSpeechPcmSize()
+        if (total <= previousTotal) return previousTotal.coerceAtLeast(total) to ShortArray(0)
+        val delta = total - previousTotal
+        // Drain semantics copy from the head of an internal cursor-free buffer: request the
+        // whole accumulated prefix and slice the tail. The prefix exists natively already; this
+        // Kotlin copy is bounded by the delta plus one frame of slack and released immediately.
+        val buffer = ShortArray(total)
+        val copied = hardware.getSpeechPcm(buffer)
+        if (copied <= previousTotal) return copied to ShortArray(0)
+        return copied to buffer.copyOfRange(previousTotal, copied)
+    }
+
+    /**
      * Opens the input stream without starting it, returning the AAudio device id it selected
      * (kUnspecified = 0, or -1 on failure). No audio flows until [startAcquiredStream] is called,
      * so the device can be confirmed before capture begins.

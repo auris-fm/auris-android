@@ -133,7 +133,7 @@ class VoiceAsrEngine @Inject constructor(
             pendingExecutionContext = null
             userHandler(intent)
             if (capture != null) {
-                joinOutcome(CollectionOutcome.Executed(capture.captureId, success = true))
+                joinOutcome(CollectionOutcome.Executed(capture.captureId, dispatchedWithoutThrowing = true))
             }
         }
         this.currentRouteClass = audioRoute::class.simpleName ?: AudioRoute.Unknown::class.simpleName!!
@@ -182,7 +182,12 @@ class VoiceAsrEngine @Inject constructor(
                         }
 
                         is VoiceSegmenterResult.SpeechContinuing -> {
-                            accountedSamples += OboeConfig.FRAMES_PER_POLL
+                            // The native producer accumulates the prefix internally; a continuing
+                            // event means new speech frames exist. Read the ACTUAL produced size
+                            // through the processor's peek hook and forward the real delta.
+                            val (produced, recent) = voiceAudioProcessor.peekSpeechDelta(accountedSamples)
+                            accountedSamples = produced
+                            if (recent.isNotEmpty()) segmentObserver.speechIncremental(openContext, recent)
                         }
 
                         is VoiceSegmenterResult.SpeechEnded -> {
@@ -190,7 +195,10 @@ class VoiceAsrEngine @Inject constructor(
                             val durationMs = totalSamples * 1000L / 16000
                             Timber.i("[VoicePipeline] vad ~%dms (%d samples)", durationMs, totalSamples)
                             // Real delta from the production producer, not a fixed constant.
-                            segmentObserver.speechIncremental(openContext, totalSamples - accountedSamples)
+                            if (totalSamples > accountedSamples) {
+                                val tail = shortTailOf(result.frames, accountedSamples)
+                                segmentObserver.speechIncremental(openContext, tail)
+                            }
 
                             val request = shouldTranscribe(result, openContext)
                             if (request != null) {
@@ -439,6 +447,25 @@ class VoiceAsrEngine @Inject constructor(
         // segment that we could not route gets the spoken line, a NotDetected one keeps the earcon.
         // The grace window is true for both, so it cannot make that distinction.
         processUtterance(routePrep.input!!, addressed = request.wakePositive, capture = request.capture)
+    }
+
+    /** Samples of [frames] beyond the first [skip] — the exact delta the producer added. */
+    private fun shortTailOf(frames: List<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.PcmAudioFrame>, skip: Int): ShortArray {
+        var seen = 0
+        val out = ShortArray((frames.sumOf { it.samples.size } - skip).coerceAtLeast(0))
+        var offset = 0
+        for (frame in frames) {
+            if (seen + frame.samples.size <= skip) {
+                seen += frame.samples.size
+                continue
+            }
+            val from = (skip - seen).coerceIn(0, frame.samples.size)
+            val len = frame.samples.size - from
+            System.arraycopy(frame.samples, from, out, offset, len)
+            offset += len
+            seen += frame.samples.size
+        }
+        return out
     }
 
     /** Join an outcome for the capture that produced it; refused silently when uncollected. */

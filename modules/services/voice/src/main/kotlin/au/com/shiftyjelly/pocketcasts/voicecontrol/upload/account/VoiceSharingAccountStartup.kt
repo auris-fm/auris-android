@@ -29,6 +29,23 @@ class VoiceSharingAccountStartup @Inject constructor(
     val coordinator = VoiceSharingAccountSessionCoordinator(state, credentials)
     val binding = VoiceSharingAccountAuthBinding(ownership, coordinator)
 
+    /** Post-commit hook target: the collection authority registers itself here when composed. */
+    @Volatile
+    var enrollmentEvidenceListener: ((VoiceSharingAccountProjection, Long) -> Unit)? = null
+
+    /** Session-end observer: evidence must die with the session even before a new one starts. */
+    @Volatile
+    var sessionEndedListener: (() -> Unit)? = null
+
+    init {
+        // State fence is the single commit point for every projection change (GET/enrollment/
+        // withdrawal/401/session-end): post-commit mirror notification ONLY — no authority is
+        // derived here; CollectionAuthority re-reads state + owner snapshot at each decision.
+        state.onProjectionApplied = { projection, ownerSession ->
+            enrollmentEvidenceListener?.invoke(projection, ownerSession)
+        }
+    }
+
     val operations: VoiceSharingAccountOperations by lazy {
         VoiceSharingAccountOperations(
             api = VoiceSharingAccountApi.create(retrofit.get()),
@@ -44,7 +61,10 @@ class VoiceSharingAccountStartup @Inject constructor(
     fun initializeOnAppStart() {
         binding.install()
         AccountManager.get(context).addOnAccountsUpdatedListener({
-            ownership.reconcileExternalState()
+            val before = ownership.authoritySnapshot().session
+            val after = ownership.reconcileExternalState()
+            // ACCOUNT CHANGE observed: notify loss subscribers WITHOUT any engine event/read.
+            if (after.accountName == null || after.session != before) sessionEndedListener?.invoke()
         }, null, false)
     }
 

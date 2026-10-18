@@ -46,6 +46,14 @@ class VoiceAudioProcessor @Inject constructor(
     }
 
     /**
+     * Peek the speech PCM accumulated so far in the native segment buffer: returns the ACTUAL
+     * produced sample count plus the samples appended since [previousTotal]. This is the same
+     * buffer the completed segment is drained from — no parallel capture, no extra copy beyond
+     * the delta read. Zero-producing or unsupported states report (0, empty) honestly.
+     */
+    fun peekSpeechDelta(previousTotal: Int): Pair<Int, ShortArray> = microphoneCapture.peekSpeechDelta(previousTotal)
+
+    /**
      * Check if audio processing is currently active.
      */
     val isProcessing: Boolean

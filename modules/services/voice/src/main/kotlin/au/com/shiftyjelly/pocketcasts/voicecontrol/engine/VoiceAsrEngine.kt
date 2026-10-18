@@ -7,6 +7,7 @@ import androidx.annotation.RequiresPermission
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.TranslationStage
+import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.OboeConfig
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceAudioProcessor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
@@ -25,6 +26,9 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeTranscriptTrimmer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordSegmentCapture
@@ -68,6 +72,10 @@ class VoiceAsrEngine @Inject constructor(
     // comes from VoiceControlModule.provideSpokenTemplateResolver.
     private val currentLocale: () -> Locale = { Locale.getDefault() },
     private val translationStage: TranslationStage,
+    // Upload observation of the ACTUAL segment path (plan Task 3). Optional only for Kotlin
+    // test call sites; Dagger supplies the production observer. The engine never allocates
+    // PCM for upload purposes when the observer's gate refuses at START.
+    private val segmentObserver: SegmentObserver = SegmentObserver(CollectionGate { _, _ -> false }, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.NoopSegmentSink),
     @ApplicationContext private val context: Context,
 ) {
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -80,6 +88,14 @@ class VoiceAsrEngine @Inject constructor(
 
     @Volatile
     private var currentMode: ListeningMode = ListeningMode.Off
+
+    /** Route CLASS frozen into each capture context; set synchronously at start()/stop(). */
+    @Volatile
+    private var currentRouteClass: String = AudioRoute.Unknown::class.simpleName!!
+
+    /** Capture-session incarnation: bumped synchronously at every pipeline start. */
+    @Volatile
+    private var captureSessionIncarnation: Long = 0L
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun start(
@@ -96,6 +112,8 @@ class VoiceAsrEngine @Inject constructor(
     ): CaptureAttachment {
         this.backend = backend
         this.currentMode = listeningMode
+        this.currentRouteClass = audioRoute::class.simpleName ?: AudioRoute.Unknown::class.simpleName!!
+        captureSessionIncarnation += 1
         this.playbackBufferProvider = playbackBufferProvider
         this.micExposureProvider = micExposureProvider
         this.onIntent = onIntent
@@ -130,9 +148,15 @@ class VoiceAsrEngine @Inject constructor(
             try {
                 voiceAudioProcessor.startProcessing().collect { result ->
                     when (result) {
-                        is VoiceSegmenterResult.SpeechStarted -> { /* utterance started */ }
+                        is VoiceSegmenterResult.SpeechStarted -> {
+                            // Freeze the capture context SYNCHRONOUSLY here — before any await
+                            // boundary — so every later outcome joins by this capture ID.
+                            segmentObserver.speechStarted(captureSessionIncarnation, currentRouteClass)
+                        }
 
-                        is VoiceSegmenterResult.SpeechContinuing -> { /* accumulating frames */ }
+                        is VoiceSegmenterResult.SpeechContinuing -> {
+                            segmentObserver.speechIncremental(OboeConfig.FRAMES_PER_POLL)
+                        }
 
                         is VoiceSegmenterResult.SpeechEnded -> {
                             val totalSamples = result.frames.sumOf { it.samples.size }
@@ -145,8 +169,10 @@ class VoiceAsrEngine @Inject constructor(
                             }
                         }
 
-                        is VoiceSegmenterResult.Rejected ->
+                        is VoiceSegmenterResult.Rejected -> {
                             Timber.w("[VoicePipeline] vad rejected - %s", result.reason)
+                            segmentObserver.cancelled(result.reason.name)
+                        }
 
                         VoiceSegmenterResult.Silence -> { /* no speech */ }
                     }
@@ -226,6 +252,14 @@ class VoiceAsrEngine @Inject constructor(
             Timber.w(e, "[VoicePipeline] wake detection failed, dropping segment")
             return null
         }
+
+        segmentObserver.wakeCompleted(
+            pcm = shortSamplesOf(segment),
+            sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000,
+            speechOnsetSample = segment.speechOnsetSample,
+            speechEndSample = segment.speechEndSample,
+            wakeState = if (wwResult.detected) SegmentObservation.WakeState.Detected else SegmentObservation.WakeState.NotDetected,
+        )
 
         // Debug instrumentation: behind WAKE_WORD_DEBUG_CAPTURE, dump every
         // VAD segment (raw WAV + log-Mel PNG) named by timestamp + score.
@@ -553,7 +587,21 @@ class VoiceAsrEngine @Inject constructor(
         val dropWithError: Boolean,
     )
 
+    /** PCM of the closed segment exactly as the VAD produced it — no padding, no playback reference. */
+    private fun shortSamplesOf(segment: VoiceSegmenterResult.SpeechEnded): ShortArray {
+        val total = segment.frames.sumOf { it.samples.size }
+        val out = ShortArray(total)
+        var offset = 0
+        for (frame in segment.frames) {
+            System.arraycopy(frame.samples, 0, out, offset, frame.samples.size)
+            offset += frame.samples.size
+        }
+        return out
+    }
+
     fun stop() {
+        // Listening closure: discard only the CURRENT partial; never resume to complete an example.
+        segmentObserver.cancelled("pipeline-stopped")
         processingJob?.cancel()
         processingJob = null
         // Tear down native capture directly too: the processing job's flow `finally` only runs

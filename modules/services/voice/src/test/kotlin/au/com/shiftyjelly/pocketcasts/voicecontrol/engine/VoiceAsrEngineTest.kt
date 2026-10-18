@@ -34,11 +34,16 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.BluetoothCandidate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.MicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.RouteAcquisitionPlatform
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.NoopSegmentSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordDetector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult
 import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.TestScope
@@ -73,6 +78,9 @@ class VoiceAsrEngineTest {
     private val gracePeriodSignal = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal>()
     private val audioFeedbackRenderer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer>()
     private val backend = mock<AsrBackend>()
+
+    // Gate OFF by default: the observation layer must not change any pre-existing engine behaviour.
+    private var observer = SegmentObserver(CollectionGate { _, _ -> false }, NoopSegmentSink)
     private val translationStage = mock<TranslationStage>()
 
     init {
@@ -112,6 +120,7 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -301,6 +310,7 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -537,6 +547,7 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = signal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -588,6 +599,7 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = GracePeriodSignal(timeoutMs = 30_000L),
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -660,6 +672,7 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = GracePeriodSignal(timeoutMs = 30_000L),
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -721,6 +734,7 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = signal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            segmentObserver = observer,
             context = context,
             templateResolver = templateResolver,
             currentLocale = currentLocale,
@@ -771,6 +785,7 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -826,6 +841,7 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -875,6 +891,7 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -926,6 +943,7 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -1122,6 +1140,7 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -1147,11 +1166,19 @@ class VoiceAsrEngineTest {
     private fun CoroutineScope.createEngineWithSpeech(
         recognizer: VoiceRecognizer,
         wakeWordResult: WakeWordResult,
+    ) = createEngineWithSpeech(observer, recognizer, wakeWordResult)
+
+    private fun CoroutineScope.createEngineWithSpeech(
+        observer: SegmentObserver,
+        recognizer: VoiceRecognizer,
+        wakeWordResult: WakeWordResult,
     ) {
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(
             flowOf(
+                VoiceSegmenterResult.SpeechStarted,
+                VoiceSegmenterResult.SpeechContinuing,
                 VoiceSegmenterResult.SpeechEnded(
                     listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
                 ),
@@ -1170,6 +1197,7 @@ class VoiceAsrEngineTest {
             gracePeriodSignal = gracePeriodSignal,
             audioFeedbackRenderer = audioFeedbackRenderer,
             translationStage = translationStage,
+            segmentObserver = observer,
             context = context,
         )
         engine.scope = this
@@ -1515,5 +1543,147 @@ class VoiceAsrEngineTest {
         override fun closeInputStream() {
             closeCalls++
         }
+    }
+
+    @Test
+    fun `the engine drives REAL segment events through the observer - frozen context, no double gate check`() = runTest {
+        val sink = EngineObservationSink()
+        var gateChecks = 0
+        observer = SegmentObserver(
+            CollectionGate { _, _ ->
+                gateChecks++
+                true
+            },
+            sink,
+        )
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        createEngineWithSpeech(
+            observer,
+            recognizer = recognizer,
+            wakeWordResult = WakeWordResult(detected = false, confidence = 0f, completionSample = 4000),
+        )
+
+        engine.start(
+            backend = FakeAsrBackend("play something"),
+            audioRoute = AudioRoute.Headset(hasMicrophone = true),
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        advanceUntilIdle()
+
+        // Gate consulted EXACTLY ONCE per capture, at START — before any PCM allocation.
+        assertEquals(1, gateChecks)
+        val started = sink.started.single()
+        val completed = sink.completed.single()
+        // Context frozen at start is the SAME context carried to completion (immutable).
+        assertEquals(started.context, completed.context)
+        assertEquals("Headset", started.context.routeClass)
+        assertEquals(1L, started.context.captureSession)
+        // Incremental accounting flowed between start and completion.
+        assertEquals(1, sink.incremental.size)
+        // Exactly the VAD's samples — no virtual padding, no playback reference.
+        assertTrue(completed.pcm.contentEquals(shortArrayOf(100, 200, 300, 400)))
+        assertEquals(SegmentObservation.WakeState.NotDetected, completed.wakeState)
+
+        engine.stop()
+    }
+
+    @Test
+    fun `stop during an open segment CANCELS it - partial discarded, nothing completes`() = runTest {
+        val sink = EngineObservationSink()
+        observer = SegmentObserver(CollectionGate { _, _ -> true }, sink)
+        val pending = MutableSharedFlow<VoiceSegmenterResult>()
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(pending)
+        `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = intentRecognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            segmentObserver = observer,
+            context = context,
+        )
+        engine.scope = this
+
+        engine.start(
+            backend = FakeAsrBackend("unused"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        advanceUntilIdle()
+        pending.emit(VoiceSegmenterResult.SpeechStarted)
+        advanceUntilIdle()
+        pending.emit(VoiceSegmenterResult.SpeechContinuing)
+        advanceUntilIdle()
+
+        engine.stop()
+        advanceUntilIdle()
+
+        assertEquals(1, sink.cancelled.size)
+        assertEquals("pipeline-stopped", sink.cancelled.single().reason)
+        assertTrue(sink.completed.isEmpty()) // listening closure discards ONLY the current partial
+    }
+
+    @Test
+    fun `gate OFF means the pipeline allocates NOTHING for upload across a full turn`() = runTest {
+        val sink = EngineObservationSink()
+        observer = SegmentObserver(CollectionGate { _, _ -> false }, sink)
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        createEngineWithSpeech(
+            observer,
+            recognizer = recognizer,
+            wakeWordResult = WakeWordResult(detected = false, confidence = 0f, completionSample = 4000),
+        )
+
+        engine.start(
+            backend = FakeAsrBackend("play something"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = {},
+        )
+        advanceUntilIdle()
+        engine.stop()
+
+        // Recognition still ran (ordinary pipeline untouched):
+        assertEquals(listOf("ensureReady", "recognize:play something"), recognizer.calls)
+        // ...yet zero upload-side observations and zero retained PCM exist anywhere.
+        assertTrue(sink.allObservedPcmSamples() == 0)
+        assertTrue(sink.started.isEmpty() && sink.incremental.isEmpty() && sink.completed.isEmpty())
+    }
+
+    private class EngineObservationSink : au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentSink {
+        val started = mutableListOf<SegmentObservation.Started>()
+        val incremental = mutableListOf<SegmentObservation.Incremental>()
+        val completed = mutableListOf<SegmentObservation.Completed>()
+        val cancelled = mutableListOf<SegmentObservation.Cancelled>()
+
+        override fun started(observation: SegmentObservation.Started): Boolean {
+            started += observation
+            return true
+        }
+
+        override fun incremental(observation: SegmentObservation.Incremental) {
+            incremental += observation
+        }
+
+        override fun completed(observation: SegmentObservation.Completed) {
+            completed += observation
+        }
+
+        override fun cancelled(observation: SegmentObservation.Cancelled) {
+            cancelled += observation
+        }
+
+        fun allObservedPcmSamples(): Int = completed.sumOf { it.pcm.size }
     }
 }

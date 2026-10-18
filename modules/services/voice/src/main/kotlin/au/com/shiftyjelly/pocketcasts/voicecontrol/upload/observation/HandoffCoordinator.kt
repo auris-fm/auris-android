@@ -29,35 +29,37 @@ class HandoffCoordinator(
         wakeState: SegmentObservation.WakeState,
         framesProvider: () -> Pair<List<ShortArray>, Int>,
         scope: ObserverHandoffScope,
-    ): Unit = collectionTx.transaction {
-        // Lock order asserted at entry: collection fence is held; acquiring the owner lock below
-        // continues the single global order collectionFence → owner → observer → sink (b1/b4).
-        checkOwnerOrder()
-        // ONE collection transaction: validate ORIGINAL coherent authority (account + policy in
-        // one acquisition)...
-        // A NULL issued authority is as unauthorized as a null context: both terminate the open
-        // capture through the same refusal path (reviewer b2 — no silent, unterminated handoff).
-        // Identity check FIRST: a stale/unknown context must be a late NO-OP, never a purge of
-        // the current capture's audio (the observer enforces this ordering under its lock too).
+    ) {
+        // PHASE 1 — validation OUTSIDE the fence (reviewer c0c45049): the validator takes ONLY
+        // the owner lock for its identity compare (plus a fence-free policy read). Nothing on
+        // this lane acquires the fence while holding the owner lock, so no entry inverts order.
         val issued = context?.issuedAuthority
-        if (context != null && !scope.ownsCapture(context.captureId)) return@transaction
-        if (issued == null || issued.accountName == null || !validateIssuedLocked(issued)) {
-            // Refusal STILL completes the capture: exactly one terminal, prefix PCM + charge
-            // released via the cancel path — never a silent return leaving live uncharged audio.
-            scope.completeUnderOwner(context, speechOnsetSample, speechEndSample, wakeState, framesProvider, admit = false)
-            return@transaction
+        val authorized = issued != null && issued.accountName != null && validateIssuedLocked(issued)
+        // PHASE 2 — observer/sink work under the fence ALONE (fence → observer → sink). The
+        // coordinator never touches the owner lock here; refusal termination and retention both
+        // serialize against loss fan-out through the same fence.
+        collectionTx.transaction {
+            checkFenceHeld()
+            // Identity check FIRST: a stale/unknown context is a late NO-OP, never a purge of
+            // the current capture's audio.
+            if (context != null && !scope.ownsCapture(context.captureId)) return@transaction
+            if (!authorized) {
+                // Refusal STILL terminates: exactly one terminal, prefix PCM + charge released
+                // via the cancel path — never a silent return leaving live uncharged audio.
+                scope.completeUnderOwner(context, speechOnsetSample, speechEndSample, wakeState, framesProvider, admit = false)
+                return@transaction
+            }
+            // Execute the handoff closure (provider + sink adoption + close) while the fence is
+            // held. A concurrent logout/expiry serializes behind this transaction. completeUnderOwner
+            // takes the observer lock internally as the innermost monitor (never upward).
+            scope.completeUnderOwner(context, speechOnsetSample, speechEndSample, wakeState, framesProvider)
         }
-        // ...then EXECUTE the actual handoff closure (provider + sink adoption + close) while the
-        // fence is still held. A concurrent logout/expiry serializes behind this transaction.
-        // NOTE: called WITHOUT the observer lock held (blocker 1): completeUnderOwner takes it
-        // internally as the innermost monitor.
-        scope.completeUnderOwner(context, speechOnsetSample, speechEndSample, wakeState, framesProvider)
     }
 
-    /** Order guard: entering the owner work only while THIS thread holds the collection fence. */
-    private fun checkOwnerOrder() {
+    /** Order guard: observer/sink work runs only while THIS thread holds the collection fence. */
+    private fun checkFenceHeld() {
         check(collectionTx.heldByCurrentThread()) {
-            "handoff must run inside the collection authority transaction"
+            "handoff observer work must run inside the collection authority transaction"
         }
     }
 }

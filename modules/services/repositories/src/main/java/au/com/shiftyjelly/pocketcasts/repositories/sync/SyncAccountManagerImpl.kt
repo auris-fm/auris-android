@@ -53,9 +53,20 @@ open class SyncAccountManagerImpl @Inject constructor(
      */
     private val collectionNestedLock = Any()
 
-    /** Runs [block] with owner state serialized by the nested collection fence (owner→inner). */
-    private fun <T> underCollectionNesting(block: () -> T): T = synchronized(collectionNestedLock) {
-        synchronized(credentialWriteLock) { block() }
+    /**
+     * CRITICAL ORDERING FACT (reviewer c0c45049): this nesting is INNERMOST — it acquires the
+     * owner lock FIRST, then the nested lock. It therefore CANNOT be entered while any outer
+     * fence is already held without inverting order against a concurrent holder that took the
+     * outer fence first. So NOTHING on the collection lane enters owner transitions from inside
+     * the collection fence: `collectionTx.transaction` never calls owner methods; coherent reads
+     * take the fence and the owner read SEQUENTIALLY (fence released before owner acquisition),
+     * and handoff validation runs OUTSIDE the fence with the fence re-acquired only for its own
+     * compare. This helper exists solely so future collection-first composition can route owner
+     * writes through `collectionFence → collectionNested → credentialWrite`; until such a
+     * writer exists, every caller here arrives fence-free and the order is trivially respected.
+     */
+    private fun <T> underCollectionNesting(block: () -> T): T = synchronized(credentialWriteLock) {
+        synchronized(collectionNestedLock) { block() }
     }
 
     private val credentialGenerationCounter = java.util.concurrent.atomic.AtomicLong(0)

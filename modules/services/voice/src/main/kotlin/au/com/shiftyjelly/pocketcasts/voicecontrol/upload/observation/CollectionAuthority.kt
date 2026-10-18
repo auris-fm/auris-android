@@ -81,9 +81,13 @@ class CollectionAuthority @Inject constructor(
     fun validateIssuedAuthority(issued: IssuedAuthority): Boolean = accountStartup.validateUnderOwnerTransaction { live -> validateIssuedLocked(live, issued) } &&
         enrollmentEvidenceMatches(issued)
 
-    /** Coherent validation while the OWNER LOCK IS ALREADY HELD (one-transaction handoff). */
+    /**
+     * Handoff validation: owner identity read via the owner lock ONLY (never entered while the
+     * collection fence is held — reviewer c0c45049), then fence-free policy compare. Runs in the
+     * coordinator's Phase 1, before the fence is acquired for observer work.
+     */
     fun validateIssuedAuthorityLocked(issued: IssuedAuthority): Boolean {
-        val live = accountStartup.authoritySnapshot() // reentrant under the held owner lock
+        val live = accountStartup.authoritySnapshot() // plain owner acquisition, fence NOT held
         return validateIssuedLocked(live, issued) && enrollmentEvidenceMatches(issued)
     }
 

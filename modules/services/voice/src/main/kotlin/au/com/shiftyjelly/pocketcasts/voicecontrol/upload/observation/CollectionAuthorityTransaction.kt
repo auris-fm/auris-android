@@ -51,17 +51,26 @@ class CollectionAuthorityTransaction @Inject constructor(
     /** Runs [block] as ONE collection-authority transaction over account + policy state. */
     fun <T> transaction(block: () -> T): T = fence.withLock { block() }
 
-    /** Coherent authority read inside the fence: owner snapshot + policy incarnation together. */
-    fun coherentAuthority(): CoherentAuthority = fence.withLock {
-        // ONE owner acquisition for all three components (they are atomic in AuthoritySnapshot).
+    /**
+     * Owner identity read WITHOUT the fence held (reviewer c0c45049): the fence and the owner
+     * lock are acquired SEQUENTIALLY, never nested, so no entry path can invert order against a
+     * concurrent owner transition. Components are individually coherent (AuthoritySnapshot is an
+     * atomic one-lock read; the policy triple is read under the fence elsewhere).
+     */
+    fun ownerIdentityNow(): au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot = ownership.authoritySnapshot()
+
+    /** Coherent authority read: policy incarnation under the fence, owner read sequentially after. */
+    fun coherentAuthority(): CoherentAuthority {
+        val policy = fence.withLock { Triple(policy.enabled(), policy.activationGeneration(), policy.activatedAtMonotonicMs()) }
+        // Fence RELEASED before the owner acquisition: strictly sequential, never nested.
         val live = ownership.authoritySnapshot()
-        CoherentAuthority(
+        return CoherentAuthority(
             accountName = live.accountName,
             session = live.session,
             credential = live.credential,
-            policyEnabled = policy.enabled(),
-            policyActivationGeneration = policy.activationGeneration(),
-            policyActivatedAtMonotonicMs = policy.activatedAtMonotonicMs(),
+            policyEnabled = policy.first,
+            policyActivationGeneration = policy.second,
+            policyActivatedAtMonotonicMs = policy.third,
         )
     }
 

@@ -21,6 +21,154 @@ object CanonicalJson {
     /** Canonical bytes (UTF-8) — what `record_sha256` hashes. */
     fun canonicalBytes(node: RecordNode): ByteArray = serialize(node).toByteArray(Charsets.UTF_8)
 
+    // Conformant parser used for re-canonicalization checks and queue persistence readback.
+    // Rejects duplicate keys and non-finite numbers (RFC 8785 input conformity).
+    fun parse(text: String): RecordNode {
+        val reader = JsonReader(text)
+        val node = reader.value()
+        reader.skipWhitespace()
+        if (!reader.atEnd()) throw CanonicalException("trailing input")
+        return node
+    }
+
+    private class JsonReader(private val s: String) {
+        private var i = 0
+        fun atEnd(): Boolean = i >= s.length
+        fun skipWhitespace() {
+            while (i < s.length && s[i].isJsonWhitespace()) i++
+        }
+
+        fun value(): RecordNode {
+            skipWhitespace()
+            if (atEnd()) throw CanonicalException("empty input")
+            return when (val c = s[i]) {
+                '{' -> obj()
+                '[' -> arr()
+                '"' -> RecordNode.Str(string())
+                't' -> literal("true", RecordNode.Bool(true))
+                'f' -> literal("false", RecordNode.Bool(false))
+                'n' -> literal("null", RecordNode.Null)
+                else -> if (c == '-' || c.isDigit()) number() else throw CanonicalException("unexpected '$c'")
+            }
+        }
+
+        private fun obj(): RecordNode.Obj {
+            expect('{')
+            val fields = LinkedHashMap<String, RecordNode>()
+            skipWhitespace()
+            if (i < s.length && s[i] == '}') {
+                i++
+                return RecordNode.Obj(emptyMap())
+            }
+            while (true) {
+                val key = string()
+                if (fields.containsKey(key)) throw CanonicalException("duplicate key '$key'")
+                skipWhitespace()
+                expect(':')
+                fields[key] = value()
+                skipWhitespace()
+                when (s.getOrNull(i)) {
+                    ',' -> i++
+
+                    '}' -> {
+                        i++
+                        return RecordNode.Obj(fields.toMap())
+                    }
+
+                    else -> throw CanonicalException("expected , or }")
+                }
+            }
+        }
+
+        private fun arr(): RecordNode.Arr {
+            expect('[')
+            val items = mutableListOf<RecordNode>()
+            skipWhitespace()
+            if (i < s.length && s[i] == ']') {
+                i++
+                return RecordNode.Arr(emptyList())
+            }
+            while (true) {
+                items += value()
+                skipWhitespace()
+                when (s.getOrNull(i)) {
+                    ',' -> i++
+
+                    ']' -> {
+                        i++
+                        return RecordNode.Arr(items.toList())
+                    }
+
+                    else -> throw CanonicalException("expected , or ]")
+                }
+            }
+        }
+
+        private fun string(): String {
+            skipWhitespace()
+            expect('"')
+            val out = StringBuilder()
+            while (true) {
+                if (atEnd()) throw CanonicalException("unterminated string")
+                val c = s[i++]
+                if (c == '"') return out.toString()
+                if (c == 92.toChar()) {
+                    when (val e = s[i++]) {
+                        '"' -> out.append('"')
+
+                        92.toChar() -> out.append(92.toChar())
+
+                        '/' -> out.append('/')
+
+                        'b' -> out.append(8.toChar())
+
+                        'f' -> out.append(12.toChar())
+
+                        'n' -> out.append(10.toChar())
+
+                        'r' -> out.append(13.toChar())
+
+                        't' -> out.append(9.toChar())
+
+                        'u' -> {
+                            val hex = s.substring(i, i + 4)
+                            i += 4
+                            out.append(hex.toInt(16).toChar())
+                        }
+
+                        else -> throw CanonicalException("bad escape '\$e'")
+                    }
+                } else {
+                    if (c.code < 0x20) throw CanonicalException("raw control character")
+                    out.append(c)
+                }
+            }
+        }
+
+        private fun number(): RecordNode.Num {
+            val start = i
+            if (s.getOrNull(i) == '-') i++
+            while (i < s.length && (s[i].isDigit() || s[i] == '.' || s[i] == 'e' || s[i] == 'E' || s[i] == '+' || s[i] == '-')) i++
+            val text = s.substring(start, i)
+            val value = text.toDoubleOrNull() ?: throw CanonicalException("bad number '$text'")
+            if (!value.isFinite()) throw CanonicalException("non-finite number")
+            return RecordNode.Num(value)
+        }
+
+        private fun literal(word: String, node: RecordNode): RecordNode {
+            if (!s.startsWith(word, i)) throw CanonicalException("bad literal")
+            i += word.length
+            return node
+        }
+
+        private fun expect(c: Char) {
+            if (s.getOrNull(i) != c) throw CanonicalException("expected '$c'")
+            i++
+        }
+    }
+
+    private fun Char.isJsonWhitespace(): Boolean = code == 32 || code == 9 || code == 10 || code == 13
+
     private fun write(node: RecordNode, out: StringBuilder) {
         when (node) {
             RecordNode.Null -> out.append("null")

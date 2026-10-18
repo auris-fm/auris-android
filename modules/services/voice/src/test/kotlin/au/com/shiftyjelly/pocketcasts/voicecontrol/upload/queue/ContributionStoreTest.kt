@@ -12,6 +12,11 @@ import org.junit.Test
 
 class ContributionStoreTest {
 
+    private companion object {
+        const val ID_A = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        const val SUCC = "11111111-2222-3333-4444-555555555555"
+    }
+
     private fun tempRoot(): File = Files.createTempDirectory("contrib").toFile()
 
     private fun meta(captureId: String, epoch: String = "epoch-1"): ByteArray = ("""{"capture_id":"$captureId","enrollment_epoch": "$epoch"}""").toByteArray()
@@ -213,6 +218,176 @@ class ContributionStoreTest {
         assertNull("attempt bookkeeping must not resurrect a purged entry", store.recordAttempt(id))
         assertEquals(0, store.readyEntries().size)
         assertFalse(File(root, "contributions/$id.ready").exists())
+    }
+
+    // ---- HELD (deterministic) controls: a hook fires WHILE the store is mid-preparation, so the
+    // interleaving is forced rather than raced. These replace sequential-after-purge proxies.
+
+    @Test
+    fun `HELD revocation during actual WAV write releases the reservation and keeps successor files`() {
+        // The hook runs at the moment the .wav.part write happens: purge lands DURING the real write.
+        val root = tempRoot()
+        val fence = QueueFence()
+        var hooked = false
+        // The successor runs on the NEW generation after a revoke, which is exactly what an account
+        // change does: old owner purged, new owner opens its own store instance on the same directory.
+        lateinit var theStore: ContributionStore
+        theStore = ContributionStore(
+            root,
+            QueueLimits.defaults().copy(maxQueueRecords = 2),
+            fence = fence,
+            hooks = StoreHooks(onWavPartWrite = { _ ->
+                hooked = true
+                fence.revoke() // revocation lands DURING the stale owner's actual WAV write
+                ContributionStore(root, QueueLimits.defaults(), fence = fence)
+                    .prepare(SUCC, "epoch-B", chunks(8), meta(SUCC))
+                theStore.purgeQueue("account-change")
+            }),
+        )
+        val store = theStore
+        val staleGen = fence.currentGeneration()
+        assertNull(store.prepareAt(staleGen, ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertTrue("hook never fired - control did not exercise the actual write", hooked)
+        // The successor's COMMITTED files must survive the stale preparation's cleanup untouched: purge is
+        // scoped to ids this owner held, never a blanket directory sweep.
+        assertTrue("successor WAV deleted by stale purge", File(root, "contributions/$SUCC.recording.wav").isFile)
+        assertTrue("successor READY marker deleted by stale purge", File(root, "contributions/$SUCC.ready").isFile)
+        // And the purged owner keeps its own index empty.
+        assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
+        assertTrue(File(root, "contributions/$SUCC.recording.wav").isFile)
+        assertTrue(File(root, "contributions/$SUCC.ready").isFile)
+        // And the stale preparation must not leave its own debris behind.
+        assertFalse(File(root, "contributions/$ID_A.ready").exists())
+        // One-slot queue: the stale reservation was released, so a fresh admission fits again.
+        assertNotNull(store.admit(8, 100))
+    }
+
+    @Test
+    fun `every non-publication path releases its own reservation`() {
+        // Direct, deterministic coverage of finding 1: each refusal/failure path must give back EXACTLY
+        // its own slot+bytes. No purge involved, so nothing can mask a leak.
+        val store = ContributionStore(tempRoot(), QueueLimits.defaults().copy(maxQueueRecords = 2))
+        // (a) refused before writing: over-length clip
+        assertNull(store.admit(16_000L * 45, 100))
+        assertEquals("refused admission must hold no budget", 0, store.reservedRecordsForTest())
+        // (b) admitted then explicitly discarded
+        val held = store.admit(8, 100)
+        assertNotNull("admission should succeed here", held)
+        assertTrue(held!!.isHeld())
+        assertEquals(1, store.reservedRecordsForTest())
+        held.discard()
+        assertFalse(held.isHeld())
+        assertEquals("discard must return the budget", 0, store.reservedRecordsForTest())
+        // (c) prepare() that reaches the commit point adopts the reservation (not double counted)
+        assertNotNull(store.prepare(ID_A, "epoch-1", chunks(8), meta(ID_A)))
+        assertEquals(1, store.readyEntries().size)
+        assertEquals("published entry leaves no live reservation", 0, store.reservedRecordsForTest())
+        // (d) duplicate prepare for an owned capture is refused WITHOUT consuming a second slot
+        assertNull(store.prepare(ID_A, "epoch-1", chunks(8), meta(ID_A)))
+        assertEquals(0, store.reservedRecordsForTest())
+        // Budget still has exactly one record free: prove it by filling it, then seeing denial.
+        assertNotNull(store.prepare(SUCC, "epoch-2", chunks(8), meta(SUCC)))
+        assertEquals(2, store.readyEntries().size)
+        assertNull(store.admit(8, 100))
+    }
+
+    @Test
+    fun `HELD stale publication alone releases its reservation without any purge`() {
+        // The leak path is the fenced-off publication inside writeAndPublish. A purge would clear all
+        // reservations and mask the bug, so this control revokes the generation WITHOUT purging: only the
+        // stale preparation's own handle can be holding budget. If its release is missing, the last
+        // admission in a 1-record queue is refused by phantom load.
+        val root = tempRoot()
+        val fence = QueueFence()
+        var hooked = false
+        lateinit var theStore: ContributionStore
+        theStore = ContributionStore(
+            root,
+            QueueLimits.defaults().copy(maxQueueRecords = 1),
+            fence = fence,
+            hooks = StoreHooks(beforePublication = { _ ->
+                hooked = true
+                fence.revoke() // stale at the publication instant; deliberately NO purgeQueue() call
+            }),
+        )
+        val store = theStore
+        val gen = fence.currentGeneration()
+        assertNull(store.prepareAt(gen, ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertTrue("hook never fired - control did not reach the publication point", hooked)
+        assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
+        assertEquals("stale publication leaked its reservation", 0, store.reservedRecordsForTest())
+        assertNotNull("one-record queue still occupied by a phantom reservation", store.admit(8, 100))
+    }
+
+    @Test
+    fun `HELD stale publication releases its reservation so the one free slot stays usable`() {
+        // No successor commits anything, so the ONLY thing that can occupy the single slot is this
+        // preparation's own reservation. If the fenced-off path failed to release it, admit() would
+        // find the queue full. Deterministic: the hook fires inside the real write, not after it.
+        val root = tempRoot()
+        val fence = QueueFence()
+        var hooked = false
+        lateinit var theStore: ContributionStore
+        theStore = ContributionStore(
+            root,
+            QueueLimits.defaults().copy(maxQueueRecords = 1),
+            fence = fence,
+            hooks = StoreHooks(onWavPartWrite = { gen ->
+                hooked = true
+                fence.revoke() // makes our captured generation stale while we are mid-write
+                theStore.purgeQueue("account-change")
+            }),
+        )
+        val store = theStore
+        assertNull(store.prepareAt(fence.currentGeneration().let { it }, ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertTrue("hook never fired - control did not exercise the actual write", hooked)
+        assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
+        assertNotNull("stale preparation leaked its reservation into a 1-slot queue", store.admit(8, 100))
+    }
+
+    @Test
+    fun `HELD revocation during late callback publication cannot delete successor files`() {
+        // Hook fires just before publication: the generation is already stale at that instant, so the
+        // stale path must abandon WITHOUT touching any file for the shared capture id.
+        val root = tempRoot()
+        val fence = QueueFence()
+        lateinit var theStore: ContributionStore
+        theStore = ContributionStore(
+            root,
+            QueueLimits.defaults(),
+            fence = fence,
+            hooks = StoreHooks(beforePublication = { _ -> theStore.purgeQueue("account-change") }),
+        )
+        val store = theStore
+        val gen = fence.currentGeneration()
+        assertNull(store.prepareAt(gen, ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        // Purge cleared everything; nothing from the fenced-off preparation may have been republished.
+        assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
+        assertFalse(File(root, "contributions/$ID_A.ready").exists())
+    }
+
+    @Test
+    fun `duplicate prepare for an owned capture does not clobber its immutable ready files`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val id = UUID.randomUUID().toString()
+        val first = store.prepare(id, "epoch-1", chunks(8), meta(id))
+        assertNotNull(first)
+        val wavBefore = File(root, "contributions/$id.recording.wav").readBytes().toList()
+        val second = store.prepare(id, "epoch-1", chunks(8), meta(id))
+        assertNull("re-preparing an already-owned capture must be refused, not overwrite ready files", second)
+        assertEquals(wavBefore, File(root, "contributions/$id.recording.wav").readBytes().toList())
+        assertEquals(1, store.readyEntries().count { it.captureId == id })
+    }
+
+    @Test
+    fun `single slot queue admits one prepare without double charging`() {
+        // prepare() must CONSUME the Admission it validated, not re-admit and demand a second slot.
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults().copy(maxQueueRecords = 1))
+        val id = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        assertEquals(1, store.readyEntries().size)
     }
 
     @Test

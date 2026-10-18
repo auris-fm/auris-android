@@ -98,92 +98,113 @@ class ContributionRetentionSink(
      * Opens a bounded prefix ONLY when the first-chunk reservation succeeds; a refused budget
      * means zero PCM allocated for this capture.
      */
+    // Opens the owned prefix. The reviewer requires RESERVE ACTUAL BYTES BEFORE ALLOCATION:
+    // the charge here is exactly the first chunk's bytes, and the caller hands that array over
+    // to the sink (adopted, no copy) — so the reserved amount equals the allocated amount.
     override fun started(observation: SegmentObservation.Started): Boolean {
-        if (!budget.reserve(FIRST_CHUNK_BYTES)) return false
+        val actualBytes = observation.firstChunk.size.toLong() * BYTES_PER_SAMPLE
+        if (actualBytes > maxBytesPerClip || !budget.reserve(actualBytes)) return false
         synchronized(lock) {
-            openPrefix = OpenPrefix(observation.context, mutableListOf()).apply { chargedBytes = FIRST_CHUNK_BYTES }
+            // ADOPT the production array: ownership transfers, zero extra allocation.
+            openPrefix = OpenPrefix(observation.context, mutableListOf(observation.firstChunk))
+                .apply { chargedBytes = actualBytes }
         }
         return true
     }
 
-    /** Appends REAL samples: reserve the delta BEFORE copying it in; refuse growth beyond caps. */
+    /** Appends REAL samples: reserve the delta BEFORE any copy; enforce per-clip + aggregate caps. */
     override fun incremental(observation: SegmentObservation.Incremental, samples: ShortArray) {
         if (samples.isEmpty()) return
         val needed = samples.size.toLong() * BYTES_PER_SAMPLE
-        val retentionEnders = mutableListOf<OpenPrefix>()
         val prefix = synchronized(lock) { openPrefix?.takeIf { it.context == observation.context } } ?: return
+        // Aggregate reservation FIRST — on failure nothing is copied and retention ends.
         if (!budget.reserve(needed)) {
-            retentionEnders.clear()
             endPrefixWithTerminal(prefix, "budget-exhausted")
             return
         }
+        var ended = false
         synchronized(lock) {
-            val still = openPrefix?.takeIf { it.context == observation.context } ?: run {
+            val still = openPrefix?.takeIf { it.context == observation.context }
+                ?: run {
+                    budget.release(needed)
+                    return
+                }
+            if (still.chargedBytes + needed > maxBytesPerClip) {
                 budget.release(needed)
-                return
-            }
-            val clipBytes = still.chargedBytes + needed
-            if (clipBytes > maxBytesPerClip) {
-                budget.release(needed)
-                val released = still.chargedBytes
-                still.buffer.clear()
-                still.chargedBytes = 0L
-                openPrefix = null
-                budget.release(released)
-                retentionEnders += still
+                ended = true
             } else {
-                still.buffer.add(samples.copyOf()) // bounded copy UNDER reservation
-                still.chargedBytes = clipBytes
-                candidates.find { it.context == observation.context && it.pcm == null }
-                    ?.let { it.incrementalSamplesAccounted += samples.size }
+                // Owned chunk: a bounded COPY under reservation (the caller's array stays theirs).
+                still.buffer.add(samples.copyOf())
+                still.chargedBytes += needed
             }
         }
-        if (retentionEnders.isNotEmpty()) logLoss("partial-discard:retention-cap")
-        retentionEnders.forEach { it.context.let { c -> onRetentionEnded?.invoke(c) } }
+        if (ended) endPrefixWithTerminal(prefix, "retention-cap")
     }
 
-    /** Adopts the PRODUCTION frames when no prefix grew; otherwise finalizes the retained prefix. */
+    /**
+     * Completion handoff with ATOMIC charge transfer: the closed segment's exact bytes are
+     * reserved BEFORE the prefix charge is released, so a failed reservation leaves the prefix
+     * fully charged and owned (never an open, uncharged buffer). The per-clip cap applies to
+     * BOTH paths. The retained copy happens only after its own reservation succeeds.
+     */
     override fun completed(observation: SegmentObservation.Completed): Boolean {
-        val prefix = synchronized(lock) { openPrefix?.takeIf { it.context == observation.context } }
-        val candidate = RetainedCandidate(observation.context)
-        if (prefix != null) {
-            val flat = flatten(prefix.buffer)
-            // Prefix already charged; adopt whichever is larger — the VAD's closed segment is
-            // authoritative, so release the prefix charge and take the full-segment charge once.
-            val fullBytes = observation.pcm.size.toLong() * BYTES_PER_SAMPLE
-            // Re-check the aggregate for the FINAL size before adopting: release the prefix
-            // reservation first, then reserve exactly the closed clip. Completion never keeps a
-            // second copy of bytes the prefix already owned — no double count.
-            val prefixCharge = prefix.chargedBytes
-            budget.release(prefixCharge)
-            prefix.chargedBytes = 0L
-            if (!budget.reserve(fullBytes)) {
-                logLoss("refused-handoff:budget")
-                return false
-            }
-            candidate.bytesCharged = fullBytes
-            candidate.pcm = observation.pcm
-            candidate.sampleRateHz = observation.sampleRateHz
-            candidate.wakeState = observation.wakeState
-            candidate.incrementalSamplesAccounted = flat.size.toLong()
-            releasePrefixOnlyBuffer(prefix)
-            synchronized(lock) {
-                if (openPrefix === prefix) openPrefix = null
-                candidates.addLast(candidate)
-            }
-            return true
-        }
-        val bytes = observation.pcm.size.toLong() * BYTES_PER_SAMPLE
-        if (bytes > maxBytesPerClip || !budget.reserve(bytes)) {
-            logLoss(if (bytes > maxBytesPerClip) "refused-handoff:clip-cap" else "refused-handoff:budget")
+        val fullSamples = observation.frames.sumOf { it.size }
+        val fullBytes = fullSamples.toLong() * BYTES_PER_SAMPLE
+        if (fullBytes > maxBytesPerClip) {
+            logLoss("refused-handoff:clip-cap")
             return false
         }
-        candidate.pcm = observation.pcm
-        candidate.sampleRateHz = observation.sampleRateHz
-        candidate.wakeState = observation.wakeState
-        candidate.bytesCharged = bytes
+        val prefix = synchronized(lock) { openPrefix?.takeIf { it.context == observation.context } }
+        if (prefix != null) {
+            // Reserve the FINAL size first; release the prefix charge only after success.
+            val extra = (fullBytes - prefix.chargedBytes).coerceAtLeast(0L)
+            if (extra > 0 && !budget.reserve(extra)) {
+                logLoss("refused-handoff:budget")
+                return false // prefix remains charged & owned; observer closes the capture separately
+            }
+            // Copy the production frames into ONE owned buffer under reservation, then transfer.
+            val owned = flattenOwned(observation.frames, fullSamples)
+            synchronized(lock) {
+                if (openPrefix === prefix) {
+                    prefix.buffer.clear()
+                    if (prefix.chargedBytes > fullBytes) budget.release(prefix.chargedBytes - fullBytes)
+                    prefix.chargedBytes = fullBytes
+                    openPrefix = null
+                }
+            }
+            val candidate = RetainedCandidate(observation.context).apply {
+                pcm = owned
+                sampleRateHz = observation.sampleRateHz
+                wakeState = observation.wakeState
+                bytesCharged = fullBytes
+                incrementalSamplesAccounted = fullSamples.toLong()
+            }
+            synchronized(lock) { candidates.addLast(candidate) }
+            return true
+        }
+        if (!budget.reserve(fullBytes)) {
+            logLoss("refused-handoff:budget")
+            return false
+        }
+        val owned = flattenOwned(observation.frames, fullSamples)
+        val candidate = RetainedCandidate(observation.context).apply {
+            pcm = owned
+            sampleRateHz = observation.sampleRateHz
+            wakeState = observation.wakeState
+            bytesCharged = fullBytes
+        }
         synchronized(lock) { candidates.addLast(candidate) }
         return true
+    }
+
+    private fun flattenOwned(frames: List<ShortArray>, total: Int): ShortArray {
+        val out = ShortArray(total)
+        var offset = 0
+        for (f in frames) {
+            System.arraycopy(f, 0, out, offset, f.size)
+            offset += f.size
+        }
+        return out
     }
 
     /** Cancellation releases the open prefix's charge completely — nothing survives it. */
@@ -247,11 +268,6 @@ class ContributionRetentionSink(
         prefix.buffer.clear()
         prefix.chargedBytes = 0L
         budget.release(bytes)
-    }
-
-    private fun releasePrefixOnlyBuffer(prefix: OpenPrefix) {
-        // Completion path: the CHARGE transfers to the candidate; only the buffer view is dropped.
-        prefix.buffer.clear()
     }
 
     private fun logLoss(event: String) = synchronized(lock) { _lossEvents.add(event) }

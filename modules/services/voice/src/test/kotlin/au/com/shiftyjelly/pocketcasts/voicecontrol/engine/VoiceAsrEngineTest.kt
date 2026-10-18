@@ -39,6 +39,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.Collection
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionGate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.HandoffValidator
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.NoopSegmentSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObserver
@@ -86,8 +87,36 @@ class VoiceAsrEngineTest {
     // Gate OFF by default: the observation layer must not change any pre-existing engine behaviour.
     private var authority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = false, fullRevocation = true) }
     private var retentionSink = ContributionRetentionSink(CollectionBudget(1L shl 20))
-    private var observer = SegmentObserver(CollectionGate { _ -> false }, NoopSegmentSink, authority)
+    private var observer = SegmentObserver(
+        CollectionGate { _ -> false },
+        NoopSegmentSink,
+        authority,
+        issueAuthority = { issuedAuthorityForTests },
+        handoffValidator = HandoffValidator { true },
+    )
     private val translationStage = mock<TranslationStage>()
+
+    // Engine tests exercise lifecycle; dedicated observer controls validate the real
+    // owner-transaction handoff. Here the frozen value is a constant and validation accepts.
+    private val issuedAuthorityForTests = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuthority(
+        "a@b.c",
+        1L,
+        1L,
+        "epoch-1",
+        "disclosure-1",
+    )
+
+    private companion object {
+        // Engine tests exercise lifecycle; dedicated observer controls validate the real
+        // owner-transaction handoff. Here the frozen value is a constant and validation accepts.
+        val issuedAuthorityForTests = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuthority(
+            "a@b.c",
+            1L,
+            1L,
+            "epoch-1",
+            "disclosure-1",
+        )
+    }
 
     init {
         // The engine reads the grace window to decide whether the user was addressing us, so the
@@ -1598,6 +1627,8 @@ class VoiceAsrEngineTest {
             },
             retention,
             liveAuthority,
+            issueAuthority = { issuedAuthorityForTests },
+            handoffValidator = HandoffValidator { true },
         )
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(
@@ -1645,7 +1676,7 @@ class VoiceAsrEngineTest {
     fun `stop during an open segment CANCELS it - partial discarded, nothing completes`() = runTest {
         val sink = EngineObservationSink()
         val liveAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
-        observer = SegmentObserver(CollectionGate { true }, sink, liveAuthority)
+        observer = SegmentObserver(CollectionGate { true }, sink, liveAuthority, { issuedAuthorityForTests }, HandoffValidator { true })
         val pending = MutableSharedFlow<VoiceSegmenterResult>()
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(pending)
         `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(true)
@@ -1691,7 +1722,7 @@ class VoiceAsrEngineTest {
         val sink = EngineObservationSink()
         val deadSink = ContributionRetentionSink(CollectionBudget(1L shl 20))
         val deadAuthority: () -> AuthorityDecision = { AuthorityDecision(collectionPermitted = false, fullRevocation = true) }
-        observer = SegmentObserver(CollectionGate { false }, sink, deadAuthority)
+        observer = SegmentObserver(CollectionGate { false }, sink, deadAuthority, { issuedAuthorityForTests }, HandoffValidator { true })
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         createEngineWithSpeech(
             observer,
@@ -1745,6 +1776,6 @@ class VoiceAsrEngineTest {
             cancelled += observation
         }
 
-        fun allObservedPcmSamples(): Int = completed.sumOf { it.pcm.size }
+        fun allObservedPcmSamples(): Int = completed.sumOf { o -> o.frames.sumOf { it.size } }
     }
 }

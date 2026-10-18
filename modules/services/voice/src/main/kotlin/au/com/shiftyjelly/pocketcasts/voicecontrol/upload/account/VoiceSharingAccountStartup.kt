@@ -68,6 +68,16 @@ class VoiceSharingAccountStartup @Inject constructor(
         }, null, false)
     }
 
+    /** Reconciles external account state and fires session-end loss to subscribers. */
+    fun reconcileAndNotifySessionEnd() {
+        val before = ownership.authoritySnapshot().session
+        val after = ownership.reconcileExternalState()
+        if (after.accountName == null || after.session != before) sessionEndedListener?.invoke()
+    }
+
     /** Last observable authority — exposed for diagnostics; never reconstructs from cache. */
     fun authoritySnapshot(): AuthoritySnapshot = ownership.authoritySnapshot()
+
+    /** Owner-transaction scope: [block] runs under the REAL owner lock (owner→voice order). */
+    fun <T> validateUnderOwnerTransaction(block: (AuthoritySnapshot) -> T): T = ownership.transaction { block(ownership.authoritySnapshot()) }
 }

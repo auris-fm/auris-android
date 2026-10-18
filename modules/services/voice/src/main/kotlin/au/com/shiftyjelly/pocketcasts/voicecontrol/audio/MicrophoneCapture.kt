@@ -84,6 +84,12 @@ class MicrophoneCapture @Inject constructor(
      * The native API exposes a full-buffer drain, so the delta read copies only the tail; when no
      * capture is active this reports (0, empty) rather than fabricating audio.
      */
+
+    fun speechPcmSize(): Int = if (isRecording) hardware.getSpeechPcmSize() else 0
+
+    /** DRAIN the native speech buffer into [out]; returns the copied length. Ownership transfers. */
+    fun drainSpeechPcm(out: ShortArray): Int = if (isRecording) hardware.getSpeechPcm(out) else 0
+
     fun peekSpeechDelta(previousTotal: Int): Pair<Int, ShortArray> {
         if (!isRecording) return 0 to ShortArray(0)
         val total = hardware.getSpeechPcmSize()

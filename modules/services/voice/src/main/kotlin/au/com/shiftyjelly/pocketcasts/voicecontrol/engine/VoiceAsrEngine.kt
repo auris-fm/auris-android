@@ -177,8 +177,15 @@ class VoiceAsrEngine @Inject constructor(
                             // Freeze the capture context SYNCHRONOUSLY here — before any await
                             // boundary — and keep the ISSUED value for every later stage of THIS
                             // capture. Refused captures yield null and are excluded downstream.
-                            openContext = segmentObserver.speechStarted(captureSessionIncarnation, currentRouteClass)
-                            accountedSamples = 0
+                            // The FIRST chunk is the producer's own accumulated buffer drained
+                            // through the SAME native API the completed segment uses — a real
+                            // allocation whose ownership transfers to the observer/sink.
+                            val initialSize = voiceAudioProcessor.speechPcmSize()
+                            val firstChunk = ShortArray(initialSize)
+                            val copied = if (initialSize > 0) voiceAudioProcessor.drainSpeechPcm(firstChunk) else 0
+                            val ownedFirst = if (copied == initialSize) firstChunk else firstChunk.copyOf(copied)
+                            openContext = segmentObserver.speechStarted(captureSessionIncarnation, currentRouteClass, ownedFirst)
+                            accountedSamples = copied
                         }
 
                         is VoiceSegmenterResult.SpeechContinuing -> {

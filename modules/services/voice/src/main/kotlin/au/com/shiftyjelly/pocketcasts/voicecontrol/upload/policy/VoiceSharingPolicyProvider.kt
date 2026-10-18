@@ -88,6 +88,9 @@ class VoiceSharingPolicyProvider(
         }
     }
 
+    /** Raw published state WITHOUT lease evaluation: lets deadline consumers read the stamp. */
+    val publishedPolicy: StateFlow<PolicySnapshot> get() = state
+
     fun snapshot(): PolicySnapshot {
         val value = state.value
         val now = nowMs()

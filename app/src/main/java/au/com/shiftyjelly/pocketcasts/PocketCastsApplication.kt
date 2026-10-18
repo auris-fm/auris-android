@@ -118,6 +118,8 @@ class PocketCastsApplication :
 
     @Inject lateinit var voiceSharingAccountStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
 
+    @Inject lateinit var voiceCollectionStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionStartup
+
     @Inject lateinit var analyticsController: AnalyticsController
 
     @Inject lateinit var downloadStatisticsReporter: DownloadStatisticsReporter
@@ -245,6 +247,8 @@ class PocketCastsApplication :
                 defaultPlaylistsInitializer.initialize()
                 voiceSharingPolicyStartup.initializeOnAppStart()
                 voiceSharingAccountStartup.initializeOnAppStart()
+                // Loss subscriptions (accounts/enrollment/policy/lease-deadline) + sink wiring.
+                voiceCollectionStartup.initializeOnAppStart()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

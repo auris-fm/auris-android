@@ -51,6 +51,12 @@ class VoiceAudioProcessor @Inject constructor(
      * buffer the completed segment is drained from — no parallel capture, no extra copy beyond
      * the delta read. Zero-producing or unsupported states report (0, empty) honestly.
      */
+
+    fun speechPcmSize(): Int = microphoneCapture.speechPcmSize()
+
+    /** Drains the producer's speech buffer into [out] (ownership of [out] transfers to caller). */
+    fun drainSpeechPcm(out: ShortArray): Int = microphoneCapture.drainSpeechPcm(out)
+
     fun peekSpeechDelta(previousTotal: Int): Pair<Int, ShortArray> = microphoneCapture.peekSpeechDelta(previousTotal)
 
     /**

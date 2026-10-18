@@ -43,9 +43,27 @@ object VoiceObservationModule {
         gate = CollectionGate { decision -> decision.shouldRetainNewWork },
         sink = sink,
         authority = authority::decide,
+        issueAuthority = authority::issueAuthority,
+        handoffValidator = HandoffValidator { issued -> authority.validateIssuedAuthority(issued) },
     ).also { observer ->
         sink.onRetentionEnded = { context -> observer.noteRetentionEnded(context) }
     }
+
+    /**
+     * Starts the PRODUCTION loss subscriptions (CollectionLossWatcher): account change,
+     * enrollment/withdrawal post-commit hook, policy disable flow, exact lease-deadline purge.
+     * Called from the app surface once at startup; idempotent inside the watcher.
+     */
+    @Provides
+    @Singleton
+    fun provideLossWatcher(
+        observer: SegmentObserver,
+        authority: CollectionAuthority,
+        policyProvider: VoiceSharingPolicyProvider,
+        accountStartup: VoiceSharingAccountStartup,
+        syncAccountManager: au.com.shiftyjelly.pocketcasts.repositories.sync.SyncAccountManager,
+        @au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope scope: kotlinx.coroutines.CoroutineScope,
+    ): CollectionLossWatcher = CollectionLossWatcher(observer, authority, policyProvider, accountStartup, syncAccountManager, scope)
 }
 
 /** 64 MiB aggregate ceiling for upload-owned PCM (queue bounds refine this in Task 5). */

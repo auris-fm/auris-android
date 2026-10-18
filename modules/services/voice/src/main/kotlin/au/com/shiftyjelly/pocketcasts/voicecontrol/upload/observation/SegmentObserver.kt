@@ -20,6 +20,10 @@ class SegmentObserver(
     private val gate: CollectionGate,
     private val sink: SegmentSink,
     private val authority: () -> AuthorityDecision,
+    /** Freezes the ORIGINAL authority at start; NO renewal source — reads current, once. */
+    private val issueAuthority: () -> IssuedAuthority = { IssuedAuthority(null, 0L, 0L, null, null) },
+    /** Owner-transaction handoff validation; fail-closed when uncomposed. */
+    private val handoffValidator: HandoffValidator = RefuseAllHandoffValidator,
 ) {
 
     // All fields below are guarded by [lock]; external callers and the pipeline thread contend
@@ -34,12 +38,15 @@ class SegmentObserver(
     var maxRetainedBytes: Long = DEFAULT_MAX_RETAINED_BYTES
 
     /** Context issued for this SpeechStarted iff admission passed; null when refused/closed. */
-    fun speechStarted(captureSession: Long, routeClass: String): CaptureContext? = synchronized(lock) {
-        val context = CaptureContext(UUID.randomUUID(), captureSession, routeClass)
+    // [firstChunk] is the production segment's current accumulated audio; when retention starts
+    // the sink ADOPTS that array (ownership transfer, no extra copy). Pass [ShortArray] of the
+    // live buffer — never a fabricated size.
+    fun speechStarted(captureSession: Long, routeClass: String, firstChunk: ShortArray): CaptureContext? = synchronized(lock) {
+        val context = CaptureContext(UUID.randomUUID(), captureSession, routeClass, issueAuthority())
         open = context
         cumulativeAccounted = 0
         // Gate BEFORE any allocation: consulted at START with the LIVE authority.
-        retainedForOpen = gate.accepts(authority()) && sink.started(SegmentObservation.Started(context))
+        retainedForOpen = gate.accepts(authority()) && sink.started(SegmentObservation.Started(context, firstChunk))
         context.takeIf { retainedForOpen }
     }
 
@@ -67,18 +74,24 @@ class SegmentObserver(
         val current = open ?: return // no open capture: nothing to complete
         if (context == null || current.captureId != context.captureId) return // late: refuse join
         val decision = authority()
-        if (!gate.accepts(decision)) {
-            // REVALIDATION before handoff: refuse, allocate NOTHING (provider not run).
+        // TWO-part revalidation (reviewer 51bf10c2): live policy/session decision AND the
+        // ORIGINAL issued authority revalidated INSIDE the owner transaction. Either failing
+        // refuses the handoff and allocates nothing. The frozen value is never renewed.
+        val issued = current.issuedAuthority
+        val ownerValid = issued != null && handoffValidator.validateUnderOwnerTransaction(issued)
+        if (!gate.accepts(decision) || !ownerValid) {
             closeLocked()
             return
         }
+        // NO upload-side flatten here: the sink receives the PRODUCTION frame list and reserves
+        // its exact bytes before performing any retained copy it owns. The pipeline's own
+        // allocation (the VAD speech buffer) belongs to recognition, not collection; on refusal
+        // collection charges and allocates ZERO additional memory.
         val (frames, rate) = framesProvider()
-        val total = frames.sumOf { it.size }
-        totalRetainedBytes += total * BYTES_PER_SAMPLE
         val adopted = sink.completed(
-            SegmentObservation.Completed(current, flatten(frames), rate, speechOnsetSample, speechEndSample, wakeState),
+            SegmentObservation.Completed(current, frames, rate, speechOnsetSample, speechEndSample, wakeState),
         )
-        if (!adopted) totalRetainedBytes -= total * BYTES_PER_SAMPLE
+        if (adopted) totalRetainedBytes += frames.sumOf { it.size } * BYTES_PER_SAMPLE
         closeLocked()
     }
 

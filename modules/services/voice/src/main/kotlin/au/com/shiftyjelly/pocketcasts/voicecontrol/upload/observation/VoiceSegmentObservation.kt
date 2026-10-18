@@ -12,6 +12,12 @@ data class CaptureContext(
     val captureId: UUID,
     val captureSession: Long,
     val routeClass: String,
+    /**
+     * Authority FROZEN at start (account/session/credential + enrollment epoch/disclosure).
+     * The completion handoff revalidates THIS value inside the owner transaction; nothing here
+     * is ever refreshed from a newer projection or a later account.
+     */
+    val issuedAuthority: IssuedAuthority? = null,
 )
 
 /**
@@ -25,7 +31,11 @@ sealed interface SegmentObservation {
     val context: CaptureContext
 
     /** VAD reported speech onset: the moment the context is frozen. Zero audio retained. */
-    data class Started(override val context: CaptureContext) : SegmentObservation
+    data class Started(
+        override val context: CaptureContext,
+        /** The production first-chunk array; the sink ADOPTS it (no upload-side copy). */
+        val firstChunk: ShortArray,
+    ) : SegmentObservation
 
     /** Incremental accounting of REAL produced samples, bounded by collector ownership. */
     data class Incremental(
@@ -46,7 +56,8 @@ sealed interface SegmentObservation {
      */
     data class Completed(
         override val context: CaptureContext,
-        val pcm: ShortArray,
+        /** The production VAD frames exactly as emitted — no upload-side flatten/copy. */
+        val frames: List<ShortArray>,
         val sampleRateHz: Int,
         val speechOnsetSample: Int,
         val speechEndSample: Int,
@@ -54,12 +65,13 @@ sealed interface SegmentObservation {
     ) : SegmentObservation {
         override fun equals(other: Any?): Boolean = this === other || (
             other is Completed && context == other.context &&
-                pcm.contentEquals(other.pcm) && sampleRateHz == other.sampleRateHz &&
+                frames.size == other.frames.size &&
+                sampleRateHz == other.sampleRateHz &&
                 speechOnsetSample == other.speechOnsetSample && speechEndSample == other.speechEndSample &&
                 wakeState == other.wakeState
             )
 
-        override fun hashCode(): Int = 31 * context.hashCode() + pcm.contentHashCode()
+        override fun hashCode(): Int = 31 * context.hashCode() + frames.size
     }
 
     /** The segment was cancelled/rejected before completion: partials die with it. */

@@ -50,6 +50,35 @@ class CollectionAuthority @Inject constructor(
         establishedSession = null
     }
 
+    /** Freeze the ORIGINAL authority for a capture: read current state ONCE, never renewed. */
+    fun issueAuthority(): IssuedAuthority {
+        val ownership = accountStartup.authoritySnapshot()
+        val projection = accountStartup.state.projection.value
+        return IssuedAuthority(
+            accountName = ownership.accountName,
+            sessionGeneration = ownership.session,
+            credentialIncarnation = ownership.credential,
+            enrollmentEpoch = projection?.enrollmentEpoch,
+            acceptedDisclosureVersion = projection?.acceptedDisclosureVersion,
+        )
+    }
+
+    /** Handoff check INSIDE the owner transaction against the value frozen at start. */
+    fun validateIssuedAuthority(issued: IssuedAuthority): Boolean = accountStartup.validateUnderOwnerTransaction { live ->
+        live.accountName == issued.accountName &&
+            live.session == issued.sessionGeneration &&
+            live.credential == issued.credentialIncarnation
+    } && enrollmentEvidenceMatches(issued)
+
+    private fun enrollmentEvidenceMatches(issued: IssuedAuthority): Boolean {
+        val projection = accountStartup.state.projection.value ?: return false
+        return establishedSession == accountStartup.authoritySnapshot().session &&
+            projection.enrollmentEpoch == issued.enrollmentEpoch &&
+            projection.acceptedDisclosureVersion == issued.acceptedDisclosureVersion &&
+            projection.voiceSharingEnrolled &&
+            projection.withdrawalState == WithdrawalState.ACTIVE
+    }
+
     fun decide(): AuthorityDecision {
         val permitted = policyProvider.snapshot().enabled
         val ownership = accountStartup.authoritySnapshot()

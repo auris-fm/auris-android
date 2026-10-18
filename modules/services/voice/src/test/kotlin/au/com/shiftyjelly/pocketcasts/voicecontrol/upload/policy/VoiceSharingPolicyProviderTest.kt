@@ -215,7 +215,7 @@ class VoiceSharingPolicyProviderTest {
     }
 
     @Test
-    fun `old timer waking while a renewal is in flight or fresh never emits a spurious disable`() {
+    fun `real expiry reached before an in-flight renewal succeeds disables until the renewal publishes`() {
         val provider = provider(refreshTimeoutMs = 10 * VoiceSharingPolicyProvider.DEFAULT_LEASE_MS)
         assertTrue(provider.snapshot().enabled) // init: enabled, timer A due at the init lease
 
@@ -228,19 +228,71 @@ class VoiceSharingPolicyProviderTest {
                 seen += if (awaitItem().enabled) "enabled" else "disabled"
                 // Renewal B allocates generation 2, then parks inside its fetch await.
                 scope.launch { provider.refresh() }
-                // Old timer A wakes NOW: A's own lease has expired, but generation 2 is already
-                // allocated and B's renewal is in flight/fresh — the fence must suppress A's
-                // disable so the subscriber sees NO emission here.
+                // A's REAL expiry passes while B is still in flight: an in-flight renewal is not
+                // a fresh policy, so the subscriber MUST see disabled until B publishes.
                 monotonicNowMs += VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1
                 dispatcher.scheduler.advanceTimeBy(VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1)
                 dispatcher.scheduler.runCurrent()
-                // Release B: bookkeeping advances, activation succeeds → renewal publishes.
+                seen += if (awaitItem().enabled) "enabled" else "disabled"
+                // B then succeeds: bookkeeping advances, activation succeeds → fresh lease.
                 fetchTimeMs += 1_000
                 fetchGate.trySetResult(true)
                 seen += if (awaitItem().enabled) "enabled" else "disabled"
-                // Only B's OWN deadline may disable the subscriber.
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+        org.junit.Assert.assertEquals(listOf("enabled", "disabled", "enabled"), seen)
+    }
+
+    @Test
+    fun `hung renewal never fabricates a fresh lease - disabled persists past the whole-refresh deadline`() {
+        // The lifecycle init must SUCCEED first (enabled); only the explicit renewal hangs.
+        val provider = provider(refreshTimeoutMs = 500)
+        assertTrue(provider.snapshot().enabled)
+        val fetchGate = TaskCompletionSource<Boolean>()
+        whenever(config.fetch()).thenAnswer { fetchGate.task } // renewal B never completes
+
+        val seen = mutableListOf<String>()
+        runBlocking {
+            provider.policy.test {
+                seen += if (awaitItem().enabled) "enabled" else "disabled"
+                scope.launch { provider.refresh() } // hangs, then hits the whole-refresh deadline
                 monotonicNowMs += VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1
-                dispatcher.scheduler.advanceTimeBy(VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 1)
+                dispatcher.scheduler.advanceTimeBy(VoiceSharingPolicyProvider.DEFAULT_LEASE_MS + 500)
+                dispatcher.scheduler.runCurrent()
+                seen += if (awaitItem().enabled) "enabled" else "disabled"
+                // No refresh ever succeeded: the policy must STAY disabled — no further emissions.
+                expectNoEvents()
+                cancelAndIgnoreRemainingEvents()
+            }
+        }
+        org.junit.Assert.assertEquals(listOf("enabled", "disabled"), seen)
+    }
+
+    @Test
+    fun `no disable between a renewal's install and its own deadline`() {
+        val provider = provider()
+        assertTrue(provider.snapshot().enabled) // init enabled; old timer A due at the init lease
+
+        val seen = mutableListOf<String>()
+        runBlocking {
+            provider.policy.test {
+                seen += if (awaitItem().enabled) "enabled" else "disabled"
+                // Renewal B installs a fresh lease that starts LATER than A's (gen2 → emission).
+                monotonicNowMs += 1_000
+                refresh(provider)
+                seen += if (awaitItem().enabled) "enabled" else "disabled"
+                assertTrue(provider.snapshot().enabled)
+                // Advance into the window where A's ORIGINAL deadline has passed but B's fresh
+                // lease is still valid: a stale wake here must not disable B — no emission.
+                monotonicNowMs += VoiceSharingPolicyProvider.DEFAULT_LEASE_MS - 500
+                dispatcher.scheduler.advanceTimeBy(VoiceSharingPolicyProvider.DEFAULT_LEASE_MS)
+                dispatcher.scheduler.runCurrent()
+                expectNoEvents()
+                assertTrue(provider.snapshot().enabled) // B still fresh
+                // B's own deadline: the only disable the subscriber may see.
+                monotonicNowMs += 1_000
+                dispatcher.scheduler.advanceTimeBy(1_000)
                 dispatcher.scheduler.runCurrent()
                 seen += if (awaitItem().enabled) "enabled" else "disabled"
                 cancelAndIgnoreRemainingEvents()

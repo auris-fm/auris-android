@@ -213,12 +213,14 @@ class VoiceSharingPolicyProvider(
                 if (nowMs() <= before) break
             }
             synchronized(fence) {
-                // Fenced twice over: this schedule may only disable the activation it was
-                // installed for (activationGeneration == gen) AND only while no newer request is
-                // even in flight (requestGeneration == gen) — otherwise a late wake during an
-                // in-flight renewal would emit a spurious disable (and a stale timer could hide
-                // or fight the renewal's own timer).
-                if (activationGeneration == gen && requestGeneration == gen) {
+                // Fenced on the ACTIVATION generation only: when this schedule's own lease truly
+                // expires, the policy MUST disable — an in-flight renewal is not a fresh policy,
+                // and subscribers must see disabled until the renewal installs a valid lease.
+                // The stale-timer hazard (an old wake AFTER a renewal installed a fresh lease,
+                // before that lease's deadline) is prevented by the renewal cancelling this job
+                // inside the fence at publication; if a late wake still slips through (cancellation
+                // lost the race), the activation-generation check refuses to tear down the renewal.
+                if (activationGeneration == gen) {
                     state.value = DISABLED
                 }
             }

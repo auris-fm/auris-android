@@ -29,6 +29,8 @@ class OtherAppPlayingCondition(
     // nobody could check. Absent or observed-ended, the window behaves as it always did.
     private val lastCueObservation: StateFlow<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer.PublishedObservation?> =
         MutableStateFlow(null),
+    // Ask the renderer for measured progress now, rather than waiting for its next heartbeat.
+    private val refreshSelfEmission: () -> Unit = {},
     private val nowMs: () -> Long = { SystemClock.elapsedRealtime() },
     private val transitionWindowMs: Long = 5_000,
     private val debounceMs: Long = 500,
@@ -67,7 +69,7 @@ class OtherAppPlayingCondition(
             if (hostIsPlaying.value) {
                 lastHostPlayingMs = nowMs()
             }
-            handleStateChange(hasOtherApp)
+            handleStateChange(hasOtherApp, revalidate = true)
             delay(1000)
         }
     }
@@ -80,12 +82,17 @@ class OtherAppPlayingCondition(
         handleStateChange(otherAppPlaying)
     }
 
-    private fun handleStateChange(hasOtherApp: Boolean) {
+    private fun handleStateChange(hasOtherApp: Boolean, revalidate: Boolean = false) {
         debounceJob?.cancel()
         if (hasOtherApp) {
             debounceJob = scope.launch {
                 delay(debounceMs)
-                mutableState.value = VoiceControlRuleState.Blocked("other_app_playing")
+                // Output and attribution may have changed during the debounce. Publish a block only
+                // if its premise is still true; update(Boolean) remains an external monitor's verdict.
+                val stillOtherApp = !revalidate || withContext(Dispatchers.IO) {
+                    otherAppPlaying(audioManager?.isMusicActive == true)
+                }
+                mutableState.value = evaluate(stillOtherApp)
             }
         } else {
             mutableState.value = VoiceControlRuleState.Allowed
@@ -124,6 +131,7 @@ class OtherAppPlayingCondition(
      * evaluation cannot disagree about them.
      */
     internal fun otherAppPlaying(isMusicActive: Boolean): Boolean {
+        if (isMusicActive) refreshSelfEmission()
         if (hasEmittedAudio.value) lastSelfEmittedMs = lastEmittedAtMs.value
         return otherAppPlaying(
             isMusicActive = isMusicActive,

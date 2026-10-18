@@ -198,6 +198,36 @@ class AudioFeedbackRenderer(
     /** The in-flight earcon coverage, so a session end can end it rather than let it run on. */
     private var earconCoverageJob: Job? = null
 
+    private data class PendingAttribution(val observer: Job, val admission: EarconPlayer.AdmissionToken)
+
+    // Guarded by coverageLock. Cleared on completion, expiry and session end, so a consumed cue
+    // cannot keep refreshing attribution forever when a later, foreign app starts playing.
+    private var pendingAttribution: PendingAttribution? = null
+
+    /**
+     * Refreshes attribution from this cue's measured playback progress at a gate decision.
+     * completionFor reads an immutable frontier and its playback head; it does not wait for the
+     * player executor or drain audio. Sampling stays outside coverageLock, then ownership is checked
+     * again so a stop or successor during the read cannot attribute the retired cue.
+     */
+    fun refreshEarconAttribution() {
+        val pending = synchronized(coverageLock) { pendingAttribution } ?: return
+        val completion = earconPlayer.completionFor(pending.admission.raw)
+        synchronized(coverageLock) {
+            if (pendingAttribution !== pending || earconCoverageJob !== pending.observer) return
+            when (completion) {
+                EarconPlayer.EarconCompletion.Playing -> noteEmitted()
+
+                EarconPlayer.EarconCompletion.Consumed -> {
+                    noteEmitted()
+                    pendingAttribution = null
+                }
+
+                else -> Unit
+            }
+        }
+    }
+
     /** Serializes ownership validation with an observation's publication. */
     private val coverageLock = Any()
 
@@ -337,10 +367,16 @@ class AudioFeedbackRenderer(
     }
 
     /** The deadline-expiry form of [publishObservationIfOwning]. */
-    private fun publishExpiryIfOwning(observer: Job?) = publishObservationIfOwning(observer) { publishCueObservation(currentCueId, CueObservation.Unknown) }
+    private fun publishExpiryIfOwning(observer: Job?) = publishObservationIfOwning(observer) {
+        pendingAttribution = null
+        publishCueObservation(currentCueId, CueObservation.Unknown)
+    }
 
     /** The observed-completion form: the cue's fate IS established. */
-    private fun publishConsumedIfOwning(observer: Job?) = publishObservationIfOwning(observer) { publishCueObservation(currentCueId, CueObservation.Consumed) }
+    private fun publishConsumedIfOwning(observer: Job?) = publishObservationIfOwning(observer) {
+        pendingAttribution = null
+        publishCueObservation(currentCueId, CueObservation.Consumed)
+    }
 
     /**
      * Attempts a retirement for [owner], and reports whether that owner still spoke for the cue.
@@ -353,7 +389,10 @@ class AudioFeedbackRenderer(
     internal fun retireObservationForTest(owner: kotlinx.coroutines.Job?) = publishEndedIfOwning(owner)
 
     /** The deliberately-ended form: attribution was stopped at the moment the sound stopped. */
-    private fun publishEndedIfOwning(observer: Job?) = publishObservationIfOwning(observer) { publishCueObservation(currentCueId, CueObservation.Ended) }
+    private fun publishEndedIfOwning(observer: Job?) = publishObservationIfOwning(observer) {
+        pendingAttribution = null
+        publishCueObservation(currentCueId, CueObservation.Ended)
+    }
 
     /**
      * Keeps the gate's attribution fresh until the cue is OBSERVED to have been consumed.
@@ -522,6 +561,7 @@ class AudioFeedbackRenderer(
         }
         synchronized(coverageLock) {
             earconCoverageJob = observer
+            pendingAttribution = admitted?.let { PendingAttribution(observer, it) }
             observerRef.complete(observer)
         }
         observer.start()

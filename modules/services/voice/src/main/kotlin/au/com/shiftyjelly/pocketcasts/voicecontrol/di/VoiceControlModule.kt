@@ -221,6 +221,7 @@ abstract class VoiceControlModule {
             // renderer's verdict would have no reader in production, and an unresolved cue would keep
             // being treated as ended on the strength of the bounded window alone.
             lastCueObservation = audioFeedbackRenderer.lastCueObservation,
+            refreshSelfEmission = audioFeedbackRenderer::refreshEarconAttribution,
             scope = scope,
         )
 

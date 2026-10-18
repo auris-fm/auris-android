@@ -136,6 +136,14 @@ bool OboeAudioCapture::start() {
         return false;
     }
 
+    // A test-installed placeholder cannot be started (requestStart is pure virtual; calling
+    // through it is undefined) -- the same accommodation close() makes. Marking active directly
+    // is exactly what a successful requestStart would have done.
+    if (mTestStreamInstalled) {
+        mActive.store(true, std::memory_order_release);
+        return true;
+    }
+
     oboe::Result result = mStream->requestStart();
     if (result != oboe::Result::OK) {
         LOGE("Failed to start stream: %s", oboe::convertToText(result));

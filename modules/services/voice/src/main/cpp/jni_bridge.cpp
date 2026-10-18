@@ -20,6 +20,24 @@ static OboeAudioCapture* gCapture = nullptr;
 static RetireableProcessorHandle<NativeVadProcessor> gVadProcessor;
 static std::mutex gCaptureMutex;
 
+// NARROW TEST SEAM (host ownership test only; see src/test/cpp/JniBridgeOwnershipTest.cpp).
+// Counts every PUBLICATION of a VAD processor through gVadProcessor. The host test needs to
+// observe attachment DIRECTLY -- an idle attached VAD emits no events and holds no speech PCM, so
+// "no event" cannot distinguish "not attached" from "attached and quiet". This counter observes
+// the publication sites themselves; it gates nothing and changes no production decision.
+long long gVadAttachesForTest = 0;
+
+// Test seam: installs [capture] as the live capture WITHOUT opening a real Oboe stream (a host
+// cannot). Ownership is unchanged: open/start/attach still decide when audio flows and when VAD
+// publishes; this only supplies the object those entries would have created. Never null in
+// production; a null argument restores the pristine state between scenarios.
+static OboeAudioCapture* gCaptureFactoryOverrideForTest = nullptr;
+
+void setCaptureFactoryOverrideForTest(OboeAudioCapture* capture) {
+    std::lock_guard<std::mutex> lock(gCaptureMutex);
+    gCaptureFactoryOverrideForTest = capture;
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeIsCapturing(
     JNIEnv* /*env*/,
@@ -145,6 +163,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartCap
         return JNI_FALSE;
     }
     gVadProcessor.publish(processor);
+    gVadAttachesForTest++;
 
     return JNI_TRUE;
 }
@@ -163,6 +182,14 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeOpenInpu
     gVadProcessor.retire();
     delete gCapture;
     gCapture = nullptr;
+
+    // The factory seam stands in for `new OboeAudioCapture()` + its real open() -- which a host
+    // cannot perform -- and NOTHING else. The ordering decisions under test (does open start
+    // audio? does the entry attach VAD?) remain entirely this function's own.
+    if (gCaptureFactoryOverrideForTest != nullptr) {
+        gCapture = gCaptureFactoryOverrideForTest;
+        return gCapture->getDeviceId();
+    }
 
     auto* capture = new OboeAudioCapture();
     if (!capture->open()) {
@@ -203,6 +230,7 @@ Java_au_com_shiftyjelly_pocketcasts_voicecontrol_audio_OboeNative_nativeStartInp
         return JNI_FALSE;
     }
     gVadProcessor.publish(processor);
+    gVadAttachesForTest++;
     if (gCapture->isActive()) {
         return JNI_TRUE;
     }

@@ -145,7 +145,7 @@ class VoiceControlServiceRenderTest {
      *
      * @spec's requirement, and it is user-facing: `VoiceControlService` releases the renderer on every
      * stop while the renderer is a Hilt `@Singleton`, so a single one-way flag meant the SECOND session
-     * had no feedback at all -- silently. Disposal is `onDestroy`'s job; a stop ends the session.
+     * had no feedback at all -- silently. Service destruction also ends a session, not the singleton.
      */
     @Test
     fun `a stop ends the session without disabling the next start`() = runTest {
@@ -188,13 +188,8 @@ class VoiceControlServiceRenderTest {
     }
 
     /**
-     * The WIRING the service uses, driven through the same constant its two call sites pass.
-     *
-     * @reviewer's gap: the renderer's two behaviours were pinned but the CHOICE between them was not,
-     * because `stopVoiceControl` is private and the cases called `endSession()`/`release()` directly.
-     * Swapping them at the call site passed the whole suite. The service now selects a named constant,
-     * so this drives the same mapping -- and swapping the two constants in the service is the mistake
-     * it fails on.
+     * Covers the renderer's lifecycle mapping only. The real Service.onDestroy call and reuse of the
+     * same renderer/TTS by another Service are covered by VoiceControlServiceFeedbackLifecycleTest.
      */
     @Test
     fun `the stop lifecycle ends the session so the next start can still emit`() {

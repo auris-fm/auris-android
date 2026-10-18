@@ -84,9 +84,6 @@ class PlaybackBufferRecorder @Inject constructor(
      */
     private val closedTickets = HashSet<Long>()
 
-    /** Identities whose acoustic tail is still owed expiry; admission closure itself is ticket-based. */
-    private val retiredProducerIds = HashSet<Long>()
-
     /**
      * Admission GENERATION. Every ticket embeds the generation it was minted under; [retire] bumps it,
      * which invalidates EVERY outstanding admission atomically -- including a callback from a producer
@@ -489,7 +486,6 @@ class PlaybackBufferRecorder @Inject constructor(
         run {
             liveByTicket.remove(ticket)
             closedTickets += ticket
-            retiredProducerIds += ticket
             // IDEMPOTENT IN TIME (@reviewer): a duplicate stop must NOT restart the deadline -- a stale
             // second call would extend the retired tail's matchable lifetime. putIfAbsent keeps the
             // ORIGINAL expiry; the refusal flag is already closed.
@@ -555,7 +551,6 @@ class PlaybackBufferRecorder @Inject constructor(
             for (retainedId in ownerTags.toHashSet()) {
                 if (retainedId == UNTAGGED) continue
                 tailExpiryMs.putIfAbsent(retainedId, nowMs + DELAY_TAIL_SAMPLES * 1_000L / SAMPLE_RATE)
-                retiredProducerIds += retainedId
             }
 
             // THE SURVIVING TAIL KEEPS ITS CONTINUITY METADATA. Clearing `expectedNextPositionMs` while

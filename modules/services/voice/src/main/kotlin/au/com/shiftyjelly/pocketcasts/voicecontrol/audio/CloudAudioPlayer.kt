@@ -16,6 +16,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -35,8 +36,8 @@ import timber.log.Timber
  * Unknown or empty codecs default to PCM with the provided sample rate and channel config.
  */
 // Base of the cloud answer's producer identities through the shared reference recorder. Each track
-// incarnation gets its OWN identity (base + generation): a stale stop or late write callback can
-// retire or tag only the incarnation it names, never a successor already on a newer track. The space
+// playback run gets its OWN identity (base + generation): a stale stop or late write callback can
+// retire or tag only the run it names, never a successor using the same track. The space
 // is negative so it cannot collide with the episode tap's non-negative stream epochs.
 const val CLOUD_ANSWER_IDENTITY_BASE: Long = Long.MIN_VALUE / 2
 
@@ -68,7 +69,7 @@ class CloudAudioPlayer(
      * Per-player state on purpose: the reference is written chunk by chunk, so continuity belongs to
      * this stream's frame sequence rather than to a single conversion call.
      */
-    private val resampler = ChunkResampler()
+    private var resampler = ChunkResampler()
 
     /**
      * Audio attributes that route through the shared STREAM_MUSIC output path.
@@ -121,9 +122,9 @@ class CloudAudioPlayer(
     private var trackFrames = 0L
 
     /**
-     * Incremented every time a NEW track is created.
+     * Incremented whenever a new playback run starts, including reuse of a stopped track.
      *
-     * Both the track's frame index and this answer's frame counters restart at zero on a rebuild, so
+     * Both the track's frame index and this answer's frame counters restart at zero after a stop, so
      * numbers from before and after agree while describing different audio. An observation and a block
      * record carry the generation they were made under, and the recorder matches only within one
      * generation -- which is what stops an old-track observation from selecting a new-track block once
@@ -170,6 +171,7 @@ class CloudAudioPlayer(
 
     /** Re-create the [AudioTrack] and [MediaCodec] decoder to match the negotiated codec. */
     private fun rebuildTrackAndDecoder() {
+        stop()
         decodeCodec?.stop()
         decodeCodec?.release()
         decodeCodec = null
@@ -240,12 +242,18 @@ class CloudAudioPlayer(
         }
     }
 
-    // This playback's recorder ADMISSION, minted when the track incarnation is created (below, where
-    // trackGeneration advances) and carried by every write and observation this player submits -- never
-    // obtained at execution time inside the recorder. A stop closes it; a held callback carrying the
-    // dead ticket cannot re-enter even before its first write ever landed, and a wholesale route
-    // retirement invalidates it by generation.
-    private var answerAdmission: au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.Admission? = null
+    // Owned by one playback run, not by the lifetime of the reusable AudioTrack.
+    private var answerAdmission: PlaybackBufferRecorder.Admission? = null
+
+    /** Called under frameBuffer's monitor when starting a new answer, never on pause/resume. */
+    private fun startPlaybackRun() {
+        trackGeneration += 1L
+        trackFrames = 0L
+        submittedSamples = 0L
+        audioWritten = false
+        resampler = ChunkResampler()
+        answerAdmission = playbackBufferRecorder?.openAdmission(CLOUD_ANSWER_IDENTITY_BASE + trackGeneration)
+    }
 
     /**
      * Start (or resume) playback.
@@ -264,9 +272,11 @@ class CloudAudioPlayer(
             if (paused) {
                 audioTrack?.play()
                 paused = false
+                drainFrames()
                 Timber.i("[CloudAudio] resumed")
                 startAudibleHeartbeat()
             } else if (!playing) {
+                startPlaybackRun()
                 audioTrack?.play()
                 playing = true
                 drainFrames()
@@ -375,10 +385,10 @@ class CloudAudioPlayer(
      */
     fun stop() {
         if (released) return
-        val stoppedIncarnation: au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder.Admission? = answerAdmission
-        synchronized(frameBuffer) {
+        val (stoppedIncarnation, stoppedRoute) = synchronized(frameBuffer) {
+            val admission = answerAdmission
+            answerAdmission = null
             frameBuffer.clear()
-            // (admission captured above; stop path retires it only if this instance was the player)
             if (playing) {
                 audioTrack?.stop()
                 playing = false
@@ -386,6 +396,9 @@ class CloudAudioPlayer(
                 Timber.i("[CloudAudio] stopped")
                 stopAudibleHeartbeat()
             }
+            val route = observedRoute
+            observedRoute = null
+            admission to route
         }
         // Retire THIS incarnation's stream on any stop -- including a stop before anything played, which
         // closes admission for callbacks the player may still hold without removing audible audio (there
@@ -401,8 +414,7 @@ class CloudAudioPlayer(
         // answering for a stream that is gone. Nulling it as well lets a later playback on this same
         // player take a fresh claim; clear() itself is idempotent per claim, so a following release()
         // withdrawing an already-cleared claim is a no-op.
-        observedRoute?.clear()
-        observedRoute = null
+        stoppedRoute?.clear()
     }
 
     /**
@@ -454,10 +466,11 @@ class CloudAudioPlayer(
     /** Release all resources. Must be called before the player is discarded. */
     fun release() {
         if (released) return
-        released = true
         // stop() withdraws the claim when one is held and clears the reference, so a released player
         // cannot be re-used to take another. Nothing else to clear here.
         stop()
+        released = true
+        heartbeatScope.cancel()
         decodeCodec?.stop()
         decodeCodec?.release()
         decodeCodec = null
@@ -495,23 +508,30 @@ class CloudAudioPlayer(
             .build()
 
         audioTrack = track
-        // A new track's frame index starts at zero, so the track-side counter restarts with it, and
-        // everything recorded against the previous track is now from another incarnation. The admission
-        // for the NEW incarnation opens HERE, at owner creation -- an epoch change is a new producer,
-        // not a migration of the old one's audio.
         trackFrames = 0L
-        trackGeneration += 1L
-        answerAdmission = playbackBufferRecorder?.openAdmission(CLOUD_ANSWER_IDENTITY_BASE + trackGeneration)
     }
 
     private fun drainFrames() {
         val track = audioTrack ?: return
         if (!playing || paused) return
+        val generation = trackGeneration
 
         while (true) {
-            val frame = synchronized(frameBuffer) {
+            val (frame, admission) = synchronized(frameBuffer) {
+                if (!playing || paused || generation != trackGeneration || audioTrack !== track) return
                 if (frameBuffer.isEmpty()) return
-                frameBuffer.removeAt(0)
+                // Only the active owner renews after a route reset, before handing off this frame.
+                // A write already held at the sink keeps its old ticket and cannot renew on return.
+                val recorder = playbackBufferRecorder
+                val previous = answerAdmission
+                val current = if (recorder != null && previous != null &&
+                    previous.generation != recorder.admissionGenerationSnapshot()
+                ) {
+                    recorder.renewAdmission(previous).also { answerAdmission = it }
+                } else {
+                    previous
+                }
+                frameBuffer.removeAt(0) to current
             }
 
             // Decode if needed.
@@ -541,98 +561,104 @@ class CloudAudioPlayer(
                         // An explicit failure rather than a silent drop: stop this answer and report
                         // it, so the turn is not treated as a clean end.
                         Timber.w("[CloudAudio] AudioTrack.write returned $written; stopping answer")
-                        audioWriteFailed = true
-                        onWriteFailure?.invoke(submittedSamples)
+                        synchronized(frameBuffer) {
+                            if (!playing || generation != trackGeneration || audioTrack !== track) return
+                            audioWriteFailed = true
+                            onWriteFailure?.invoke(submittedSamples)
+                        }
                         break
                     }
-                    audioWritten = true
-                    // Record only what the sink accepted, so the reference never holds audio the
-                    // output rejected, and position it on the submitted-sample timeline.
-                    val floats = s16leBytesToFloats(pcmBytes, written, offset)
-                    // The decoded PCM is at the codec's rate; the recorder's timeline is 16 kHz.
-                    // Recording it unchanged would store rate/16000 times too many samples for the
-                    // span of audio they represent, so the reference would claim a duration that
-                    // never played and correlation could never align against it. Resample through the
-                    // stateful resampler so successive chunks stay phase-continuous: a frame whose
-                    // length does not divide into a whole output count would otherwise drop its
-                    // remainder every time and drift off the producer clock.
-                    resampler.beginChunk(currentSampleRate)
-                    val referenceFloats = resampler.resample(floats)
-                    // The chunk's position on the RENDER clock, when the platform reports one. That
-                    // is a time on the same monotonic axis the capture side uses, so it is the only
-                    // value here the microphone instant can be compared against.
-                    //
-                    // THE SUBMITTED COUNT IS NOT A SUBSTITUTE AND MUST NOT BE LABELLED AS ONE. It is
-                    // a different quantity -- what was SENT, not when it SOUNDED -- and the difference
-                    // is exactly the player's buffer latency, which is what an echo-bleed filter is
-                    // trying to measure. Recording it under `Monotonic` would make the recorder offer
-                    // an anchor (its `anchored` gate reads that label) and the filter would compare a
-                    // submission count against a capture instant: a confident misalignment, which is
-                    // worse than no position at all. So an unavailable clock records NO position, and
-                    // the recorder's own null path leaves the window unanchored.
-                    //
-                    // The PCM is still recorded either way -- an absent position changes WHEN the
-                    // window can be placed, never WHAT it holds.
-                    // The observation names WHICH frame is sounding and WHEN, and this chunk begins at
-                    // a later frame on the same index. `submittedSamples` is exactly that index: it
-                    // counts the frames already handed to the track before this chunk, so it is this
-                    // chunk's first frame. The translation between the two is the buffer depth, which
-                    // is the quantity the observation alone cannot express.
-                    // 2 bytes per s16le sample, times the channel count, is the bytes-per-frame.
-                    val bytesPerFrame = 2L * (if (channelConfig == AudioFormat.CHANNEL_OUT_STEREO) 2 else 1)
-                    val observation = renderedFrame(currentSampleRate)
-                    val renderMs = observation?.let {
-                        expectedInstantOfChunk(
-                            observation = it,
-                            // The chunk's first frame on the TRACK's index, which is what `framePosition`
-                            // is expressed in. Not `submittedSamples`, which is the recorder-side count.
-                            firstFrameOfChunk = trackFrames,
-                            sampleRateHz = currentSampleRate,
-                        )
-                    }
-                    answerAdmission?.let { admission ->
-                        playbackBufferRecorder?.write(
-                            pcm = referenceFloats,
-                            admission = admission,
-                            // The chunk's frame range on the track's index, recorded so a render
-                            // observation can later select THIS block -- or the block it truly names --
-                            // by frame identity rather than by extrapolated time. The rendered-block
-                            // mapping is built from these records; they retire with their samples.
-                            trackStartFrame = trackFrames,
-                            trackEndFrame = trackFrames + written.toLong() / bytesPerFrame,
-                            trackGeneration = trackGeneration,
-                            // A rendered-frame observation when the platform reports one, else the
-                            // producer's own placement -- the cumulative submitted count, from the chunks
-                            // before this one (write() adds this chunk's own duration). The count is
-                            // retained because it is what makes the window's DURATION checkable and it is
-                            // what a drifting resample would break.
-                            positionMs = renderMs ?: (submittedSamples * 1_000L) / currentSampleRate,
-                            // NO AXIS, even when renderMs came from a real observation: the extrapolated
-                            // chunk instant is a PREDICTION about unrendered audio, and prediction
-                            // metadata stays separate from observed alignment. Observed alignment is
-                            // claimed only by the rendered-block mapping, which selects blocks the
-                            // observation's frame actually names. (The estimate still sets the recorded
-                            // position, which duration checks rely on; it just cannot anchor.)
-                            axis = null,
-                        )
-                    }
-                    submittedSamples += floats.size
-                    // The track's own frame count, advanced by the frames just written at the track's
-                    // rate: one frame is one sample for the mono/stereo layouts used here, and the byte
-                    // count is what the track received.
-                    trackFrames += written.toLong() / bytesPerFrame
-                    // The observation is offered to the recorder only now, after the block it might
-                    // name is recorded. A matchable observation (frame at or before the write head)
-                    // drives the rendered-block mapping; an unmatched one is refused there.
-                    if (observation != null) {
-                        answerAdmission?.let { admission ->
-                            playbackBufferRecorder?.onRenderObservation(
-                                observation.framePosition,
-                                observation.nanoTime,
-                                currentSampleRate,
-                                trackGeneration,
-                                admission,
+                    synchronized(frameBuffer) {
+                        if (!playing || generation != trackGeneration || audioTrack !== track) return
+                        audioWritten = true
+                        // Record only what the sink accepted, so the reference never holds audio the
+                        // output rejected, and position it on the submitted-sample timeline.
+                        val floats = s16leBytesToFloats(pcmBytes, written, offset)
+                        // The decoded PCM is at the codec's rate; the recorder's timeline is 16 kHz.
+                        // Recording it unchanged would store rate/16000 times too many samples for the
+                        // span of audio they represent, so the reference would claim a duration that
+                        // never played and correlation could never align against it. Resample through the
+                        // stateful resampler so successive chunks stay phase-continuous: a frame whose
+                        // length does not divide into a whole output count would otherwise drop its
+                        // remainder every time and drift off the producer clock.
+                        resampler.beginChunk(currentSampleRate)
+                        val referenceFloats = resampler.resample(floats)
+                        // The chunk's position on the RENDER clock, when the platform reports one. That
+                        // is a time on the same monotonic axis the capture side uses, so it is the only
+                        // value here the microphone instant can be compared against.
+                        //
+                        // THE SUBMITTED COUNT IS NOT A SUBSTITUTE AND MUST NOT BE LABELLED AS ONE. It is
+                        // a different quantity -- what was SENT, not when it SOUNDED -- and the difference
+                        // is exactly the player's buffer latency, which is what an echo-bleed filter is
+                        // trying to measure. Recording it under `Monotonic` would make the recorder offer
+                        // an anchor (its `anchored` gate reads that label) and the filter would compare a
+                        // submission count against a capture instant: a confident misalignment, which is
+                        // worse than no position at all. So an unavailable clock records NO position, and
+                        // the recorder's own null path leaves the window unanchored.
+                        //
+                        // The PCM is still recorded either way -- an absent position changes WHEN the
+                        // window can be placed, never WHAT it holds.
+                        // The observation names WHICH frame is sounding and WHEN, and this chunk begins at
+                        // a later frame on the same index. `submittedSamples` is exactly that index: it
+                        // counts the frames already handed to the track before this chunk, so it is this
+                        // chunk's first frame. The translation between the two is the buffer depth, which
+                        // is the quantity the observation alone cannot express.
+                        // 2 bytes per s16le sample, times the channel count, is the bytes-per-frame.
+                        val bytesPerFrame = 2L * (if (channelConfig == AudioFormat.CHANNEL_OUT_STEREO) 2 else 1)
+                        val observation = renderedFrame(currentSampleRate)
+                        val renderMs = observation?.let {
+                            expectedInstantOfChunk(
+                                observation = it,
+                                // The chunk's first frame on the TRACK's index, which is what `framePosition`
+                                // is expressed in. Not `submittedSamples`, which is the recorder-side count.
+                                firstFrameOfChunk = trackFrames,
+                                sampleRateHz = currentSampleRate,
                             )
+                        }
+                        admission?.let {
+                            playbackBufferRecorder?.write(
+                                pcm = referenceFloats,
+                                admission = admission,
+                                // The chunk's frame range on the track's index, recorded so a render
+                                // observation can later select THIS block -- or the block it truly names --
+                                // by frame identity rather than by extrapolated time. The rendered-block
+                                // mapping is built from these records; they retire with their samples.
+                                trackStartFrame = trackFrames,
+                                trackEndFrame = trackFrames + written.toLong() / bytesPerFrame,
+                                trackGeneration = generation,
+                                // A rendered-frame observation when the platform reports one, else the
+                                // producer's own placement -- the cumulative submitted count, from the chunks
+                                // before this one (write() adds this chunk's own duration). The count is
+                                // retained because it is what makes the window's DURATION checkable and it is
+                                // what a drifting resample would break.
+                                positionMs = renderMs ?: (submittedSamples * 1_000L) / currentSampleRate,
+                                // NO AXIS, even when renderMs came from a real observation: the extrapolated
+                                // chunk instant is a PREDICTION about unrendered audio, and prediction
+                                // metadata stays separate from observed alignment. Observed alignment is
+                                // claimed only by the rendered-block mapping, which selects blocks the
+                                // observation's frame actually names. (The estimate still sets the recorded
+                                // position, which duration checks rely on; it just cannot anchor.)
+                                axis = null,
+                            )
+                        }
+                        submittedSamples += floats.size
+                        // The track's own frame count, advanced by the frames just written at the track's
+                        // rate: one frame is one sample for the mono/stereo layouts used here, and the byte
+                        // count is what the track received.
+                        trackFrames += written.toLong() / bytesPerFrame
+                        // The observation is offered to the recorder only now, after the block it might
+                        // name is recorded. A matchable observation (frame at or before the write head)
+                        // drives the rendered-block mapping; an unmatched one is refused there.
+                        if (observation != null) {
+                            admission?.let {
+                                playbackBufferRecorder?.onRenderObservation(
+                                    observation.framePosition,
+                                    observation.nanoTime,
+                                    currentSampleRate,
+                                    generation,
+                                    admission,
+                                )
+                            }
                         }
                     }
                     offset += written

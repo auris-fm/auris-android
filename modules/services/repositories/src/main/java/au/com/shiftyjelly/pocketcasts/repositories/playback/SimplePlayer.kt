@@ -374,6 +374,7 @@ class SimplePlayer(
             statsManager = statsManager,
             boostVolume = playbackEffects?.isVolumeBoosted ?: false,
             fingerprintPcmTap = fingerprintPcmTap,
+            episodeReferenceEligibility = episodeReferenceEligibility,
             fingerprintTapEnabled = {
                 // REFERENCE ELIGIBILITY IS INDEPENDENT OF THE TRANSCRIPT TOGGLE (4235652501): while
                 // a voice-capture session is active the episode reference is required for bleed

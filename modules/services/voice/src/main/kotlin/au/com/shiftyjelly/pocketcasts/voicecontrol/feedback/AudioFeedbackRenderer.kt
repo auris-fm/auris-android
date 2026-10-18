@@ -612,10 +612,9 @@ class AudioFeedbackRenderer(
     /**
      * What an owner's lifecycle event should do to this renderer.
      *
-     * Named rather than left to two call sites, because the CHOICE is the defect this exists to
-     * prevent: `stopVoiceControl` runs on EVERY stop while this type is a `@Singleton`, so releasing
-     * there silenced all feedback for the process. A caller selects a constant, and the service's two
-     * call sites are pinned by a test without standing the Service up.
+     * A foreground Service instance owns a session, not this singleton's lifetime. Both a normal
+     * stop and Service destruction end that session; permanent disposal belongs to the singleton's
+     * final owner. The service teardown/reuse boundary is covered separately from this mapping.
      */
     enum class Lifecycle {
         /** The owning session ended; the renderer stays usable for the next one. */

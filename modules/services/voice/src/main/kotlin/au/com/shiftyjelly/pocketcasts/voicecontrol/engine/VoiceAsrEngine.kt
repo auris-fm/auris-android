@@ -182,22 +182,24 @@ class VoiceAsrEngine @Inject constructor(
                             // ownership then transfers to the sink. Refusal allocates NOTHING and
                             // leaves the recognition buffer untouched.
                             val initialSize = voiceAudioProcessor.speechPcmSize()
-                            openContext = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize)
-                            if (openContext != null) {
-                                // Lease-protected initial allocation (reviewer 23cae70e b4): the
-                                // admit token's charge leaves EXACTLY ONCE — transferred into the
-                                // prefix on a successful adopt, or returned by releaseInitialChunk
-                                // in the finally on refusal/throw. No unmanaged window.
-                                val ctx = openContext!!
+                            val admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize)
+                            openContext = admission?.context
+                            if (admission != null) {
+                                // Lease-protected initial allocation (reviewers 23cae70e b4 /
+                                // 79b2b5c9 b2): release is addressed by the IMMUTABLE HANDLE —
+                                // valid even if revocation closes this capture or a successor
+                                // opens mid-copy. The admit token's charge leaves EXACTLY ONCE:
+                                // transferred into the prefix on success, or returned here.
                                 var transferred = false
                                 try {
                                     val firstChunk = ShortArray(initialSize)
                                     val copied = if (initialSize > 0) voiceAudioProcessor.drainSpeechPcm(firstChunk) else 0
-                                    val adopted = segmentObserver.adoptFirstChunk(ctx, firstChunk)
-                                    transferred = adopted
-                                    if (adopted) accountedSamples = copied
+                                    // ACTUAL sink transfer result; drained VALID count passed
+                                    // separately from array capacity (reviewer 79b2b5c9 b3).
+                                    transferred = segmentObserver.adoptFirstChunk(admission, firstChunk, copied)
+                                    if (transferred) accountedSamples = copied
                                 } finally {
-                                    if (!transferred) segmentObserver.releaseInitialChunk(ctx)
+                                    if (!transferred) segmentObserver.releaseInitialChunk(admission)
                                 }
                             }
                         }

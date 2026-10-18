@@ -91,7 +91,8 @@ class ContributionRetentionSink(
         var chargedBytes: Long = 0L
 
         /** Valid length per ADOPTED array (arrays may carry unused reserved capacity at the tail;
-         * readers must slice to this length — reviewer 23cae70e b3: one array, one charge). */
+         * readers must slice to this length — reviewer 79b2b5c9 b1/b3: one array, FULL-CAPACITY
+         * charge until dropped, valid range separate from size). */
         val validLengths = java.util.IdentityHashMap<ShortArray, Int>()
 
         fun samples(): Long = buffer.sumOf { (validLengths[it] ?: it.size).toLong() }
@@ -112,8 +113,10 @@ class ContributionRetentionSink(
         if (actualBytes > maxBytesPerClip || !budget.reserve(actualBytes)) return false
         synchronized(lock) {
             // ADOPT the production array: ownership transfers, zero extra allocation.
-            openPrefix = OpenPrefix(observation.context, mutableListOf(observation.firstChunk))
-                .apply { chargedBytes = actualBytes }
+            openPrefix = OpenPrefix(observation.context, mutableListOf(observation.firstChunk)).apply {
+                chargedBytes = actualBytes
+                validLengths[observation.firstChunk] = observation.firstChunk.size
+            }
         }
         return true
     }
@@ -137,33 +140,38 @@ class ContributionRetentionSink(
         openPrefix?.context == context
     }
 
-    override fun adopted(observation: SegmentObservation.Started, token: ReservationToken?) {
-        if (token == null) return
-        val actualBytes = observation.firstChunk.size.toLong() * BYTES_PER_SAMPLE
-        // Reconcile against THIS allocation only: shrink returns the token's unused capacity;
-        // growth charges the difference to the same token (still bounded by the clip cap).
-        if (actualBytes < token.bytes) {
-            val unused = token.bytes - actualBytes
-            token.bytes = actualBytes
-            budget.release(unused)
-        } else if (actualBytes > token.bytes) {
-            val extra = actualBytes - token.bytes
+    override fun adopted(observation: SegmentObservation.Started, token: ReservationToken?): Boolean {
+        if (token == null) return false
+        val capacityBytes = observation.firstChunk.size.toLong() * BYTES_PER_SAMPLE
+        // Reviewer 79b2b5c9 b1: the sink adopts the WHOLE ARRAY, so its full CAPACITY stays
+        // charged while it is live — releasing "unused" bytes here would under-account memory the
+        // prefix still pins. Valid audio = observation.validSamples (b3), stored separately.
+        // Growth beyond the admitted reservation must be charged to close the gap; refusal ends
+        // retention explicitly rather than exceed the cap.
+        if (capacityBytes > token.bytes) {
+            val extra = capacityBytes - token.bytes
             if (!budget.reserve(extra)) {
-                // Over-growth beyond cap: end retention explicitly rather than exceed.
                 endPrefixWithTerminal(OpenPrefix(observation.context, mutableListOf()).apply { chargedBytes = token.bytes }, "adoption-over-cap")
                 dropTokenLocked(token)
-                return
+                return false
             }
-            token.bytes = actualBytes
+            token.bytes = capacityBytes
         }
+        val validBytes = observation.validSamples.toLong() * BYTES_PER_SAMPLE
         synchronized(lock) {
-            // Transfer ownership atomically: the token's remaining charge moves into the prefix;
-            // its lease disappears so no later release can double-return it.
+            // Transfer ownership atomically: the token's FULL-CAPACITY charge moves into the
+            // prefix; its lease disappears so no later release can double-return it.
             dropLeaseLocked(token.captureId, token.id)
             tokens.remove(token.id)
-            openPrefix = OpenPrefix(observation.context, mutableListOf(observation.firstChunk))
-                .apply { chargedBytes = actualBytes }
+            openPrefix = OpenPrefix(observation.context, mutableListOf(observation.firstChunk)).apply {
+                chargedBytes = token.bytes
+                validLengths[observation.firstChunk] = observation.validSamples
+            }
+            // The drained-valid shortfall vs capacity remains charged WITH the array; when the
+            // capture completes or purges, release uses chargedBytes (capacity), never valid audio.
+            check(validBytes <= token.bytes) { "valid range exceeds charged capacity" }
         }
+        return true
     }
 
     private fun dropTokenLocked(token: ReservationToken) {
@@ -261,7 +269,6 @@ class ContributionRetentionSink(
     /** Returns true when the delta was adopted; false when refused (revoked or unknown token). */
     override fun commitDelta(context: CaptureContext, drained: ShortArray, copied: Int, token: ReservationToken?): Boolean {
         if (token == null || token.captureId != context.captureId) return false
-        val usedBytes = copied.toLong() * BYTES_PER_SAMPLE
         return synchronized(lock) {
             // Token validity FIRST: an already-consumed/released token commits NOTHING.
             val live = tokens[token.id] ?: return@synchronized false
@@ -270,17 +277,20 @@ class ContributionRetentionSink(
             // releaseDelta when the producer drops it (reviewer 8273382e b4).
             val cancelled = leases[context.captureId]?.any { it.tokenId == token.id && it.cancelled } == true
             val prefix = openPrefix?.takeIf { it.context == context && !cancelled } ?: return@synchronized false
-            // ADOPT the ORIGINAL array and its valid range — no second array, one charge
-            // (reviewer 23cae70e b3). The sink stores (array, validLength) so trailing unused
-            // capacity is never read as audio.
+            // ADOPT the ORIGINAL array and its valid range — no second array, ONE charge for the
+            // WHOLE capacity (reviewer 79b2b5c9 b1): the array stays fully charged while live;
+            // "unused" tail bytes are pinned memory, not free budget. Valid audio length is
+            // stored separately so readers never see zero padding (b3).
             prefix.buffer.add(drained)
             prefix.validLengths[drained] = copied
-            // Transfer THIS token's used-range charge into the prefix; release ONLY its unused
-            // capacity back to the budget. No global counter participates.
-            val unused = (live.bytes - usedBytes).coerceAtLeast(0L)
-            prefix.chargedBytes += live.bytes - unused
-            live.bytes = unused
-            if (unused > 0) budget.release(unused)
+            val capacityBytes = drained.size.toLong() * BYTES_PER_SAMPLE
+            if (capacityBytes > live.bytes) {
+                // Caller handed a larger array than reserved: charge the gap or refuse.
+                val extra = capacityBytes - live.bytes
+                if (!budget.reserve(extra)) return@synchronized false
+                live.bytes = capacityBytes
+            }
+            prefix.chargedBytes += live.bytes
             dropLeaseLocked(context.captureId, token.id)
             live.bytes = 0L
             tokens.remove(token.id)

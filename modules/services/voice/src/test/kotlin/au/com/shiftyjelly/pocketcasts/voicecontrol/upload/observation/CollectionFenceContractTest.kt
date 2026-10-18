@@ -82,7 +82,7 @@ class CollectionFenceContractTest {
         val handoffThread = Thread {
             tx.transaction {
                 started.countDown()
-                observer.wakeCompleted(ctx, 0, 8, SegmentObservation.WakeState.NotDetected) {
+                observer.wakeCompleted(ctx.context, 0, 8, SegmentObservation.WakeState.NotDetected) {
                     release.await(2, TimeUnit.SECONDS)
                     listOf(ShortArray(8) { it.toShort() }) to 16000
                 }
@@ -100,7 +100,7 @@ class CollectionFenceContractTest {
         expiryThread.join(3000)
 
         assertTrue("copy ran under the fence", expiryRanWhileHeld)
-        assertEquals(1, sink.retainedSnapshot().count { it.context == ctx })
+        assertEquals(1, sink.retainedSnapshot().count { it.context == ctx.context })
     }
 
     @Test
@@ -134,19 +134,19 @@ class CollectionFenceContractTest {
             observer,
             liveGateAllowed = true,
         )
-        assertTrue(observer.isOpen(ctx.captureId))
+        assertTrue(observer.isOpen(ctx.context.captureId))
         // The OPEN capture's own invalid handoff terminates exactly once and releases everything.
-        coordinator.handoff(ctx, 0, 8, SegmentObservation.WakeState.NotDetected, { emptyList<ShortArray>() to 0 }, observer, liveGateAllowed = true)
-        assertFalse(observer.isOpen(ctx.captureId)) // terminated exactly once
+        coordinator.handoff(ctx.context, 0, 8, SegmentObservation.WakeState.NotDetected, { emptyList<ShortArray>() to 0 }, observer, liveGateAllowed = true)
+        assertFalse(observer.isOpen(ctx.context.captureId)) // terminated exactly once
         assertEquals(0L, sink.totalChargedBytesForTest()) // prefix charge released, nothing retained
         // Direct wake with a stale context is a NO-OP (late outcome), never a second terminal.
         val ctx2 = observer.speechStartedAdmitting(2L, "Headset", 8)!!
         observer.adoptFirstChunk(ctx2, ShortArray(8))
         observer.wakeCompleted(CaptureContext(java.util.UUID.randomUUID(), 9L, "X", IssuedAuthority(null, 0L, 0L, null, null)), 0, 8, SegmentObservation.WakeState.NotDetected) { emptyList<ShortArray>() to 0 }
-        assertTrue(observer.isOpen(ctx2.captureId))
+        assertTrue(observer.isOpen(ctx2.context.captureId))
         // Null-context handoff through the coordinator closes the OPEN capture with one terminal.
         coordinator.handoff(null, 0, 8, SegmentObservation.WakeState.NotDetected, { emptyList<ShortArray>() to 0 }, observer, liveGateAllowed = true)
-        assertFalse(observer.isOpen(ctx2.captureId))
+        assertFalse(observer.isOpen(ctx2.context.captureId))
         assertEquals(0L, sink.totalChargedBytesForTest())
     }
 
@@ -170,7 +170,7 @@ class CollectionFenceContractTest {
         val ctx = observer.speechStartedAdmitting(1L, "Headset", 8)!!
         observer.adoptFirstChunk(ctx, ShortArray(8))
         // Producer reserves a delta and HOLDS the allocated array (mid-copy window).
-        val leaseToken = sink.reserveDelta(ctx, 16)
+        val leaseToken = sink.reserveDelta(ctx.context, 16)
         assertNotNull(leaseToken)
         val held = ShortArray(16)
         // Lease accounting is BYTES: reserveDelta(16 samples) charges 16 * 2 = 32 bytes.
@@ -185,9 +185,9 @@ class CollectionFenceContractTest {
         )
         // Stale commit after revocation must NOT adopt into retained ownership; the partially
         // copied array is dropped by the producer's release path (commit refuses, returns false).
-        assertFalse(sink.commitDelta(ctx, held, 16, leaseToken))
+        assertFalse(sink.commitDelta(ctx.context, held, 16, leaseToken))
         // Producer finally drops the array: charge releases exactly then — THAT token only.
-        sink.releaseDelta(ctx, leaseToken)
+        sink.releaseDelta(ctx.context, leaseToken)
         assertEquals(0L, sink.outstandingLeaseBytesForTest())
         // Revocation released the finished prefix (16 bytes) immediately; the producer-held
         // lease (32 bytes) survived it and leaves only on drop → total after both = before − 48.
@@ -215,7 +215,7 @@ class CollectionFenceContractTest {
         val ctxA = observer.speechStartedAdmitting(1L, "Headset", 8)!!
         assertTrue(observer.adoptFirstChunk(ctxA, ShortArray(8)))
         // Delta reservation requires the sink's OPEN prefix for this exact context object.
-        val tokenA = sink.reserveDelta(ctxA, 16)!!
+        val tokenA = sink.reserveDelta(ctxA.context, 16)!!
         // Capture B opens AFTER A's revoke fan-out begins: fresh context, own tokens only.
         assertTrue(observer.revoked("account-change"))
         // Observer state was closed by A's revocation; B opens on a fresh observer. Same sink —
@@ -231,7 +231,7 @@ class CollectionFenceContractTest {
         )
         val ctxB = observerB.speechStartedAdmitting(2L, "Headset", 8)!!
         assertTrue(observerB.adoptFirstChunk(ctxB, ShortArray(8)))
-        val tokenB = sink.reserveDelta(ctxB, 32)!!
+        val tokenB = sink.reserveDelta(ctxB.context, 32)!!
         val chargedBefore = sink.totalChargedBytesForTest() // A lease 32 + B prefix 16 + B lease 64 = 112
         // FULL REVOCATION through the shared sink purges every FINISHED buffer (B's prefix goes),
         // but producer-held LEASE charges survive — for BOTH captures, each released only by its
@@ -239,9 +239,9 @@ class CollectionFenceContractTest {
         assertTrue(observerB.revoked("account-change"))
         assertEquals(chargedBefore - 16L, sink.totalChargedBytesForTest())
         // Stale commit for B with A's dead token: refuses, releases nothing of B.
-        assertFalse(sink.commitDelta(ctxB, ShortArray(16), 16, tokenA))
+        assertFalse(sink.commitDelta(ctxB.context, ShortArray(16), 16, tokenA))
         // Producer drops B's array: exactly B's token charge (32 samples * 2 = 64 bytes) leaves.
-        sink.releaseDelta(ctxB, tokenB)
+        sink.releaseDelta(ctxB.context, tokenB)
         val afterDrop = sink.totalChargedBytesForTest()
         assertEquals(chargedBefore - 80L, afterDrop)
         // Remaining charge == A's producer-held lease ONLY; A's finished prefix was purged at its
@@ -249,11 +249,83 @@ class CollectionFenceContractTest {
         assertEquals(32L, afterDrop)
         // A's producer finally-path drop releases exactly A's remaining token charge — the ONLY
         // way that lease leaves the budget (revocation alone never touched it).
-        sink.releaseDelta(ctxA, tokenA)
+        sink.releaseDelta(ctxA.context, tokenA)
         assertEquals(0L, sink.totalChargedBytesForTest())
         // Double-release of the SAME token returns nothing further (idempotent per token).
-        sink.releaseDelta(ctxB, tokenB)
+        sink.releaseDelta(ctxB.context, tokenB)
         assertEquals(0L, sink.totalChargedBytesForTest())
+    }
+
+    @Test
+    fun `held first copy then revoke plus successor - initial handle releases independently`() {
+        // Reviewer 79b2b5c9 b2: releaseInitialChunk is addressed by the IMMUTABLE handle from
+        // admission. Revocation closes capture A and a SUCCESSOR B opens; A's producer finally
+        // must still return A's held lease — never silently no-op on "current open context".
+        val budget = CollectionBudget(1L shl 20)
+        val sink = ContributionRetentionSink(budget)
+        val owner = FakeOwner()
+        val tx = CollectionAuthorityTransaction(owner, FakePolicyReader(PolicySnapshot(enabled = true, activationGeneration = 7, activatedAtMonotonicMs = 1000)), sharedLock = owner.collectionSharedLock)
+        val observer = SegmentObserver(
+            gate = CollectionGate { true },
+            sink = sink,
+            authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) },
+            issueAuthority = { IssuedAuthority("a@b.c", 1L, 1L, "e1", "d1") },
+            fenceGate = object : FenceGate {
+                override fun <R> gate(block: () -> R): R = tx.transaction(block)
+            },
+        )
+        // A admits and holds its FIRST allocation (mid-copy): adopt deliberately NOT called yet.
+        val admissionA = observer.speechStartedAdmitting(1L, "Headset", 8)!!
+        assertNotNull(admissionA.initialToken)
+        val chargedA = sink.totalChargedBytesForTest()
+        assertEquals(16L, chargedA) // 8 samples * 2 bytes, producer-held
+        // Revocation closes A while the producer still holds the array...
+        assertTrue(observer.revoked("account-change"))
+        // ...and a SUCCESSOR capture opens on the same observer/sink.
+        val admissionB = observer.speechStartedAdmitting(2L, "Headset", 8)!!
+        assertTrue(observer.adoptFirstChunk(admissionB, ShortArray(8)))
+        // A's producer finally-path releases BY HANDLE despite closure + successor being open.
+        observer.releaseInitialChunk(admissionA)
+        assertEquals(sink.totalChargedBytesForTest(), 16L) // only B's prefix remains charged
+        // Double-release via the same handle returns nothing further.
+        val before = sink.totalChargedBytesForTest()
+        observer.releaseInitialChunk(admissionA)
+        assertEquals(before, sink.totalChargedBytesForTest())
+    }
+
+    @Test
+    fun `partial first copy keeps capacity charged and valid range distinct`() {
+        // Reviewer 79b2b5c9 b1/b3: drained VALID count passes separately; the adopted array's FULL
+        // CAPACITY stays charged while live; readers see validSamples audio, never zero padding.
+        val budget = CollectionBudget(1L shl 20)
+        val sink = ContributionRetentionSink(budget)
+        val owner = FakeOwner()
+        val tx = CollectionAuthorityTransaction(owner, FakePolicyReader(PolicySnapshot(enabled = true, activationGeneration = 7, activatedAtMonotonicMs = 1000)), sharedLock = owner.collectionSharedLock)
+        val observer = SegmentObserver(
+            gate = CollectionGate { true },
+            sink = sink,
+            authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) },
+            issueAuthority = { IssuedAuthority("a@b.c", 1L, 1L, "e1", "d1") },
+            fenceGate = object : FenceGate {
+                override fun <R> gate(block: () -> R): R = tx.transaction(block)
+            },
+        )
+        val admission = observer.speechStartedAdmitting(1L, "Headset", 16)!!
+        // Distinctive PCM in the valid prefix ONLY; tail is untouched zero padding.
+        val big = ShortArray(16)
+        for (i in 0 until 8) big[i] = (100 + i).toShort()
+        assertTrue(observer.adoptFirstChunk(admission, big, validSamples = 8))
+        // FULL CAPACITY charged (32 bytes), not just the valid 16.
+        assertEquals(32L, sink.totalChargedBytesForTest())
+        // Valid SAMPLES are the drained count — zero padding is not audio.
+        assertEquals(8L, sink.prefixSamples())
+        // adoptFirstChunk reports the SINK result: after revocation closes the capture, a stale
+        // adoption attempt with the live handle returns FALSE (never hard true — reviewer b3),
+        // and the sink's own transfer is what gates the observer.
+        assertTrue(observer.revoked("account-change"))
+        val fresh = observer.speechStartedAdmitting(2L, "Headset", 16)!!
+        assertFalse(observer.adoptFirstChunk(admission, big, validSamples = 8))
+        assertTrue(observer.adoptFirstChunk(fresh, big, validSamples = 8))
     }
 
     @Test

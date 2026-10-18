@@ -36,8 +36,13 @@ sealed interface SegmentObservation {
 
     data class Started(
         override val context: CaptureContext,
-        /** The production first-chunk array; the sink ADOPTS it (no upload-side copy). */
+        /** The production first-chunk array; the sink ADOPTS it (no upload-side copy). Its
+         * CAPACITY may exceed the drained VALID range — the whole allocation stays charged until
+         * the buffer is dropped (reviewer 79b2b5c9 b1/b3); audio readers must slice to
+         * [validSamples]. */
         val firstChunk: ShortArray,
+        /** Samples actually drained into [firstChunk] (distinctive-partial-copy proof). */
+        val validSamples: Int = firstChunk.size,
     ) : SegmentObservation
 
     /** Incremental accounting of REAL produced samples, bounded by collector ownership. */
@@ -117,7 +122,7 @@ interface SegmentSink {
      * leaves the caller responsible for releaseInitial (finally-path), which returns the token's
      * full charge exactly once.
      */
-    fun adopted(observation: SegmentObservation.Started, token: ReservationToken?) = Unit
+    fun adopted(observation: SegmentObservation.Started, token: ReservationToken?): Boolean
 
     /** Producer drop for an initial allocation that never transferred (refusal/throw path). */
     fun releaseInitial(context: CaptureContext, token: ReservationToken?) = Unit

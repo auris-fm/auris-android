@@ -62,10 +62,15 @@ class SegmentObserver(
     // Admission path (order shared → observer → sink; reviewer 2e1d5b0b b2): BOTH authority reads
     // — the frozen ISSUE and the LIVE gate decision — happen under the shared primitive BEFORE
     // this object's monitor is entered. Inside the lock only local state + sink admit run.
-    fun speechStartedAdmitting(captureSession: Long, routeClass: String, producerSize: Int): CaptureContext? = fenceGate.gate {
+    // Admission + its IMMUTABLE initial-reservation handle (reviewer 79b2b5c9 b2): producers
+    // adopt/release by THIS handle even after revocation closed the capture or a successor
+    // opened — release never depends on "the currently open context".
+    data class AdmissionHandle(val context: CaptureContext, val initialToken: ReservationToken?)
+
+    fun speechStartedAdmitting(captureSession: Long, routeClass: String, producerSize: Int): AdmissionHandle? = fenceGate.gate {
         val issued = issueAuthority() // under the shared primitive, no observer lock yet
         val permitted = gate.accepts(authority()) // same: decision read before the monitor
-        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted)
+        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted)?.let { AdmissionHandle(it, admissionToken) }
     }
 
     private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int, issued: IssuedAuthority, permitted: Boolean): CaptureContext? {
@@ -81,26 +86,34 @@ class SegmentObserver(
         }
     }
 
-    /** Transfers the drained first chunk into the reserved prefix using ITS admit token; a
-     * refusal/throw path must call releaseInitialChunk so that token's charge leaves exactly once
-     * (reviewer 23cae70e b4). Returns whether retention was adopted. */
-    fun adoptFirstChunk(context: CaptureContext, firstChunk: ShortArray): Boolean = synchronized(lock) {
+    // Transfers the drained first chunk into the reserved prefix using ITS admit token; a
+    // refusal/throw path must call releaseInitialChunk so that token's charge leaves exactly once
+    // (reviewer 23cae70e b4). [validSamples] = samples actually drained; array capacity may
+    // exceed the valid range and stays fully charged while adopted (reviewer 79b2b5c9 b1/b3).
+    // Returns the SINK's actual transfer result — never hard true on refusal.
+    fun adoptFirstChunk(admission: AdmissionHandle, firstChunk: ShortArray, validSamples: Int = firstChunk.size): Boolean = synchronized(lock) {
+        val context = admission.context
         if (open?.captureId != context.captureId) return false
-        val token = admissionToken ?: return false
-        sink.adopted(SegmentObservation.Started(context, firstChunk), token)
-        admissionToken = null
-        // Retention is live once the prefix exists (sink sets it on adoption); mirror for gates.
-        retainedForOpen = openPrefixExistsFor(context)
-        true
+        val token = admission.initialToken ?: return false
+        val transferred = sink.adopted(SegmentObservation.Started(context, firstChunk, validSamples), token)
+        if (transferred) {
+            admissionToken = null
+            // Retention is live once the prefix exists (sink sets it on adoption); mirror for gates.
+            retainedForOpen = openPrefixExistsFor(context)
+        }
+        transferred
     }
 
     /** True when the sink currently holds an OPEN prefix for this capture. */
     private fun openPrefixExistsFor(context: CaptureContext): Boolean = sink.hasOpenPrefix(context)
 
-    /** Producer drop for an initial allocation that never transferred (engine finally-path). */
-    fun releaseInitialChunk(context: CaptureContext) {
-        val token = synchronized(lock) { admissionToken.takeIf { open?.captureId == context.captureId }?.also { admissionToken = null } }
-        sink.releaseInitial(context, token)
+    /** Producer drop for an initial allocation that never transferred. Addressed by the HANDLE
+     * from [Admission] — valid AFTER revocation closed the capture or a successor opened: the
+     * sink releases THAT token, not "the current open capture's" (reviewer 79b2b5c9 b2). */
+    fun releaseInitialChunk(admission: AdmissionHandle) {
+        val token = admission.initialToken ?: return
+        synchronized(lock) { if (admissionToken === token) admissionToken = null }
+        sink.releaseInitial(admission.context, token)
     }
 
     // Entry WITHOUT any monitor: fenceGate acquires the SHARED primitive first; the observer
@@ -108,7 +121,7 @@ class SegmentObserver(
     fun speechStarted(captureSession: Long, routeClass: String, firstChunk: ShortArray): CaptureContext? {
         val admitted = speechStartedAdmitting(captureSession, routeClass, firstChunk.size) ?: return null
         if (!adoptFirstChunk(admitted, firstChunk)) releaseInitialChunk(admitted)
-        return admitted
+        return admitted.context
     }
 
     // --- Reserve-before-copy delta protocol (blocker b3): reservation is a budget admit that

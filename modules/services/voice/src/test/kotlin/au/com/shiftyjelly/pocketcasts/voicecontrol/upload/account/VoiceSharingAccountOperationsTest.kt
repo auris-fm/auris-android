@@ -39,6 +39,8 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 import retrofit2.Retrofit
 
 /**
@@ -70,8 +72,17 @@ private class TestOwner(
         authoritySnapshot()
     }
 
-    override fun beginRefresh(): RefreshLease? = synchronized(lock) {
-        accountName?.let { RefreshLease(it, session, credential) }
+    override fun beginRefresh(account: android.accounts.Account): RefreshLease? = synchronized(lock) {
+        val name = accountName ?: return null
+        if (account.name != name) return null // ORIGINAL account validation
+        RefreshLease(name, session, credential, RefreshToken("lease-r"), AccountConstants.SignInType.Tokens)
+    }
+
+    override fun publishCredentials(refreshToken: RefreshToken, accessToken: AccessToken): Boolean = synchronized(lock) {
+        if (accountName == null) return false
+        token = accessToken
+        credential += 1
+        true
     }
 
     override fun publishRefresh(lease: RefreshLease, refreshToken: RefreshToken, accessToken: AccessToken): Boolean = synchronized(lock) {
@@ -758,6 +769,7 @@ class VoiceSharingAccountSessionCoordinatorTest {
  * fail-closed under the same owner lock. NO async email collector exists (no second authority
  * writer).
  */
+@RunWith(RobolectricTestRunner::class) // android.accounts.Account needs the Robolectric shadow
 class VoiceSharingAccountAuthBindingTest {
 
     @Test
@@ -853,7 +865,7 @@ class VoiceSharingAccountAuthBindingTest {
         val result = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
         withContext(Dispatchers.IO) { Thread.sleep(200) }
         // REAL refresh write via the lease path (T4): session survives, credential rotates.
-        val lease = owner.beginRefresh()!!
+        val lease = owner.beginRefresh(android.accounts.Account("user@example.com", "type"))!!
         assertTrue(owner.publishRefresh(lease, RefreshToken("r2"), AccessToken("real-token-2")))
         credentials.publish("Bearer real-token-2") // mirror follows the owner publication
         assertTrue(result.await() is VoiceSharingMutationResult.Failure)

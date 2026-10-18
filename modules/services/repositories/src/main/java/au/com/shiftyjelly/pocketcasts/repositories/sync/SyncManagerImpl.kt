@@ -168,17 +168,16 @@ class SyncManagerImpl @Inject constructor(
     private suspend fun fetchAccessToken(account: Account): AccessToken {
         val refreshToken = syncAccountManager.getRefreshToken(account) ?: throw RefreshTokenExpiredException()
         return try {
-            val signInType = syncAccountManager.getSignInType(account)
-            LogBuffer.i(LogBuffer.TAG_BACKGROUND_TASKS, "Fetching the access token, SignInType: $signInType")
-            // Refresh admission captured BEFORE the network work: the publication commit is
-            // conditional on the account/session/credential still matching, so a late refresh
-            // can neither write into a newer account/session nor overwrite a newer credential,
-            // and a REFUSED publication never hands its token to the platform cache.
-            val lease = credentialOwnership.beginRefresh()
+            // Refresh admission FIRST: validates the ORIGINAL account (an A->B switch BEFORE
+            // admission refuses) and atomically freezes ALL network inputs under the owner
+            // lock. The publication commit is then conditional on the account/session/credential
+            // still matching the lease, and a REFUSED publication never hands its token back.
+            val lease = credentialOwnership.beginRefresh(account)
+            LogBuffer.i(LogBuffer.TAG_BACKGROUND_TASKS, "Fetching the access token, SignInType: ${lease?.signInType}")
             val tokenResponse = downloadTokens(
-                email = account.name,
-                refreshToken = refreshToken,
-                signInType = signInType,
+                email = lease?.accountName ?: account.name,
+                refreshToken = lease?.refreshToken ?: refreshToken,
+                signInType = lease?.signInType ?: syncAccountManager.getSignInType(account),
             )
             if (lease == null || !credentialOwnership.publishRefresh(lease, tokenResponse.refreshToken, tokenResponse.accessToken)) {
                 throw java.io.IOException("Token refresh publication refused: superseded by newer account/session/credential state")

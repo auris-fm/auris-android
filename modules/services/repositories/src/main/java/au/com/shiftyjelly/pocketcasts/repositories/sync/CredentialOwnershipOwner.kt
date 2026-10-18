@@ -1,6 +1,8 @@
 package au.com.shiftyjelly.pocketcasts.repositories.sync
 
+import android.accounts.Account
 import au.com.shiftyjelly.pocketcasts.preferences.AccessToken
+import au.com.shiftyjelly.pocketcasts.preferences.AccountConstants
 import au.com.shiftyjelly.pocketcasts.preferences.RefreshToken
 
 /**
@@ -27,6 +29,8 @@ class RefreshLease(
     val accountName: String,
     val session: Long,
     val credential: Long,
+    val refreshToken: RefreshToken,
+    val signInType: AccountConstants.SignInType,
 )
 
 /**
@@ -58,8 +62,12 @@ interface CredentialOwnershipOwner {
      */
     fun installOwnershipBinding(binding: CredentialOwnershipBinding?): AuthoritySnapshot?
 
-    /** Refresh admission, captured BEFORE the network work; null when there is nothing to refresh. */
-    fun beginRefresh(): RefreshLease?
+    /**
+     * Refresh admission, captured BEFORE the network work: validates the ORIGINAL account
+     * (an A->B switch BEFORE admission refuses) and ATOMICALLY freezes ALL network inputs
+     * (refresh token + sign-in type) under the lock. Null = refused.
+     */
+    fun beginRefresh(account: Account): RefreshLease?
 
     /**
      * Conditional publication of BOTH refreshed tokens: commits only if the account, session
@@ -88,6 +96,13 @@ interface CredentialOwnershipOwner {
      * limit; no real-time notification is promised.
      */
     fun reconcileExternalState(): AuthoritySnapshot
+
+    /**
+     * ATOMIC publication of BOTH credentials after a password change (audit b7ad5a9a: the
+     * password flow previously published the refresh and access tokens in two separate
+     * unlocked writes). One lock, ONE credential incarnation move.
+     */
+    fun publishCredentials(refreshToken: RefreshToken, accessToken: AccessToken): Boolean
 
     fun sessionGeneration(): Long
 }

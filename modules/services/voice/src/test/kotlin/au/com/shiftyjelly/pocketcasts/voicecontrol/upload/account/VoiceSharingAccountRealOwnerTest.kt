@@ -125,7 +125,7 @@ class VoiceSharingAccountRealOwnerTest {
     fun `T1 - a LATE A refresh after B login is REFUSED and never writes into B`() {
         val auth = realAuth()
         addAccount(auth, email = "a@example.com", token = "tA")
-        val lease = auth.beginRefresh()!! // A's refresh admission, BEFORE the "network work"
+        val lease = auth.beginRefresh(auth.getAccount()!!)!! // A's refresh admission, BEFORE the "network work"
 
         auth.signOut()
         addAccount(auth, email = "b@example.com", token = "tB") // B logs in while A's refresh is in flight
@@ -187,7 +187,7 @@ class VoiceSharingAccountRealOwnerTest {
         val token = currentToken(state)
         val sessionBefore = auth.sessionGeneration()
 
-        val lease = auth.beginRefresh()!!
+        val lease = auth.beginRefresh(auth.getAccount()!!)!!
         assertTrue(auth.publishRefresh(lease, RefreshToken("r2"), AccessToken("t2")))
 
         assertEquals(sessionBefore, auth.sessionGeneration()) // refresh NEVER moves the session
@@ -204,7 +204,7 @@ class VoiceSharingAccountRealOwnerTest {
         val state = VoiceSharingAccountState()
         bindingFor(auth, state).install()
 
-        val lease = auth.beginRefresh()!!
+        val lease = auth.beginRefresh(auth.getAccount()!!)!!
         assertTrue(auth.publishRefresh(lease, RefreshToken("r2"), AccessToken("t2")))
 
         // Simulate the platform's delayed internal cache copy writing the OLD value.
@@ -223,8 +223,8 @@ class VoiceSharingAccountRealOwnerTest {
         addAccount(auth)
         bindingFor(auth, VoiceSharingAccountState()).install()
 
-        val lease1 = auth.beginRefresh()!!
-        val lease2 = auth.beginRefresh()!! // two concurrent refreshes, same admission state
+        val lease1 = auth.beginRefresh(auth.getAccount()!!)!!
+        val lease2 = auth.beginRefresh(auth.getAccount()!!)!! // two concurrent refreshes, same admission state
         assertTrue(auth.publishRefresh(lease2, RefreshToken("r2"), AccessToken("t2"))) // newer completes first
         assertFalse(auth.publishRefresh(lease1, RefreshToken("r1"), AccessToken("t1-old"))) // older completion REFUSED
         assertEquals("t2", auth.authoritySnapshot().token!!.value)
@@ -236,7 +236,7 @@ class VoiceSharingAccountRealOwnerTest {
     fun `T8 - a REFUSED publication hands NO token back - the caller cannot publish a rejected refresh`() {
         val auth = realAuth()
         addAccount(auth, token = "t1")
-        val lease = auth.beginRefresh()!!
+        val lease = auth.beginRefresh(auth.getAccount()!!)!!
         auth.signOut() // session superseded while "in flight"
         addAccount(auth, token = "t2")
 
@@ -271,6 +271,106 @@ class VoiceSharingAccountRealOwnerTest {
         auth.reconcileExternalState()
         assertFalse(state.hasCurrentSessionProjection())
         server.shutdown()
+    }
+
+    @Test
+    fun `R1 - an account switch BEFORE refresh admission REFUSES - A inputs never read for B`() {
+        val auth = realAuth()
+        addAccount(auth, email = "a@example.com", token = "tA")
+        // B replaces A BEFORE the admission is even attempted.
+        auth.signOut()
+        addAccount(auth, email = "b@example.com", token = "tB")
+
+        val accountA = android.accounts.Account("a@example.com", au.com.shiftyjelly.pocketcasts.preferences.AccountConstants.ACCOUNT_TYPE)
+        assertNull(auth.beginRefresh(accountA)) // ORIGINAL account validation: refused pre-network
+        assertEquals("tB", auth.authoritySnapshot().token!!.value)
+        serverShutdownNothing()
+    }
+
+    @Test
+    fun `R2 - external REPLACEMENT reconciles FIRST in every authority transaction - never B-name-with-A-token`() = runBlocking {
+        val auth = realAuth()
+        addAccount(auth, email = "a@example.com", token = "tA")
+        val state = VoiceSharingAccountState()
+        val binding = bindingFor(auth, state)
+        binding.install()
+        val token = currentToken(state)
+        val server = MockWebServer().apply { start() }
+        val operations = operations(auth, state, server)
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
+        assertTrue(operations.refreshProjection(token))
+        val observed = auth.authoritySnapshot()
+
+        // EXTERNAL replacement: A removed, B added by the RAW platform, entirely behind the
+        // owner's back (the owner's addAccount is a LOGIN and would legitimately publish).
+        val platform = AccountManager.get(context)
+        platform.removeAccountExplicitly(auth.getAccount()!!)
+        val accountB = android.accounts.Account("b@example.com", au.com.shiftyjelly.pocketcasts.preferences.AccountConstants.ACCOUNT_TYPE)
+        platform.addAccountExplicitly(accountB, "rB", null)
+        platform.setAuthToken(accountB, au.com.shiftyjelly.pocketcasts.preferences.AccountConstants.TOKEN_TYPE, "tB")
+
+        // The NEXT authority transaction reconciles FIRST: session revoked, stale 401 refused —
+        // even though the observed snapshot's account/session/credential "exist" again under B.
+        assertFalse(auth.invalidateIfCurrent(observed) { true })
+        assertFalse(state.hasCurrentSessionProjection()) // A's session revoked by reconciliation
+        assertEquals("b@example.com", auth.authoritySnapshot().accountName)
+        assertNull(auth.authoritySnapshot().token) // B's platform token NEVER auto-adopted
+        server.shutdown()
+    }
+
+    @Test
+    fun `R3 - removal revokes the session INDEPENDENT of token presence (credential already invalidated)`() {
+        val auth = realAuth()
+        addAccount(auth)
+        val state = VoiceSharingAccountState()
+        val binding = bindingFor(auth, state)
+        binding.install()
+        assertNotNull(state.currentSessionTokenForTest())
+
+        auth.invalidateAccessToken() // the 401-equivalent: credential invalidated, session STILL armed
+        assertNull(auth.authoritySnapshot().token)
+        assertNotNull(state.currentSessionTokenForTest())
+
+        // External removal observed afterwards: the STALE session is still revoked.
+        val platform = AccountManager.get(context)
+        platform.removeAccountExplicitly(auth.getAccount()!!)
+        auth.reconcileExternalState()
+        assertNull(state.currentSessionTokenForTest())
+        assertEquals(null, auth.authoritySnapshot().accountName)
+    }
+
+    @Test
+    fun `R4 - install is an ONCE bootstrap - rebinding seeds the ledger, null seed REVOKES`() {
+        val auth = realAuth()
+        addAccount(auth)
+        val state = VoiceSharingAccountState()
+        val binding = bindingFor(auth, state)
+        val first = binding.install()
+        assertEquals("t1", first!!.token!!.value)
+        val credentialAtInstall = auth.credentialGeneration()
+
+        val second = binding.install() // REBIND: seeds the RETAINED ledger, NO cache re-adoption
+        assertEquals("t1", second!!.token!!.value)
+        assertEquals(credentialAtInstall, auth.credentialGeneration()) // no adoption write
+        assertTrue(state.isCurrentSession(currentToken(state))) // no spurious session churn
+
+        assertNull(binding.install(null)) // explicit null seed REVOKES the previous binding
+        assertNull(state.currentSessionTokenForTest())
+        assertNull(auth.authoritySnapshot().token)
+    }
+
+    @Test
+    fun `R5 - publishCredentials commits BOTH tokens in ONE credential incarnation move`() {
+        val auth = realAuth()
+        addAccount(auth)
+        bindingFor(auth, VoiceSharingAccountState()).install()
+        val credentialBefore = auth.credentialGeneration()
+
+        assertTrue(auth.publishCredentials(RefreshToken("r2"), AccessToken("t2")))
+        val snapshot = auth.authoritySnapshot()
+        assertEquals("t2", snapshot.token!!.value)
+        assertEquals(credentialBefore + 1, snapshot.credential) // ONE move, not two writes
+        serverShutdownNothing()
     }
 
     private fun serverShutdownNothing() { /* no server in pure owner controls */ }

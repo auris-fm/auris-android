@@ -126,7 +126,7 @@ class VoiceSharingAccountOperations(
         val (live, ticket, _) = issued
         val op = frozen(token, ticket, live, Route.GET, null)
         return when (val outcome = execute(op) { bearer, _ -> api.getVoiceSharing(bearer) }) {
-            is Outcome.Body -> ownership.transaction { state.applyOutcome(token, ticket, outcome.json, live.session) }
+            is Outcome.Body -> ownership.transaction { state.applyOutcome(token, ticket, outcome.json, ownership.authoritySnapshot().session) }
             else -> false
         }
     }
@@ -164,7 +164,7 @@ class VoiceSharingAccountOperations(
     /** Fenced terminal apply of a 200 body; the outcome carries the ORIGINAL issued context. */
     private fun appliedOrFailure(op: FrozenOperation, json: String): VoiceSharingMutationResult {
         val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
-        val applied = ownership.transaction { state.applyOutcome(op.token, op.ticket, json, op.observed.session) }
+        val applied = ownership.transaction { state.applyOutcome(op.token, op.ticket, json, ownership.authoritySnapshot().session) }
         return if (applied) {
             VoiceSharingMutationResult.Applied(projection, op.token, op.ticket)
         } else {
@@ -179,7 +179,7 @@ class VoiceSharingAccountOperations(
      */
     private fun conflictOrFailure(op: FrozenOperation, json: String): VoiceSharingMutationResult {
         val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
-        val applied = ownership.transaction { state.applyOutcome(op.token, op.ticket, json, op.observed.session) }
+        val applied = ownership.transaction { state.applyOutcome(op.token, op.ticket, json, ownership.authoritySnapshot().session) }
         if (!applied) return VoiceSharingMutationResult.Failure
         return VoiceSharingMutationResult.MembershipConflict(projection, op.token, op.ticket)
     }
@@ -196,7 +196,7 @@ class VoiceSharingAccountOperations(
             .let { (it as? Outcome.Body)?.json } ?: return null
         val receipt = parseDeletionReceipt(body) ?: return null
         // Fence the terminal outcome: a superseded session/generation discards the receipt.
-        return if (ownership.transaction { state.isTicketCurrent(token, ticket, live.session) }) receipt else null
+        return if (ownership.transaction { state.isTicketCurrent(token, ticket, ownership.authoritySnapshot().session) }) receipt else null
     }
 
     private enum class Route { GET, ENROLLMENT, WITHDRAWAL, DELETION }
@@ -235,8 +235,8 @@ class VoiceSharingAccountOperations(
         while (attempt < MAX_ATTEMPTS) {
             attempt++
             // Ticket revalidation happens after every await boundary — as an owner→voice
-            // transaction: the LIVE owner session incarnation gates every send.
-            val liveSession = ownership.sessionGeneration()
+            // transaction that reconciles and reads the LIVE owner snapshot INSIDE the lock.
+            val liveSession = ownership.transaction { ownership.authoritySnapshot().session }
             if (!ownership.transaction { state.isTicketCurrent(op.token, op.ticket, liveSession) }) return Outcome.Rejected
             try {
                 val response = call(op.bearer, op.requestBody)

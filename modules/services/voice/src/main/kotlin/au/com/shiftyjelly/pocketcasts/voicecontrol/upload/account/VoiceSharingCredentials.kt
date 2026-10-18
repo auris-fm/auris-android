@@ -83,6 +83,9 @@ class VoiceSharingAccountAuthBinding(
      */
     fun install(): AuthoritySnapshot? = ownership.installOwnershipBinding(this)
 
+    /** Explicit null seed: revokes the previous binding (reviewer b7ad5a9a). */
+    fun install(binding: CredentialOwnershipBinding?): AuthoritySnapshot? = if (binding == null) ownership.installOwnershipBinding(null) else binding.let { ownership.installOwnershipBinding(it) }
+
     /** Owner login/install transaction tail (INSIDE the owner lock): arm session + mirror. */
     override fun onSessionStarted(session: Long) {
         val snapshot = ownership.authoritySnapshot() // reentrant owner read

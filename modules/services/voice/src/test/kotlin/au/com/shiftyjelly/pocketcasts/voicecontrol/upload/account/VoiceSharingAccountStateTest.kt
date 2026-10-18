@@ -1,57 +1,51 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account
 
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.test.UnconfinedTestDispatcher
-import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+private fun projectionJson(
+    revision: String = "rev-abc",
+    plan: String = "pro",
+    enrolled: Boolean = true,
+    epoch: String? = "epoch-1",
+    disclosure: String? = "v3",
+    withdrawal: String = "active",
+    schemaVersion: String = "1",
+    rawOverrides: Map<String, String> = emptyMap(),
+): String = buildString {
+    append("{")
+    append("\"schema_version\":$schemaVersion,")
+    append("\"membership_revision\":\"$revision\",")
+    append("\"plan\":\"$plan\",")
+    if ("voice_sharing_enrolled" !in rawOverrides) append("\"voice_sharing_enrolled\":$enrolled,")
+    if ("enrollment_epoch" !in rawOverrides) append("\"enrollment_epoch\":${epoch?.let { "\"$it\"" } ?: "null"},")
+    append("\"accepted_disclosure_version\":${disclosure?.let { "\"$it\"" } ?: "null"},")
+    append("\"withdrawal_state\":\"$withdrawal\"")
+    rawOverrides.forEach { (k, v) -> append(",\"$k\":$v") }
+    append("}")
+}
+
 /**
- * Task 2 red control (plan Task 2; contract guidance 6d975ce7): the membership projection is
- * parsed STRICTLY — schema_version must be 1, every field present, any unknown field fails
- * closed — the projection is keyed on ACCOUNT IDENTITY (a change invalidates the projection and
- * in-flight responses of the obsolete session are dropped), and a token refresh on the SAME
- * identity is not a logout. Membership revisions are opaque server strings: the state exposes
- * them only for equality, never ordering.
+ * Task 2 contract controls (reviewer 99f9d241): exact JSON types/values with NO coercion, an
+ * explicitly duplicate-detecting strict parser, lifecycle generation issued SYNCHRONOUSLY at
+ * request issuance (not account ID, not async flow observation — a conflating flow must not be
+ * the invalidation mechanism), token-scoped authority applies (only the originally issued
+ * session token may apply a response), enrollment/withdrawal consistency, and the opaque
+ * membership revision exposed for equality only.
  */
-@OptIn(ExperimentalCoroutinesApi::class)
 class VoiceSharingAccountStateTest {
 
-    private val identity = MutableStateFlow<String?>("account-1")
+    private fun state() = VoiceSharingAccountState()
 
-    private fun kotlinx.coroutines.test.TestScope.state() = VoiceSharingAccountState(identity = identity).also {
-        it.observeIdentity(backgroundScope, UnconfinedTestDispatcher(testScheduler))
-    }
-
-    private fun validJson(
-        revision: String = "rev-abc",
-        plan: String = "pro",
-        enrolled: Boolean = true,
-        epoch: String? = "epoch-1",
-        disclosure: String? = "v3",
-        withdrawal: String = "active",
-    ): String = buildString {
-        append("{")
-        append("\"schema_version\":1,")
-        append("\"membership_revision\":\"$revision\",")
-        append("\"plan\":\"$plan\",")
-        append("\"voice_sharing_enrolled\":$enrolled,")
-        append("\"enrollment_epoch\":${epoch?.let { "\"$it\"" } ?: "null"},")
-        append("\"accepted_disclosure_version\":${disclosure?.let { "\"$it\"" } ?: "null"},")
-        append("\"withdrawal_state\":\"$withdrawal\"")
-        append("}")
-    }
+    // --- strict parsing: exact types ---
 
     @Test
-    fun `valid projection body parses into the full projection`() = runTest {
-        val projection = state().parseProjection(validJson())
-        assertTrue(projection != null)
-        assertEquals("rev-abc", projection!!.membershipRevision)
+    fun `valid projection body parses into the full projection`() {
+        val projection = state().parseProjection(projectionJson())!!
+        assertEquals("rev-abc", projection.membershipRevision)
         assertEquals(VoiceSharingPlan.PRO, projection.plan)
         assertTrue(projection.voiceSharingEnrolled)
         assertEquals("epoch-1", projection.enrollmentEpoch)
@@ -60,87 +54,163 @@ class VoiceSharingAccountStateTest {
     }
 
     @Test
-    fun `free plan with null epoch and not_enrolled parses`() = runTest {
+    fun `free plan not enrolled parses`() {
         val projection = state().parseProjection(
-            validJson(plan = "free", enrolled = false, epoch = null, disclosure = null, withdrawal = "not_enrolled"),
-        )
-        assertEquals(VoiceSharingPlan.FREE, projection!!.plan)
+            projectionJson(plan = "free", enrolled = false, epoch = null, disclosure = null, withdrawal = "not_enrolled"),
+        )!!
+        assertEquals(VoiceSharingPlan.FREE, projection.plan)
         assertNull(projection.enrollmentEpoch)
         assertNull(projection.acceptedDisclosureVersion)
         assertEquals(WithdrawalState.NOT_ENROLLED, projection.withdrawalState)
     }
 
     @Test
-    fun `wrong schema version fails closed`() = runTest {
-        val json = validJson().replace("\"schema_version\":1", "\"schema_version\":2")
+    fun `schema_version as string fraction long or null fails closed - no numeric coercion`() {
+        val st = state()
+        assertNull(st.parseProjection(projectionJson(schemaVersion = "\"1\"")))
+        assertNull(st.parseProjection(projectionJson(schemaVersion = "1.5")))
+        assertNull(st.parseProjection(projectionJson(schemaVersion = "1.0")))
+        assertNull(st.parseProjection(projectionJson(schemaVersion = "null")))
+        assertNull(st.parseProjection(projectionJson(schemaVersion = "2")))
+    }
+
+    @Test
+    fun `string boolean fails closed - no boolean coercion`() {
+        assertNull(state().parseProjection(projectionJson(rawOverrides = mapOf("voice_sharing_enrolled" to "\"true\""))))
+        assertNull(state().parseProjection(projectionJson(rawOverrides = mapOf("voice_sharing_enrolled" to "1"))))
+    }
+
+    @Test
+    fun `enum case variants fail closed - no uppercase coercion`() {
+        val st = state()
+        assertNull(st.parseProjection(projectionJson(plan = "PRO")))
+        assertNull(st.parseProjection(projectionJson(plan = "Pro")))
+        assertNull(st.parseProjection(projectionJson(withdrawal = "Active")))
+        assertNull(st.parseProjection(projectionJson(withdrawal = "NOT_ENROLLED")))
+    }
+
+    @Test
+    fun `wrong schema version fails closed`() {
+        assertNull(state().parseProjection(projectionJson(schemaVersion = "2")))
+    }
+
+    @Test
+    fun `unknown field fails closed`() {
+        assertNull(state().parseProjection(projectionJson(rawOverrides = mapOf("plan_details" to "{}"))))
+    }
+
+    @Test
+    fun `missing field fails closed`() {
+        assertNull(state().parseProjection(projectionJson(rawOverrides = mapOf("voice_sharing_enrolled" to "null"))))
+    }
+
+    // --- nonempty fields + enrollment/withdrawal consistency ---
+
+    @Test
+    fun `empty revision epoch or disclosure fails closed`() {
+        val st = state()
+        assertNull(st.parseProjection(projectionJson(revision = "")))
+        assertNull(st.parseProjection(projectionJson(epoch = "")))
+        assertNull(st.parseProjection(projectionJson(disclosure = "")))
+    }
+
+    @Test
+    fun `contradictory enrollment and withdrawal states fail closed`() {
+        val st = state()
+        assertNull(st.parseProjection(projectionJson(enrolled = false, withdrawal = "active")))
+        assertNull(st.parseProjection(projectionJson(epoch = null, withdrawal = "active")))
+        assertNull(st.parseProjection(projectionJson(disclosure = null, withdrawal = "active")))
+        assertNull(st.parseProjection(projectionJson(enrolled = true, withdrawal = "withdrawn")))
+        assertNull(st.parseProjection(projectionJson(enrolled = true, withdrawal = "not_enrolled")))
+        assertNull(st.parseProjection(projectionJson(enrolled = false, epoch = "epoch-1", withdrawal = "not_enrolled")))
+    }
+
+    @Test
+    fun `malformed json fails closed independently`() {
+        val st = state()
+        assertNull(st.parseProjection("{"))
+        assertNull(st.parseProjection("{\"a\":}"))
+        assertNull(st.parseProjection("not json"))
+        assertNull(st.parseProjection(""))
+        assertNull(st.parseProjection("[1,2]"))
+    }
+
+    // --- explicit duplicate-key detection ---
+
+    @Test
+    fun `duplicate top-level keys fail closed`() {
+        val json = "{\"schema_version\":1,\"membership_revision\":\"a\",\"membership_revision\":\"b\"," +
+            "\"plan\":\"pro\",\"voice_sharing_enrolled\":true,\"enrollment_epoch\":\"e\"," +
+            "\"accepted_disclosure_version\":\"v\",\"withdrawal_state\":\"active\"}"
         assertNull(state().parseProjection(json))
     }
 
+    // --- synchronous lifecycle issuance + token-scoped applies ---
+
     @Test
-    fun `unknown field fails closed`() = runTest {
-        val json = validJson().dropLast(1) + ",\"plan_details\":{}}"
-        assertNull(state().parseProjection(json))
+    fun `session issuance is synchronous and unique per lifecycle`() {
+        val st = state()
+        val t1 = st.sessionStarted()
+        val t2 = st.sessionStarted()
+        assertTrue(t1 !== t2)
     }
 
     @Test
-    fun `missing field fails closed`() = runTest {
-        val json = validJson().replace("\"voice_sharing_enrolled\":true,", "")
-        assertNull(state().parseProjection(json))
+    fun `apply requires the ORIGINALLY ISSUED token - stale token never applies`() {
+        val st = state()
+        val issued = st.sessionStarted()
+        st.sessionEnded()
+        val relogin = st.sessionStarted() // same account, NEW incarnation
+        assertFalse(st.applySessionResponse(issued, projectionJson()))
+        assertTrue(st.applySessionResponse(relogin, projectionJson()))
+        assertEquals("rev-abc", st.projection.value!!.membershipRevision)
     }
 
     @Test
-    fun `invalid enum value fails closed`() = runTest {
-        assertNull(state().parseProjection(validJson(plan = "ultra")))
-        assertNull(state().parseProjection(validJson(withdrawal = "paused")))
+    fun `logout invalidates synchronously - no flow conflation dependency`() {
+        val st = state()
+        val issued = st.sessionStarted()
+        assertTrue(st.applySessionResponse(issued, projectionJson()))
+        st.sessionEnded()
+        assertNull(st.projection.value)
+        assertFalse(st.hasCurrentSessionProjection())
+        // The ended token cannot re-arm anything afterwards.
+        assertFalse(st.applySessionResponse(issued, projectionJson()))
     }
 
     @Test
-    fun `withdrawal and deletion stay distinct states`() = runTest {
-        assertEquals(
-            WithdrawalState.WITHDRAWN,
-            state().parseProjection(validJson(withdrawal = "withdrawn"))!!.withdrawalState,
-        )
+    fun `no apply path without an issued session`() {
+        val st = state()
+        assertNull(st.projection.value)
+        assertFalse(st.hasCurrentSessionProjection())
     }
 
     @Test
-    fun `projection is keyed on account identity - identity change invalidates`() = runTest {
-        val state = state()
-        state.onProjectionFetched(validJson())
-        assertEquals("rev-abc", state.projection.first()!!.membershipRevision)
-
-        identity.value = "account-2"
-        testScheduler.advanceUntilIdle()
-        assertNull(state.projection.first())
-        // A response belonging to the obsolete session is dropped, not applied to the new one.
-        assertFalse(state.applyResponseForSession("account-1", validJson(revision = "rev-old")))
+    fun `token refresh without a lifecycle boundary keeps the projection`() {
+        val st = state()
+        val issued = st.sessionStarted()
+        assertTrue(st.applySessionResponse(issued, projectionJson()))
+        st.onTokenRefresh()
+        assertTrue(st.hasCurrentSessionProjection())
+        assertTrue(st.applySessionResponse(issued, projectionJson()))
     }
 
     @Test
-    fun `token refresh on the same identity is not a logout - projection retained`() = runTest {
-        val state = state()
-        state.onProjectionFetched(validJson())
-        state.onTokenRefresh()
-        assertEquals("rev-abc", state.projection.first()!!.membershipRevision)
+    fun `opaque revision equality-only - no ordering surface`() {
+        val st = state()
+        val issued = st.sessionStarted()
+        st.applySessionResponse(issued, projectionJson(revision = "zzz-later-looking"))
+        assertTrue(st.isCurrentRevision("zzz-later-looking"))
+        assertFalse(st.isCurrentRevision("aaa-earlier-looking"))
     }
 
-    @Test
-    fun `membership revisions are opaque - equality only, exposed as plain strings`() = runTest {
-        val state = state()
-        state.onProjectionFetched(validJson(revision = "zzz-later-looking"))
-        val projection = state.projection.first()!!
-        // Revisions never sort: the API exposes equality with the CURRENT revision only.
-        assertTrue(state.isCurrentRevision(projection.membershipRevision))
-        assertFalse(state.isCurrentRevision("aaa-earlier-looking"))
-        // No revision ordering is exposed: the only predicate is equality with the CURRENT one.
-    }
+    // --- malformed baseline ---
 
     @Test
-    fun `current-session GET is required before authority`() = runTest {
-        val state = state()
-        // No GET has happened: no authority to act on a projection.
-        assertNull(state.projection.first())
-        assertFalse(state.hasCurrentSessionProjection())
-        state.onProjectionFetched(validJson())
-        assertTrue(state.hasCurrentSessionProjection())
+    fun `unparseable body never arms authority`() {
+        val st = state()
+        val issued = st.sessionStarted()
+        assertFalse(st.applySessionResponse(issued, "garbage"))
+        assertNull(st.projection.value)
     }
 }

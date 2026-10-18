@@ -119,12 +119,12 @@ class VoiceSharingAccountState {
     }
 
     /**
-     * ATOMIC 401 rejection handling under one fence: the issued TICKET generation and the
-     * session are validated here, so a newer same-session operation (which bumped the
-     * generation) or a superseded session makes a stale 401 a no-op. The credential
-     * incarnation compare-and-invalidate is owned by the credential store (rotation cannot
-     * be made atomic under this lock); see [VoiceSharingCredentialStore]. No credential data
-     * passes through or is stored.
+     * SCOPED state side of the coordinated 401 invalidation transaction: validates the issued
+     * TICKET generation and the session under the state fence, so a newer same-session
+     * operation (which bumped the generation) or a superseded session makes a stale 401 a
+     * no-op. The credential owner ([VoiceSharingCredentialStore.invalidateIfCurrent]) runs
+     * this check INSIDE its transaction lock, making credential compare + state invalidation
+     * one coordinated transaction. No credential data passes through or is stored.
      */
     fun processUnauthorized(token: SessionToken, ticket: OperationTicket): Boolean = synchronized(fence) {
         if (token !== currentToken) return false

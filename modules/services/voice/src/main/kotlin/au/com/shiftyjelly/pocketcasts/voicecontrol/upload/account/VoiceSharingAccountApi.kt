@@ -105,7 +105,7 @@ data class DeletionReceipt(val deletionRequestId: String, val status: String)
 class VoiceSharingAccountOperations(
     private val api: VoiceSharingAccountApi,
     private val state: VoiceSharingAccountState,
-    private val credentials: VoiceSharingCredentialStore = VoiceSharingCredentialStore(),
+    private val credentials: VoiceSharingCredentialStore,
     private val onCredentialInvalid: suspend (CredentialIncarnation) -> Unit = {},
 ) {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
@@ -257,21 +257,21 @@ class VoiceSharingAccountOperations(
     }
 
     /**
-     * Scoped 401 invalidation across THREE rotation gaps, each closed by its owner:
-     * (a) rotation between the frozen credential read and the credential-owner check — the
-     * incarnation identity compare rejects it; (b) rotation between the state fence and the
-     * credential effect — the credential OWNER's atomic compare-and-invalidate rejects it, so
-     * a fresh incarnation is never invalidated and no fresh authority is logged out; (c) the
-     * state fence itself (ticket generation + session) rejects a 401 from a superseded
-     * operation. The effect fires only when ALL owners accepted, and carries the rejected
+     * Scoped 401 invalidation as ONE COORDINATED OWNER TRANSACTION: the credential owner
+     * compares the rejected incarnation, runs the scoped state check (ticket generation +
+     * session), and clears the credential — all serialized under the credential store's
+     * single transaction lock. Rotation can therefore neither split the two invalidations
+     * nor slip between them: a stale rejection invalidates NOTHING (fresh incarnation AND
+     * fresh session authority both survive), and an accepted one invalidates both together.
+     * The effect fires only when the transaction committed, and carries the rejected
      * incarnation — never a raw bearer, never logged.
      */
     private suspend fun handleUnauthorized(op: FrozenOperation) {
         val rejected = op.credential ?: return
-        if (credentials.current() !== rejected) return // gap (a): rotated before the state check
-        if (!state.processUnauthorized(op.token, op.ticket)) return // gap (c): generation/session fence
-        if (!credentials.invalidateIfCurrent(rejected)) return // gap (b): rotated after the state check
-        onCredentialInvalid(rejected)
+        val committed = credentials.invalidateIfCurrent(rejected) {
+            state.processUnauthorized(op.token, op.ticket)
+        }
+        if (committed) onCredentialInvalid(rejected)
     }
 
     /** Endpoint-EXACT bodies from ONLY the ticket-captured values, built once, byte-identical retries. */

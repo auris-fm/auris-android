@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account
 
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
@@ -327,40 +328,54 @@ class VoiceSharingAccountOperationsFencingTest {
     }
 
     @Test
-    fun `401 after rotation BETWEEN the frozen credential read and the state check invalidates NOTHING`() = runTest {
+    fun `401 after a rotation BEFORE the coordinated transaction invalidates NOTHING`() = runTest {
         val c1 = credentials.publish("Bearer token-a")!!
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         assertTrue(operations.refreshProjection(token)) // froze incarnation c1
-        // Rotate AFTER the freeze read but BEFORE the paused 401 reaches the owner check.
-        server.enqueue(MockResponse().setResponseCode(401).setHeadersDelay(500, TimeUnit.MILLISECONDS))
+        // Deterministic margin: the 401 cannot be PROCESSED until the headers delay elapses
+        // (2s); the rotation is committed at ~200ms — strictly before the transaction starts.
+        server.enqueue(MockResponse().setResponseCode(401).setHeadersDelay(2, TimeUnit.SECONDS))
         val result = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
-        withContext(Dispatchers.IO) { Thread.sleep(100) } // request went out with c1
-        credentials.publish("Bearer token-b") // fresh authority exists before the 401 lands
+        withContext(Dispatchers.IO) { Thread.sleep(200) }
+        val fresh = credentials.publish("Bearer token-b")!! // rotation commits first
         assertTrue(result.await() is VoiceSharingMutationResult.Failure)
-        val current = credentials.current()!!
-        assertNotSame(c1, current) // rotated: a NEW incarnation exists
-        assertEquals("Bearer token-b", current.bearer) // fresh credential untouched
-        assertTrue(state.hasCurrentSessionProjection()) // fresh session authority untouched too
+        // The coordinated transaction refused: NOTHING was invalidated.
+        assertSame(fresh, credentials.current()) // fresh incarnation untouched
+        assertEquals("Bearer token-b", credentials.current()!!.bearer)
+        assertTrue(state.hasCurrentSessionProjection()) // session authority untouched
         assertEquals("rev-1", state.projection.value!!.membershipRevision)
-        assertTrue(invalidations.isEmpty())
+        assertTrue(invalidations.isEmpty()) // no credential effect
     }
 
     @Test
-    fun `401 after rotation BETWEEN the state fence and the credential effect spares the fresh incarnation`() = runTest {
-        val c1 = credentials.publish("Bearer token-a")!!
+    fun `a session started before the 401 callback survives it - deterministic callback barrier`() = runTest {
+        credentials.publish("Bearer token-a")
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         assertTrue(operations.refreshProjection(token))
-        // The 401 passes the owner identity check (c1 still current), then rotation happens
-        // INSIDE the window between the state fence and the atomic compare-and-invalidate.
-        server.enqueue(MockResponse().setResponseCode(401).setHeadersDelay(500, TimeUnit.MILLISECONDS))
-        val result = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
-        withContext(Dispatchers.IO) { Thread.sleep(100) }
-        // Publish a new incarnation while the rejection is being processed.
-        credentials.publish("Bearer token-b")
-        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
-        // Whichever side of the fence the rotation landed on, the FRESH incarnation survives:
+        server.enqueue(MockResponse().setResponseCode(401))
+        // Deterministic barrier AT THE ACTUAL BOUNDARY: the callback itself suspends; while it
+        // is pending we start a NEW session and publish a FRESH incarnation, then release.
+        val enteredCallback = CompletableDeferred<Unit>()
+        val releaseCallback = CompletableDeferred<Unit>()
+        val barrierOps = VoiceSharingAccountOperations(
+            api = VoiceSharingAccountApi.create(Retrofit.Builder().baseUrl(server.url("/")), OkHttpClient()),
+            state = state,
+            credentials = credentials,
+            onCredentialInvalid = { _ ->
+                enteredCallback.complete(Unit)
+                releaseCallback.await()
+            },
+        )
+        val result = async(Dispatchers.IO) { barrierOps.enroll(token, acceptedDisclosureVersion = "v3") }
+        enteredCallback.await() // transaction COMMITTED; effect pending
+        val newSession = state.sessionStarted() // fresh authority starts BEFORE the callback runs
+        credentials.publish("Bearer token-b") // fresh incarnation BEFORE the callback runs
+        releaseCallback.complete(Unit)
+        // Both survive the callback: the effect is a notification, never a second invalidation.
+        assertTrue(state.isCurrentSession(newSession))
         assertEquals("Bearer token-b", credentials.current()!!.bearer)
-        assertNotSame(c1, credentials.current()!!)
+        assertTrue(result.await() is VoiceSharingMutationResult.Failure)
+        assertTrue(invalidations.isEmpty())
     }
 
     @Test
@@ -570,5 +585,58 @@ class VoiceSharingAccountOperationsFencingTest {
             r.headers["Authorization"]?.let { headers.add(it) } ?: break
         }
         return headers
+    }
+}
+
+/**
+ * Auth/lifecycle binding for the account boundary (reviewer b566ee43): the coordinator is the
+ * ACTUAL credential owner composition — login/refresh/logout drive BOTH the credential
+ * incarnation store and the session lifecycle; operations always require a real store.
+ */
+class VoiceSharingAccountSessionCoordinatorTest {
+
+    @Test
+    fun `login binds the credential write to session issuance`() {
+        val state = VoiceSharingAccountState()
+        val credentials = VoiceSharingCredentialStore()
+        val coordinator = VoiceSharingAccountSessionCoordinator(state, credentials)
+        val token = coordinator.login("Bearer token-a")
+        assertEquals("Bearer token-a", credentials.current()!!.bearer)
+        assertTrue(state.isCurrentSession(token))
+    }
+
+    @Test
+    fun `login without a credential issues a session with no incarnation`() {
+        val state = VoiceSharingAccountState()
+        val credentials = VoiceSharingCredentialStore()
+        val coordinator = VoiceSharingAccountSessionCoordinator(state, credentials)
+        val token = coordinator.login(null)
+        assertNull(credentials.current())
+        assertTrue(state.isCurrentSession(token))
+    }
+
+    @Test
+    fun `token refresh keeps the SAME incarnation for the same bearer and rotates for a new bearer`() {
+        val state = VoiceSharingAccountState()
+        val credentials = VoiceSharingCredentialStore()
+        val coordinator = VoiceSharingAccountSessionCoordinator(state, credentials)
+        coordinator.login("Bearer token-a")
+        val same = credentials.current()
+        coordinator.credentialRefreshed("Bearer token-a")
+        assertSame(same, credentials.current()) // refresh is NOT a rotation
+        coordinator.credentialRefreshed("Bearer token-b")
+        assertNotSame(same, credentials.current()) // a different bearer IS a new incarnation
+        assertEquals("Bearer token-b", credentials.current()!!.bearer)
+    }
+
+    @Test
+    fun `logout clears the credential AND ends the session together`() {
+        val state = VoiceSharingAccountState()
+        val credentials = VoiceSharingCredentialStore()
+        val coordinator = VoiceSharingAccountSessionCoordinator(state, credentials)
+        val token = coordinator.login("Bearer token-a")
+        coordinator.loggedOut()
+        assertNull(credentials.current())
+        assertNull(state.beginOperation(token, requireProjection = false)) // session ended
     }
 }

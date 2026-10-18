@@ -1,6 +1,5 @@
 package au.com.shiftyjelly.pocketcasts.repositories.sync
 
-import android.accounts.Account
 import au.com.shiftyjelly.pocketcasts.preferences.AccessToken
 import au.com.shiftyjelly.pocketcasts.preferences.AccountConstants
 import au.com.shiftyjelly.pocketcasts.preferences.RefreshToken
@@ -63,11 +62,12 @@ interface CredentialOwnershipOwner {
     fun installOwnershipBinding(binding: CredentialOwnershipBinding?): AuthoritySnapshot?
 
     /**
-     * Refresh admission, captured BEFORE the network work: validates the ORIGINAL account
-     * (an A->B switch BEFORE admission refuses) and ATOMICALLY freezes ALL network inputs
-     * (refresh token + sign-in type) under the lock. Null = refused.
+     * Refresh admission against the caller's OBSERVED snapshot (captured BEFORE the request):
+     * validates the original account name AND session AND credential incarnation and
+     * ATOMICALLY freezes ALL network inputs (refresh token + sign-in type) under the lock.
+     * A refused admission means ZERO network work. Null = refused.
      */
-    fun beginRefresh(account: Account): RefreshLease?
+    fun beginRefresh(observed: AuthoritySnapshot): RefreshLease?
 
     /**
      * Conditional publication of BOTH refreshed tokens: commits only if the account, session
@@ -98,11 +98,12 @@ interface CredentialOwnershipOwner {
     fun reconcileExternalState(): AuthoritySnapshot
 
     /**
-     * ATOMIC publication of BOTH credentials after a password change (audit b7ad5a9a: the
-     * password flow previously published the refresh and access tokens in two separate
-     * unlocked writes). One lock, ONE credential incarnation move.
+     * ATOMIC conditional publication of BOTH credentials after a password change: commits
+     * only if the observed account/session/credential (captured BEFORE the request) are still
+     * current — a late A password change after a B login refuses without writing. One lock,
+     * ONE credential incarnation move.
      */
-    fun publishCredentials(refreshToken: RefreshToken, accessToken: AccessToken): Boolean
+    fun publishCredentials(observed: AuthoritySnapshot, refreshToken: RefreshToken, accessToken: AccessToken): Boolean
 
     fun sessionGeneration(): Long
 }

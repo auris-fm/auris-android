@@ -139,13 +139,16 @@ class SyncManagerImpl @Inject constructor(
     }
 
     override suspend fun updatePassword(newPassword: String, oldPassword: String) {
+        // The ORIGINAL authority is captured BEFORE the request; BOTH returned tokens are
+        // committed CONDITIONALLY (one lock, ONE credential move). A late A password change
+        // after a B login refuses without writing anything.
+        val observed = credentialOwnership.authoritySnapshot()
         val response = getCacheTokenOrLogin { token ->
             val response = syncServiceManager.updatePassword(newPassword, oldPassword, token)
             eventHorizon.track(UserPasswordUpdatedEvent)
             response
         }
-        syncAccountManager.setRefreshToken(response.refreshToken)
-        syncAccountManager.setAccessToken(response.accessToken)
+        credentialOwnership.publishCredentials(observed, response.refreshToken, response.accessToken)
     }
 
     override fun isLoggedIn(): Boolean = syncAccountManager.isLoggedIn()
@@ -166,20 +169,21 @@ class SyncManagerImpl @Inject constructor(
     override fun getRefreshToken(): RefreshToken? = syncAccountManager.getRefreshToken()
 
     private suspend fun fetchAccessToken(account: Account): AccessToken {
-        val refreshToken = syncAccountManager.getRefreshToken(account) ?: throw RefreshTokenExpiredException()
+        // The ORIGINAL authority is observed BEFORE the request; admission validates name +
+        // session + credential against it. A REFUSED admission is ZERO network work — there
+        // are NO fallback inputs: refused means refused.
+        val observed = credentialOwnership.authoritySnapshot()
+        if (observed.accountName != account.name) throw RefreshTokenExpiredException()
         return try {
-            // Refresh admission FIRST: validates the ORIGINAL account (an A->B switch BEFORE
-            // admission refuses) and atomically freezes ALL network inputs under the owner
-            // lock. The publication commit is then conditional on the account/session/credential
-            // still matching the lease, and a REFUSED publication never hands its token back.
-            val lease = credentialOwnership.beginRefresh(account)
-            LogBuffer.i(LogBuffer.TAG_BACKGROUND_TASKS, "Fetching the access token, SignInType: ${lease?.signInType}")
+            val lease = credentialOwnership.beginRefresh(observed)
+                ?: throw RefreshTokenExpiredException() // refused admission: NO download at all
+            LogBuffer.i(LogBuffer.TAG_BACKGROUND_TASKS, "Fetching the access token, SignInType: ${lease.signInType}")
             val tokenResponse = downloadTokens(
-                email = lease?.accountName ?: account.name,
-                refreshToken = lease?.refreshToken ?: refreshToken,
-                signInType = lease?.signInType ?: syncAccountManager.getSignInType(account),
+                email = lease.accountName,
+                refreshToken = lease.refreshToken,
+                signInType = lease.signInType,
             )
-            if (lease == null || !credentialOwnership.publishRefresh(lease, tokenResponse.refreshToken, tokenResponse.accessToken)) {
+            if (!credentialOwnership.publishRefresh(lease, tokenResponse.refreshToken, tokenResponse.accessToken)) {
                 throw java.io.IOException("Token refresh publication refused: superseded by newer account/session/credential state")
             }
             tokenResponse.accessToken

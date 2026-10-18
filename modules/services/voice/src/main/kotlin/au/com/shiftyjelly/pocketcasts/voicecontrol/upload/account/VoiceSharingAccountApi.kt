@@ -234,10 +234,11 @@ class VoiceSharingAccountOperations(
         var attempt = 0
         while (attempt < MAX_ATTEMPTS) {
             attempt++
-            // Ticket revalidation happens after every await boundary — as an owner→voice
-            // transaction that reconciles and reads the LIVE owner snapshot INSIDE the lock.
-            val liveSession = ownership.transaction { ownership.authoritySnapshot().session }
-            if (!ownership.transaction { state.isTicketCurrent(op.token, op.ticket, liveSession) }) return Outcome.Rejected
+            // Ticket revalidation happens after every await boundary — ONE owner→voice
+            // transaction: the LIVE owner snapshot is read and the ticket checked together
+            // inside the same lock (b680934d: no two-transaction split).
+            val current = ownership.transaction { state.isTicketCurrent(op.token, op.ticket, ownership.authoritySnapshot().session) }
+            if (!current) return Outcome.Rejected
             try {
                 val response = call(op.bearer, op.requestBody)
                 when {

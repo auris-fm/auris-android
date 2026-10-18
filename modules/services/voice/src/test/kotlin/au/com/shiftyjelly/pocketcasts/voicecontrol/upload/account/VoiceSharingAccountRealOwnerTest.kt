@@ -125,7 +125,7 @@ class VoiceSharingAccountRealOwnerTest {
     fun `T1 - a LATE A refresh after B login is REFUSED and never writes into B`() {
         val auth = realAuth()
         addAccount(auth, email = "a@example.com", token = "tA")
-        val lease = auth.beginRefresh(auth.getAccount()!!)!! // A's refresh admission, BEFORE the "network work"
+        val lease = auth.beginRefresh(auth.authoritySnapshot())!! // A's refresh admission, BEFORE the "network work"
 
         auth.signOut()
         addAccount(auth, email = "b@example.com", token = "tB") // B logs in while A's refresh is in flight
@@ -187,7 +187,7 @@ class VoiceSharingAccountRealOwnerTest {
         val token = currentToken(state)
         val sessionBefore = auth.sessionGeneration()
 
-        val lease = auth.beginRefresh(auth.getAccount()!!)!!
+        val lease = auth.beginRefresh(auth.authoritySnapshot())!!
         assertTrue(auth.publishRefresh(lease, RefreshToken("r2"), AccessToken("t2")))
 
         assertEquals(sessionBefore, auth.sessionGeneration()) // refresh NEVER moves the session
@@ -204,7 +204,7 @@ class VoiceSharingAccountRealOwnerTest {
         val state = VoiceSharingAccountState()
         bindingFor(auth, state).install()
 
-        val lease = auth.beginRefresh(auth.getAccount()!!)!!
+        val lease = auth.beginRefresh(auth.authoritySnapshot())!!
         assertTrue(auth.publishRefresh(lease, RefreshToken("r2"), AccessToken("t2")))
 
         // Simulate the platform's delayed internal cache copy writing the OLD value.
@@ -223,8 +223,8 @@ class VoiceSharingAccountRealOwnerTest {
         addAccount(auth)
         bindingFor(auth, VoiceSharingAccountState()).install()
 
-        val lease1 = auth.beginRefresh(auth.getAccount()!!)!!
-        val lease2 = auth.beginRefresh(auth.getAccount()!!)!! // two concurrent refreshes, same admission state
+        val lease1 = auth.beginRefresh(auth.authoritySnapshot())!!
+        val lease2 = auth.beginRefresh(auth.authoritySnapshot())!! // two concurrent refreshes, same admission state
         assertTrue(auth.publishRefresh(lease2, RefreshToken("r2"), AccessToken("t2"))) // newer completes first
         assertFalse(auth.publishRefresh(lease1, RefreshToken("r1"), AccessToken("t1-old"))) // older completion REFUSED
         assertEquals("t2", auth.authoritySnapshot().token!!.value)
@@ -236,7 +236,7 @@ class VoiceSharingAccountRealOwnerTest {
     fun `T8 - a REFUSED publication hands NO token back - the caller cannot publish a rejected refresh`() {
         val auth = realAuth()
         addAccount(auth, token = "t1")
-        val lease = auth.beginRefresh(auth.getAccount()!!)!!
+        val lease = auth.beginRefresh(auth.authoritySnapshot())!!
         auth.signOut() // session superseded while "in flight"
         addAccount(auth, token = "t2")
 
@@ -281,8 +281,10 @@ class VoiceSharingAccountRealOwnerTest {
         auth.signOut()
         addAccount(auth, email = "b@example.com", token = "tB")
 
-        val accountA = android.accounts.Account("a@example.com", au.com.shiftyjelly.pocketcasts.preferences.AccountConstants.ACCOUNT_TYPE)
-        assertNull(auth.beginRefresh(accountA)) // ORIGINAL account validation: refused pre-network
+        val observedA = auth.authoritySnapshot() // A's own observation, captured BEFORE the switch
+        auth.signOut()
+        addAccount(auth, email = "b@example.com", token = "tB")
+        assertNull(auth.beginRefresh(observedA)) // refused: B is the owner now — A never even reads inputs
         assertEquals("tB", auth.authoritySnapshot().token!!.value)
         serverShutdownNothing()
     }
@@ -366,10 +368,64 @@ class VoiceSharingAccountRealOwnerTest {
         bindingFor(auth, VoiceSharingAccountState()).install()
         val credentialBefore = auth.credentialGeneration()
 
-        assertTrue(auth.publishCredentials(RefreshToken("r2"), AccessToken("t2")))
+        assertTrue(auth.publishCredentials(auth.authoritySnapshot(), RefreshToken("r2"), AccessToken("t2")))
         val snapshot = auth.authoritySnapshot()
         assertEquals("t2", snapshot.token!!.value)
         assertEquals(credentialBefore + 1, snapshot.credential) // ONE move, not two writes
+        serverShutdownNothing()
+    }
+
+    @Test
+    fun `R6 - same-account RELOGIN before admission REFUSES the refresh - zero network`() {
+        val auth = realAuth()
+        addAccount(auth) // session S1
+        val observedBeforeRelogin = auth.authoritySnapshot()
+        addAccount(auth) // SAME account relogin → S2 (inputs rotated under the owner lock)
+        // Admission validates the caller's observed SESSION, not just the account name.
+        assertNull(auth.beginRefresh(observedBeforeRelogin))
+        // A CURRENT observation admits.
+        val lease = auth.beginRefresh(auth.authoritySnapshot())
+        assertNotNull(lease)
+        assertEquals("user@example.com", lease!!.accountName)
+        serverShutdownNothing()
+    }
+
+    @Test
+    fun `R7 - late A password change after B login REFUSES - zero writes`() {
+        val auth = realAuth()
+        addAccount(auth, email = "a@example.com", token = "tA")
+        val observedA = auth.authoritySnapshot() // captured BEFORE the (simulated) request
+        auth.signOut()
+        addAccount(auth, email = "b@example.com", token = "tB") // B logs in while A's request flies
+
+        assertFalse(auth.publishCredentials(observedA, RefreshToken("rA2"), AccessToken("tA2")))
+        assertEquals("tB", auth.authoritySnapshot().token!!.value) // B's credential untouched
+        // And a CURRENT observation commits atomically.
+        assertTrue(auth.publishCredentials(auth.authoritySnapshot(), RefreshToken("rB2"), AccessToken("tB2")))
+        assertEquals("tB2", auth.authoritySnapshot().token!!.value)
+        serverShutdownNothing()
+    }
+
+    @Test
+    fun `R8 - rebinding is an ATOMIC authority transfer - old retired, new seeded, no re-adoption`() {
+        val auth = realAuth()
+        addAccount(auth)
+        val stateOld = VoiceSharingAccountState()
+        val stateNew = VoiceSharingAccountState()
+        val oldBinding = bindingFor(auth, stateOld)
+        val newBinding = bindingFor(auth, stateNew)
+        val first = oldBinding.install()
+        assertEquals("t1", first!!.token!!.value)
+        val credentialAtInstall = auth.credentialGeneration()
+        val sessionAtInstall = auth.sessionGeneration()
+
+        val rebind = newBinding.install() // transfer: old session retired, new seeded from LEDGER
+        assertEquals("t1", rebind!!.token!!.value)
+        assertEquals(credentialAtInstall, rebind.credential) // NO cache re-adoption write
+        assertEquals(sessionAtInstall, rebind.session) // transfer, not a new incarnation
+        assertNull(stateOld.currentSessionTokenForTest()) // old state retired
+        assertEquals("t1", auth.authoritySnapshot().token!!.value) // retained ledger preserved
+        assertNotNull(stateNew.currentSessionTokenForTest()) // new binding armed from the retained ledger
         serverShutdownNothing()
     }
 

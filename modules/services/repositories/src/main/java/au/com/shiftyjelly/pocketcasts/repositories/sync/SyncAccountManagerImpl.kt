@@ -53,9 +53,18 @@ open class SyncAccountManagerImpl @Inject constructor(
     fun credentialGeneration(): Long = credentialGenerationCounter.get()
 
     /** DISTINCT session incarnation: changes ONLY on login/logout/account-switch, never on refresh. */
-    override fun publishCredentials(refreshToken: RefreshToken, accessToken: AccessToken): Boolean = synchronized(credentialWriteLock) {
+    override fun publishCredentials(observed: AuthoritySnapshot, refreshToken: RefreshToken, accessToken: AccessToken): Boolean = synchronized(credentialWriteLock) {
         reconcileLocked()
-        val account = getAccount() ?: return false
+        val account = getAccount()
+        // CONDITIONAL commit: the observed snapshot (captured BEFORE the request) must still be
+        // the current authority — a late A password change after a B login writes NOTHING.
+        if (account == null ||
+            retainedAccountName != observed.accountName ||
+            sessionGenerationCounter.get() != observed.session ||
+            credentialGenerationCounter.get() != observed.credential
+        ) {
+            return false
+        }
         accountManager.setPassword(account, refreshToken.value)
         accountManager.setUserData(account, AccountConstants.SIGN_IN_TYPE_KEY, AccountConstants.SignInType.Tokens.value)
         accountManager.setAuthToken(account, AccountConstants.TOKEN_TYPE, accessToken.value)
@@ -84,11 +93,13 @@ open class SyncAccountManagerImpl @Inject constructor(
         if (live != retainedAccountName) {
             if (sessionOpen) {
                 sessionGenerationCounter.incrementAndGet()
-                credentialGenerationCounter.incrementAndGet()
-                publishedToken = null
                 sessionOpen = false
                 ownershipBinding?.onSessionEnded(sessionGenerationCounter.get())
             }
+            // The retained credential is cleared INDEPENDENT of voice arming (b680934d):
+            // an identity replacement while the session is closed STILL voids the token.
+            publishedToken = null
+            credentialGenerationCounter.incrementAndGet()
             retainedAccountName = live
         }
     }
@@ -108,13 +119,21 @@ open class SyncAccountManagerImpl @Inject constructor(
             }
             return null // revoked: no authority from a null seed
         }
-        ownershipBinding = binding
         if (ownershipInstalled) {
-            // REBINDING: seed the RETAINED ledger only — NEVER re-adopt the platform token
-            // (a later cache copy cannot acquire authority through a rebind).
-            return if (sessionOpen) authoritySnapshot() else null
+            // REBINDING: an ATOMIC authority transfer under the owner lock — the OLD binding's
+            // session is retired and the NEW binding is seeded with the RETAINED ledger (same
+            // token, same credential incarnation, NO platform cache re-adoption).
+            val previous = ownershipBinding
+            ownershipBinding = binding
+            if (sessionOpen) {
+                previous?.onSessionEnded(sessionGenerationCounter.get())
+                binding.onSessionStarted(sessionGenerationCounter.get())
+                return authoritySnapshot()
+            }
+            return null
         }
         ownershipInstalled = true
+        ownershipBinding = binding // FIRST install: the binding is registered for all future tails
         val account = getAccount()
         val platformToken = account?.let { peekAccessToken(it) }
         if (account == null || platformToken == null) {
@@ -131,12 +150,19 @@ open class SyncAccountManagerImpl @Inject constructor(
         authoritySnapshot()
     }
 
-    override fun beginRefresh(account: Account): RefreshLease? = synchronized(credentialWriteLock) {
+    override fun beginRefresh(observed: AuthoritySnapshot): RefreshLease? = synchronized(credentialWriteLock) {
         reconcileLocked()
         val current = getAccount()
-        // The ORIGINAL account must still be the owner account: an A->B switch BEFORE the
-        // network work refuses here, with A's inputs never even read for B.
-        if (current == null || current.name != account.name) return null
+        // The caller's OBSERVED snapshot (name + session + credential, captured BEFORE the
+        // request) must still be current: an A->B switch AND a same-account relogin BEFORE
+        // admission refuse here — with the refused inputs never read and ZERO network work.
+        if (current == null ||
+            retainedAccountName != observed.accountName ||
+            sessionGenerationCounter.get() != observed.session ||
+            credentialGenerationCounter.get() != observed.credential
+        ) {
+            return null
+        }
         val refreshToken = getRefreshToken(current) ?: return null
         val signInType = getSignInType(current)
         RefreshLease(current.name, sessionGenerationCounter.get(), credentialGenerationCounter.get(), refreshToken, signInType)

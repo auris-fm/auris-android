@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Voice-sharing remote policy (Task 1 of docs/plans/android/voice-recording-uploads.md).
@@ -44,13 +45,13 @@ import kotlinx.coroutines.suspendCancellableCoroutine
  * Only `voice_sharing_enabled` is a remote key; every numeric limit is a compiled default
  * validated against a compiled ceiling (tracked separately, not part of this claim).
  */
-@Singleton
-class VoiceSharingPolicyProvider @Inject constructor(
+class VoiceSharingPolicyProvider(
     private val remoteConfig: FirebaseRemoteConfig,
     private val featureProvider: FirebaseRemoteFeatureProvider,
     private val scope: CoroutineScope,
     private val nowMs: () -> Long,
     private val sleepMs: suspend (Long) -> Unit = { delay(it) },
+    private val refreshTimeoutMs: Long = REFRESH_TIMEOUT_MS,
 ) {
     private val state = MutableStateFlow(DISABLED)
 
@@ -100,56 +101,67 @@ class VoiceSharingPolicyProvider @Inject constructor(
      * disabled publication.
      */
     suspend fun refresh(): PolicySnapshot {
-        val requestGen = ++requestGeneration
+        val requestGen: Long = synchronized(fence) { ++requestGeneration }
+        // The WHOLE refresh is bounded: a fetch or activation that never completes cannot hang
+        // the caller; on deadline it fails closed (fenced).
+        return withTimeoutOrNull(refreshTimeoutMs) { runRefresh(requestGen) }
+            ?: publishDisabled(requestGen)
+    }
 
+    private suspend fun runRefresh(requestGen: Long): PolicySnapshot {
         // Capture the SDK's PRE-EXISTING fetch bookkeeping BEFORE this refresh's request — even
         // when this provider has never refreshed before — so a cached success (the SDK already
         // fetched earlier and nothing advanced since) cannot pass as fresh on a first refresh.
-        val preFetchTimeMs = runCatching { remoteConfig.info.fetchTimeMillis }.getOrDefault(Long.MIN_VALUE)
+        // An unreadable baseline is NOT a pass: fail closed.
+        val baseline = attemptFinite { remoteConfig.info }
+            ?.let { info -> attemptFinite { info.fetchTimeMillis } }
+            ?: return publishDisabled(requestGen)
 
         // A genuine new fetch request, awaited before its bookkeeping is judged.
-        val fetched = runCatching { taskSuccess(remoteConfig.fetch()) }.getOrDefault(false)
-        if (!fetched) {
+        val fetched = attemptFinite { taskSuccess(remoteConfig.fetch()) }
+        if (fetched != true) {
             return publishDisabled(requestGen)
         }
 
-        val statusOk = runCatching {
-            remoteConfig.info.lastFetchStatus == FirebaseRemoteConfig.LAST_FETCH_STATUS_SUCCESS
-        }.getOrDefault(false)
-        val postFetchTimeMs = runCatching { remoteConfig.info.fetchTimeMillis }.getOrDefault(Long.MIN_VALUE)
-        if (!statusOk || postFetchTimeMs <= preFetchTimeMs) {
+        val info = attemptFinite { remoteConfig.info } ?: return publishDisabled(requestGen)
+        val statusOk = attemptFinite { info.lastFetchStatus == FirebaseRemoteConfig.LAST_FETCH_STATUS_SUCCESS } == true
+        val postFetchTimeMs = attemptFinite { info.fetchTimeMillis }
+        if (!statusOk || postFetchTimeMs == null || postFetchTimeMs <= baseline) {
             // Failure, or a cached success whose bookkeeping never advanced: not fresh, and the
             // lease must not renew.
             return publishDisabled(requestGen)
         }
 
-        val activated = runCatching { taskSuccess(remoteConfig.activate()) }.getOrDefault(false)
-        if (!activated) {
+        val activated = attemptFinite { taskSuccess(remoteConfig.activate()) }
+        if (activated != true) {
             return publishDisabled(requestGen)
         }
 
-        val value = remoteConfig.getValue(FirebaseConfig.VOICE_SHARING_ENABLED)
-        val strictBoolean = value.asString().let {
-            if (it == "true") {
-                true
-            } else if (it == "false") {
-                false
-            } else {
-                null
+        val value = attemptFinite { remoteConfig.getValue(FirebaseConfig.VOICE_SHARING_ENABLED) }
+            ?: return publishDisabled(requestGen)
+        val strictBoolean = attemptFinite {
+            when (value.asString()) {
+                "true" -> true
+                "false" -> false
+                else -> null
             }
-        }
-        val enabled = strictBoolean == true && value.source == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE
+        } ?: return publishDisabled(requestGen)
+        val enabled = strictBoolean && attemptFinite { value.source } == FirebaseRemoteConfig.VALUE_SOURCE_REMOTE
 
         val snapshot = PolicySnapshot(
             enabled = enabled,
             activatedAtMonotonicMs = nowMs(),
             activationGeneration = requestGen,
         )
-        if (requestGen != requestGeneration) {
-            return DISABLED // a newer refresh superseded this one while it was awaiting
+        // Generation allocation and conditional publication share one lock, so a newer request
+        // can never interleave between this refresh's check and its publication.
+        synchronized(fence) {
+            if (requestGen != requestGeneration) {
+                return DISABLED // a newer refresh superseded this one while it was awaiting
+            }
+            activationGeneration = requestGen
+            state.value = snapshot
         }
-        activationGeneration = requestGen
-        state.value = snapshot
         if (enabled) {
             scheduleLeaseInvalidation(snapshot)
         }
@@ -158,10 +170,26 @@ class VoiceSharingPolicyProvider @Inject constructor(
 
     /** Publishes disabled unless a newer refresh request has started (generation fence). */
     private fun publishDisabled(requestGen: Long): PolicySnapshot {
-        if (requestGen == requestGeneration) {
-            state.value = DISABLED
+        synchronized(fence) {
+            if (requestGen == requestGeneration) {
+                activationGeneration = 0L
+                state.value = DISABLED
+            }
         }
         return DISABLED
+    }
+
+    /**
+     * Runs [block], converting ordinary failures into null — but CancellationException is
+     * rethrown: a cancelled refresh is a cancellation (e.g. the whole-refresh deadline), never
+     * an ordinary failure to publish over.
+     */
+    private inline fun <T> attemptFinite(block: () -> T): T? = try {
+        block()
+    } catch (cancellation: kotlinx.coroutines.CancellationException) {
+        throw cancellation
+    } catch (error: Exception) {
+        null
     }
 
     /**
@@ -208,12 +236,18 @@ class VoiceSharingPolicyProvider @Inject constructor(
 
     private val directExecutor = java.util.concurrent.Executor { command -> command.run() }
 
+    /** Serializes generation allocation and conditional publication across threads. */
+    private val fence = Any()
+
     companion object {
         /** How long a successfully activated snapshot stays valid in monotonic time. */
         const val DEFAULT_LEASE_MS: Long = 15 * 60 * 1000L
 
         /** Bound on joining the underlying provider's initial fetch/activation sequence. */
         const val INIT_AWAIT_MS: Long = 2_000L
+
+        /** Bound on a whole refresh: pending fetch/activate tasks cannot suspend it forever. */
+        const val REFRESH_TIMEOUT_MS: Long = 10_000L
 
         private val DISABLED = PolicySnapshot(enabled = false, activatedAtMonotonicMs = 0L, activationGeneration = 0L)
     }

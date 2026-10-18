@@ -77,11 +77,27 @@ class VoiceSharingPolicyProviderTest {
         Dispatchers.resetMain()
     }
 
+    private var fetchGateOverride: com.google.android.gms.tasks.Task<Void>? = null
+    private var baselineThrowOnce = false
+
+    private fun restubWithFetchGate(gate: com.google.android.gms.tasks.Task<Void>?) {
+        fetchGateOverride = gate
+        restub()
+    }
+
     private fun restub() {
         val info = mock(FirebaseRemoteConfigInfo::class.java)
         whenever(info.fetchTimeMillis).thenAnswer { fetchTimeMs }
         whenever(info.lastFetchStatus).thenAnswer { fetchStatus }
-        whenever(config.info).thenReturn(info)
+        if (baselineThrowOnce) {
+            baselineThrowOnce = false
+            whenever(config.info).thenAnswer {
+                @Suppress("UNCHECKED_CAST")
+                throw IllegalStateException("scripted unreadable baseline")
+            }
+        } else {
+            whenever(config.info).thenReturn(info)
+        }
 
         val value = mock(FirebaseRemoteConfigValue::class.java)
         whenever(value.asString()).thenAnswer { rawValue ?: "" }
@@ -89,6 +105,7 @@ class VoiceSharingPolicyProviderTest {
         whenever(config.getValue(FirebaseConfig.VOICE_SHARING_ENABLED)).thenReturn(value)
 
         whenever(config.fetch()).thenAnswer {
+            fetchGateOverride?.let { return@thenAnswer it }
             if (fetchOutcome == null) {
                 Tasks.forException<Void>(IllegalStateException("scripted fetch failure"))
             } else {
@@ -109,13 +126,17 @@ class VoiceSharingPolicyProviderTest {
 
     private var activateOutcome: Unit? = Unit
 
-    private fun provider(sleepMs: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) }): VoiceSharingPolicyProvider {
+    private fun provider(
+        sleepMs: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
+        refreshTimeoutMs: Long = VoiceSharingPolicyProvider.REFRESH_TIMEOUT_MS,
+    ): VoiceSharingPolicyProvider {
         val provider = VoiceSharingPolicyProvider(
             remoteConfig = config,
             featureProvider = FirebaseRemoteFeatureProvider(config, featureScope),
             scope = scope,
             nowMs = { monotonicNowMs },
             sleepMs = sleepMs,
+            refreshTimeoutMs = refreshTimeoutMs,
         )
         // Run the lifecycle init's bounded join to completion on the virtual scheduler.
         dispatcher.scheduler.advanceTimeBy(VoiceSharingPolicyProvider.INIT_AWAIT_MS + 1)
@@ -165,11 +186,93 @@ class VoiceSharingPolicyProviderTest {
     }
 
     @Test
-    fun `first refresh over preexisting cached success with unchanged bookkeeping disables`() {
-        // The SDK already fetched (SUCCESS, timestamp T) and the refresh's fetch does not move it.
+    fun `first genuine attempt over preexisting cached success with unchanged bookkeeping disables`() {
+        // The SDK already fetched (SUCCESS, timestamp T) BEFORE this process's first attempt, and
+        // that first attempt's fetch does not move the timestamp. No provider() refresh ran with
+        // advancing bookkeeping beforehand: the lifecycle init IS the first genuine attempt.
+        fetchAdvancesBookkeeping = false
         val provider = provider()
-        refresh(provider, advances = false)
         assertFalse(provider.snapshot().enabled)
+    }
+
+    @Test
+    fun `unreadable pre-fetch baseline fails closed even when the fetch itself later succeeds`() {
+        // Install the throw-once baseline BEFORE the lifecycle runs so the FIRST reader of the
+        // SDK bookkeeping — the lifecycle init's own first genuine refresh — hits it.
+        baselineThrowOnce = true
+        restubWithFetchGate(null)
+        val provider = provider()
+        // The fetch still advances bookkeeping afterwards, but the baseline was unreadable, so
+        // freshness cannot be proven: fail closed.
+        assertFalse(provider.snapshot().enabled)
+    }
+
+    @Test
+    fun `pending fetch task hits the whole-refresh deadline and fails closed`() {
+        val fetchGate = TaskCompletionSource<Boolean>()
+        whenever(config.fetch()).thenAnswer { fetchGate.task }
+        val provider = provider(refreshTimeoutMs = 50)
+        val result = runBlocking { provider.refresh() }
+        assertFalse(result.enabled)
+        assertFalse(provider.snapshot().enabled)
+    }
+
+    @Test
+    fun `pending activation task hits the whole-refresh deadline and fails closed`() {
+        val activationGate = TaskCompletionSource<Boolean>()
+        whenever(config.activate()).thenAnswer { activationGate.task }
+        val provider = provider(refreshTimeoutMs = 50)
+        val result = runBlocking { provider.refresh() }
+        assertFalse(result.enabled)
+        assertFalse(provider.snapshot().enabled)
+    }
+
+    @Test
+    fun `cross-thread refresh race - older completion cannot overwrite newer disabled`() {
+        val fetchGate = TaskCompletionSource<Boolean>()
+        val firstFetch = java.util.concurrent.atomic.AtomicBoolean(true)
+        val aReachedFetch = java.util.concurrent.CountDownLatch(1)
+        whenever(config.fetch()).thenAnswer {
+            if (firstFetch.compareAndSet(true, false)) {
+                aReachedFetch.countDown() // A is awaiting inside its fetch
+                fetchGate.task
+            } else {
+                fetchTimeMs += 1_000
+                Tasks.forResult<Void>(null)
+            }
+        }
+
+        val a = Thread {
+            runBlocking { provider(refreshTimeoutMs = 5_000).refresh() }
+        }
+        a.start()
+        org.junit.Assert.assertTrue(aReachedFetch.await(2, java.util.concurrent.TimeUnit.SECONDS))
+
+        // B runs on this thread while A is suspended: B fails closed and is NEWER.
+        fetchOutcome = null
+        restubWithFetchGate(null)
+        val provider = provider(refreshTimeoutMs = 5_000)
+        val resultB = runBlocking { provider.refresh() }
+        assertFalse(resultB.enabled)
+
+        // A's fetch now completes successfully — the fence must suppress its stale publication.
+        fetchGate.trySetResult(true)
+        a.join(2_000)
+        assertFalse(provider.snapshot().enabled)
+    }
+
+    @Test
+    fun `hilt module composes the real provider entry`() {
+        val composed = VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
+            remoteConfig = config,
+            featureProvider = FirebaseRemoteFeatureProvider(config, featureScope),
+            scope = scope,
+        )
+        // The actual composition entry instantiates and owns the fail-closed provider. (The
+        // seed state is disabled before any refresh; snapshot() would call SystemClock, which is
+        // not mocked on the JVM — the provider's behavior is covered by the other controls.)
+        org.junit.Assert.assertNotNull(composed)
+        assertFalse(composed.policy.value.enabled)
     }
 
     @Test

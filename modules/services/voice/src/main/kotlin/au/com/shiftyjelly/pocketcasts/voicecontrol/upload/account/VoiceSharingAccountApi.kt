@@ -58,10 +58,27 @@ interface VoiceSharingAccountApi {
  * accepted (no auto re-enroll / no false success).
  */
 sealed interface VoiceSharingMutationResult {
-    data class Applied(val projection: VoiceSharingAccountProjection) : VoiceSharingMutationResult
+    /**
+     * Terminal 200 apply. Carries the IMMUTABLE ORIGINAL issued operation context (ticket +
+     * session token), NOT fresh-sampled state, so a caller resuming after this outcome can
+     * fence its own continuation against exactly the operation that applied.
+     */
+    data class Applied(
+        val projection: VoiceSharingAccountProjection,
+        val token: SessionToken,
+        val ticket: OperationTicket,
+    ) : VoiceSharingMutationResult
 
-    /** 409 membership conflict: carries the server-CURRENT projection when it parses strictly. */
-    data class MembershipConflict(val currentProjection: VoiceSharingAccountProjection?) : VoiceSharingMutationResult
+    /**
+     * 409 membership conflict, returned ONLY when the server-current projection parses
+     * strictly AND the issued ticket was still valid at apply time (the apply was accepted).
+     * Carries the original issued context for caller resume fencing.
+     */
+    data class MembershipConflict(
+        val currentProjection: VoiceSharingAccountProjection,
+        val token: SessionToken,
+        val ticket: OperationTicket,
+    ) : VoiceSharingMutationResult
 
     data object Failure : VoiceSharingMutationResult
 }
@@ -88,8 +105,8 @@ data class DeletionReceipt(val deletionRequestId: String, val status: String)
 class VoiceSharingAccountOperations(
     private val api: VoiceSharingAccountApi,
     private val state: VoiceSharingAccountState,
-    private val bearerProvider: suspend () -> String? = { null },
-    private val onCredentialInvalid: suspend (String) -> Unit = {},
+    private val credentials: VoiceSharingCredentialStore = VoiceSharingCredentialStore(),
+    private val onCredentialInvalid: suspend (CredentialIncarnation) -> Unit = {},
 ) {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
@@ -124,21 +141,25 @@ class VoiceSharingAccountOperations(
         }
     }
 
-    /** Fenced terminal apply of a 200 body. */
+    /** Fenced terminal apply of a 200 body; the outcome carries the ORIGINAL issued context. */
     private fun appliedOrFailure(token: SessionToken, ticket: OperationTicket, json: String): VoiceSharingMutationResult {
         val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
         return if (state.applyOutcome(token, ticket, json)) {
-            VoiceSharingMutationResult.Applied(projection)
+            VoiceSharingMutationResult.Applied(projection, token, ticket)
         } else {
             VoiceSharingMutationResult.Failure
         }
     }
 
-    /** 409 conflict: strictly parsed server-current projection applied fenced; NEVER a success. */
+    /**
+     * 409 conflict: MembershipConflict ONLY when the body parses strictly AND the issued
+     * ticket is still valid and the fenced apply was ACCEPTED. A malformed body or a
+     * generation-stale 409 is Failure — never a conflict with a null projection.
+     */
     private fun conflictOrFailure(token: SessionToken, ticket: OperationTicket, json: String): VoiceSharingMutationResult {
-        val projection = state.parseProjection(json)
-        if (projection != null) state.applyOutcome(token, ticket, json)
-        return VoiceSharingMutationResult.MembershipConflict(projection)
+        val projection = state.parseProjection(json) ?: return VoiceSharingMutationResult.Failure
+        if (!state.applyOutcome(token, ticket, json)) return VoiceSharingMutationResult.Failure
+        return VoiceSharingMutationResult.MembershipConflict(projection, token, ticket)
     }
 
     suspend fun deleteData(token: SessionToken): DeletionReceipt? {
@@ -163,16 +184,18 @@ class VoiceSharingAccountOperations(
     }
 
     private suspend fun frozen(token: SessionToken, ticket: OperationTicket, route: Route, disclosureVersion: String?): FrozenOperation {
-        // Revalidate the issued ticket AFTER awaiting the bearer, before the first send.
-        val bearer = bearerProvider()
+        // The credential INCARNATION (not a raw string) is captured at freeze.
+        val credential = credentials.current()
+        val bearer = credential?.bearer
+        // Revalidate the issued ticket AFTER awaiting the credential, before the first send.
         if (!state.isTicketCurrent(token, ticket)) {
-            return FrozenOperation(token, ticket, bearer, EMPTY_BODY, route)
+            return FrozenOperation(token, ticket, credential, bearer, EMPTY_BODY, route)
         }
         val body = when (route) {
             Route.GET -> EMPTY_BODY
             else -> writeBody(ticket, route, disclosureVersion)
         }
-        return FrozenOperation(token, ticket, bearer, body, route)
+        return FrozenOperation(token, ticket, credential, bearer, body, route)
     }
 
     /**
@@ -234,18 +257,21 @@ class VoiceSharingAccountOperations(
     }
 
     /**
-     * Scoped 401 invalidation: the current credential is awaited FIRST (no state mutation
-     * while suspended), then the state performs ONE ATOMIC fenced compare — issued TICKET
-     * generation + session + rejected-vs-current credential — and invalidates only on a full
-     * match. A newer same-session operation (generation bump), a superseded session, or a
-     * rotated credential makes the stale 401 a no-op. No credential data is stored or logged.
+     * Scoped 401 invalidation across THREE rotation gaps, each closed by its owner:
+     * (a) rotation between the frozen credential read and the credential-owner check — the
+     * incarnation identity compare rejects it; (b) rotation between the state fence and the
+     * credential effect — the credential OWNER's atomic compare-and-invalidate rejects it, so
+     * a fresh incarnation is never invalidated and no fresh authority is logged out; (c) the
+     * state fence itself (ticket generation + session) rejects a 401 from a superseded
+     * operation. The effect fires only when ALL owners accepted, and carries the rejected
+     * incarnation — never a raw bearer, never logged.
      */
     private suspend fun handleUnauthorized(op: FrozenOperation) {
-        val rejected = op.bearer
-        val current = bearerProvider()
-        if (state.processUnauthorized(op.token, op.ticket, rejected, current)) {
-            onCredentialInvalid(rejected!!)
-        }
+        val rejected = op.credential ?: return
+        if (credentials.current() !== rejected) return // gap (a): rotated before the state check
+        if (!state.processUnauthorized(op.token, op.ticket)) return // gap (c): generation/session fence
+        if (!credentials.invalidateIfCurrent(rejected)) return // gap (b): rotated after the state check
+        onCredentialInvalid(rejected)
     }
 
     /** Endpoint-EXACT bodies from ONLY the ticket-captured values, built once, byte-identical retries. */
@@ -320,6 +346,7 @@ class VoiceSharingAccountOperations(
     private data class FrozenOperation(
         val token: SessionToken,
         val ticket: OperationTicket,
+        val credential: CredentialIncarnation?,
         val bearer: String?,
         val requestBody: okhttp3.RequestBody,
         val route: Route,

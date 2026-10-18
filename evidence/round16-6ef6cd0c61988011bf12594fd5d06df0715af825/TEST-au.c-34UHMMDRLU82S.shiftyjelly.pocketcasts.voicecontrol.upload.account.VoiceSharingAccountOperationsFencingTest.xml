@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" tests="20" skipped="0" failures="0" errors="0" timestamp="2026-10-18T09:33:54.362Z" hostname="MacBook-Pro.local" time="4.637">
+  <properties/>
+  <testcase name="409 arriving after a newer same-session op is Failure - not a conflict outcome" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.792"/>
+  <testcase name="withdrawal serializes a NULL epoch explicitly - exact decoded key set" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.012"/>
+  <testcase name="422 is terminal - no retry" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.009"/>
+  <testcase name="deletion body carries ONLY the request_id" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.012"/>
+  <testcase name="malformed deletion receipt fails closed - dup keys, trailing junk, wrong schema" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.002"/>
+  <testcase name="401 after the session ended triggers NO credential effect" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.009"/>
+  <testcase name="409 with a malformed projection body applies nothing" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.011"/>
+  <testcase name="a later same-session GET fences an older in-flight operation response" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.557"/>
+  <testcase name="the post-commit notification has NO authority effects - deterministic barrier" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.024"/>
+  <testcase name="disclosure versions with quotes and backslashes are JSON-escaped and retry bodies are byte-identical" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.015"/>
+  <testcase name="401 with the SAME bearer and originating session triggers the credential effect once" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.012"/>
+  <testcase name="401 after a rotation BEFORE the coordinated transaction invalidates NOTHING" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="2.147"/>
+  <testcase name="401 from a superseded same-session operation invalidates NOTHING - generation-fenced" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.541"/>
+  <testcase name="409 revision conflict is terminal - no retry, projection untouched" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.008"/>
+  <testcase name="409 applies the strictly parsed CURRENT projection under the issued token - no replay" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.011"/>
+  <testcase name="enrollment body carries NO epoch - exact decoded key set" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.009"/>
+  <testcase name="mutation retries retain the ORIGINAL request_id and byte-identical body" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.01"/>
+  <testcase name="deleteData fences its terminal outcome - session ended mid-flight discards the receipt" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.008"/>
+  <testcase name="withdraw 409 conflict is a DISTINCT outcome - never reports success" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.008"/>
+  <testcase name="401 when the bearer has since changed triggers NO credential effect" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest" time="0.439"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[Possibly running android unit test without robolectric
+java.lang.RuntimeException: Method isLoggable in android.util.Log not mocked. See https://developer.android.com/r/studio-ui/build/not-mocked for details.
+	at android.util.Log.isLoggable(Log.java)
+	at okhttp3.internal.platform.android.AndroidLog.enableLogging(AndroidLog.kt:132)
+	at okhttp3.internal.platform.android.AndroidLog.enable(AndroidLog.kt:109)
+	at okhttp3.internal.platform.PlatformRegistry.findPlatform(PlatformRegistry.kt:25)
+	at okhttp3.internal.platform.Platform$Companion.findPlatform(Platform.kt:252)
+	at okhttp3.internal.platform.Platform$Companion.access$findPlatform(Platform.kt:230)
+	at okhttp3.internal.platform.Platform.<clinit>(Platform.kt:231)
+	at mockwebserver3.MockWebServer.start(MockWebServer.kt:331)
+	at mockwebserver3.MockWebServer.start(MockWebServer.kt:303)
+	at mockwebserver3.MockWebServer.start(MockWebServer.kt:288)
+	at okhttp3.mockwebserver.MockWebServer.start(MockWebServer.kt:155)
+	at okhttp3.mockwebserver.MockWebServer.start$default(MockWebServer.kt:153)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountOperationsFencingTest.setUp(VoiceSharingAccountOperationsTest.kt:382)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.junit.runners.model.FrameworkMethod$1.runReflectiveCall(FrameworkMethod.java:59)
+	at org.junit.internal.runners.model.ReflectiveCallable.run(ReflectiveCallable.java:12)
+	at org.junit.runners.model.FrameworkMethod.invokeExplosively(FrameworkMethod.java:56)
+	at org.junit.internal.runners.statements.RunBefores.invokeMethod(RunBefores.java:33)
+	at org.junit.internal.runners.statements.RunBefores.evaluate(RunBefores.java:24)
+	at org.junit.internal.runners.statements.RunAfters.evaluate(RunAfters.java:27)
+	at org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)
+	at org.junit.runners.BlockJUnit4ClassRunner$1.evaluate(BlockJUnit4ClassRunner.java:100)
+	at org.junit.runners.ParentRunner.runLeaf(ParentRunner.java:366)
+	at org.junit.runners.BlockJUnit4ClassRunner.runChild(BlockJUnit4ClassRunner.java:103)
+	at org.junit.runners.BlockJUnit4ClassRunner.runChild(BlockJUnit4ClassRunner.java:63)
+	at org.junit.runners.ParentRunner$4.run(ParentRunner.java:331)
+	at org.junit.runners.ParentRunner$1.schedule(ParentRunner.java:79)
+	at org.junit.runners.ParentRunner.runChildren(ParentRunner.java:329)
+	at org.junit.runners.ParentRunner.access$100(ParentRunner.java:66)
+	at org.junit.runners.ParentRunner$2.evaluate(ParentRunner.java:293)
+	at org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)
+	at org.junit.runners.ParentRunner.run(ParentRunner.java:413)
+	at org.junit.runner.JUnitCore.run(JUnitCore.java:137)
+	at org.junit.runner.JUnitCore.run(JUnitCore.java:115)
+	at org.gradle.api.internal.tasks.testing.junit.JUnitTestExecutor.runRequest(JUnitTestExecutor.java:174)
+	at org.gradle.api.internal.tasks.testing.junit.JUnitTestExecutor.accept(JUnitTestExecutor.java:84)
+	at org.gradle.api.internal.tasks.testing.junit.JUnitTestExecutor.accept(JUnitTestExecutor.java:47)
+	at org.gradle.api.internal.tasks.testing.junit.AbstractJUnitTestDefinitionProcessor.processTestDefinition(AbstractJUnitTestDefinitionProcessor.java:65)
+	at org.gradle.api.internal.tasks.testing.SuiteTestDefinitionProcessor.processTestDefinition(SuiteTestDefinitionProcessor.java:53)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.gradle.internal.dispatch.MethodInvocation.invokeOn(MethodInvocation.java:77)
+	at org.gradle.internal.dispatch.ReflectionDispatch.dispatch(ReflectionDispatch.java:28)
+	at org.gradle.internal.dispatch.ReflectionDispatch.dispatch(ReflectionDispatch.java:19)
+	at org.gradle.internal.dispatch.ContextClassLoaderDispatch.dispatch(ContextClassLoaderDispatch.java:33)
+	at org.gradle.internal.dispatch.ProxyDispatchAdapter$DispatchingInvocationHandler.invoke(ProxyDispatchAdapter.java:88)
+	at jdk.proxy1/jdk.proxy1.$Proxy4.processTestDefinition(Unknown Source)
+	at org.gradle.api.internal.tasks.testing.worker.TestWorker$2.run(TestWorker.java:178)
+	at org.gradle.api.internal.tasks.testing.worker.TestWorker.executeAndMaintainThreadName(TestWorker.java:126)
+	at org.gradle.api.internal.tasks.testing.worker.TestWorker.execute(TestWorker.java:103)
+	at org.gradle.api.internal.tasks.testing.worker.TestWorker.execute(TestWorker.java:63)
+	at org.gradle.process.internal.worker.child.ActionExecutionWorker.execute(ActionExecutionWorker.java:56)
+	at org.gradle.process.internal.worker.child.SystemApplicationClassLoaderWorker.call(SystemApplicationClassLoaderWorker.java:122)
+	at org.gradle.process.internal.worker.child.SystemApplicationClassLoaderWorker.call(SystemApplicationClassLoaderWorker.java:72)
+	at worker.org.gradle.process.internal.worker.GradleWorkerMain.run(GradleWorkerMain.java:69)
+	at worker.org.gradle.process.internal.worker.GradleWorkerMain.main(GradleWorkerMain.java:74)
+]]></system-err>
+</testsuite>

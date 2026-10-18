@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" tests="23" skipped="0" failures="0" errors="0" timestamp="2026-10-18T09:33:36.503Z" hostname="MacBook-Pro.local" time="1.279">
+  <properties/>
+  <testcase name="importMissingEpisode downloads podcast episode when podcast uuid is regular podcast" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.927"/>
+  <testcase name="sync uses JSON implementation when protobuf feature flag is disabled" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.031"/>
+  <testcase name="performProtobufSync clears synced changes after successful sync" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.057"/>
+  <testcase name="buildProtobufRequest creates REPLACE change with multiple episodes" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.019"/>
+  <testcase name="performProtobufSync handles 304 Not Modified response" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.061"/>
+  <testcase name="serverAndLocalEpisodesMatch returns false when counts differ" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.006"/>
+  <testcase name="readProtobufResponse keeps local queue on first login with empty server response" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.009"/>
+  <testcase name="serverAndLocalEpisodesMatch returns true when episodes match exactly" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.009"/>
+  <testcase name="serverAndLocalEpisodesMatch returns false when episodes order doesn't match" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.006"/>
+  <testcase name="readJsonResponse returns early when server modified hasn't changed" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.022"/>
+  <testcase name="buildJsonRequest creates REPLACE change with multiple episodes" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.029"/>
+  <testcase name="performJsonSync clears synced changes after successful sync" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.011"/>
+  <testcase name="importMissingPodcasts filters out user podcast uuid" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.006"/>
+  <testcase name="importMissingEpisode downloads user episode when podcast uuid is user podcast" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.01"/>
+  <testcase name="sync uses protobuf implementation when feature flag is enabled" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.012"/>
+  <testcase name="importMissingPodcasts downloads missing podcasts" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.007"/>
+  <testcase name="readJsonResponse keeps local queue on first login with empty server response" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.012"/>
+  <testcase name="readProtobufResponse returns early when server modified hasn't changed" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.005"/>
+  <testcase name="importMissingEpisode returns null when podcastUuid is null" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.013"/>
+  <testcase name="serverAndLocalEpisodesMatch returns false when server has episodes but local is empty" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.004"/>
+  <testcase name="serverAndLocalEpisodesMatch returns false when episodes are different" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.004"/>
+  <testcase name="serverAndLocalEpisodesMatch returns true for empty lists" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.004"/>
+  <testcase name="performJsonSync handles 304 Not Modified response" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.UpNextSyncTest" time="0.011"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="au.com.shiftyjelly.pocketcasts.repositories.sync.PodcastRefresherImplTest" tests="14" skipped="0" failures="0" errors="0" timestamp="2026-10-18T09:33:32.179Z" hostname="MacBook-Pro.local" time="2.553">
+  <properties/>
+  <testcase name="updatePodcastIfRequired does not update when only non-tracked fields change" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PodcastRefresherImplTest" time="1.793"/>
+  <testcase name="updatePodcastIfRequired does not update when no field changes" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PodcastRefresherImplTest" time="0.008"/>
+  <testcase name="updatePodcastIfRequired updates when the episodeFrequency changes" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PodcastRefresherImplTest" time="0.028"/>
+  <testcase name="updatePodcastIfRequired updates when the fundingUrl changes" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PodcastRefresherImplTest" time="0.008"/>
+  <testcase name="updatePodcastIfRequired updates when multiple fields change" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PodcastRefresherImplTest" time="0.013"/>
+  <testcase name="updatePodcastIfRequired updates when the explicit changes from null" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PodcastRefresherImplTest" time="0.009"/>
+  <testcase name="updatePodcastIfRequired updates when the webFeed changes" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PodcastRefresherImplTest" time="0.008"/>
+  <testcase name="updatePodcastIfRequired updates when the refreshAvailable changes" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PodcastRefresherImplTest" time="0.01"/>
+  <testcase name="updatePodcastIfRequired updates when the explicit changes" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PodcastRefresherImplTest" time="0.011"/>
+  <testcase name="updatePodcastIfRequired updates when the description changes" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PodcastRefresherImplTest" time="0.01"/>
+  <testcase name="updatePodcastIfRequired updates when the title changes" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PodcastRefresherImplTest" time="0.009"/>
+  <testcase name="updatePodcastIfRequired updates when the estimatedNextEpisode changes" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PodcastRefresherImplTest" time="0.009"/>
+  <testcase name="updatePodcastIfRequired updates when the author changes" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PodcastRefresherImplTest" time="0.008"/>
+  <testcase name="updatePodcastIfRequired updates when the category changes" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PodcastRefresherImplTest" time="0.009"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

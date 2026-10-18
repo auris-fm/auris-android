@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="au.com.shiftyjelly.pocketcasts.repositories.sync.PocketCastsAccountAuthenticatorTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-10-18T09:33:28.721Z" hostname="MacBook-Pro.local" time="3.423">
+  <properties/>
+  <testcase name="getAuthTokenExpiredRefreshToken" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PocketCastsAccountAuthenticatorTest" time="3.296"/>
+  <testcase name="hasFeatures" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PocketCastsAccountAuthenticatorTest" time="0.026"/>
+  <testcase name="getAuthTokenSuccess" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PocketCastsAccountAuthenticatorTest" time="0.045"/>
+  <testcase name="getAuthTokenServerError" classname="au.com.shiftyjelly.pocketcasts.repositories.sync.PocketCastsAccountAuthenticatorTest" time="0.036"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

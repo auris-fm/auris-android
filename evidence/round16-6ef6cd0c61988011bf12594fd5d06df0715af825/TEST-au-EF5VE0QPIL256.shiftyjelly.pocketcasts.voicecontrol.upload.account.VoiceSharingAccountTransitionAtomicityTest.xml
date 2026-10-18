@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountTransitionAtomicityTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-10-18T09:34:06.313Z" hostname="MacBook-Pro.local" time="1.253">
-  <properties/>
-  <testcase name="interleaved login and logout stay CONSISTENT - credential present iff a session is current" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountTransitionAtomicityTest" time="1.033"/>
-  <testcase name="rotation CANNOT interleave the coordinated invalidation transaction - deterministic lock barrier" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountTransitionAtomicityTest" time="0.219"/>
-  <system-out><![CDATA[]]></system-out>
-  <system-err><![CDATA[]]></system-err>
-</testsuite>

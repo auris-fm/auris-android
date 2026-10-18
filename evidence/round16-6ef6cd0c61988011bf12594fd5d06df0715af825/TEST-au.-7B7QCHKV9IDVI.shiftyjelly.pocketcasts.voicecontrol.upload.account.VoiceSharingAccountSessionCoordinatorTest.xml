@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountSessionCoordinatorTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-10-18T09:34:06.264Z" hostname="MacBook-Pro.local" time="0.005">
-  <properties/>
-  <testcase name="login binds the credential write to session issuance" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountSessionCoordinatorTest" time="0.003"/>
-  <testcase name="login without a credential issues a session with no incarnation" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountSessionCoordinatorTest" time="0.001"/>
-  <testcase name="logout clears the credential AND ends the session together" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountSessionCoordinatorTest" time="0.0"/>
-  <system-out><![CDATA[]]></system-out>
-  <system-err><![CDATA[]]></system-err>
-</testsuite>

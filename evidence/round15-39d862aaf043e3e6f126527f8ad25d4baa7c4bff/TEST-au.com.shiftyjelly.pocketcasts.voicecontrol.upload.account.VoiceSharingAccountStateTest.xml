@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" tests="26" skipped="0" failures="0" errors="0" timestamp="2026-10-18T09:23:28.162Z" hostname="MacBook-Pro.local" time="0.022">
+  <properties/>
+  <testcase name="missing field fails closed" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.0"/>
+  <testcase name="schema_version exact numeric 1 - 1_0 and 1e0 are integers and must be accepted" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.002"/>
+  <testcase name="unparseable body never arms authority" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.0"/>
+  <testcase name="a NEW session token atomically clears the prior projection - no sessionEnded needed" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.001"/>
+  <testcase name="unknown field fails closed" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.0"/>
+  <testcase name="duplicate top-level keys fail closed" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.0"/>
+  <testcase name="session issuance is synchronous and unique per lifecycle" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.0"/>
+  <testcase name="malformed json fails closed independently" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.001"/>
+  <testcase name="contradictory enrollment and withdrawal states fail closed" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.001"/>
+  <testcase name="legal key escapes are decoded - escaped alias of a duplicate key fails, unique escaped key parses" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.001"/>
+  <testcase name="enum case variants fail closed - no uppercase coercion" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.005"/>
+  <testcase name="token refresh without a lifecycle boundary keeps the projection" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.0"/>
+  <testcase name="strict complete document - trailing junk and second value fail" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.002"/>
+  <testcase name="wrong schema version fails closed" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.0"/>
+  <testcase name="schema_version near-1 fraction that ROUNDS to 1_0 fails - exact decimal lexeme" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.001"/>
+  <testcase name="free plan not enrolled parses" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.001"/>
+  <testcase name="valid projection body parses into the full projection" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.0"/>
+  <testcase name="string boolean fails closed - no boolean coercion" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.0"/>
+  <testcase name="schema_version as string fraction long or null fails closed - no numeric coercion" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.001"/>
+  <testcase name="apply requires the ORIGINALLY ISSUED token - stale token never applies" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.0"/>
+  <testcase name="no apply path without an issued session" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.0"/>
+  <testcase name="empty revision epoch or disclosure fails closed" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.0"/>
+  <testcase name="unquoted or single-quoted keys fail - strict syntax only" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.001"/>
+  <testcase name="logout invalidates synchronously - no flow conflation dependency" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.0"/>
+  <testcase name="epoch and disclosure must be actual JSON null OR nonempty string - non-string types fail" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.001"/>
+  <testcase name="opaque revision equality-only - no ordering surface" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStateTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

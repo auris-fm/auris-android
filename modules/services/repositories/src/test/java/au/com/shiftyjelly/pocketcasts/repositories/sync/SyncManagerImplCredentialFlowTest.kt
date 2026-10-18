@@ -177,11 +177,17 @@ class SyncManagerImplCredentialFlowTest {
 
     @Test
     fun `P4 - identity switch DURING token acquisition refuses BEFORE the password request`() = kotlinx.coroutines.runBlocking {
-        addAccount("a@example.com", "t1") // initial seed on the OUTER owner (P3 fixture shape)
+        // The pair is created FIRST; the initial seed is the INJECTED owner's OWN login —
+        // never the outer fixture owner.
         val (manager, injectedOwner) = managerWithAcquisitionSwitch {
             signOut() // EXPLICIT receiver: the injected owner retires its own session
             addAccount("b@example.com", "uuid-b", RefreshToken("r-b"), AccessToken("tB"), au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity.PocketCasts) // FIVE-arg REAL method on the SAME object
         }
+        injectedOwner.addAccount("a@example.com", "uuid-a", RefreshToken("r-a"), AccessToken("t1"), au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity.PocketCasts)
+        // INITIAL premise, asserted on the injected owner BEFORE updatePassword:
+        assertEquals("t1", injectedOwner.authoritySnapshot().token!!.value) // published token
+        assertEquals("a@example.com", injectedOwner.authoritySnapshot().accountName)
+        assertTrue(injectedOwner.sessionGeneration() > 0) // session ARMED by the login
         try {
             manager.updatePassword(newPassword = "np", oldPassword = "op")
             fail("identity superseded during acquisition must refuse EXPLICITLY")
@@ -200,11 +206,17 @@ class SyncManagerImplCredentialFlowTest {
      */
     @Test
     fun `P5 - SAME-account relogin DURING token acquisition refuses - session fence is NECESSARY`() = kotlinx.coroutines.runBlocking {
-        addAccount("a@example.com", "t1") // initial seed on the OUTER owner (P3 fixture shape)
+        // The pair is created FIRST; the initial seed is the INJECTED owner's OWN login —
+        // never the outer fixture owner.
         val (manager, injectedOwner) = managerWithAcquisitionSwitch {
             signOut() // EXPLICIT receiver: the injected owner retires its own session
             addAccount("a@example.com", "uuid-a2", RefreshToken("r-a2"), AccessToken("t2"), au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity.PocketCasts) // FIVE-arg REAL method, SAME object, same name, NEW session
         }
+        injectedOwner.addAccount("a@example.com", "uuid-a1", RefreshToken("r-a1"), AccessToken("t1"), au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity.PocketCasts)
+        // INITIAL premise, asserted on the injected owner BEFORE updatePassword:
+        assertEquals("t1", injectedOwner.authoritySnapshot().token!!.value)
+        assertEquals("a@example.com", injectedOwner.authoritySnapshot().accountName)
+        assertTrue(injectedOwner.sessionGeneration() > 0) // session ARMED by the login
         try {
             manager.updatePassword(newPassword = "np", oldPassword = "op")
             fail("same-account relogin during acquisition must refuse: the session moved")

@@ -152,34 +152,35 @@ class SyncManagerImplCredentialFlowTest {
     // identity is captured before acquisition; A resumes with B's admission → refused BEFORE
     // the password HTTP request, explicitly, with zero network.
 
-    /** Installs a SyncManager whose owner switches the identity AT the acquisition seam. */
-    private fun managerWithAcquisitionSwitch(switch: SyncAccountManagerImpl.() -> Unit): SyncManagerImpl {
-        val switchingOwner = object : SyncAccountManagerImpl(mock(), accountManager) {
+    // Installs a SyncManager whose owner switches the identity AT the acquisition seam. The
+    // owner is returned EXPLICITLY so every lifecycle call and readback names that EXACT
+    // object — no implicit receivers, no test-helper resolution to an outer owner.
+    private fun managerWithAcquisitionSwitch(switch: SyncAccountManagerImpl.() -> Unit): Pair<SyncManagerImpl, SyncAccountManagerImpl> {
+        val injectedOwner = object : SyncAccountManagerImpl(mock(), accountManager) {
             override suspend fun getAccessToken(): AccessToken? {
-                // The switch drives THIS SAME owner instance — the very one injected below —
-                // so the platform swap moves ITS ledger, not a detached twin's.
                 this.switch()
                 return super.getAccessToken()
             }
         }
-        return SyncManagerImpl(
+        val manager = SyncManagerImpl(
             eventHorizon = com.automattic.eventhorizon.EventHorizon(au.com.shiftyjelly.pocketcasts.analytics.testing.TestEventSink()),
             context = context,
             settings = mock(),
-            syncAccountManager = switchingOwner,
-            credentialOwnership = switchingOwner,
+            syncAccountManager = injectedOwner,
+            credentialOwnership = injectedOwner,
             syncServiceManager = syncServiceManagerField,
             moshi = moshiField,
             notificationManager = mock(),
         )
+        return manager to injectedOwner
     }
 
     @Test
     fun `P4 - identity switch DURING token acquisition refuses BEFORE the password request`() = kotlinx.coroutines.runBlocking {
-        addAccount("a@example.com", "t1")
-        val manager = managerWithAcquisitionSwitch {
-            signOut()
-            addAccount("b@example.com", "tB") // B replaces A on the SAME owner
+        addAccount("a@example.com", "t1") // initial seed on the OUTER owner (P3 fixture shape)
+        val (manager, injectedOwner) = managerWithAcquisitionSwitch {
+            signOut() // EXPLICIT receiver: the injected owner retires its own session
+            addAccount("b@example.com", "uuid-b", RefreshToken("r-b"), AccessToken("tB"), au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity.PocketCasts) // FIVE-arg REAL method on the SAME object
         }
         try {
             manager.updatePassword(newPassword = "np", oldPassword = "op")
@@ -188,8 +189,9 @@ class SyncManagerImplCredentialFlowTest {
             assertTrue(expected.message!!.contains("superseded during token acquisition"))
         }
         assertEquals(0, server.requestCount) // refused BEFORE the password HTTP request
-        assertEquals("tB", syncAccountManager.authoritySnapshot().token!!.value) // B intact; A published nowhere
-        assertEquals("b@example.com", syncAccountManager.authoritySnapshot().accountName)
+        // ALL readbacks from the EXACT object that SyncManager received:
+        assertEquals("tB", injectedOwner.authoritySnapshot().token!!.value) // B intact; A published nowhere
+        assertEquals("b@example.com", injectedOwner.authoritySnapshot().accountName)
     }
 
     /**
@@ -198,10 +200,10 @@ class SyncManagerImplCredentialFlowTest {
      */
     @Test
     fun `P5 - SAME-account relogin DURING token acquisition refuses - session fence is NECESSARY`() = kotlinx.coroutines.runBlocking {
-        addAccount("a@example.com", "t1")
-        val manager = managerWithAcquisitionSwitch {
-            signOut()
-            addAccount("a@example.com", "t2") // same name, NEW session incarnation
+        addAccount("a@example.com", "t1") // initial seed on the OUTER owner (P3 fixture shape)
+        val (manager, injectedOwner) = managerWithAcquisitionSwitch {
+            signOut() // EXPLICIT receiver: the injected owner retires its own session
+            addAccount("a@example.com", "uuid-a2", RefreshToken("r-a2"), AccessToken("t2"), au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity.PocketCasts) // FIVE-arg REAL method, SAME object, same name, NEW session
         }
         try {
             manager.updatePassword(newPassword = "np", oldPassword = "op")
@@ -210,8 +212,9 @@ class SyncManagerImplCredentialFlowTest {
             assertTrue(expected.message!!.contains("superseded during token acquisition"))
         }
         assertEquals(0, server.requestCount) // no password HTTP
-        assertEquals("a@example.com", syncAccountManager.authoritySnapshot().accountName) // name alone cannot refuse
-        assertEquals("t2", syncAccountManager.authoritySnapshot().token!!.value) // fresh session's credential intact
+        // ALL readbacks from the EXACT object that SyncManager received:
+        assertEquals("a@example.com", injectedOwner.authoritySnapshot().accountName) // name alone cannot refuse
+        assertEquals("t2", injectedOwner.authoritySnapshot().token!!.value) // fresh session's credential intact
     }
 
     /** P3 — refused admission in the REAL fetch flow issues ZERO token-fetch calls. */

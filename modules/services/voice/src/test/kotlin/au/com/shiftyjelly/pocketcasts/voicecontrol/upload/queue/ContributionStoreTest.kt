@@ -39,13 +39,27 @@ class ContributionStoreTest {
         val limits = QueueLimits.defaults().copy(maxQueueRecords = 1)
         val store = ContributionStore(root, limits)
         val id = UUID.randomUUID().toString()
-        assertTrue(store.admit(16, 100))
+        store.admit(16, 100)!!.let {
+            assertTrue(it.isHeld())
+            it.discard()
+        }
         assertNotNull(store.prepare(id, "epoch-1", chunks(16), meta(id)))
         // Record cap reached: deny BEFORE any copy; no new files appear.
-        assertFalse(store.admit(16, 100))
+        assertNull(store.admit(16, 100))
         assertNull(store.prepare(UUID.randomUUID().toString(), "epoch-1", chunks(16), meta("x")))
-        // Clip byte cap: 31s of 16k mono exceeds max_clip_bytes -> deny.
-        assertFalse(store.admit(16_000L * 31, 100))
+    }
+
+    @Test
+    fun `duration cap denies an over-length clip on a fresh store`() {
+        // Fresh store, ALL spec defaults (maxQueueRecords=200, maxQueueBytes=64MiB) so no other bound
+        // can short-circuit first. 31 s at 16 kHz mono = 992,144 bytes INCLUDING header, which is well
+        // UNDER max_clip_bytes (2 MiB); only max_clip_ms = 30_000 makes it inadmissible. Enforcing this
+        // bound is required: without it a device could queue an arbitrarily long recording whose byte
+        // size still slips under the cap.
+        val store = ContributionStore(tempRoot(), QueueLimits.defaults())
+        assertNull(store.admit(16_000L * 31, 100))
+        // Boundary stays admissible: exactly 30 s of audio is within max_clip_ms.
+        assertNotNull(store.admit(16_000L * 30, 100))
     }
 
     @Test
@@ -142,6 +156,63 @@ class ContributionStoreTest {
         // Successor session works on the NEW generation.
         val next = fence.currentGeneration()
         assertNotNull(fence.guard(next) { "ok" })
+    }
+
+    @Test
+    fun `interrupted preparation is never visible as ready`() {
+        // The failure path must not leave a provisional index entry behind: only durable, marker-
+        // committed entries may appear in readyEntries(). Refusing on an over-length clip writes no
+        // files and publishes nothing.
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val id = UUID.randomUUID().toString()
+        assertNull(store.prepare(id, "epoch-1", chunks(16_000 * 45), meta(id))) // 45 s > max_clip_ms
+        assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
+        val dir = File(root, "contributions")
+        assertTrue(dir.list()?.none { it.startsWith(id) } ?: true)
+    }
+
+    @Test
+    fun `concurrent prepares cannot both consume one remaining slot`() {
+        // ONE record of headroom, many threads racing to claim it. Admission reserves count+bytes
+        // atomically, so at most one entry may exist afterwards; without a reservation two threads
+        // can both pass the check and publish, silently exceeding max_queue_records.
+        val root = tempRoot()
+        val limits = QueueLimits.defaults().copy(maxQueueRecords = 1)
+        val store = ContributionStore(root, limits)
+        val ids = (1..8).map { UUID.randomUUID().toString() }
+        val results = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+        val start = java.util.concurrent.CountDownLatch(1)
+        val done = java.util.concurrent.CountDownLatch(ids.size)
+        ids.forEach { id ->
+            Thread {
+                start.await()
+                if (store.prepare(id, "epoch-1", chunks(16), meta(id)) != null) results.add(id)
+                done.countDown()
+            }.start()
+        }
+        start.countDown()
+        assertTrue(done.await(30, java.util.concurrent.TimeUnit.SECONDS))
+        assertTrue("expected at least one admission", results.isNotEmpty())
+        assertTrue(
+            "over-admitted ${results.size} entries into a 1-record queue: ${results.size}",
+            store.readyEntries().size <= 1,
+        )
+    }
+
+    @Test
+    fun `late callback after purge cannot recreate an entry`() {
+        // Purge removes everything; a subsequent attempt-bookkeeping call for the removed capture must
+        // not bring the entry back. Uses only the current public API so the behavior is observable now.
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val id = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id, "epoch-1", chunks(16), meta(id)))
+        store.purgeQueue("account-change")
+        assertEquals(0, store.readyEntries().size)
+        assertNull("attempt bookkeeping must not resurrect a purged entry", store.recordAttempt(id))
+        assertEquals(0, store.readyEntries().size)
+        assertFalse(File(root, "contributions/$id.ready").exists())
     }
 
     @Test

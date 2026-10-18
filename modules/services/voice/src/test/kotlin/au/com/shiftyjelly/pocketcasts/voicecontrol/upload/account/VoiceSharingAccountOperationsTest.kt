@@ -2,8 +2,10 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account
 
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -259,6 +261,7 @@ class VoiceSharingAccountOperationsFencingTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson("rev-new")))
 
         val older = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
+        withContext(Dispatchers.IO) { Thread.sleep(100) } // let the older op freeze + go in flight
         assertTrue(operations.refreshProjection(token)) // newer intent, later generation
         assertEquals("rev-new", state.projection.value!!.membershipRevision)
         assertFalse(older.await()) // obsolete generation: never applied
@@ -310,9 +313,12 @@ class VoiceSharingAccountOperationsFencingTest {
         bearer = "Bearer token-a"
         server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         assertTrue(operations.refreshProjection(token))
-        server.enqueue(MockResponse().setResponseCode(401))
+        // Pause the 401 so the credential changes AFTER the request was sent.
+        server.enqueue(MockResponse().setResponseCode(401).setHeadersDelay(400, TimeUnit.MILLISECONDS))
+        val result = async { operations.enroll(token, acceptedDisclosureVersion = "v3") }
+        withContext(Dispatchers.IO) { Thread.sleep(100) } // let the request go out with token-a
         bearer = "Bearer token-b" // refreshed credentials mid-flight
-        assertFalse(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        assertFalse(result.await())
         assertTrue(invalidations.isEmpty())
     }
 

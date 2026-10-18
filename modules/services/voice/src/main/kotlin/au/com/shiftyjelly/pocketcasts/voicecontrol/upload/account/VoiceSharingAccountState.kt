@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account
 
 import com.squareup.moshi.JsonDataException
 import com.squareup.moshi.JsonReader
+import java.math.BigDecimal
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import okio.Buffer
@@ -81,6 +82,11 @@ class VoiceSharingAccountState {
         state.value?.membershipRevision == revision
     }
 
+    /** Fenced check: is this the session currently in authority? */
+    fun isCurrentSession(token: SessionToken): Boolean = synchronized(fence) {
+        token === currentToken
+    }
+
     fun hasCurrentSessionProjection(): Boolean = synchronized(fence) {
         currentToken != null && state.value != null
     }
@@ -100,7 +106,8 @@ internal object ProjectionJsonParser {
     private val WITHDRAWAL_STATES = setOf("active", "withdrawn", "not_enrolled")
 
     fun parse(json: String): VoiceSharingAccountProjection? {
-        val reader = JsonReader.of(Buffer().writeUtf8(json))
+        val source = Buffer().writeUtf8(json)
+        val reader = JsonReader.of(source)
         reader.beginObject()
 
         var schemaVersion: Double? = null
@@ -118,7 +125,10 @@ internal object ProjectionJsonParser {
             when (key) {
                 "schema_version" -> {
                     if (reader.peek() != JsonReader.Token.NUMBER) return null
-                    schemaVersion = reader.nextDouble() // 1, 1.0, 1e0 all read as exactly 1.0
+                    schemaVersion = reader.nextDouble()
+                    if (schemaVersion != 1.0) return null
+                    // Exact decimal check on the RAW LEXEME below: nextDouble alone would round
+                    // 1.00000000000000001 to exactly 1.0 and wrongly accept it.
                 }
 
                 "membership_revision" -> revision = reader.nonEmptyStringOrNull() ?: return null
@@ -143,6 +153,11 @@ internal object ProjectionJsonParser {
         if (reader.peek() != JsonReader.Token.END_DOCUMENT) return null // trailing junk / 2nd value
 
         if (seen != ALLOWED_KEYS) return null
+        // Exact decimal lexeme check: Moshi has already proven syntax, field set, and that the
+        // value is a single NUMBER; this extraction reads the exact characters of that number
+        // (escape-aware on the key) and compares the exact decimal value.
+        val lexeme = SchemaVersionLexeme.extract(json) ?: return null
+        if (BigDecimal(lexeme).compareTo(BigDecimal.ONE) != 0) return null
         if (plan !in PLANS) return null // exact schema literal, no case coercion
         if (withdrawal !in WITHDRAWAL_STATES) return null
         if (schemaVersion == null || schemaVersion != SCHEMA_VERSION.toDouble()) return null
@@ -199,6 +214,131 @@ internal object ProjectionJsonParser {
         "accepted_disclosure_version",
         "withdrawal_state",
     )
+}
+
+/**
+ * Extracts the exact character lexeme of the TOP-LEVEL `schema_version` value, decoding legal
+ * key escapes. Syntax is owned by the Moshi pass that runs first; this only reads the exact
+ * number characters so the decimal comparison is exact (no float rounding).
+ */
+internal object SchemaVersionLexeme {
+
+    fun extract(json: String): String? {
+        var i = 0
+        val n = json.length
+        fun ws() {
+            while (i < n && json[i].isWhitespace()) i++
+        }
+        fun readString(): String? {
+            if (json[i] != '"') return null
+            i++
+            val sb = StringBuilder()
+            while (i < n) {
+                when (val c = json[i]) {
+                    '"' -> {
+                        i++
+                        return sb.toString()
+                    }
+
+                    '\\' -> {
+                        i++
+                        when (val e = json.getOrNull(i) ?: return null) {
+                            '"' -> sb.append('"')
+
+                            '\\' -> sb.append('\\')
+
+                            '/' -> sb.append('/')
+
+                            'b' -> sb.append('\b')
+
+                            'f' -> sb.append('\u000C')
+
+                            'n' -> sb.append('\n')
+
+                            'r' -> sb.append('\r')
+
+                            't' -> sb.append('\t')
+
+                            'u' -> {
+                                val hex = json.substringOrNull(i + 1, i + 5) ?: return null
+                                sb.append(hex.toIntOrNull(16)?.toChar() ?: return null)
+                                i += 4
+                            }
+
+                            else -> return null
+                        }
+                        i++
+                    }
+
+                    else -> {
+                        sb.append(c)
+                        i++
+                    }
+                }
+            }
+            return null
+        }
+        fun skipValue() {
+            when (json[i]) {
+                '"' -> readString()
+
+                '{', '[' -> {
+                    val close = if (json[i] == '{') '}' else ']'
+                    var depth = 0
+                    while (i < n) {
+                        when (json[i]) {
+                            '"' -> readString()
+
+                            '{', '[' -> depth++
+
+                            close -> {
+                                depth--
+                                if (depth == 0) {
+                                    i++
+                                    return
+                                }
+                            }
+                        }
+                        i++
+                    }
+                }
+
+                else -> while (i < n && json[i] !in ",}") i++
+            }
+        }
+
+        ws()
+        if (i >= n || json[i] != '{') return null
+        i++
+        while (true) {
+            ws()
+            if (i >= n) return null
+            if (json[i] == '}') return null
+            val key = readString() ?: return null
+            ws()
+            if (i >= n || json[i] != ':') return null
+            i++
+            ws()
+            if (key == "schema_version") {
+                val sb = StringBuilder()
+                while (i < n && (json[i].isDigit() || json[i] in "-+.eE")) {
+                    sb.append(json[i])
+                    i++
+                }
+                return if (sb.isEmpty()) null else sb.toString()
+            }
+            skipValue()
+            ws()
+            if (i >= n) return null
+            when (json[i]) {
+                ',' -> i++
+                '}' -> return null
+                else -> return null
+            }
+        }
+    }
+
+    private fun String.substringOrNull(start: Int, end: Int): String? = if (end <= length) substring(start, end) else null
 }
 
 /** Non-secret lifecycle incarnation: unique per issued session, reference-compared only. */

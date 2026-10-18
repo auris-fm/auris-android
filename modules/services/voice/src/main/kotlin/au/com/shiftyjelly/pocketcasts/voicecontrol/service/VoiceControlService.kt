@@ -862,9 +862,8 @@ class VoiceControlService : Service() {
         gracePeriodSignal.onWindowEnded = null
         voiceRecognizer.release()
         // END THE SESSION, do not dispose. This runs on every stop, and the renderer is a Hilt
-        // @Singleton: disposing here meant the next start had no feedback at all, silently. Disposal
-        // is onDestroy's job, below. The choice is named so it is checkable without driving the
-        // Service -- swapping these two constants is the mistake the naming prevents.
+        // @Singleton shared by successive Service instances. onDestroy also ends a session; it is
+        // not the end of the renderer's process lifetime.
         audioFeedbackRenderer.applyLifecycle(AudioFeedbackRenderer.Lifecycle.SessionEnded)
         notificationManager.cancelNotification()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -882,9 +881,8 @@ class VoiceControlService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopVoiceControl()
-        // The service itself is gone, so the singleton renderer can be disposed for good. Permanent
-        // release belongs here, where the object will not be handed back to a new session.
-        audioFeedbackRenderer.applyLifecycle(AudioFeedbackRenderer.Lifecycle.Disposed)
+        // stopVoiceControl ended this session. The renderer and TTS engine remain owned by Hilt's
+        // singleton component and will be reused by the next Service instance.
         // The controller keeps its own record of whether this service is running; without this it
         // would believe a service that the system killed is still alive and never start it again.
         voiceControlServiceController.onServiceStopped()

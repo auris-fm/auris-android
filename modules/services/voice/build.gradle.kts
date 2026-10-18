@@ -48,6 +48,8 @@ dependencies {
     implementation(libs.timber)
     implementation(libs.mlkit.translate)
 
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.config)
     implementation(projects.modules.services.analytics)
     implementation(projects.modules.services.coroutines)
     implementation(projects.modules.services.localization)

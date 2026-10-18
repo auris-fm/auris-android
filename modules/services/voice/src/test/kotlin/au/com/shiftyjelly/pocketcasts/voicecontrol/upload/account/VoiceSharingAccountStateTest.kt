@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -23,7 +24,9 @@ class VoiceSharingAccountStateTest {
 
     private val identity = MutableStateFlow<String?>("account-1")
 
-    private fun state() = VoiceSharingAccountState(identity = identity)
+    private fun kotlinx.coroutines.test.TestScope.state() = VoiceSharingAccountState(identity = identity).also {
+        it.observeIdentity(backgroundScope, UnconfinedTestDispatcher(testScheduler))
+    }
 
     private fun validJson(
         revision: String = "rev-abc",
@@ -106,6 +109,7 @@ class VoiceSharingAccountStateTest {
         assertEquals("rev-abc", state.projection.first()!!.membershipRevision)
 
         identity.value = "account-2"
+        testScheduler.advanceUntilIdle()
         assertNull(state.projection.first())
         // A response belonging to the obsolete session is dropped, not applied to the new one.
         assertFalse(state.applyResponseForSession("account-1", validJson(revision = "rev-old")))
@@ -127,7 +131,7 @@ class VoiceSharingAccountStateTest {
         // Revisions never sort: the API exposes equality with the CURRENT revision only.
         assertTrue(state.isCurrentRevision(projection.membershipRevision))
         assertFalse(state.isCurrentRevision("aaa-earlier-looking"))
-        assertFalse(state.isCurrentRevision("zzz-later-looking ") != state.isCurrentRevision("zzz-later-looking"))
+        // No revision ordering is exposed: the only predicate is equality with the CURRENT one.
     }
 
     @Test

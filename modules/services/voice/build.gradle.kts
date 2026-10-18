@@ -69,6 +69,9 @@ dependencies {
     testImplementation(libs.mockito.kotlin)
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.robolectric)
+    // Plain-JVM org.json implementation so unit tests exercise real JSON parsing (the
+    // android.jar org.json classes throw 'not mocked' without Robolectric).
+    testImplementation("org.json:json:20240303")
     testImplementation(libs.turbine)
     testImplementation(projects.modules.services.sharedtest)
 }

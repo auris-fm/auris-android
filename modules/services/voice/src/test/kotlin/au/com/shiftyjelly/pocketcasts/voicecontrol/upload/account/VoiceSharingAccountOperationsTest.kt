@@ -97,6 +97,7 @@ class VoiceSharingAccountOperationsTest {
         // 2. Enrollment: request_id UUID, expected_revision = current, disclosure version.
         enqueueProjection(revision = "rev-2")
         assertTrue(operations.enroll(token, acceptedDisclosureVersion = "v3"))
+        server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
         val posted = server.takeRequest(5, TimeUnit.SECONDS)!!
         assertEquals("POST", posted.method)
         assertTrue(posted.path!!.startsWith("/api/v1/account/voice-sharing/enrollment"))
@@ -111,21 +112,26 @@ class VoiceSharingAccountOperationsTest {
 
     @Test
     fun `withdrawal posts revision and epoch - distinct from deletion`() = runTest {
+        // Seed a current projection with an epoch; then the withdrawal's own projection.
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                projectionJson(epoch = "epoch-9", enrolled = true, disclosure = "v3", withdrawal = "active"),
+            ),
+        )
         server.enqueue(
             MockResponse().setResponseCode(200).setBody(
                 projectionJson(revision = "rev-3", withdrawal = "withdrawn", enrolled = false, epoch = "epoch-9"),
             ),
         )
-        // Seed a current projection with an epoch.
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson(epoch = "epoch-9")))
         assertTrue(operations.refreshProjection(token))
 
         assertTrue(operations.withdraw(token))
+        server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
         val posted = server.takeRequest(5, TimeUnit.SECONDS)!!
         assertEquals("POST", posted.method)
         assertTrue(posted.path!!.startsWith("/api/v1/account/voice-sharing/withdrawal"))
         val body = posted.body.readUtf8()
-        assertTrue(body.contains("\"expected_membership_revision\":\"rev-1\""))
+        assertTrue(body.contains("\"expected_membership_revision\":\"rev-abc\""))
         assertTrue(body.contains("\"enrollment_epoch\":\"epoch-9\""))
         // Withdrawal applies a membership projection; it never deletes data.
         assertEquals(WithdrawalState.WITHDRAWN, state.projection.value!!.withdrawalState)
@@ -133,17 +139,19 @@ class VoiceSharingAccountOperationsTest {
 
     @Test
     fun `deletion is a distinct DELETE - 202 deletion_pending parsed, projection untouched`() = runTest {
+        // Seed the current projection first; then the deletion's 202 receipt.
+        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         server.enqueue(
             MockResponse().setResponseCode(202)
                 .setBody("{\"schema_version\":1,\"deletion_request_id\":\"del-123\",\"status\":\"deletion_pending\"}"),
         )
-        server.enqueue(MockResponse().setResponseCode(200).setBody(projectionJson()))
         assertTrue(operations.refreshProjection(token))
 
         val receipt = operations.deleteData(token)
         assertTrue(receipt != null)
         assertEquals("del-123", receipt!!.deletionRequestId)
         assertEquals("deletion_pending", receipt.status)
+        server.takeRequest(5, TimeUnit.SECONDS)!! // drain the seeding GET
         val deleted = server.takeRequest(5, TimeUnit.SECONDS)!!
         assertEquals("DELETE", deleted.method)
         assertTrue(deleted.path!!.startsWith("/api/v1/account/voice-sharing/data"))

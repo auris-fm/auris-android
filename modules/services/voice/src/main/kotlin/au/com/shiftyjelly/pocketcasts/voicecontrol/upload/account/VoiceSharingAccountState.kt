@@ -1,26 +1,27 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account
 
+import com.squareup.moshi.JsonDataException
+import com.squareup.moshi.JsonReader
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import org.json.JSONTokener
+import okio.Buffer
 
 /**
  * Membership projection state (Task 2 of docs/plans/android/voice-recording-uploads.md,
- * reviewer round 2). Strict, identity-lifecycle-keyed, fail-closed:
+ * reviewer rounds 2-3). Strict, lifecycle-keyed, fail-closed:
  *
- * - Parsing uses EXACT JSON types with no coercion: `schema_version` must be a JSON integer
- *   (a string, a fraction, or null fails), booleans must be JSON booleans, enum values must
- *   match the schema literals exactly (no case coercion). The field set is exact — a missing
- *   or unknown field fails.
- * - Duplicate top-level keys are detected EXPLICITLY by this parser (not delegated to a
- *   platform behavior).
- * - Session lifecycle generation is issued SYNCHRONOUSLY at request issuance
- *   ([sessionStarted]) and ended synchronously ([sessionEnded]). Same-account logout/relogin
- *   issues a NEW token, so old responses are rejected even where an account-identity flow
- *   would conflate A→null→A. A token refresh ([onTokenRefresh]) is not a lifecycle boundary.
- * - Every authority apply ([applySessionResponse]) requires the ORIGINALLY ISSUED token;
- *   whatever account is current when a response arrives never grants authority.
- * - The membership revision is opaque: equality with the current revision only, never sorted.
+ * - Parsing uses Moshi's STRICT JsonReader (an established strict parser, not hand-patched
+ *   syntax): unquoted or single-quoted names, malformed nested syntax, and trailing junk or a
+ *   second top-level value all fail. Legal key escapes are DECODED and duplicate detection
+ *   compares decoded keys, so escaped aliases are caught.
+ * - Exact values: schema_version must be the exact NUMERIC 1 (1 and 1.0 and 1e0 are the same
+ *   number; "1", true, null, and 1.5 fail). Epoch/disclosure must be actual JSON null OR a
+ *   nonempty string — no other type coerces. Booleans must be JSON booleans; enums must match
+ *   schema literals exactly.
+ * - Lifecycle generation is issued SYNCHRONOUSLY: sessionStarted() supersedes the prior token
+ *   and clears the prior projection ATOMICALLY (a new authoritative session never inherits the
+ *   old one's projection), sessionEnded() ends it, and token refresh is not a boundary.
+ * - Every authority apply requires the ORIGINALLY ISSUED token, reference-compared.
  */
 class VoiceSharingAccountState {
     private val state = MutableStateFlow<VoiceSharingAccountProjection?>(null)
@@ -32,8 +33,13 @@ class VoiceSharingAccountState {
 
     val projection: StateFlow<VoiceSharingAccountProjection?> = state
 
-    /** Issues a fresh session token synchronously; supersedes any earlier token. */
+    /**
+     * Issues a fresh session token synchronously, superseding any earlier token AND clearing
+     * the earlier session's projection atomically: a newly authoritative session never starts
+     * with the previous session's projection.
+     */
     fun sessionStarted(): SessionToken = synchronized(fence) {
+        state.value = null
         SessionToken().also { currentToken = it }
     }
 
@@ -63,11 +69,7 @@ class VoiceSharingAccountState {
         return true
     }
 
-    /**
-     * Strict parse: exact JSON types (no coercion), exact field set, explicit duplicate-key
-     * detection, nonempty strings, and enrollment/withdrawal consistency. Any defect fails
-     * closed.
-     */
+    /** Strict parse: see [ProjectionJsonParser]. Any defect fails closed. */
     fun parseProjection(json: String): VoiceSharingAccountProjection? = try {
         ProjectionJsonParser.parse(json)
     } catch (_: Exception) {
@@ -85,10 +87,10 @@ class VoiceSharingAccountState {
 }
 
 /**
- * Production strict parser with its own real-boundary controls: walks the top-level object with
- * [JSONTokener] so duplicate keys are detected here, then validates exact types. This file is
- * the shared implementation — the "desktop org.json rejects duplicates" behavior is never
- * relied on.
+ * Production strict parser over Moshi's JsonReader (strict by default): the established parser
+ * owns syntax strictness (quoted names only, no single quotes, no trailing junk, well-formed
+ * nested values); this layer owns the contract — decoded-key duplicate detection, exact field
+ * set, exact value types.
  */
 internal object ProjectionJsonParser {
 
@@ -98,87 +100,94 @@ internal object ProjectionJsonParser {
     private val WITHDRAWAL_STATES = setOf("active", "withdrawn", "not_enrolled")
 
     fun parse(json: String): VoiceSharingAccountProjection? {
-        val tokener = JSONTokener(json)
-        if (tokener.nextClean() != '{') return null
+        val reader = JsonReader.of(Buffer().writeUtf8(json))
+        reader.beginObject()
 
-        val values = LinkedHashMap<String, Any?>()
-        var c = tokener.nextClean()
-        if (c == '}') return null // empty object lacks the required fields
-        while (true) {
-            if (c != '"') return null
-            val key = parseString(tokener) ?: return null
-            if (key in values) return null // explicit duplicate detection
-            if (tokener.nextClean() != ':') return null
-            values[key] = tokener.nextValue()
+        var schemaVersion: Double? = null
+        var revision: String? = null
+        var plan: String? = null
+        var enrolled: Boolean? = null
+        var epoch: String? = null
+        var disclosure: String? = null
+        var withdrawal: String? = null
+        val seen = HashSet<String>()
 
-            c = tokener.nextClean()
-            when (c) {
-                ';' -> return null
-                ',' -> c = tokener.nextClean()
-                '}' -> break
-                else -> return null
+        while (reader.hasNext()) {
+            val key = reader.nextName() // strict: names must be quoted; escapes decoded here
+            if (!seen.add(key)) return null // decoded-key duplicate detection
+            when (key) {
+                "schema_version" -> {
+                    if (reader.peek() != JsonReader.Token.NUMBER) return null
+                    schemaVersion = reader.nextDouble() // 1, 1.0, 1e0 all read as exactly 1.0
+                }
+
+                "membership_revision" -> revision = reader.nonEmptyStringOrNull() ?: return null
+
+                "plan" -> plan = reader.nonEmptyStringOrNull() ?: return null
+
+                "voice_sharing_enrolled" -> {
+                    if (reader.peek() != JsonReader.Token.BOOLEAN) return null
+                    enrolled = reader.nextBoolean()
+                }
+
+                "enrollment_epoch" -> epoch = reader.nonEmptyStringOrNull()
+
+                "accepted_disclosure_version" -> disclosure = reader.nonEmptyStringOrNull()
+
+                "withdrawal_state" -> withdrawal = reader.nonEmptyStringOrNull() ?: return null
+
+                else -> reader.skipValue() // unknown field: strict-consumed, then rejected below
             }
         }
+        reader.endObject()
+        if (reader.peek() != JsonReader.Token.END_DOCUMENT) return null // trailing junk / 2nd value
 
-        if (values.keys != ALLOWED_KEYS) return null
-
-        // Exact types: schema_version must be a JSON integer, not a string, fraction or null.
-        val schemaVersion = values["schema_version"]
-        if (schemaVersion !is Int || schemaVersion != SCHEMA_VERSION) return null
-
-        val revision = values["membership_revision"] as? String
-        if (revision.isNullOrEmpty()) return null
-
-        val plan = values["plan"] as? String
-        if (plan == null || plan !in PLANS) return null
-
-        val enrolled = values["voice_sharing_enrolled"]
-        if (enrolled !is Boolean) return null
-
-        val epoch = values["enrollment_epoch"] as? String
-        if (epoch != null && epoch.isEmpty()) return null
-
-        val disclosure = values["accepted_disclosure_version"] as? String
-        if (disclosure != null && disclosure.isEmpty()) return null
-
-        val withdrawal = values["withdrawal_state"] as? String
-        if (withdrawal == null || withdrawal !in WITHDRAWAL_STATES) return null
+        if (seen != ALLOWED_KEYS) return null
+        if (plan !in PLANS) return null // exact schema literal, no case coercion
+        if (withdrawal !in WITHDRAWAL_STATES) return null
+        if (schemaVersion == null || schemaVersion != SCHEMA_VERSION.toDouble()) return null
+        if (enrolled == null) return null
 
         // Enrollment/withdrawal consistency.
         val consistent = when (withdrawal) {
             "active" -> enrolled && epoch != null && disclosure != null
             "withdrawn" -> !enrolled
-            else -> !enrolled && epoch == null // not_enrolled
+            "not_enrolled" -> !enrolled && epoch == null
+            else -> return null
         }
         if (!consistent) return null
 
         return VoiceSharingAccountProjection(
-            membershipRevision = revision,
-            plan = VoiceSharingPlan.valueOf(plan.uppercase()),
+            membershipRevision = revision!!,
+            plan = if (plan == "pro") VoiceSharingPlan.PRO else VoiceSharingPlan.FREE,
             voiceSharingEnrolled = enrolled,
             enrollmentEpoch = epoch,
             acceptedDisclosureVersion = disclosure,
-            withdrawalState = WithdrawalState.valueOf(withdrawal.uppercase()),
+            withdrawalState = when (withdrawal) {
+                "withdrawn" -> WithdrawalState.WITHDRAWN
+                "not_enrolled" -> WithdrawalState.NOT_ENROLLED
+                else -> WithdrawalState.ACTIVE
+            },
         )
     }
 
-    /** Reads a complete quoted string (no escapes expected in schema keys; reject escapes). */
-    private fun parseString(tokener: JSONTokener): String? {
-        val sb = StringBuilder()
-        while (true) {
-            val c = tokener.next()
-            when {
-                c == '\\' -> return null
-
-                // reject escape sequences in keys
-                c == '"' -> return sb.toString()
-
-                c == 0.toChar() -> return null
-
-                // unterminated
-                else -> sb.append(c)
-            }
+    /**
+     * The value must be an actual JSON null (returns null) or a NONEMPTY string (returns it).
+     * Any other type — number, boolean, object, array — fails closed (returns null marker via
+     * exception is avoided here: we return null only for JSON null, and `fail` for others).
+     */
+    private fun JsonReader.nonEmptyStringOrNull(): String? = when (peek()) {
+        JsonReader.Token.NULL -> {
+            nextNull<Any?>()
+            null
         }
+
+        JsonReader.Token.STRING -> {
+            val s = nextString()
+            if (s.isEmpty()) throw JsonDataException("empty string not allowed") else s
+        }
+
+        else -> throw JsonDataException("non-string, non-null type not allowed")
     }
 
     private val ALLOWED_KEYS = setOf(

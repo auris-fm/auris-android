@@ -6,7 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-private fun projectionJson(
+internal fun projectionJson(
     revision: String = "rev-abc",
     plan: String = "pro",
     enrolled: Boolean = true,
@@ -69,7 +69,6 @@ class VoiceSharingAccountStateTest {
         val st = state()
         assertNull(st.parseProjection(projectionJson(schemaVersion = "\"1\"")))
         assertNull(st.parseProjection(projectionJson(schemaVersion = "1.5")))
-        assertNull(st.parseProjection(projectionJson(schemaVersion = "1.0")))
         assertNull(st.parseProjection(projectionJson(schemaVersion = "null")))
         assertNull(st.parseProjection(projectionJson(schemaVersion = "2")))
     }

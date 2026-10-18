@@ -250,7 +250,7 @@ class ContributionStoreTest {
         )
         val store = theStore
         val staleGen = fence.currentGeneration()
-        assertNull(store.prepareAt(staleGen, ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertNull(store.prepareAt(staleGen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A)))
         assertTrue("hook never fired - control did not exercise the actual write", hooked)
         // The successor's COMMITTED files must survive the stale preparation's cleanup untouched: purge is
         // scoped to ids this owner held, never a blanket directory sweep.
@@ -316,7 +316,7 @@ class ContributionStoreTest {
         )
         val store = theStore
         val gen = fence.currentGeneration()
-        assertNull(store.prepareAt(gen, ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertNull(store.prepareAt(gen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A)))
         assertTrue("hook never fired - control did not reach the publication point", hooked)
         assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
         assertEquals("stale publication leaked its reservation", 0, store.reservedRecordsForTest())
@@ -343,7 +343,7 @@ class ContributionStoreTest {
             }),
         )
         val store = theStore
-        assertNull(store.prepareAt(fence.currentGeneration().let { it }, ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertNull(store.prepareAt(fence.currentGeneration(), store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A)))
         assertTrue("hook never fired - control did not exercise the actual write", hooked)
         assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
         assertNotNull("stale preparation leaked its reservation into a 1-slot queue", store.admit(8, 100))
@@ -367,7 +367,7 @@ class ContributionStoreTest {
         // Revocation lands at the publication instant, so this preparation publishes nothing and the
         // generation captured by an in-flight callback is now stale.
         val inflightGen = fence.currentGeneration()
-        assertNull(store.prepareAt(inflightGen, ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertNull(store.prepareAt(inflightGen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A)))
         assertTrue("hook never fired - control did not reach the publication point", hooked)
         assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
 
@@ -413,6 +413,121 @@ class ContributionStoreTest {
     }
 
     @Test
+    fun `public prepare consumes a pre-retention admission without re-admitting`() {
+        // Reviewer 195845cb finding 5: the PUBLIC entry point must take the ORIGINAL validated handle.
+        // A one-slot queue plus one pre-PCM admission must publish successfully; if prepare admitted a
+        // second time, the slot it already occupies would make its own admission fail.
+        val store = ContributionStore(tempRoot(), QueueLimits.defaults().copy(maxQueueRecords = 1))
+        val admission = store.admit(8, meta(ID_A).size)
+        assertNotNull(admission)
+        // The caller (retention sink) reserved before copying PCM; the worker now does the disk work.
+        val entry = store.prepare(admission!!, ID_A, "epoch-A", chunks(8), meta(ID_A))
+        assertNotNull("pre-retention admission was not consumed by public prepare", entry)
+        assertEquals(1, store.readyEntries().size)
+        assertFalse("consumed admission must not stay held", admission.isHeld())
+        assertEquals("published entry leaves no live reservation", 0, store.reservedRecordsForTest())
+        // And the slot is genuinely occupied by the durable entry, not by a leaked reservation.
+        assertNull(store.admit(8, 100))
+    }
+
+    @Test
+    fun `early-return invalid size releases the transferred admission`() {
+        // Finding 4: an invalid audioBytes / over-cap return must not leak the caller's reservation.
+        val store = ContributionStore(tempRoot(), QueueLimits.defaults())
+        val admission = store.admit(8, meta(ID_A).size)!!
+        // Invalid per-chunk range makes sampleCount refuse AFTER the handle was handed over.
+        val refused = store.prepareAt(store.fence.currentGeneration(), admission, ID_A, "epoch-A", listOf(ShortArray(4) to 9), meta(ID_A))
+        assertNull(refused)
+        assertFalse("invalid-size early return leaked the admission", admission.isHeld())
+        assertEquals(0, store.reservedRecordsForTest())
+    }
+
+    @Test
+    fun `ownership paths take the store lock before the fence on every path`() {
+        // Lock-order contract (reviewer 195845cb finding 1): publication, attempt writes, terminal drops and
+        // revocation must ALL acquire the store lock first and consult the fence second. Mixing the orders is
+        // what deadlocked: one thread holding the fence waiting for the store, another holding the store
+        // waiting for the fence. This reads the committed source and fails if any ownership site reverts to
+        // wrapping a store-lock block inside fence.guard, or calls the fence outside the store lock.
+        val relative = "modules/services/voice/src/main/kotlin/au/com/shiftyjelly/pocketcasts/" +
+            "voicecontrol/upload/queue/ContributionStore.kt"
+        val cwd = System.getProperty("user.dir") ?: error("no working directory reported")
+        var probe: java.io.File? = java.io.File(cwd)
+        var found: java.io.File? = null
+        while (probe != null && found == null) {
+            val candidate = java.io.File(probe, relative)
+            if (candidate.isFile) found = candidate
+            probe = probe.parentFile
+        }
+        val file = found ?: error("could not locate $relative from $cwd")
+        val srcLines = file.readLines().map { it.substringBefore("//") }
+        val src = srcLines.joinToString("\n")
+        val ownershipSites = listOf(
+            "val published: Entry? = synchronized(lock) {",
+            "val updated = synchronized(lock) {",
+            "val removed = synchronized(lock) {",
+        )
+        ownershipSites.forEach { site ->
+            assertTrue(
+                "ownership site missing (expected `$site` on a single line, comments stripped)",
+                srcLines.any { it.trim().startsWith(site.substringBefore(" {").trim()) && it.contains("synchronized(lock) {") },
+            )
+        }
+        assertFalse("fence.guard must not wrap any store-lock ownership block",
+            Regex("fence\\.guard\\([^)]*\\)\\s*\\{\\s*synchronized\\(lock\\)").containsMatchIn(src))
+        val guardCalls = Regex("fence\\.guard\\(").findAll(src).count()
+        assertEquals("no ownership path may take the fence first; found $guardCalls fence.guard call sites", 0, guardCalls)
+        val unlockedChecks = Regex("fence\\.isValidUnlocked\\(").findAll(src).count()
+        assertTrue("every ownership path should consult the fence under the store lock (found $unlockedChecks)",
+            unlockedChecks >= 4)
+    }
+
+    @Test
+    fun `ownership paths cannot deadlock between publication and purge`() {
+        // Finding 1: publication once took fence -> store while purge took store -> fence, so two threads
+        // could each hold one lock and wait forever. All ownership paths now use store -> fence. This runs
+        // preparation/purge against each other under a hard timeout: a deadlock shows up as failure, not a hang.
+        val root = tempRoot()
+        val fence = QueueFence()
+        val store = ContributionStore(root, QueueLimits.defaults(), fence = fence)
+        val stop = java.util.concurrent.atomic.AtomicBoolean(false)
+        val errors = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val publishers = (1..4).map { i ->
+            Thread {
+                try {
+                    while (!stop.get()) {
+                        val id = String.format("aaaaaaaa-0000-4000-8000-%012d", i * 1000 + 1)
+                        store.prepare(id, "epoch-$i", chunks(8), meta(id))
+                    }
+                } catch (t: Throwable) {
+                    errors += "${t::class.simpleName}: ${t.message}"
+                }
+            }
+        }
+        val purger = Thread {
+            try {
+                var n = 0
+                while (!stop.get() && n < 60) {
+                    Thread.sleep(2)
+                    store.purgeQueue("race-$n")
+                    n++
+                }
+            } catch (t: Throwable) {
+                errors += "${t::class.simpleName}: ${t.message}"
+            }
+        }
+        val all = publishers + listOf(purger)
+        all.forEach { it.isDaemon = true; it.start() }
+        val deadline = System.currentTimeMillis() + 30_000
+        while (all.any { it.isAlive } && System.currentTimeMillis() < deadline) Thread.sleep(50)
+        stop.set(true)
+        all.forEach { it.join(5_000) }
+        val stuck = all.filter { it.isAlive }
+        assertTrue("lock-order deadlock between publication and purge; still running: ${stuck.map { it.name }}", stuck.isEmpty())
+        assertTrue("unexpected errors during lock race: $errors", errors.isEmpty())
+    }
+
+    @Test
     fun `same-generation duplicate attempts do not share staging files`() {
         // Deterministic staging-collision control (reviewer 32d8012c follow-up): both attempts run in the
         // SAME generation for the SAME capture id, and the first is HELD INSIDE its staging write until the
@@ -446,7 +561,7 @@ class ContributionStoreTest {
         val publishedCount = java.util.concurrent.atomic.AtomicInteger()
         fun run(chunks: List<Pair<ShortArray, Int>>) {
             try {
-                if (store.prepareAt(gen, ID_A, "epoch-A", chunks, meta(ID_A)) != null) publishedCount.incrementAndGet()
+                if (store.prepareAt(gen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks, meta(ID_A)) != null) publishedCount.incrementAndGet()
             } catch (t: Throwable) {
                 failure = t
             }
@@ -501,7 +616,7 @@ class ContributionStoreTest {
         )
         val store = theStore
         val gen = fence.currentGeneration()
-        assertNull(store.prepareAt(gen, ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertNull(store.prepareAt(gen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A)))
         // Purge cleared everything; nothing from the fenced-off preparation may have been republished.
         assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
         assertFalse(File(root, "contributions/$ID_A.ready").exists())

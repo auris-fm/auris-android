@@ -59,31 +59,37 @@ class ContributionStore(
         val id: String,
         internal val projectedBytes: Long,
     ) {
-        private var used = false
+        /**
+         * Single-use settlement, guarded by the STORE lock (reviewer 195845cb: the previous plain boolean
+         * was read and written outside any lock, so two racing settlements could both think they won).
+         * One synchronized transition per live ownership: HELD -> RELEASED or HELD -> ADOPTED.
+         */
+        private var state = ADMISSION_HELD
 
         /** Release the reserved slot/bytes when preparation is refused, fails, or is fenced off. Idempotent. */
         fun discard() {
-            if (used) return
-            used = true
-            synchronized(lock) { released.add(id) }
-            releaseReservation(id, projectedBytes)
+            synchronized(lock) {
+                if (state != ADMISSION_HELD) return
+                state = ADMISSION_RELEASED
+                reservations.remove(id)
+            }
         }
 
         /**
          * Adopt the reservation into a published entry: the slot/bytes become durable queue load, so the
-         * reservation itself is returned. Single-use like [discard]; after it, both are no-ops.
+         * reservation itself is returned. After this, [discard] is a no-op.
          */
         internal fun adopt() {
-            if (used) return
-            used = true
             synchronized(lock) {
-                released.add(id)
+                if (state != ADMISSION_HELD) return
+                state = ADMISSION_ADOPTED
                 reservations.remove(id)
             }
         }
 
         /** True while this admission still holds its reservation. */
-        fun isHeld(): Boolean = synchronized(lock) { !used && id in reservations }
+        fun isHeld(): Boolean = synchronized(lock) { state == ADMISSION_HELD && reservations.containsKey(id) }
+
     }
 
     /**
@@ -119,18 +125,22 @@ class ContributionStore(
         }
     }
 
+    /** Test seam: reserve a small admission sized for [samples]/[metadataBytes] (fails loudly if refused). */
+    fun admitForTest(samples: Long, metadataBytes: Int): Admission = admit(samples, metadataBytes)
+        ?: throw AssertionError("test admission should have been accepted")
+
     /** Test seam: how many records' worth of budget live reservations currently occupy. */
-    fun reservedRecordsForTest(): Int = synchronized(lock) { liveReservationCountLocked() }
+    fun reservedRecordsForTest(): Int = synchronized(lock) { reservations.size }
 
-    /** Reservations still held by their owner (consumed or discarded handles are inert). */
-    private fun liveReservationCountLocked(): Int = reservations.keys.count { !released.contains(it) }
-
-    private fun liveReservationBytesLocked(): Long =
-        reservations.entries.filterNot { released.contains(it.key) }.sumOf { it.value }
+    /**
+     * Settlement bookkeeping is BOUNDED: a reservation lives in [reservations] only while it is HELD, and
+     * both discard() and adopt() remove it under the store lock. There are no tombstone entries to accumulate.
+     */
+    private fun liveReservationBytesLocked(): Long = reservations.values.sumOf { it }
 
     /** Re-check budgets at publication time (a purge/expiry may have moved them since admission). */
     private fun roomForPublicationLocked(admission: Admission): Boolean {
-        val others = reservations.entries.filterNot { it.key == admission.id || released.contains(it.key) }
+        val others = reservations.entries.filterNot { it.key == admission.id }
         val bytes = memoryEntries.values.sumOf { it.audioBytes + it.metadataBytes } + others.sumOf { it.value }
         val liveRecords = memoryEntries.size + others.size
         return liveRecords < limits.maxQueueRecords && bytes + admission.projectedBytes <= limits.maxQueueBytes
@@ -159,7 +169,7 @@ class ContributionStore(
 
     /** Budget test against durable entries PLUS live reservations (both consume the same budget). */
     private fun roomLocked(projected: Long): Boolean {
-        val live = memoryEntries.size + liveReservationCountLocked()
+        val live = memoryEntries.size + reservations.size
         if (live >= limits.maxQueueRecords) return false
         val bytes = memoryEntries.values.sumOf { it.audioBytes + it.metadataBytes } + liveReservationBytesLocked()
         return bytes + projected <= limits.maxQueueBytes
@@ -179,67 +189,82 @@ class ContributionStore(
      * Sequence: write `<id>.wav.part` -> fsync -> write `<id>.meta` -> fsync -> rename part to final
      * name -> write sidecars -> write `<id>.ready` LAST (the commit point) -> publish in memory.
      */
+    /**
+     * Prepare an entry using an [Admission] the caller validated and reserved BEFORE the PCM copy — the
+     * shape the retention sink uses (admit on the capture callback, hand the handle to a worker that does
+     * the disk work). This is the REAL consumption path: no second `admit()` happens here, so a queue with
+     * exactly one free slot admits one preparation instead of demanding a second one (reviewer 195845cb
+     * finding 5). The handle is settled exactly once: adopted on publication, released on every other exit.
+     */
+    fun prepare(admission: Admission, captureId: String, enrollmentEpoch: String, pcmChunks: List<Pair<ShortArray, Int>>, canonicalMetadata: ByteArray): Entry? =
+        prepareAt(fence.currentGeneration(), admission, captureId, enrollmentEpoch, pcmChunks, canonicalMetadata)
+
     fun prepare(
         captureId: String,
         enrollmentEpoch: String,
         pcmChunks: List<Pair<ShortArray, Int>>,
         canonicalMetadata: ByteArray,
-    ): Entry? = prepareAt(fence.currentGeneration(), captureId, enrollmentEpoch, pcmChunks, canonicalMetadata)
+    ): Entry? {
+        val samples = sampleCount(pcmChunks) ?: return null
+        val admission = admit(samples, canonicalMetadata.size) ?: return null
+        return prepareAt(fence.currentGeneration(), admission, captureId, enrollmentEpoch, pcmChunks, canonicalMetadata)
+    }
 
     /**
-     * Generation-fenced preparation. [generation] is the value the caller captured before starting work.
+     * Generation-fenced preparation from a caller-supplied [admission]. [generation] is the value the caller
+     * captured before starting work.
      *
-     * Ownership rules enforced here (reviewer 32d8012c):
-     *  - The [Admission] obtained for this attempt is CONSUMED exactly once: it is either converted into
-     *    the published entry or released on every non-publication path, including a path that reached the
-     *    commit point but whose generation went stale. prepare() does NOT re-admit, so a one-slot queue
-     *    admits one preparation without double charging.
-     *  - All bytes are written to GENERATION-OWNED staging names (`.<generation>.<captureId>.wav.part`).
-     *    A stale preparation therefore can neither delete nor overwrite a successor's files: cleanup only
-     *    ever touches its own staging prefix.
-     *  - If this store already owns [captureId] as a ready entry, the request is REFUSED before any write:
-     *    an entry's WAV/metadata are immutable once committed, so a duplicate prepare must not clobber them.
-     *  - Publication happens ONLY while the captured generation is still current, and only after the
-     *    `.ready` marker commit point; a fenced-off attempt publishes nothing and removes only its staging.
+     * Ownership rules enforced here (reviewers 32d8012c / 195845cb):
+     *  - [admission] is CONSUMED exactly once by this call: adopted when the entry publishes, otherwise
+     *    released on EVERY exit, including the early returns for invalid sizes and the exception path. There
+     *    is deliberately no `admit()` inside, so passing a pre-retention handle never double-charges.
+     *  - Bytes go to staging named after the UNIQUE attempt (`gen$<attemptId>.<generation>.<captureId>…`), not
+     *    merely generation+captureId, so two same-generation attempts cannot truncate each other and a stale
+     *    attempt's cleanup only ever touches its own staging prefix — never a successor's committed files.
+     *  - If [captureId] is already owned as a ready entry, the request is refused before any write: a
+     *    committed entry's WAV/metadata are immutable.
+     *  - Publication happens only while the captured generation is current AND inside the store lock, under
+     *    the single fixed lock order store -> fence; a fenced-off attempt publishes nothing.
      */
     fun prepareAt(
         generation: Long,
+        admission: Admission,
         captureId: String,
         enrollmentEpoch: String,
         pcmChunks: List<Pair<ShortArray, Int>>,
         canonicalMetadata: ByteArray,
     ): Entry? {
         require(captureId.matches(UUID_RE)) { "capture id must be UUID" }
-        val samples = pcmChunks.sumOf { it.second.toLong() }
-        if (samples != pcmChunks.sumOf { (chunk, valid) ->
-                require(valid in 0..chunk.size)
-                valid.toLong()
-            }
-        ) {
+        val samples = sampleCount(pcmChunks) ?: run {
+            admission.discard()
             return null
         }
-        // Refuse a duplicate BEFORE touching disk: never mutate an existing ready entry's immutable files.
-        synchronized(lock) {
-            if (memoryEntries.containsKey(captureId)) return null
-        }
-        val admission = admit(samples, canonicalMetadata.size) ?: return null
         try {
-            // writeAndPublish releases its own reservation on every path that does not publish.
-            return writeAndPublish(generation, captureId, enrollmentEpoch, pcmChunks, samples, canonicalMetadata, admission)
+            return writeAndPublish(generation, admission, captureId, enrollmentEpoch, pcmChunks, samples, canonicalMetadata)
         } catch (_: Exception) {
-            admission.discard() // idempotent: a no-op if writeAndPublish already settled the handle
+            admission.discard() // idempotent: no-op if writeAndPublish already settled the handle
             return null
         }
     }
 
+    /** Total valid samples across [pcmChunks], or null when any range is invalid or the sum overflows. */
+    private fun sampleCount(pcmChunks: List<Pair<ShortArray, Int>>): Long? {
+        var total = 0L
+        for ((chunk, valid) in pcmChunks) {
+            if (valid < 0 || valid > chunk.size) return null
+            total = Math.addExact(total, valid.toLong())
+        }
+        return total
+    }
+
     private fun writeAndPublish(
         generation: Long,
+        admission: Admission,
         captureId: String,
         enrollmentEpoch: String,
         pcmChunks: List<Pair<ShortArray, Int>>,
         samples: Long,
         canonicalMetadata: ByteArray,
-        admission: Admission,
     ): Entry? {
         val createdAt = clock()
         dir.mkdirs()
@@ -273,68 +298,73 @@ class ContributionStore(
                 out.fd.sync()
             }
             val audioBytes = wavPart.length()
+            // An invalid committed size must still give the reservation back: the enclosing try/finally in
+            // prepareAt settles EVERY exit, so this returns through it rather than leaking here.
             if (audioBytes == 0L || audioBytes > limits.maxClipBytes) return null
-            // Rename into the capture's final names happens INSIDE the ownership decision below, so a
-            // successor that grabbed the id first is never overwritten.
             val digest = sha256Hex(canonicalMetadata)
             val entry = Entry(
                 captureId, enrollmentEpoch, digest, audioBytes, canonicalMetadata.size,
                 attempts = 0, createdAtMs = createdAt,
             )
-            // Revocation seam: fires outside the guard so a revoke performed here is observed as stale
-            // AT the publication instant, deterministically and without racing another thread.
+            // Revocation seam: fires before the ownership decision so a revoke performed here is observed as
+            // stale AT the publication instant, deterministically and without racing another thread.
             hooks.beforePublication?.invoke(generation)
-            val published = fence.guard(generation) {
-                synchronized(lock) {
-                    // Ownership is decided atomically with publication: a concurrent attempt for the same
-                    // capture that reached its commit point first owns the id, and this one is refused.
-                    val ownedByAnother = preparedIds.contains(captureId) || memoryEntries.containsKey(captureId)
-                    if (ownedByAnother || !roomForPublicationLocked(admission)) {
+
+            // LOCK ORDER: store lock -> fence, the single order used by every ownership path in this class
+            // (reviewer 195845cb finding 1). Publication used to take the fence FIRST while purge took the
+            // store first; two threads could then hold one lock each and wait forever on the other. The
+            // generation is now checked while already holding the store lock, via isValidUnlocked.
+            val published: Entry? = synchronized(lock) {
+                if (!fence.isValidUnlocked(generation)) {
+                    null
+                } else if (preparedIds.contains(captureId) || memoryEntries.containsKey(captureId) ||
+                    !roomForPublicationLocked(admission)
+                ) {
+                    // Ownership is decided atomically with publication: whoever reached the commit point first
+                    // owns the id, and a duplicate or over-budget attempt is refused.
+                    null
+                } else if (!claimFinalNames(wavPart, metaPart, wavFinal, metaFinal, readyFile)) {
+                    // Final names are claimed only after ownership is established, so no attempt can rename
+                    // over an existing entry's immutable files.
+                    null
+                } else {
+                    // Adopt the reservation into the durable index (removes it from the live set).
+                    admission.adopt()
+                    fsyncDir(dir)
+                    // Age + attempt authorities are written BEFORE the marker; failing either is a failed
+                    // preparation, not an invented fallback, and must hand the slot back.
+                    val sidecarsOk = runCatching {
+                        createdFile.writeText(createdAt.toString())
+                        attemptsFile.writeText("0")
+                    }.isSuccess
+                    if (!sidecarsOk) {
+                        // Roll the claim back exactly: remove what we just wrote and re-hold nothing.
+                        deleteLocked(entry)
+                        memoryEntries.remove(captureId)
+                        preparedIds.remove(captureId)
                         null
                     } else {
-                        // The final names are claimed ONLY after ownership is established above, so a
-                        // concurrent or duplicate attempt can never rename over an existing entry's files.
-                        val claimed = claimFinalNames(wavPart, metaPart, wavFinal, metaFinal, readyFile)
-                        if (!claimed) {
-                            reservations[admission.id] = admission.projectedBytes
-                            null
-                        } else {
-                            fsyncDir(dir)
-                            // Age + attempt authorities are written BEFORE the marker; failing either is a
-                            // failed preparation rather than an invented fallback.
-                            runCatching { createdFile.writeText(createdAt.toString()) }.onFailure {
-                                reservations[admission.id] = admission.projectedBytes
-                                return@guard null
-                            }
-                            runCatching { attemptsFile.writeText("0") }.onFailure {
-                                reservations[admission.id] = admission.projectedBytes
-                                return@guard null
-                            }
-                            // READY MARKER LAST: presence of this file is the ONLY readiness authority.
-                            FileOutputStream(readyFile).use { it.fd.sync() }
-                            fsyncDir(dir)
-                            committed = true
-                            memoryEntries[captureId] = entry
-                            preparedIds.add(captureId)
-                            entry
-                        }
+                        // READY MARKER LAST: presence of this file is the ONLY readiness authority.
+                        FileOutputStream(readyFile).use { it.fd.sync() }
+                        fsyncDir(dir)
+                        committed = true
+                        memoryEntries[captureId] = entry
+                        preparedIds.add(captureId)
+                        entry
                     }
                 }
             }
             synchronized(lock) { stagingOwners.remove(admission.id) }
             if (published == null) {
-                // Fenced off / lost ownership / budget moved: drop OUR staging and give the slot back.
-                wavPart.delete()
-                metaPart.delete()
-                admission.discard()
+                // Fenced off / lost ownership / budget moved: drop OUR staging only, never shared names.
+                deleteStaging(admission.id)
+                admission.discard() // idempotent: no-op once adopted above
                 return null
             }
-            admission.adopt()
             return entry
         } finally {
             if (!committed) {
-                wavPart.delete()
-                metaPart.delete()
+                deleteStaging(admission.id)
             }
         }
     }
@@ -386,10 +416,10 @@ class ContributionStore(
      * sidecar write failed (a swallowed write error would silently reset retry budget on restart).
      */
     fun recordAttempt(generation: Long, captureId: String): Int? {
-        val updated = fence.guard(generation) {
-            synchronized(lock) {
-                val e = memoryEntries[captureId] ?: return@guard null
-                e.copy(attempts = e.attempts + 1).also { memoryEntries[captureId] = it }
+        val updated = synchronized(lock) {
+            // Same fixed order as publication: store lock -> fence.
+            if (!fence.isValidUnlocked(generation)) null else memoryEntries[captureId]?.let {
+                it.copy(attempts = it.attempts + 1).also { cur -> memoryEntries[captureId] = cur }
             }
         } ?: return null
         return try {
@@ -398,8 +428,10 @@ class ContributionStore(
         } catch (_: Exception) {
             // Roll back only while this generation still owns the queue; after a revoke the whole index is
             // gone and inventing a decrement could corrupt a successor's counts.
-            fence.guard(generation) {
-                synchronized(lock) { memoryEntries[captureId]?.let { memoryEntries[captureId] = it.copy(attempts = it.attempts - 1) } }
+            synchronized(lock) {
+                if (fence.isValidUnlocked(generation)) {
+                    memoryEntries[captureId]?.let { memoryEntries[captureId] = it.copy(attempts = it.attempts - 1) }
+                }
             }
             null
         }
@@ -414,8 +446,8 @@ class ContributionStore(
      * and the file deletion happen inside the same guarded critical section as the ownership check.
      */
     fun dropEntry(generation: Long, captureId: String, reason: TerminalReason): Boolean {
-        val removed = fence.guard(generation) {
-            synchronized(lock) { memoryEntries.remove(captureId)?.also { deleteLocked(it) } }
+        val removed = synchronized(lock) {
+            if (fence.isValidUnlocked(generation)) memoryEntries.remove(captureId)?.also { deleteLocked(it) } else null
         } != null
         if (removed) dropCounterOnly(reason)
         return removed
@@ -450,7 +482,6 @@ class ContributionStore(
             memoryEntries.clear()
             preparedIds.clear()
             reservations.clear()
-            released.clear()
             recovered = true // a purged store must not lazily resurrect anything from disk
             stagedAttempts = stagingOwners.toSet()
             stagingOwners.clear()
@@ -594,9 +625,6 @@ class ContributionStore(
     private val preparedIds = mutableSetOf<String>()
     private val reservations = LinkedHashMap<String, Long>()
 
-    /** Reservation ids whose budget has been returned (discarded) or adopted (consumed). */
-    private val released = mutableSetOf<String>()
-
     /** Attempt ids with staging files owned by THIS instance, so purge cleanup stays scoped. */
     private val stagingOwners = mutableSetOf<String>()
 
@@ -633,6 +661,9 @@ class ContributionStore(
         private const val SUFFIX_READY = ".ready"
         private const val SUFFIX_PART = ".wav.part"
         private const val STAGING_PREFIX = "gen$"
+        private const val ADMISSION_HELD = 0
+        private const val ADMISSION_RELEASED = 1
+        private const val ADMISSION_ADOPTED = 2
         private const val SUFFIX_ATTEMPTS = ".attempts"
         private const val SAMPLE_RATE_HZ = 16_000L
         private const val SUFFIX_CREATED = ".created"

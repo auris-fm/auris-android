@@ -24,4 +24,14 @@ class QueueFence {
     fun <R> guard(captured: Long, block: () -> R): R? = synchronized(lock) {
         if (captured != generation) null else block()
     }
+
+    /**
+     * Non-reentrant ownership check for callers that already hold their own lock.
+     *
+     * LOCK ORDER IS FIXED ACROSS THE QUEUE: **store lock → fence**. Taking the fence first and then the
+     * store (as publication once did) while revocation took the store first and then the fence produces a
+     * deadlock, because neither side releases before acquiring the other. Every ownership path must follow
+     * the same order; use this instead of [guard] whenever the caller is inside `synchronized(storeLock)`.
+     */
+    fun isValidUnlocked(captured: Long): Boolean = synchronized(lock) { captured == generation }
 }

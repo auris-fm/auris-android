@@ -274,11 +274,13 @@ jobs:
         env:
           # Anthropic-compatible gateway (Auris). Sourced from secrets for uniformity.
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          GH_TOKEN: ${{ github.token }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # Skip Claude GitHub App install; use Actions token for GitHub API.
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          track_progress: true
+          # Direct-prompt mode avoids injecting the PR's entire comment/review history.
+          track_progress: false
           show_full_output: true
           prompt: |
             REPO: ${{ github.repository }}
@@ -286,6 +288,22 @@ jobs:
             REVIEWED HEAD: ${{ needs.resolve-target.outputs.head-sha }}
 
             Read AGENTS.md first - it carries this repo's conventions.
+
+            Retrieve review context in small, targeted requests:
+            - Use `gh pr view` for metadata and changed paths, then inspect the relevant
+              checked-out files and individual patches. Do not load the entire diff or
+              comment history into one response.
+            - Before reviewing, use `gh api graphql` to fetch this PR's unresolved
+              review threads, including their comment bodies and URLs. Paginate through
+              every page and inspect long threads in smaller batches; do not omit open
+              findings because older bot summaries are absent from the initial prompt.
+            - Use `gh api --method GET` for focused REST reads as needed. If a prior
+              reviewed commit cannot be verified, review the full PR rather than infer
+              a baseline from an old comment.
+            - Post the summary with `gh pr comment` and `--body-file`; agent mode does
+              not create or update a tracking comment automatically. Inline findings
+              still use `mcp__github_inline_comment__create_inline_comment`. Use Write
+              only for the temporary summary file; do not modify repository files.
 
             Priorities, in order:
             1. Correctness - bugs reachable from real user flows: wrong logic,
@@ -343,7 +361,7 @@ jobs:
 
           claude_args: |
             --model ${{ steps.resolve-model.outputs.model }}
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*)"
+            --allowedTools "Write,mcp__github_inline_comment__create_inline_comment,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api --method GET:*),Bash(gh api graphql:*),Bash(gh pr comment:*)"
 
       - name: Report a review that did not complete
         # The third state GitHub cannot express: the action ran, the step succeeded, but the MODEL

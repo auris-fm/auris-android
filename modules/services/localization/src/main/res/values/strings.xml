@@ -13,10 +13,19 @@
     <string name="add_bookmark">Add bookmark</string>
     <string name="add_bookmark_title">Add Bookmark</string>
     <string name="bookmark_added">Bookmark \"%s\" added</string>
+    <string name="bookmark_create_failed">Couldn\'t add bookmark</string>
+    <string name="bookmark_edit_transcript_selection">Selected passage: %1$s</string>
+    <string name="bookmark_edit_transcript_subtitle">Select a transcript passage for this bookmark</string>
+    <string name="bookmark_edit_transcript_title">Edit transcript</string>
+    <string name="bookmark_new_badge">New</string>
+    <string name="bookmark_player_tip_title" translatable="false">@string/add_bookmark</string>
+    <string name="bookmark_player_tip_message">Keep the part you wanted</string>
+    <string name="bookmark_suggesting_title">Suggesting a title…</string>
+    <string name="bookmark_suggestion_prefix">Suggestion:</string>
+    <string name="bookmark_adding_transcript">Adding transcript…</string>
     <string name="bookmark_updated">Bookmark \"%s\" updated</string>
     <string name="change_title">Change title</string>
-    <string name="add_bookmark_title_hint">Add an optional title to identify this bookmark</string>
-    <string name="change_bookmark_title_hint">Change the title that identifies this bookmark</string>
+    <string name="bookmark_title_label">Title</string>
     <string name="save_bookmark">Save bookmark</string>
     <string name="playing_bookmark">Playing \"%s\"</string>
     <string name="skipping_to">Skipping to %s</string>
@@ -51,6 +60,7 @@
     <string name="effects">Effects</string>
     <string name="episode_not_found">Episode not found</string>
     <string name="go_to_podcast">Go to podcast</string>
+    <string name="go_to_episode">Go to episode</string>
     <string name="go_to_files">Go to files</string>
     <string name="in_progress">In progress</string>
     <string name="in_progress_uppercase">In Progress</string>
@@ -1056,9 +1066,21 @@
     <string name="add_to_playlist_failure_message">This playlist is full. Remove a few episodes or start a new one.</string>
     <!-- %1$s is a playlist title  -->
     <string name="added_to_playlist_single">Added to %1$s</string>
+    <!-- %d is a playlist count of 2 or more. Keep all quantity forms for locale-specific plural rules. -->
     <plurals name="added_to_playlist_single_multiple">
         <item quantity="one">Added to %d playlist</item>
         <item quantity="other">Added to %d playlists</item>
+    </plurals>
+    <string name="removed_from_playlist_feedback">Removed from playlist</string>
+    <!-- %d is a playlist count of 2 or more. Keep all quantity forms for locale-specific plural rules. -->
+    <plurals name="removed_from_playlists">
+        <item quantity="one">Removed from %d playlist</item>
+        <item quantity="other">Removed from %d playlists</item>
+    </plurals>
+    <!-- %d is a playlist count of 2 or more. Keep all quantity forms for locale-specific plural rules. -->
+    <plurals name="changed_playlists">
+        <item quantity="one">Changed %d playlist</item>
+        <item quantity="other">Changed %d playlists</item>
     </plurals>
     <string name="create_playlist">Create playlist</string>
     <string name="create_smart_playlist">Create smart playlist</string>
@@ -1519,7 +1541,7 @@
     <string name="settings_app_icon_ok" translatable="false">@string/ok</string>
     <string name="settings_app_icon_title">Title</string>
     <string name="settings_app_icon_updated">Icon updated</string>
-    <string name="settings_app_icon_updated_message">This new icon may take a few minutes to appear and you will see two icons in your all apps screen. This is normal. Drag the new one onto your home screen and you should be good to go!</string>
+    <string name="settings_app_icon_updated_message_v2">This new icon may take a few minutes to appear. If your Home screen shortcut disappears, add Pocket Casts again from your all apps screen.</string>
     <string name="settings_apply_archived_hide">Would you like to change all your existing podcasts to hide archived?</string>
     <string name="settings_apply_archived_show">Would you like to change all your existing podcasts to show archived?</string>
     <string name="settings_apply_group_by">Would you like to change all your existing podcasts to be grouped by %s?</string>
@@ -1854,9 +1876,20 @@
     <string name="settings_auto_archive_no_starred_summary">Starred episodes won\'t be auto archived</string>
     <string name="settings_select_podcasts">Select Podcasts</string>
     <string name="settings_notification_silent">Silent</string>
-    <string name="settings_whats_new">What\'s New</string>
+    <string name="settings_whats_new">What\'s new</string>
     <string name="settings_whats_new_next" translatable="false">@string/next</string>
     <string name="settings_whats_new_done">Done</string>
+    <string name="whats_new_category_new_feature">New Feature</string>
+    <string name="whats_new_category_tip">Tips and Tricks</string>
+    <string name="whats_new_category_announcement">Announcement</string>
+    <string name="whats_new_category_known_issue">Known Issue</string>
+    <string name="whats_new_category_research">User Research</string>
+    <string name="whats_new_feed_empty_title">No messages yet</string>
+    <string name="whats_new_feed_empty_description">New features, tips and announcements will show up\u00A0here.</string>
+    <string name="whats_new_feed_unread">Unread</string>
+    <string name="whats_new_feed_read_all">Read all</string>
+    <string name="whats_new_feed_all_read">All messages marked as read</string>
+    <string name="whats_new_feed_unable_to_load">Unable to load What\'s new</string>
     <string name="settings_manage_downloads_deleting">Deleting episodes…</string>
     <string name="settings_storage_phone">Phone</string>
     <string name="settings_storage_sd_card">SD Card</string>
@@ -2040,6 +2073,8 @@
 
     <string name="discover">Discover</string>
     <string name="discover_error">There was an error loading the content.</string>
+    <string name="discover_network">Network</string>
+    <string name="discover_networks">Networks</string>
     <string name="discover_error_try_again">Could not load content. Please check your internet connection and try again.</string>
     <string name="discover_retry" translatable="false">@string/retry</string>
     <string name="discover_row_fresh_pick">FRESH PICK</string>
@@ -2317,6 +2352,9 @@
     <string name="log_in_with_google">Log in with Google</string>
     <string name="log_in_on_phone">Log in on phone</string>
     <string name="log_in_with_email">Log in with email</string>
+    <string name="log_in_with_code">Log in with code</string>
+    <string name="log_in_with_code_instructions">Scan the QR code with your phone, or go to %1$s and enter this code</string>
+    <string name="log_in_with_code_error">Couldn\'t get your log in code</string>
     <string name="enter_email">Enter email</string>
     <string name="log_in_watch_from_phone_instructions_1">Log into Pocket Casts on a paired Android phone.</string>
     <string name="log_in_watch_from_phone_instructions_2">The next time you open Pocket Casts on your watch and have a network connection, you will be logged in.</string>
@@ -2461,6 +2499,7 @@
     <string name="bookmarks_delete_singular">Delete bookmark</string>
     <string name="bookmarks_deleted_plural">%1$d bookmarks deleted</string>
     <string name="bookmarks_deleted_singular">Bookmark deleted</string>
+    <string name="bookmarks_deleted_undo">Undo</string>
     <string name="bookmarks_delete_summary_plural">%d bookmarks will be deleted. This cannot be undone.</string>
     <string name="bookmarks_delete_summary_singular">This bookmark will be deleted. This cannot be undone.</string>
     <string name="bookmark_not_found">Bookmark not found</string>
@@ -2474,6 +2513,8 @@
     <string name="bookmark_notification_content_tap_to_view">Tap to view</string>
     <string name="bookmark_notification_action_change_title">Change title</string>
     <string name="bookmark_notification_action_delete_title" translatable="false">@string/delete</string>
+    <string name="bookmarks_upgrade_example_title">The audition room</string>
+    <string name="bookmarks_upgrade_example_passage">You\'re casting the person, not the résumé.</string>
     <string name="bookmarks_upsell_instructions">Save timestamps of your favorite episodes and unlock many more features with Pocket&#160;Casts Plus.</string>
     <string name="bookmarks_upsell_instructions_early_access">Get early access to this feature with Pocket&#160;Casts Patron and save timestamps of your favorite episodes. Available for Plus subscribers soon.</string>
     <string name="bookmarks_search_results_not_found">We couldn\'t find any bookmark matching your search criteria. Try another keyword.</string>
@@ -2481,6 +2522,8 @@
     <string name="bookmarks_free_user_empty_state_message">You can save timestamps of important moments in an episode.</string>
     <string name="bookmarks_free_user_empty_state_button">Get Bookmarks</string>
     <string name="bookmarks_paid_user_empty_state_message">You can save timestamps of episodes from the actions menu in the player or by configuring an action with your headphones.</string>
+    <string name="smart_bookmarks_upsell_title">Save the parts worth keeping</string>
+    <string name="smart_bookmarks_upsell_message">One tap. It\'s named, and the words come with it.</string>
 
     <!-- Transcripts -->
     <string name="error_transcript_failed_to_load">Sorry, but something went wrong while loading this transcript.</string>
@@ -2905,6 +2948,7 @@
     <string name="search_filters_podcasts" translatable="false">@string/podcasts</string>
     <string name="search_filters_episodes" translatable="false">@string/episodes</string>
     <string name="search_filters_folders" translatable="false">@string/folders</string>
+    <string name="search_filters_networks">Networks</string>
     <string name="search_suggestions_view_all">View all for \"%1$s\"</string>
     <string name="search_suggestions_no_results_title">No Results</string>
     <string name="search_suggestions_no_results_message">Try a new search, or by adding a podcast feed URL</string>
@@ -2954,4 +2998,21 @@
     <string name="tv_onboarding_welcome_back">Good to see you</string>
     <string name="tv_onboarding_syncing_subtitle">Loading your podcasts now.</string>
     <string name="tv_create_account_title">Create your free account</string>
+    <string name="device_approve_title">Connect your device</string>
+    <string name="device_approve_description">Your listening will sync automatically.\nYou can disconnect at any time from Settings.</string>
+    <string name="device_approve_login_required">In order to connect your device you need to have an account. Please sign in or create an account and try again.</string>
+    <string name="device_approve_signing_in_as">Signing in as…</string>
+    <string name="device_approve_switch_account">Not you? Switch account</string>
+    <string name="device_approve_switch_account_title">Switch account?</string>
+    <string name="device_approve_switch_account_message">This signs you out and removes the podcasts, filters and listening history on this device.</string>
+    <string name="device_approve_switch_account_confirm">Switch account</string>
+    <string name="device_approve_connect">Connect</string>
+    <string name="device_approve_success_title">Device connected</string>
+    <string name="device_approve_success_message">Your device is now connected to your account.</string>
+    <string name="device_approve_expired_title">Your QR code expired</string>
+    <string name="device_approve_expired_message">Please go back to your device to generate a new one.</string>
+    <string name="device_approve_error_title">Device approval failed</string>
+    <string name="device_approve_error_message">Please try again later.</string>
+    <string name="add_bookmark_title_hint">Add an optional title to identify this bookmark</string>
+    <string name="change_bookmark_title_hint">Change the title that identifies this bookmark</string>
 </resources>

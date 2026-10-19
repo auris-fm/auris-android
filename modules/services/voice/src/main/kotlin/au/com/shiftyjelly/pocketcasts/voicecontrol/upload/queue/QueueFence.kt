@@ -1,37 +1,26 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
-// Revocation fence for queue ownership (spec @05dc7937): a late network/receipt callback must
-// never recreate a purged entry or act under a successor account. Every mutation that a response
-// can trigger (drop, retry-count, re-prepare) is checked against an EPOCH GENERATION captured
-// when the request went out; any full revocation (account change, withdrawal, remote disable,
-// lease loss) bumps the generation and invalidates outstanding callbacks.
-class QueueFence {
-    private val lock = Any()
-    private var generation = 0L
+/**
+ * Compatibility view over [QueueOwnership]: the generation counter is NOT independently locked. Holding a
+ * `QueueFence` reference gives no way to read or change the generation outside the shared ownership
+ * transaction, because there is no separate lock to hold (reviewer ee26880c finding 1).
+ *
+ * New code should take part in [QueueOwnership.transaction] directly; this wrapper exists so a store, its
+ * controller and the account-loss watcher can all be handed the same boundary object.
+ */
+class QueueFence(private val ownership: QueueOwnership) {
 
-    fun currentGeneration(): Long = synchronized(lock) { generation }
-
-    /** Called by the FULL-REVOCATION path before/after purging the store: fences all in-flight. */
-    fun revoke(): Long = synchronized(lock) {
-        ++generation
-        generation
-    }
-
-    /** True while [captured] still belongs to the CURRENT owner/session (no revocation since). */
-    fun isValid(captured: Long): Boolean = synchronized(lock) { captured == generation }
-
-    /** Runs [block] only if the captured generation is still current; returns null when fenced. */
-    fun <R> guard(captured: Long, block: () -> R): R? = synchronized(lock) {
-        if (captured != generation) null else block()
-    }
+    fun currentGeneration(): Long = ownership.currentGeneration()
 
     /**
-     * Non-reentrant ownership check for callers that already hold their own lock.
-     *
-     * LOCK ORDER IS FIXED ACROSS THE QUEUE: **store lock → fence**. Taking the fence first and then the
-     * store (as publication once did) while revocation took the store first and then the fence produces a
-     * deadlock, because neither side releases before acquiring the other. Every ownership path must follow
-     * the same order; use this instead of [guard] whenever the caller is inside `synchronized(storeLock)`.
+     * Revocation from an external authority. Runs as its OWN transaction on the shared monitor, so it is
+     * atomic with respect to publication/drop/attempt mutations — but callers that must also purge state
+     * should use `ContributionStore.revokeAndPurge`, which does both in ONE section.
      */
-    fun isValidUnlocked(captured: Long): Boolean = synchronized(lock) { captured == generation }
+    fun revoke(): Long = ownership.transaction { revoke() }
+
+    fun isValid(captured: Long): Boolean = ownership.transaction { isValid(captured) }
+
+    /** Guarded execution inside the shared transaction; re-entrant when already inside one. */
+    fun <R> guard(captured: Long, block: () -> R): R? = ownership.transaction { if (isValid(captured)) block() else null }
 }

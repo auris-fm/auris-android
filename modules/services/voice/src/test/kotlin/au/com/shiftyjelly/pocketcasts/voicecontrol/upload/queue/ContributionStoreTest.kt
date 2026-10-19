@@ -12,9 +12,13 @@ import org.junit.Test
 
 class ContributionStoreTest {
 
+    private val idB = "bbbbbbbb-1111-4111-8111-111111111101"
+    private val idC = "cccccccc-1111-4111-8111-111111111102"
+    private val idD = "dddddddd-1111-4111-8111-111111111103"
+    private val idE = "eeeeeeee-1111-4111-8111-111111111104"
+
     private val firstName = "first-attempt"
     private val secondName = "second-attempt"
-
 
     private companion object {
         const val ID_A = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -82,7 +86,7 @@ class ContributionStoreTest {
         assertNotNull(store.prepare(idA, "epoch-1", chunks(8), meta(idA)))
         now += 150_000 // A (created at t=1_000_000) is now 150s old > max_queue_age_s=100
         assertNotNull(store.prepare(idB, "epoch-1", chunks(8), meta(idB)))
-        store.recordAttempt(idA)
+        store.recordAttempt(store.fence.currentGeneration(), idA)
         // RESTART: fresh store recovers durable state including attempt counts.
         val store2 = ContributionStore(root, limits, clock = { now })
         val recovered = store2.recover()
@@ -148,7 +152,8 @@ class ContributionStoreTest {
 
     @Test
     fun `fence blocks late callbacks after revocation and successor account`() {
-        val fence = QueueFence()
+        val ownership = QueueOwnership()
+        val fence = QueueFence(ownership)
         val captured = fence.currentGeneration()
         var ran = false
         assertNotNull(
@@ -219,7 +224,7 @@ class ContributionStoreTest {
         assertNotNull(store.prepare(id, "epoch-1", chunks(16), meta(id)))
         store.purgeQueue("account-change")
         assertEquals(0, store.readyEntries().size)
-        assertNull("attempt bookkeeping must not resurrect a purged entry", store.recordAttempt(id))
+        assertNull("attempt bookkeeping must not resurrect a purged entry", store.recordAttempt(store.fence.currentGeneration(), id))
         assertEquals(0, store.readyEntries().size)
         assertFalse(File(root, "contributions/$id.ready").exists())
     }
@@ -231,7 +236,8 @@ class ContributionStoreTest {
     fun `HELD revocation during actual WAV write releases the reservation and keeps successor files`() {
         // The hook runs at the moment the .wav.part write happens: purge lands DURING the real write.
         val root = tempRoot()
-        val fence = QueueFence()
+        val ownership = QueueOwnership()
+        val fence = QueueFence(ownership)
         var hooked = false
         // The successor runs on the NEW generation after a revoke, which is exactly what an account
         // change does: old owner purged, new owner opens its own store instance on the same directory.
@@ -239,11 +245,12 @@ class ContributionStoreTest {
         theStore = ContributionStore(
             root,
             QueueLimits.defaults().copy(maxQueueRecords = 2),
+            ownership = ownership,
             fence = fence,
             hooks = StoreHooks(onWavPartWrite = { _ ->
                 hooked = true
                 fence.revoke() // revocation lands DURING the stale owner's actual WAV write
-                ContributionStore(root, QueueLimits.defaults(), fence = fence)
+                ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
                     .prepare(SUCC, "epoch-B", chunks(8), meta(SUCC))
                 theStore.purgeQueue("account-change")
             }),
@@ -302,12 +309,14 @@ class ContributionStoreTest {
         // stale preparation's own handle can be holding budget. If its release is missing, the last
         // admission in a 1-record queue is refused by phantom load.
         val root = tempRoot()
-        val fence = QueueFence()
+        val ownership = QueueOwnership()
+        val fence = QueueFence(ownership)
         var hooked = false
         lateinit var theStore: ContributionStore
         theStore = ContributionStore(
             root,
             QueueLimits.defaults().copy(maxQueueRecords = 1),
+            ownership = ownership,
             fence = fence,
             hooks = StoreHooks(beforePublication = { _ ->
                 hooked = true
@@ -329,12 +338,14 @@ class ContributionStoreTest {
         // preparation's own reservation. If the fenced-off path failed to release it, admit() would
         // find the queue full. Deterministic: the hook fires inside the real write, not after it.
         val root = tempRoot()
-        val fence = QueueFence()
+        val ownership = QueueOwnership()
+        val fence = QueueFence(ownership)
         var hooked = false
         lateinit var theStore: ContributionStore
         theStore = ContributionStore(
             root,
             QueueLimits.defaults().copy(maxQueueRecords = 1),
+            ownership = ownership,
             fence = fence,
             hooks = StoreHooks(onWavPartWrite = { gen ->
                 hooked = true
@@ -354,15 +365,21 @@ class ContributionStoreTest {
         // Full attempt-write fencing: a network callback that captured the OLD generation must not be able
         // to advance retry state, write the attempts sidecar, or delete an entry once a revocation landed.
         val root = tempRoot()
-        val fence = QueueFence()
+        val ownership = QueueOwnership()
+        val fence = QueueFence(ownership)
         var hooked = false
         lateinit var theStore: ContributionStore
-        theStore = ContributionStore(root, QueueLimits.defaults(), fence = fence,
+        theStore = ContributionStore(
+            root,
+            QueueLimits.defaults(),
+            ownership = ownership,
+            fence = fence,
             hooks = StoreHooks(beforePublication = { _ ->
                 hooked = true
                 fence.revoke()
                 theStore.purgeQueue("account-change")
-            }))
+            }),
+        )
         val store = theStore
         // Revocation lands at the publication instant, so this preparation publishes nothing and the
         // generation captured by an in-flight callback is now stale.
@@ -373,12 +390,14 @@ class ContributionStoreTest {
 
         // A late callback carrying that stale generation must be refused on every mutating surface.
         // The entry below belongs to THIS (now revoked) owner's index, so only the fence can stop it.
-        val victim = ContributionStore(root, QueueLimits.defaults(), fence = fence)
+        val victim = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
         assertNotNull(victim.prepare(ID_A, "epoch-A", chunks(8), meta(ID_A)))
         assertEquals(1, victim.readyEntries().size)
         assertNull("stale recordAttempt must be refused", victim.recordAttempt(inflightGen, ID_A))
-        assertFalse("stale dropEntry must be refused",
-            victim.dropEntry(inflightGen, ID_A, ContributionStore.TerminalReason.SERVER_TERMINAL))
+        assertFalse(
+            "stale dropEntry must be refused",
+            victim.dropEntry(inflightGen, ID_A, ContributionStore.TerminalReason.SERVER_TERMINAL),
+        )
         assertEquals("stale callback must leave the attempt count alone", 0, victim.readyEntries().single().attempts)
         assertTrue("stale callback must not delete the entry's files", File(victim.dirForTest(), "$ID_A.recording.wav").isFile)
     }
@@ -388,16 +407,17 @@ class ContributionStoreTest {
         // The dangerous shape: revocation + successor commits the SAME capture id, then the old owner's
         // callback arrives carrying the old generation. It must neither bump nor delete the successor's entry.
         val root = tempRoot()
-        val fence = QueueFence()
-        val oldStore = ContributionStore(root, QueueLimits.defaults(), fence = fence)
+        val ownership = QueueOwnership()
+        val fence = QueueFence(ownership)
+        val oldStore = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
         assertNotNull(oldStore.prepare(ID_A, "epoch-old", chunks(8), meta(ID_A)))
         val staleGen = fence.currentGeneration()
         fence.revoke()
         oldStore.purgeQueue("account-change")
 
-        val newStore = ContributionStore(root, QueueLimits.defaults(), fence = fence)
+        val newStore = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
         assertNotNull(newStore.prepare(ID_A, "epoch-new", chunks(8), meta(ID_A)))
-        val succAttempts = newStore.recordAttempt(ID_A)
+        val succAttempts = newStore.recordAttempt(newStore.fence.currentGeneration(), ID_A)
         assertEquals(1, succAttempts)
 
         // Stale callback from the previous owner.
@@ -408,8 +428,183 @@ class ContributionStoreTest {
         val live = newStore.readyEntries().single()
         assertEquals("successor enrollment epoch changed by stale callback", "epoch-new", live.enrollmentEpoch)
         assertEquals("successor attempt count changed by stale callback", 1, live.attempts)
-        assertEquals("successor attempts sidecar changed by stale callback", "1",
-            File(newStore.dirForTest(), "$ID_A.attempts").readText())
+        assertEquals(
+            "successor attempts sidecar changed by stale callback",
+            "1",
+            File(newStore.dirForTest(), "$ID_A.attempts").readText(),
+        )
+    }
+
+    @Test
+    fun `discarded reused foreign and undersized handles cannot publish`() {
+        // Reviewer ee26880c finding 2: the transferred handle must be validated as THIS store's, still HELD,
+        // sized for the ACTUAL chunks+metadata, and not already settled. Each refusal has one isolated reason.
+        val store = ContributionStore(tempRoot(), QueueLimits.defaults())
+        // (a) already discarded
+        val discarded = store.admit(8, meta(ID_A).size)!!
+        discarded.discard()
+        assertNull(
+            "discarded handle must not publish",
+            store.prepareAt(store.fence.currentGeneration(), discarded, ID_A, "epoch-A", chunks(8), meta(ID_A)),
+        )
+        assertEquals(0, store.readyEntries().size)
+        // (b) reused after a successful publication
+        val used = store.admit(8, meta(idB).size)!!
+        assertNotNull(store.prepareAt(store.fence.currentGeneration(), used, idB, "epoch-A", chunks(8), meta(idB)))
+        assertEquals(1, store.readyEntries().size)
+        assertNull(
+            "adopted handle must not publish again",
+            store.prepareAt(store.fence.currentGeneration(), used, idC, "epoch-A", chunks(8), meta(idC)),
+        )
+        assertEquals("reuse must not add an entry", 1, store.readyEntries().size)
+        // (c) foreign: created by a DIFFERENT store's reservation registry
+        val other = ContributionStore(tempRoot(), QueueLimits.defaults())
+        val foreign = other.admit(8, meta(idD).size)!!
+        assertNull(
+            "foreign handle must not publish into this store",
+            store.prepareAt(store.fence.currentGeneration(), foreign, idD, "epoch-A", chunks(8), meta(idD)),
+        )
+        assertFalse("foreign handle must be released, not left held", foreign.isHeld())
+        // (d) undersized: reserved for 8 samples but asked to write 16
+        val small = store.admit(8, meta(idE).size)!!
+        assertNull(
+            "undersized handle must not publish a larger clip",
+            store.prepareAt(store.fence.currentGeneration(), small, idE, "epoch-A", chunks(16), meta(idE)),
+        )
+        assertFalse("refused handle must not stay held", small.isHeld())
+        // Only the legitimate B entry exists; none of the four refusals created state.
+        assertEquals(listOf(idB), store.readyEntries().map { it.captureId })
+    }
+
+    @Test
+    fun `concurrent reuse of one handle cannot share its staging`() {
+        // Reviewer ee26880c finding 2, concurrency half: two attempts racing with the SAME handle must produce
+        // exactly one writer; the transfer is single-winner under the shared monitor.
+        val store = ContributionStore(tempRoot(), QueueLimits.defaults())
+        val gen = store.fence.currentGeneration()
+        val handle = store.admit(8, meta(ID_A).size)!!
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val results = java.util.concurrent.CopyOnWriteArrayList<String?>()
+        val threads = (1..2).map { _ ->
+            Thread {
+                gate.await()
+                val e = runCatching {
+                    store.prepareAt(gen, handle, ID_A, "epoch-A", chunks(8), meta(ID_A))
+                }.fold({ it?.captureId }, { t -> "THROWN:${t::class.simpleName}" })
+                results += e
+            }.apply { isDaemon = true }
+        }
+        threads.forEach { it.start() }
+        gate.countDown()
+        threads.forEach { it.join(20_000) }
+        assertEquals("both attempts must report", 2, results.size)
+        val published = results.count { it != null && !it.startsWith("THROWN") }
+        assertEquals("exactly one attempt may claim the handle", 1, published)
+        assertFalse("loser must not leave the handle held", handle.isHeld())
+        assertEquals("at most one entry for one capture id", 1, store.readyEntries().size)
+        assertTrue("no thread may fail unexpectedly: $results", results.none { it?.startsWith("THROWN") == true })
+    }
+
+    @Test
+    fun `stale generation refuses before any staging claim`() {
+        // Findings 1+2 combined: a handle offered under a revoked generation is refused WITHOUT claiming
+        // staging or writing bytes, and settles the caller's reservation.
+        val ownership = QueueOwnership()
+        val fence = QueueFence(ownership)
+        val store = ContributionStore(tempRoot(), QueueLimits.defaults(), ownership = ownership, fence = fence)
+        val gen = fence.currentGeneration()
+        val handle = store.admit(8, meta(ID_A).size)!!
+        fence.revoke()
+        assertNull(store.prepareAt(gen, handle, ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertFalse("stale attempt must settle its handle", handle.isHeld())
+        val files = store.dirForTest().listFiles()?.toList() ?: emptyList()
+        assertEquals(
+            "stale attempt must leave no staging behind",
+            emptyList<String>(),
+            files.filter { it.name.endsWith(".part") }.map { it.name },
+        )
+        assertTrue("stale attempt must not create the final wav", !File(store.dirForTest(), "$ID_A.recording.wav").exists())
+    }
+
+    @Test
+    fun `same-id successor survives a revoked owner's late cleanup`() {
+        // Finding 4: revocation+cleanup is ONE transaction on the shared monitor, and cleanup is scoped to ids
+        // this owner actually held, so a successor that claims the same capture id keeps its files.
+        val root = tempRoot()
+        val ownership = QueueOwnership()
+        val fence = QueueFence(ownership)
+        val oldOwner = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        assertNotNull(oldOwner.prepare(ID_A, "epoch-old", chunks(8), meta(ID_A)))
+        fence.revoke()
+        oldOwner.revokeAndPurge("account-change")
+        val successor = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        assertNotNull(successor.prepare(ID_A, "epoch-new", chunks(8), meta(ID_A, "epoch-new")))
+        oldOwner.revokeAndPurge("late-second-purge")
+        assertTrue("successor WAV deleted by a revoked owner's late cleanup", File(successor.dirForTest(), "$ID_A.recording.wav").isFile)
+        assertTrue("successor READY deleted by a revoked owner's late cleanup", File(successor.dirForTest(), "$ID_A.ready").isFile)
+        assertEquals(listOf(ID_A), successor.readyEntries().map { it.captureId })
+        assertEquals("epoch-new", successor.readyEntries().single().enrollmentEpoch)
+    }
+
+    @Test
+    fun `attempt bump cannot be attributed across a concurrent revocation`() {
+        // Finding 4: validation, index bump and the durable sidecar write are ONE section. A racing revoke can
+        // land before validation (refused) or after the section (consistent world), never between. The
+        // invariant: reported value, in-memory index and on-disk sidecar always agree.
+        val root = tempRoot()
+        val ownership = QueueOwnership()
+        val fence = QueueFence(ownership)
+        val store = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
+        store.prepare(ID_A, "epoch-A", chunks(8), meta(ID_A))
+        repeat(20) { round ->
+            val gen = fence.currentGeneration()
+            val stop = java.util.concurrent.atomic.AtomicBoolean(false)
+            val revoker = Thread {
+                while (!stop.get()) runCatching { fence.revoke() }
+            }.apply {
+                isDaemon = true
+                start()
+            }
+            val reported = store.recordAttempt(gen, ID_A)
+            stop.set(true)
+            revoker.join(5_000)
+            val live = store.readyEntries().firstOrNull { it.captureId == ID_A }
+            val sidecar = File(store.dirForTest(), "$ID_A.attempts").takeIf { it.isFile }?.readText()?.trim()
+            if (reported != null) {
+                assertNotNull("round $round: bump reported but the entry vanished", live)
+                assertEquals("round $round: reported/index disagree", reported, live!!.attempts)
+                assertEquals(
+                    "round $round: index/sidecar disagree (write escaped the ownership section)",
+                    live.attempts.toString(),
+                    sidecar,
+                )
+            } else {
+                assertTrue(
+                    "round $round: refused yet the sidecar advanced past the revoked generation",
+                    sidecar == null || sidecar == "0",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `generation cannot be consulted or changed outside the shared ownership transaction`() {
+        // Reviewer ee26880c finding 1: reading or bumping the generation requires the shared monitor; a raw
+        // fence reference cannot mutate state outside a transaction.
+        val ownership = QueueOwnership()
+        val fence = QueueFence(ownership)
+        val gen = fence.currentGeneration()
+        val error = runCatching { ownership.validateOutsideLockForTest(gen) }.exceptionOrNull()
+        assertNotNull("validation outside the shared monitor must be refused", error)
+        assertTrue("expected IllegalStateException, got ${error?.let { it::class.simpleName }}", error is IllegalStateException)
+        ownership.transaction<Unit> {
+            assertTrue(isValid(gen))
+            revoke()
+            assertFalse("stale generation must be refused after revoke in the same transaction", isValid(gen))
+        }
+        assertEquals(gen + 1, fence.currentGeneration())
+        assertEquals(gen + 2, fence.revoke())
+        assertEquals(gen + 2, fence.currentGeneration())
     }
 
     @Test
@@ -464,7 +659,7 @@ class ContributionStoreTest {
         val src = srcLines.joinToString("\n")
         val ownershipSites = listOf(
             "val published: Entry? = synchronized(lock) {",
-            "val updated = synchronized(lock) {",
+            "val result: Int? = synchronized(lock) {",
             "val removed = synchronized(lock) {",
         )
         ownershipSites.forEach { site ->
@@ -473,13 +668,26 @@ class ContributionStoreTest {
                 srcLines.any { it.trim().startsWith(site.substringBefore(" {").trim()) && it.contains("synchronized(lock) {") },
             )
         }
-        assertFalse("fence.guard must not wrap any store-lock ownership block",
-            Regex("fence\\.guard\\([^)]*\\)\\s*\\{\\s*synchronized\\(lock\\)").containsMatchIn(src))
+        assertFalse(
+            "fence.guard must not wrap any store-lock ownership block",
+            Regex("fence\\.guard\\([^)]*\\)\\s*\\{\\s*synchronized\\(lock\\)").containsMatchIn(src),
+        )
         val guardCalls = Regex("fence\\.guard\\(").findAll(src).count()
         assertEquals("no ownership path may take the fence first; found $guardCalls fence.guard call sites", 0, guardCalls)
-        val unlockedChecks = Regex("fence\\.isValidUnlocked\\(").findAll(src).count()
-        assertTrue("every ownership path should consult the fence under the store lock (found $unlockedChecks)",
-            unlockedChecks >= 4)
+        val ownershipChecks = Regex("ownership\\.isValidUnderLock\\(").findAll(src).count()
+        assertTrue(
+            "every ownership path should validate inside the shared monitor (found $ownershipChecks)",
+            ownershipChecks >= 4,
+        )
+        assertFalse(
+            "the store must not keep its own separate monitor away from the generation",
+            Regex("private val lock[^\\n]*= *Any\\(\\)").containsMatchIn(src),
+        )
+        assertTrue(
+            "revocation and cleanup must be one transaction on the shared monitor",
+            srcLines.any { it.contains("fun revokeAndPurge(reason: String)") } &&
+                Regex("ownership\\.revokeUnderLock\\(\\)").containsMatchIn(src),
+        )
     }
 
     @Test
@@ -488,8 +696,9 @@ class ContributionStoreTest {
         // could each hold one lock and wait forever. All ownership paths now use store -> fence. This runs
         // preparation/purge against each other under a hard timeout: a deadlock shows up as failure, not a hang.
         val root = tempRoot()
-        val fence = QueueFence()
-        val store = ContributionStore(root, QueueLimits.defaults(), fence = fence)
+        val ownership = QueueOwnership()
+        val fence = QueueFence(ownership)
+        val store = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
         val stop = java.util.concurrent.atomic.AtomicBoolean(false)
         val errors = java.util.concurrent.CopyOnWriteArrayList<String>()
         val publishers = (1..4).map { i ->
@@ -517,7 +726,10 @@ class ContributionStoreTest {
             }
         }
         val all = publishers + listOf(purger)
-        all.forEach { it.isDaemon = true; it.start() }
+        all.forEach {
+            it.isDaemon = true
+            it.start()
+        }
         val deadline = System.currentTimeMillis() + 30_000
         while (all.any { it.isAlive } && System.currentTimeMillis() < deadline) Thread.sleep(50)
         stop.set(true)
@@ -542,7 +754,8 @@ class ContributionStoreTest {
         val firstWriterFlag = java.util.concurrent.atomic.AtomicBoolean(true)
         lateinit var theStore: ContributionStore
         theStore = ContributionStore(
-            root, QueueLimits.defaults(),
+            root,
+            QueueLimits.defaults(),
             hooks = StoreHooks(onWavPartWrite = { _ ->
                 val partsNow = probeDir.listFiles()?.filter { it.name.endsWith(".part") }
                     ?.map { "${it.name}=${it.length()}B" }?.sorted()?.joinToString(" ; ") ?: ""
@@ -556,23 +769,24 @@ class ContributionStoreTest {
         val store = theStore
         val gen = store.fence.currentGeneration()
         val large = chunks(4096) // 8236 B payload
-        val small = chunks(8)    //   60 B payload
+        val small = chunks(8) //   60 B payload
         var failure: Throwable? = null
         val publishedCount = java.util.concurrent.atomic.AtomicInteger()
-        fun run(chunks: List<Pair<ShortArray, Int>>) {
+        fun run(samples: Int, chunks: List<Pair<ShortArray, Int>>) {
             try {
-                if (store.prepareAt(gen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks, meta(ID_A)) != null) publishedCount.incrementAndGet()
+                val handle = store.admitForTest(samples.toLong(), meta(ID_A).size)
+                if (store.prepareAt(gen, handle, ID_A, "epoch-A", chunks, meta(ID_A)) != null) publishedCount.incrementAndGet()
             } catch (t: Throwable) {
                 failure = t
             }
         }
 
-        val first = Thread({ run(large) }, firstName)
+        val first = Thread({ run(4096, large) }, firstName)
         first.start()
         assertTrue("first attempt never entered its staging write", gate.await(10, java.util.concurrent.TimeUnit.SECONDS))
-        val second = Thread({ run(small) }, secondName)
+        val second = Thread({ run(8, small) }, secondName)
         second.start()
-        second.join(20_000)  // second completes fully while the first is still held inside its write
+        second.join(20_000) // second completes fully while the first is still held inside its write
         holdFirstOpen.release()
         first.join(20_000)
         failure?.let { throw it }
@@ -597,7 +811,9 @@ class ContributionStoreTest {
             line.substringAfter("-> ").split(" ; ").filter { it.isNotEmpty() }.map { it.substringBefore("=") }
         }.distinct()
         assertEquals(
-            "each attempt must own a distinct staging path; saw $distinctStagingNames", 2, distinctStagingNames.size,
+            "each attempt must own a distinct staging path; saw $distinctStagingNames",
+            2,
+            distinctStagingNames.size,
         )
     }
 
@@ -606,11 +822,13 @@ class ContributionStoreTest {
         // Hook fires just before publication: the generation is already stale at that instant, so the
         // stale path must abandon WITHOUT touching any file for the shared capture id.
         val root = tempRoot()
-        val fence = QueueFence()
+        val ownership = QueueOwnership()
+        val fence = QueueFence(ownership)
         lateinit var theStore: ContributionStore
         theStore = ContributionStore(
             root,
             QueueLimits.defaults(),
+            ownership = ownership,
             fence = fence,
             hooks = StoreHooks(beforePublication = { _ -> theStore.purgeQueue("account-change") }),
         )

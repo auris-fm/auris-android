@@ -25,5 +25,7 @@ sealed interface CloudTurnFrame {
         val conversationId: String? = null,
         /** `create` or `resume`; omitted when absent. */
         val conversationMode: String? = null,
+        /** Optional ASR source-language tag, omitted when unknown. */
+        val sourceLanguage: String? = null,
     ) : CloudTurnFrame
 }

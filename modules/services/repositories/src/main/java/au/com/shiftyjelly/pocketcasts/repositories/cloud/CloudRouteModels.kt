@@ -92,6 +92,8 @@ data class CloudRouteTurn(
      * request would be admitted under its successor.
      */
     val capturedOrigin: Long? = null,
+    /** Optional ASR source language; absence is unknown, not the UI locale. */
+    val sourceLanguage: String? = null,
 )
 
 /** Capability names negotiated with the server (cloud-assistant.md). */

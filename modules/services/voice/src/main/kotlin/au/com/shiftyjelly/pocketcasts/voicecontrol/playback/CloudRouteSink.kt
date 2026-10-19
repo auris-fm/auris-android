@@ -254,6 +254,7 @@ class CloudRouteSink internal constructor(
         logicalRequestId: String?,
         /** True when the caller is RETRYING, so a lookup miss is a refusal rather than a first attempt. */
         isRetry: Boolean,
+        sourceLanguage: String?,
     ): CloudRouteTurn? {
         // A RETRY REUSES ITS TURN rather than minting a new one. The caller names the logical request;
         // if a turn already exists for it, this returns THAT turn unchanged, so its request ID, handle
@@ -282,6 +283,7 @@ class CloudRouteSink internal constructor(
         ) ?: return null
         val built = CloudRouteTurn(
             request = request,
+            sourceLanguage = sourceLanguage,
             context = buildRouteContext(context),
             requestId = UUID.randomUUID().toString(),
             capabilities = advertisedCapabilities(),

@@ -1412,6 +1412,7 @@ class VoicePlaybackIntentExecutorTest {
             hint: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint?,
             logicalRequestId: String?,
             isRetry: Boolean,
+            sourceLanguage: String?,
         ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? {
             onPrepareSeam?.invoke()
             // RETIRE AT THE SEAM, once, on the retry: a retirement landing after the executor's guards
@@ -1441,6 +1442,7 @@ class VoicePlaybackIntentExecutorTest {
                 conversationId = "handle-${preparedTurns.size + 1}",
                 conversationMode = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode.Create,
                 capturedOrigin = capturedOrigin,
+                sourceLanguage = sourceLanguage,
             )
             preparedTurns += prepared
             logicalRequestId?.let { retained[it] = prepared }

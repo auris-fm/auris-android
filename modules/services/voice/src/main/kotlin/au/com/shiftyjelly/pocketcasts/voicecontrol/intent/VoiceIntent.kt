@@ -148,6 +148,8 @@ sealed interface VoiceIntent {
          * not, or the fallback would fund its own next attempt.
          */
         val origin: CloudRouteOrigin = CloudRouteOrigin.ModelCall,
+        /** ASR source language supplied by the runtime, never by the intent model or app locale. */
+        val sourceLanguage: String? = null,
     ) : VoiceIntent
 
     enum class CloudRouteOrigin { ModelCall, RoutingFailure }

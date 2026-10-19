@@ -34,6 +34,8 @@ import au.com.shiftyjelly.pocketcasts.utils.fingerprint.FingerprintPolicy
 import au.com.shiftyjelly.pocketcasts.utils.log.LogBuffer
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 
@@ -68,14 +70,21 @@ class SimplePlayer(
     var videoWidth: Int = 0
     var videoHeight: Int = 0
 
-    override var isPip: Boolean = false
-
     override val currentAudioLevel: Float get() = renderersFactory?.currentAudioLevel ?: 0f
 
     private var videoChangedListener: VideoChangedListener? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    private var hasVideoSurface = false
+    private val _hasVideoSurfaceFlow = MutableStateFlow(false)
+    val hasVideoSurfaceFlow = _hasVideoSurfaceFlow.asStateFlow()
+    private var hasVideoSurface: Boolean
+        get() = _hasVideoSurfaceFlow.value
+        set(value) {
+            _hasVideoSurfaceFlow.value = value
+        }
+    private var videoTrackDisableRunnable: Runnable? = null
+
+    private var pendingSurface: SurfaceView? = null
 
     @Volatile
     private var prepared = false
@@ -137,6 +146,8 @@ class SimplePlayer(
 
         player = null
         prepared = false
+        pendingSurface = null
+        cancelPendingVideoTrackDisable()
 
         videoChangedListener?.videoNeedsReset()
     }
@@ -240,8 +251,18 @@ class SimplePlayer(
         player.addListener(PlayPauseListener(playbackStatsCollector))
         player.addAnalyticsListener(renderer)
 
+        val surfaceToAttach = pendingSurface
         handleStop()
         this.player = player
+        surfaceToAttach?.let { surface ->
+            try {
+                player.setVideoSurfaceHolder(surface.holder)
+                hasVideoSurface = true
+                applyVideoTrackSelection()
+            } catch (e: Exception) {
+                Timber.e(e)
+            }
+        }
 
         setPlayerEffects()
         player.addListener(object : Player.Listener {
@@ -335,13 +356,35 @@ class SimplePlayer(
             .build()
     }
 
+    private fun scheduleVideoTrackDisable() {
+        cancelPendingVideoTrackDisable()
+        val runnable = Runnable {
+            videoTrackDisableRunnable = null
+            if (!hasVideoSurface) {
+                applyVideoTrackSelection()
+            }
+        }
+        videoTrackDisableRunnable = runnable
+        mainHandler.postDelayed(runnable, VIDEO_TRACK_DISABLE_GRACE_MS)
+    }
+
+    private fun cancelPendingVideoTrackDisable() {
+        videoTrackDisableRunnable?.let(mainHandler::removeCallbacks)
+        videoTrackDisableRunnable = null
+    }
+
     private fun addVideoListener(player: ExoPlayer) {
         player.addListener(object : Player.Listener {
             override fun onSurfaceSizeChanged(width: Int, height: Int) {
                 val attached = width != 0 || height != 0
                 if (attached != hasVideoSurface) {
                     hasVideoSurface = attached
-                    applyVideoTrackSelection()
+                    if (attached) {
+                        cancelPendingVideoTrackDisable()
+                        applyVideoTrackSelection()
+                    } else {
+                        scheduleVideoTrackDisable()
+                    }
                 }
             }
 
@@ -381,15 +424,36 @@ class SimplePlayer(
         )
     }
 
-    fun setDisplay(surfaceView: SurfaceView?): Boolean {
-        val player = player ?: return false
+    fun setDisplay(surfaceView: SurfaceView): Boolean {
+        val player = player
+        if (player == null) {
+            pendingSurface = surfaceView
+            return false
+        }
+        pendingSurface = null
 
         return try {
-            player.setVideoSurfaceHolder(surfaceView?.holder)
+            player.setVideoSurfaceHolder(surfaceView.holder)
             true
         } catch (e: Exception) {
             Timber.e(e)
             false
+        }
+    }
+
+    fun clearDisplay(surfaceView: SurfaceView) {
+        val player = player
+        if (player == null) {
+            if (pendingSurface == surfaceView) {
+                pendingSurface = null
+            }
+            return
+        }
+
+        try {
+            player.clearVideoSurfaceHolder(surfaceView.holder)
+        } catch (e: Exception) {
+            Timber.e(e)
         }
     }
 
@@ -419,6 +483,8 @@ class SimplePlayer(
         player.playbackParameters = PlaybackParameters(playbackEffects.playbackSpeed.toFloat(), 1f)
     }
 }
+
+private const val VIDEO_TRACK_DISABLE_GRACE_MS = 10_000L
 
 internal fun shouldDisableVideoTrack(audioOnly: Boolean, hasVideoSurface: Boolean, isHlsStream: Boolean): Boolean {
     return audioOnly || (!hasVideoSurface && !isHlsStream)

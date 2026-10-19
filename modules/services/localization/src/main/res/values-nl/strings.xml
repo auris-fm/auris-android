@@ -1,25 +1,120 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-Translation-Revision-Date: 2026-09-10 11:56:41+0000
+Translation-Revision-Date: 2026-10-08 15:57:44+0000
 Plural-Forms: nplurals=2; plural=n != 1;
 Generator: GlotPress/2.4.0-alpha
 Language: nl
 -->
 <resources>
+    <string name="manual_playlist_no_content_body_alternative">Kies afleveringen uit de podcasts die je volgt. Of veeg naar links bij elke aflevering om het toe te voegen terwijl je gaat.</string>
+
+    <string name="manual_playlist_no_content_body">Zoek een podcast die je leuk vindt en veeg vervolgens naar links bij elke aflevering om deze toe te voegen.</string>
+
+    <string name="settings_general_whats_new_unread_dot_summary">Toon een ongelezen punt op profiel wanneer er nieuwe Wat is nieuwe berichten zijn.</string>
+
+    <string name="settings_general_whats_new_unread_dot">Ongelezen punt tonen</string>
+
+    <string name="up_next_as_playlist_replace_body">Als je dit afspeelt, wordt je huidige Hierna vervangen. Bewaar het als een afspeellijst om het te behouden.</string>
+
+    <string name="whats_new_message_page_progress">Pagina %1$d van %2$d</string>
+
+    <string name="whats_new_poll_answered">Bedankt voor je antwoord.</string>
+
+    <string name="whats_new_research_title">Gebruikersonderzoek</string>
+
+    <string name="whats_new_feed_unable_to_load">Kan nieuwe niet laden</string>
+
+    <string name="whats_new_feed_all_read">Alle berichten gemarkeerd als gelezen</string>
+
+    <string name="whats_new_feed_read_all">Alles lezen</string>
+
+    <string name="whats_new_feed_unread">Ongelezen</string>
+
+    <string name="whats_new_feed_empty_description">Nieuwe functies, tips en aankondigingen worden hier weergegeven\u00A0.</string>
+
+    <string name="whats_new_feed_empty_title">Nog geen berichten</string>
+
+    <string name="whats_new_category_research">Gebruikersonderzoek</string>
+
+    <string name="whats_new_category_known_issue">bekende problemen</string>
+
+    <string name="whats_new_category_announcement">Aankondiging</string>
+
+    <string name="whats_new_category_tip">Tips &amp; tricks van onze medewerkers</string>
+
+    <string name="whats_new_category_new_feature">Nieuwe functie</string>
+
+    <string name="bookmark_title_label">Titel</string>
+
+    <string name="bookmarks_deleted_undo">Ongedaan maken</string>
+
+    <string name="device_approve_switch_account_confirm">Account wisselen</string>
+
+    <string name="device_approve_switch_account_message">Dit meldt je af en verwijdert de podcasts, filters en luistergeschiedenis op dit apparaat.</string>
+
+    <string name="device_approve_switch_account_title">Account wisselen</string>
+
+    <string name="device_approve_switch_account">Ben jij dit niet? Account wisselen</string>
+
+    <string name="bookmark_edit_transcript_selection">Geselecteerde passage: %1$s</string>
+
+    <string name="removed_from_playlist_feedback">Verwijderen uit afspeellijst</string>
+
+    <string name="bookmark_adding_transcript">Transcriptie toevoegen …</string>
+
+    <string name="settings_app_icon_updated_message_v2">Het kan een paar minuten duren voordat dit nieuwe pictogram verschijnt. Als de snelkoppeling naar het startscherm verdwijnt, voeg je Pocket Casts opnieuw toe vanuit het scherm Alle apps.</string>
+
+    <string name="go_to_episode">Ga naar aflevering</string>
+
+    <string name="smart_bookmarks_upsell_message">Eén tik. Het is genoemd, en de woorden komen ermee.</string>
+
+    <string name="smart_bookmarks_upsell_title">Bewaar de onderdelen die je moet bewaren</string>
+
+    <string name="bookmarks_upgrade_example_passage">Jij bent de persoon aan het casten, niet de cv.</string>
+
+    <string name="bookmark_edit_transcript_title">Transcriptie bewerken</string>
+
+    <string name="bookmarks_upgrade_example_title">De auditieruimte</string>
+
+    <string name="bookmark_suggestion_prefix">Suggestie:</string>
+
+    <string name="bookmark_suggesting_title">Een titel voorstellen…</string>
+
+    <string name="bookmark_player_tip_message">Behoud het onderdeel dat je wilde</string>
+
+    <string name="bookmark_new_badge">Nieuw</string>
+
+    <string name="bookmark_edit_transcript_subtitle">Selecteer een transcriptiepassage voor deze bladwijzer</string>
+
+    <string name="bookmark_create_failed">Kon bladwijzer niet toevoegen</string>
+
+
+    <string name="log_in_with_code_error">Kon je inlogcode niet ophalen</string>
+
+    <string name="log_in_with_code_instructions">Scan de QR-code met je telefoon of ga naar %1$s en voer deze code in</string>
+
+    <string name="log_in_with_code">Inloggen met QR-code.</string>
     <string name="search_filters_networks">Netwerken</string>
     <string name="discover_networks">Netwerken</string>
     <string name="discover_network">Netwerk</string>
     <string name="device_approve_login_required">Om je apparaat te verbinden, moet je een account hebben. Log in of maak een account aan en probeer het opnieuw.</string>
     <string name="device_approve_error_message">Probeer het later opnieuw.</string>
     <string name="device_approve_error_title">Apparaatgoedkeuring mislukt</string>
-    <string name="device_approve_expired_message">Ga terug naar je tv om een nieuwe te genereren.</string>
+    <string name="device_approve_expired_message">Ga terug naar je apparaat om een nieuwe te genereren.</string>
+
     <string name="device_approve_expired_title">Je QR-code is verlopen</string>
-    <string name="device_approve_success_message">Je tv is nu verbonden met je account.</string>
-    <string name="device_approve_success_title">Tv verbonden</string>
+
+    <string name="device_approve_success_message">Je apparaat is nu verbonden met je account.</string>
+
+    <string name="device_approve_success_title">Apparaat aangesloten</string>
+
     <string name="device_approve_connect">Verbinden</string>
+
     <string name="device_approve_signing_in_as">Inloggen als …</string>
+
     <string name="device_approve_description">Je luistergedrag wordt automatisch gesynchroniseerd.\nJe kunt op elk moment de verbinding met Instellingen verbreken.</string>
-    <string name="device_approve_title">Maak verbinding met je tv</string>
+
+    <string name="device_approve_title">Verbind je apparaat</string>
     <string name="tv_settings_subscription_plan">Abonnement</string>
     <string name="tv_settings_subscription_next_renewal">Volgende verlenging</string>
     <string name="tv_settings_subscription_lifetime">Levenslang</string>
@@ -288,7 +383,6 @@ Language: nl
     <string name="end_of_year_next_story">Volgend verhaal</string>
     <string name="end_of_year_story_listened_to_numbers">Je hebt naar %1$d podcasts en %2$d afleveringen geluisterd</string>
     <string name="up_next_as_playlist_replace_switch_description">Sla je huidige wachtrij Hierna op als afspeellijst.</string>
-    <string name="up_next_as_playlist_replace_body">Als je dit afspeelt, wordt je huidige Hierna vervangen.</string>
     <string name="added_to_playlist_single">Toegevoegd aan %1$s</string>
     <string name="end_of_year_failed_to_load_message">Sorry, we konden het afspelen niet laden</string>
     <string name="end_of_year_stories_already_subscribed_to_plus">Met je Plus-extraatjes ontgrendel je extra statistieken en krachtige functies</string>
@@ -379,7 +473,6 @@ Language: nl
     <string name="manual_playlist_no_available_episode_body">Het lijkt erop dat je alle afleveringen van deze show hebt toegevoegd.</string>
     <string name="manual_playlist_no_content_title_alternative">Begin met het bouwen van je playlist</string>
     <string name="manual_playlist_no_content_title">Afleveringen toevoegen aan je playlist</string>
-    <string name="manual_playlist_no_content_body">Veeg naar links bij een aflevering om deze aan je playlist toe te voegen.</string>
     <string name="unavailable">Niet beschikbaar</string>
     <string name="added_to_playlist">%1$s toegevoegd aan \'%2$s\'</string>
     <string name="add_to_playlist_failure_message">Deze playlist is vol. Verwijder een paar afleveringen of begin een nieuwe.</string>
@@ -790,7 +883,6 @@ Language: nl
     <string name="referrals_activate_my_pass">Activeer mijn pas</string>
     <string name="referrals_claim_guest_pass_title">Claim je gastenpas van %1$s voor Plus</string>
     <string name="referrals_claim_guess_pass_banner_card_subtitle">Ontgrendel de volledige luisterervaring</string>
-    <string name="referrals_tooltip_message">Geef %1$s Pocket Casts Plus weg!</string>
     <string name="referrals_claim_guess_pass_banner_card_title">Claim je gastenpas van %1$svoor Plus</string>
     <string name="referrals_share_guest_pass">Gastenpassen delen</string>
     <string name="referrals_send_guest_pass_title">Geef %1$s Pocket Casts Plus weg</string>
@@ -984,7 +1076,6 @@ Language: nl
     <string name="notification_channel_description_playback_error">Fouten tijdens playback</string>
     <string name="notification_channel_description_episode">Wordt weergegeven wanneer een nieuwe aflevering uitkomt</string>
     <string name="notification_channel_description_download">Wordt weergegeven wanneer Pocket Casts afleveringen downloadt</string>
-    <string name="change_bookmark_title_hint">Wijzig de titel die deze bladwijzer identificeert</string>
     <string name="bookmark">Bladwijzer</string>
     <string name="details">Details</string>
     <string name="episode">Aflevering</string>
@@ -997,7 +1088,6 @@ Language: nl
     <string name="skipping_to">Doorspoelen naar %s</string>
     <string name="playing_bookmark">%s aan het afspelen</string>
     <string name="save_bookmark">Bladwijzer opslaan</string>
-    <string name="add_bookmark_title_hint">Voeg een optionele titel toe om deze bladwijzer eenvoudig te identificeren</string>
     <string name="change_title">Titel wijzigen</string>
     <string name="bookmark_added">Bladwijzer %s toegevoegd</string>
     <string name="add_bookmark_title">Bladwijzer toevoegen</string>
@@ -1787,7 +1877,6 @@ Language: nl
     <string name="settings_auto_archive_episode_limit">Afleveringlimiet</string>
     <string name="settings_apply_group_by">Wil je al je huidige podcasts veranderen zodat ze gegroepeerd worden door %s?</string>
     <string name="settings_apply_archived_hide">Wil je al je huidige podcasts veranderen naar Gearchiveerde verbergen?</string>
-    <string name="settings_app_icon_updated_message">Het kan even duren voor dit nieuwe pictogram verschijnt en je ziet twee pictogrammen in het scherm Alle apps. Dit is normaal. Sleep het nieuwe pictogram naar je startscherm en je bent klaar om aan de slag te gaan!</string>
     <string name="settings_app_icon_updated">Pictogram bijgewerkt.</string>
     <string name="settings_app_icon_title">Titel</string>
     <string name="settings_app_icon_image">pictogramafbeelding</string>
@@ -1957,10 +2046,10 @@ Language: nl
     <string name="profile_next_payment">Volgende betaling: %s</string>
     <string name="profile_new_password">Nieuw wachtwoord</string>
     <string name="profile_new_email_address">Nieuw e-mailadres</string>
-    <string name="profile_license_agreement">Pocket Casts waardeert je privacy. In dit Privacybeleid wordt uitgelegd welke informatie we over je verzamelen en waarom, wat we met die informatie doen en hoe we de informatie behandelen. Het Privacybeleid is van toepassing op de Pocket Casts-apps voor iOS en Android en de Pocket Casts online service met bijbehorende macOS- en Windows-apps (samen en afzonderlijk de Service). Door de service te gebruiken, ga je akkoord met dit Privacybeleid. Als je pushberichten inschakelt in de app, slaan we de push-token op die Apple ons geeft om deze pushberichten naar je apparaat te sturen. Als je de online app aanschaft, slaan we een transactienummer op voor je aankoop. Als je ervoor kies geen account aan te maken en geen pushberichten gebruikt, worden er geen gegevens over jou opgeslagen op onze servers. De Pocket Casts-online service gebruikt ook cookies en andere technologieën om je ingelogd te houden. Als je ervoor kiest een ondersteuningsverzoek te genereren in de service, kunnen we een bijlage genereren met aanvullende gegevens om te helpen bij je verzoek. Je kunt deze bijlage inzien voor je hem indient.</string>
     <string name="profile_last_refresh">Laatst vernieuwd: %s geleden</string>
     <string name="profile_joined">Deelnemen:</string>
     <string name="profile_get_plus">Neem Pocket Casts Plus om deze functie en nog veel meer te ontgrendelen!</string>
+    <string name="profile_license_agreement">Pocket Casts waardeert je privacy. In dit Privacybeleid wordt uitgelegd welke informatie we over je verzamelen en waarom, wat we met die informatie doen en hoe we de informatie behandelen. Het Privacybeleid is van toepassing op de Pocket Casts-apps voor iOS en Android en de Pocket Casts online service met bijbehorende macOS- en Windows-apps (samen en afzonderlijk de Service). Door de service te gebruiken, ga je akkoord met dit Privacybeleid. Als je pushberichten inschakelt in de app, slaan we de push-token op die Apple ons geeft om deze pushberichten naar je apparaat te sturen. Als je de online app aanschaft, slaan we een transactienummer op voor je aankoop. Als je ervoor kies geen account aan te maken en geen pushberichten gebruikt, worden er geen gegevens over jou opgeslagen op onze servers. De Pocket Casts-online service gebruikt ook cookies en andere technologieën om je ingelogd te houden. Als je ervoor kiest een ondersteuningsverzoek te genereren in de service, kunnen we een bijlage genereren met aanvullende gegevens om te helpen bij je verzoek. Je kunt deze bijlage inzien voor je hem indient.</string>
     <string name="profile_free_account">Gratis account</string>
     <string name="profile_files_remove_image">Afbeelding vervangen</string>
     <string name="profile_files_empty_summary">Wil je naar je eigen bestanden luisteren?\nTik op de knop + om ze te openen in Pocket Casts en ze verschijnen hier.</string>
@@ -2407,9 +2496,16 @@ Language: nl
     <string name="archive_episode">Aflevering archiveren</string>
     <string name="archive">Archiveren</string>
     <string name="in_progress">Aan het beluisteren</string>
+    <string name="referrals_tooltip_message">Geef %1$s Pocket Casts Plus weg!</string>
+    <string name="change_bookmark_title_hint">Wijzig de titel die deze bladwijzer identificeert</string>
+    <string name="add_bookmark_title_hint">Voeg een optionele titel toe om deze bladwijzer eenvoudig te identificeren</string>
     <plurals name="added_to_playlist_single_multiple">
         <item quantity="one">Toevoegen aan %d playlist</item>
         <item quantity="other">Toevoegen aan %d playlists</item>
+    </plurals>
+    <plurals name="changed_playlists">
+        <item quantity="one">Gewijzigde %d afspeellijst</item>
+        <item quantity="other">Gewijzigde %d afspeellijsten</item>
     </plurals>
     <plurals name="chapter">
         <item quantity="one">hoofdstuk</item>
@@ -2526,6 +2622,10 @@ Language: nl
     <plurals name="profile_stats_second_saved">
         <item quantity="one">Seconde opgeslagen</item>
         <item quantity="other">Seconden opgeslagen</item>
+    </plurals>
+    <plurals name="removed_from_playlists">
+        <item quantity="one">Verwijderen uit afspeellijst%d</item>
+        <item quantity="other">Verwijderen uit afspeellijst%d</item>
     </plurals>
     <plurals name="second">
         <item quantity="one">seconde</item>

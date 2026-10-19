@@ -9,6 +9,7 @@ import au.com.shiftyjelly.pocketcasts.discover.TvDiscoverEpisode
 import au.com.shiftyjelly.pocketcasts.discover.TvDiscoverFeedAnalytics
 import au.com.shiftyjelly.pocketcasts.discover.TvDiscoverFeedLoader
 import au.com.shiftyjelly.pocketcasts.discover.TvDiscoverPodcast
+import au.com.shiftyjelly.pocketcasts.discover.TvDiscoverPodcastAttribution
 import au.com.shiftyjelly.pocketcasts.discover.TvDiscoverRow
 import au.com.shiftyjelly.pocketcasts.discover.TvOpenedCategory
 import au.com.shiftyjelly.pocketcasts.models.entity.Podcast
@@ -54,7 +55,6 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.rx2.await
 import timber.log.Timber
 import au.com.shiftyjelly.pocketcasts.localization.R as LR
 
@@ -70,9 +70,10 @@ class TvSearchViewModel @Inject constructor(
     private val folderManager: FolderManager,
     private val eventHorizon: EventHorizon,
     private val settings: Settings,
+    private val discoverPodcastAttribution: TvDiscoverPodcastAttribution,
 ) : ViewModel() {
 
-    private val discoverFeedAnalytics = TvDiscoverFeedAnalytics(eventHorizon, settings, SOURCE_SEARCH, localRowIds = emptySet())
+    private val discoverFeedAnalytics = TvDiscoverFeedAnalytics(eventHorizon, settings, SOURCE_SEARCH, localRowIds = emptySet(), attribution = discoverPodcastAttribution)
 
     private val _categories = MutableStateFlow<List<DiscoverCategory>>(emptyList())
     val categories: StateFlow<List<DiscoverCategory>> = _categories.asStateFlow()
@@ -275,6 +276,20 @@ class TvSearchViewModel @Inject constructor(
         eventHorizon.track(SearchShownEvent(source = SourceViewType.Search))
     }
 
+    fun retryDiscoverRow(row: TvDiscoverRow) {
+        viewModelScope.launch {
+            val reloaded = try {
+                discoverFeedLoader.reloadSearchRow(row.id, syncManager.isLoggedIn()) ?: row
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (exception: Exception) {
+                Timber.e(exception, "Failed to reload TV search row ${row.id}")
+                row
+            }
+            _discoverRows.value = _discoverRows.value.mapNotNull { if (it.id == row.id) reloaded else it }
+        }
+    }
+
     fun trackDiscoverListShown(row: TvDiscoverRow) = discoverFeedAnalytics.trackListImpression(row)
 
     fun trackDiscoverPodcastTapped(row: TvDiscoverRow, podcast: TvDiscoverPodcast) = discoverFeedAnalytics.trackPodcastTapped(row, podcast)
@@ -342,8 +357,13 @@ class TvSearchViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 val found = episodeManager.findByUuid(episode.episodeUuid)
-                    ?: run {
-                        podcastManager.findOrDownloadPodcastRxSingle(episode.podcastUuid).await()
+                    ?: runCatching {
+                        podcastManager.findOrDownloadPodcast(episode.podcastUuid)
+                        episodeManager.findByUuid(episode.episodeUuid)
+                            ?: episodeManager.downloadMissingPodcastEpisode(episode.episodeUuid, episode.podcastUuid)
+                    }.getOrElse { if (it is CancellationException) throw it else null }
+                    ?: episode.toPlayableEpisode()?.let { playable ->
+                        episodeManager.add(listOf(playable), playable.podcastUuid, downloadMetaData = false)
                         episodeManager.findByUuid(episode.episodeUuid)
                     }
                 if (found != null) {
@@ -365,7 +385,7 @@ class TvSearchViewModel @Inject constructor(
     fun playLatestEpisode(row: TvDiscoverRow, podcast: TvDiscoverPodcast) {
         viewModelScope.launch {
             try {
-                val loadedPodcast = podcastManager.findOrDownloadPodcastRxSingle(podcast.uuid).await()
+                val loadedPodcast = podcastManager.findOrDownloadPodcast(podcast.uuid)
                 podcastManager.refreshPodcast(loadedPodcast, playbackManager)
                 val latest = episodeManager.findEpisodesByPodcastOrderedByPublishDate(loadedPodcast).firstOrNull()
                 if (latest != null) {
@@ -411,7 +431,7 @@ class TvSearchViewModel @Inject constructor(
     private suspend fun hydrate(episode: ImprovedSearchResultItem.EpisodeItem): PodcastEpisode? {
         return episodeManager.findByUuid(episode.uuid)
             ?: run {
-                podcastManager.findOrDownloadPodcastRxSingle(episode.podcastUuid).await()
+                podcastManager.findOrDownloadPodcast(episode.podcastUuid)
                 episodeManager.findByUuid(episode.uuid)
             }
     }

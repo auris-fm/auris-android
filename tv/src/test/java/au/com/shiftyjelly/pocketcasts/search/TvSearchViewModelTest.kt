@@ -7,6 +7,7 @@ import au.com.shiftyjelly.pocketcasts.analytics.SourceView
 import au.com.shiftyjelly.pocketcasts.discover.TvDiscoverEpisode
 import au.com.shiftyjelly.pocketcasts.discover.TvDiscoverFeedLoader
 import au.com.shiftyjelly.pocketcasts.discover.TvDiscoverPodcast
+import au.com.shiftyjelly.pocketcasts.discover.TvDiscoverPodcastAttribution
 import au.com.shiftyjelly.pocketcasts.discover.TvDiscoverRow
 import au.com.shiftyjelly.pocketcasts.models.entity.Folder
 import au.com.shiftyjelly.pocketcasts.models.entity.Podcast
@@ -53,7 +54,6 @@ import com.automattic.eventhorizon.SearchResultTappedEvent
 import com.automattic.eventhorizon.SearchResultType
 import com.automattic.eventhorizon.SearchShownEvent
 import com.automattic.eventhorizon.SourceViewType
-import io.reactivex.Single
 import java.util.Date
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
@@ -67,7 +67,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
+import org.mockito.kotlin.argThat
 import org.mockito.kotlin.doReturn
+import org.mockito.kotlin.doSuspendableAnswer
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
@@ -83,7 +86,11 @@ class TvSearchViewModelTest {
     @get:Rule
     val coroutineRule = MainCoroutineRule()
 
-    private val listRepository = mock<ListRepository>()
+    private val listRepository = mock<ListRepository> {
+        on { getListFeedResult(any(), anyOrNull()) } doSuspendableAnswer { invocation ->
+            Result.success((invocation.mock as ListRepository).getListFeed(invocation.getArgument(0), invocation.getArgument(1)))
+        }
+    }
     private val syncManager = mock<SyncManager> {
         on { isLoggedIn() } doReturn false
     }
@@ -680,7 +687,7 @@ class TvSearchViewModelTest {
         createViewModel().playDiscoverEpisode(discoverEpisode("episode-1"))
 
         verifyBlocking(playbackManager) { playNowSuspend(episode = episode, sourceView = SourceView.SEARCH) }
-        verify(podcastManager, never()).findOrDownloadPodcastRxSingle(any(), any())
+        verifyBlocking(podcastManager, never()) { findOrDownloadPodcast(any(), any()) }
     }
 
     @Test
@@ -688,7 +695,7 @@ class TvSearchViewModelTest {
         whenever(listRepository.getSearchDiscoverFeed()).thenReturn(discover())
         val episode = podcastEpisode("episode-1")
         whenever(episodeManager.findByUuid("episode-1")).thenReturn(null, episode)
-        whenever(podcastManager.findOrDownloadPodcastRxSingle("podcast-episode-1")).thenReturn(Single.just(subscribedPodcast("podcast-episode-1")))
+        whenever(podcastManager.findOrDownloadPodcast("podcast-episode-1")).thenReturn(subscribedPodcast("podcast-episode-1"))
 
         createViewModel().playDiscoverEpisode(discoverEpisode("episode-1"))
 
@@ -696,11 +703,45 @@ class TvSearchViewModelTest {
     }
 
     @Test
+    fun `playDiscoverEpisode streams a curated clip from the feed url when the episode cannot be resolved`() = runTest {
+        whenever(listRepository.getSearchDiscoverFeed()).thenReturn(discover())
+        val playable = podcastEpisode("episode-1")
+        whenever(episodeManager.findByUuid("episode-1")).thenReturn(null, null, playable)
+        whenever(podcastManager.findOrDownloadPodcast("podcast-episode-1")).thenReturn(subscribedPodcast("podcast-episode-1"))
+
+        createViewModel().playDiscoverEpisode(
+            discoverEpisode("episode-1").copy(mediaUrl = "https://example.com/clip.mp4", mediaType = "video/mp4"),
+        )
+
+        verifyBlocking(episodeManager) {
+            add(argThat { size == 1 && first().downloadUrl == "https://example.com/clip.mp4" }, eq("podcast-episode-1"), eq(false))
+        }
+        verifyBlocking(playbackManager) { playNowSuspend(episode = playable, sourceView = SourceView.SEARCH) }
+    }
+
+    @Test
+    fun `playDiscoverEpisode streams a curated clip from the feed url when the lookup throws`() = runTest {
+        whenever(listRepository.getSearchDiscoverFeed()).thenReturn(discover())
+        val playable = podcastEpisode("episode-1")
+        whenever(episodeManager.findByUuid("episode-1")).thenReturn(null, playable)
+        whenever(podcastManager.findOrDownloadPodcast("podcast-episode-1")).thenThrow(RuntimeException("boom"))
+
+        createViewModel().playDiscoverEpisode(
+            discoverEpisode("episode-1").copy(mediaUrl = "https://example.com/clip.mp4", mediaType = "video/mp4"),
+        )
+
+        verifyBlocking(episodeManager) {
+            add(argThat { size == 1 && first().downloadUrl == "https://example.com/clip.mp4" }, eq("podcast-episode-1"), eq(false))
+        }
+        verifyBlocking(playbackManager) { playNowSuspend(episode = playable, sourceView = SourceView.SEARCH) }
+    }
+
+    @Test
     fun `playLatestEpisode plays the newest episode of a featured podcast and stamps the search source`() = runTest {
         whenever(listRepository.getSearchDiscoverFeed()).thenReturn(discover())
         val podcast = subscribedPodcast("podcast-1")
         val newest = podcastEpisode("episode-new")
-        whenever(podcastManager.findOrDownloadPodcastRxSingle("podcast-1")).thenReturn(Single.just(podcast))
+        whenever(podcastManager.findOrDownloadPodcast("podcast-1")).thenReturn(podcast)
         whenever(episodeManager.findEpisodesByPodcastOrderedByPublishDate(podcast))
             .thenReturn(listOf(newest, podcastEpisode("episode-old")))
         val row = TvDiscoverRow.FeaturedPodcasts(id = "list-featured", title = "Featured", podcasts = listOf(discoverPodcast("podcast-1")), listId = "list-featured")
@@ -718,7 +759,7 @@ class TvSearchViewModelTest {
     fun `playLatestEpisode reports a failure when the podcast has no episodes`() = runTest {
         whenever(listRepository.getSearchDiscoverFeed()).thenReturn(discover())
         val podcast = subscribedPodcast("podcast-1")
-        whenever(podcastManager.findOrDownloadPodcastRxSingle("podcast-1")).thenReturn(Single.just(podcast))
+        whenever(podcastManager.findOrDownloadPodcast("podcast-1")).thenReturn(podcast)
         whenever(episodeManager.findEpisodesByPodcastOrderedByPublishDate(podcast)).thenReturn(emptyList())
         val row = TvDiscoverRow.FeaturedPodcasts(id = "list-featured", title = "Featured", podcasts = listOf(discoverPodcast("podcast-1")), listId = "list-featured")
         val viewModel = createViewModel()
@@ -736,7 +777,7 @@ class TvSearchViewModelTest {
         whenever(listRepository.getSearchDiscoverFeed()).thenReturn(discover())
         val podcast = subscribedPodcast("podcast-1")
         val newest = podcastEpisode("episode-new")
-        whenever(podcastManager.findOrDownloadPodcastRxSingle("podcast-1")).thenReturn(Single.just(podcast))
+        whenever(podcastManager.findOrDownloadPodcast("podcast-1")).thenReturn(podcast)
         whenever(episodeManager.findEpisodesByPodcastOrderedByPublishDate(podcast)).thenReturn(listOf(newest))
         whenever { playbackManager.playNowSuspend(episode = newest, sourceView = SourceView.SEARCH) }
             .thenThrow(RuntimeException("boom"))
@@ -921,6 +962,7 @@ class TvSearchViewModelTest {
         folderManager = folderManager,
         eventHorizon = eventHorizon,
         settings = settings,
+        discoverPodcastAttribution = TvDiscoverPodcastAttribution(),
     )
 
     private fun folderEntity(name: String) = Folder(

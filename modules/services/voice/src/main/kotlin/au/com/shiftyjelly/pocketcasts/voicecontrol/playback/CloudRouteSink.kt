@@ -18,6 +18,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
@@ -82,6 +83,7 @@ class CloudRouteSink internal constructor(
     private val privacyClosureCount: () -> Long = { 0L },
     /** Audio player for cloud-delivered binary audio frames. */
     private val audioPlayer: CloudAudioPlayer? = null,
+    private val gracePeriodSignal: GracePeriodSignal? = null,
 ) : VoiceCloudRouteSink {
 
     @Inject constructor(
@@ -96,6 +98,7 @@ class CloudRouteSink internal constructor(
         currentLocale: () -> Locale,
         playbackContextMonitor: PlaybackContextMonitor,
         audioPlayer: CloudAudioPlayer?,
+        gracePeriodSignal: GracePeriodSignal,
     ) : this(
         resolveBaseUrl = cloudConfig::baseUrl,
         tokenProvider = tokenProvider,
@@ -105,6 +108,7 @@ class CloudRouteSink internal constructor(
         cloudPlaybackContextState = cloudPlaybackContextState,
         analytics = analytics,
         audioPlayer = audioPlayer,
+        gracePeriodSignal = gracePeriodSignal,
         routeInvoker = null,
         searchResultsRenderer = null,
         conversationMemory = CloudConversationMemory(),
@@ -435,6 +439,8 @@ class CloudRouteSink internal constructor(
             localPlaybackFailed = true
             Timber.w("[CloudRoute] answer audio was cut short by a sink refusal at %d frames", frames)
         }
+
+        val graceHold = gracePeriodSignal?.holdCloudTurn(prepared?.capturedOrigin ?: capturedOrigin)
 
         // Everything from registration onward sits inside the cleanup path: a
         // throw or cancellation during setup (context build, route opening, the
@@ -783,30 +789,34 @@ class CloudRouteSink internal constructor(
             // turn can register and pause while this restore is suspended in
             // resume(); only the current turn touches audio state, and it clears
             // its own registration as it goes.
-            withContext(NonCancellable) {
-                turnMutex.withLock {
-                    if (activeTurnId == myId) {
-                        // Stop cloud audio if it was playing but the turn ended
-                        // abnormally (cancellation, timeout, error).
-                        if (audioPlayed) {
-                            audioPlayer?.stop()
+            try {
+                withContext(NonCancellable) {
+                    turnMutex.withLock {
+                        if (activeTurnId == myId) {
+                            // Stop cloud audio if it was playing but the turn ended
+                            // abnormally (cancellation, timeout, error).
+                            if (audioPlayed) {
+                                audioPlayer?.stop()
+                            }
+                            // Abandon duck focus if we requested it but didn't complete
+                            // normally (Done already restores).
+                            if (ducked) {
+                                playbackSink.restore()
+                                ducked = false
+                            }
+                            restoreTransientAudioState(privacyInvalidatedSince(privacyClosuresAtPause))
+                            // The reservation is per turn-CHAIN, like the pause it claims: a turn that
+                            // never received the server's confirmation leaves it set, and clearing it only
+                            // when THIS turn still owns the audio state keeps a successor's reservation
+                            // intact -- the successor inherits the paused player, so it inherits the claim.
+                            pauseReserved = false
+                            activeTurnId = 0
+                            activeTurn = null
                         }
-                        // Abandon duck focus if we requested it but didn't complete
-                        // normally (Done already restores).
-                        if (ducked) {
-                            playbackSink.restore()
-                            ducked = false
-                        }
-                        restoreTransientAudioState(privacyInvalidatedSince(privacyClosuresAtPause))
-                        // The reservation is per turn-CHAIN, like the pause it claims: a turn that
-                        // never received the server's confirmation leaves it set, and clearing it only
-                        // when THIS turn still owns the audio state keeps a successor's reservation
-                        // intact -- the successor inherits the paused player, so it inherits the claim.
-                        pauseReserved = false
-                        activeTurnId = 0
-                        activeTurn = null
                     }
                 }
+            } finally {
+                graceHold?.let { gracePeriodSignal.finishCloudTurn(it) }
             }
         }
         return CloudTurnResult(

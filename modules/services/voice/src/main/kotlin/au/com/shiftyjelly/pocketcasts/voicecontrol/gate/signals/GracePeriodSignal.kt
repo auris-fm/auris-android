@@ -216,6 +216,37 @@ class GracePeriodSignal @Inject constructor() {
      */
     private val windowLock = Any()
 
+    /** Opaque ownership for work that must finish before the inactivity countdown resumes. */
+    class CloudTurnHold internal constructor(internal val generation: Long)
+
+    private val cloudTurns = mutableSetOf<CloudTurnHold>()
+
+    /** Holds only an already-live window; an old request cannot borrow its successor's grace. */
+    fun holdCloudTurn(fromGeneration: Long? = null): CloudTurnHold? = synchronized(windowLock) {
+        if (closedByPrivacy || !_isActive.value ||
+            (fromGeneration != null && fromGeneration != generation)
+        ) {
+            return@synchronized null
+        }
+        CloudTurnHold(generation).also {
+            cloudTurns += it
+            timerJob?.cancel()
+            timerJob = null
+        }
+    }
+
+    /** Called after turn termination and local playback drain/clear, including failure cleanup. */
+    fun finishCloudTurn(hold: CloudTurnHold) {
+        val armFor = synchronized(windowLock) {
+            if (!cloudTurns.remove(hold)) return@synchronized null
+            if (hold.generation != generation || closedByPrivacy || !_isActive.value || cloudTurns.isNotEmpty()) {
+                return@synchronized null
+            }
+            generation
+        } ?: return
+        armTimerForLocked(armFor)
+    }
+
     // The monitor itself, so a test can hold it and observe whether a transition waits for it.
     internal fun windowMonitorForTest(): Any = windowLock
 
@@ -359,6 +390,7 @@ class GracePeriodSignal @Inject constructor() {
         // AFTER the counter has advanced -- the notification reports the window that ended, which is the
         // previous generation, not the one now current.
         val previous = generation
+        cloudTurns.clear()
         generation += 1
         // EACH WINDOW HAS ITS OWN ALLOWANCE, so opening one CLEARS the spent marker: otherwise a claim
         // made under a previous window made every later window read as spent.
@@ -403,7 +435,7 @@ class GracePeriodSignal @Inject constructor() {
             //
             // The check runs here, in the protected assignment, because the caller releases windowLock
             // before arming -- so this really is the last point at which ownership can be established.
-            if (ownedGeneration == generation && _isActive.value) {
+            if (ownedGeneration == generation && _isActive.value && cloudTurns.isEmpty()) {
                 timerJob?.cancel()
                 timerJob = job
             } else {
@@ -424,6 +456,7 @@ class GracePeriodSignal @Inject constructor() {
         val ended = synchronized(windowLock) {
             if (ownedGeneration != generation) return@synchronized null
             if (timerJob !== thisTimer) return@synchronized null
+            if (cloudTurns.isNotEmpty()) return@synchronized null
             _isActive.value = false
             ownedGeneration
         } ?: return@launch
@@ -463,6 +496,7 @@ class GracePeriodSignal @Inject constructor() {
         val ended = synchronized(windowLock) {
             privacyClosures.incrementAndGet()
             timerJob?.cancel()
+            cloudTurns.clear()
             closedByPrivacy = true
             _isActive.value = false
             generation

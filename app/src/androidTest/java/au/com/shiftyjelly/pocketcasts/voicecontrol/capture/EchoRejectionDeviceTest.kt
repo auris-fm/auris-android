@@ -16,13 +16,19 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.UtteranceFilter
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.route.AndroidAudioRouteMonitor
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.AndroidPlatformTtsEngine
+import java.util.Collections
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Rule
@@ -82,18 +88,18 @@ class EchoRejectionDeviceTest {
             assertTrue("the acquired stream did not start", capture.startAcquiredStream())
             assertTrue("the native VAD did not attach to the acquired stream", capture.attachCapture())
 
-            val segments = mutableListOf<FloatArray>()
-            var captureFailure: Throwable? = null
+            val observations = Collections.synchronizedList(mutableListOf<EchoReferenceObservation>())
+            val captureFailure = AtomicReference<Throwable?>()
             job = scope.launch {
                 try {
-                    capture.startCapture().collect { result ->
-                        if (result is VoiceSegmenterResult.SpeechEnded) {
-                            segments += result.frames.flatMap { f -> f.samples.map { it / 32768f } }.toFloatArray()
-                        }
+                    capture.startCapture().collectEchoObservations(recorder::reference) { observation ->
+                        observations += observation
                     }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
                 } catch (t: Throwable) {
                     Log.e(tag, "capture failed: ${t::class.simpleName}: ${t.message}", t)
-                    captureFailure = t
+                    captureFailure.set(t)
                 }
             }
 
@@ -110,11 +116,15 @@ class EchoRejectionDeviceTest {
             // prefix into the reference the filter reads.
             engine = AndroidPlatformTtsEngine(ctx, recorder)
             engine.warmUp("en")
-            withTimeoutOrNull(30_000) {
-                engine.speak("the quick brown fox jumps over the lazy dog and keeps running", "en")
-            }
-            val duringSpeech = MicrophoneCapture.diagnostics()
-            Log.i(tag, "during app speech: $duringSpeech")
+            // A short stimulus can fit the two-second reference. Actual speech bounds and signal
+            // coverage are still checked below; voice speed is never assumed to guarantee coverage.
+            val stimulusCompleted = withTimeoutOrNull(30_000) {
+                engine.speak("testing one two", "en")
+                true
+            } == true
+            assertTrue("the controlled speech stimulus did not complete", stimulusCompleted)
+            val afterDelivery = MicrophoneCapture.diagnostics()
+            Log.i(tag, "after speech delivery: $afterDelivery")
             val nativeAfterSpeech = MicrophoneCapture.framesConsumed()
             // Let the loopback land in the microphone and any segment close.
             withTimeoutOrNull(10_000) { delay(4_000) }
@@ -122,14 +132,19 @@ class EchoRejectionDeviceTest {
             val afterSpeech = MicrophoneCapture.diagnostics()
             Log.i(tag, "after app speech: $afterSpeech")
             val nativeTotal = MicrophoneCapture.framesConsumed()
-            val reference = recorder.reference()
-            val mic = segments.lastOrNull()
+            // End collection before reading the evidence. Each observation already owns the
+            // reference sampled DURING its VAD interval: speak() retired its producer, so reading
+            // recorder.reference() here, four seconds later, would retrieve zeroed retired PCM.
+            capture.stopCapture()
+            capture.closeAcquiredStream()
+            job.cancelAndJoin()
+            val paired = synchronized(observations) { observations.toList() }
             Log.i(
                 tag,
                 "nativeFrames=$nativeTotal (before=$nativeBefore afterSpeech=$nativeAfterSpeech) " +
-                    "segments=${segments.size} referenceSamples=${reference.samples.size} mic=${mic?.size ?: 0} " +
-                    "failure=${captureFailure?.message}",
+                    "segments=${paired.size} failure=${captureFailure.get()?.message}",
             )
+            assertNull("the native capture flow faulted", captureFailure.get())
 
             // The acoustic part must have run: without samples reaching the native VAD, nothing below is a
             // statement about rejection.
@@ -138,30 +153,39 @@ class EchoRejectionDeviceTest {
                 "capture must deliver samples to the native VAD during THIS run (runDelta=$runDelta nativeTotal=$nativeTotal)",
                 runDelta > 0,
             )
-            assertTrue("the app's speech must be in the reference", reference.samples.isNotEmpty())
-
             // A segmented utterance is required before the filter can be asked anything. Its absence is
             // reported as "not demonstrated" rather than converted into a pass.
             assertTrue(
                 "the VAD must have emitted a segment around the app's own speech; none formed " +
-                    "(runDelta=$runDelta segments=${segments.size})",
-                segments.isNotEmpty(),
+                    "(runDelta=$runDelta segments=${paired.size})",
+                paired.isNotEmpty(),
             )
 
             val filter = UtteranceFilter(PlaybackCrossCorrelator(), AndroidAudioRouteMonitor(ctx, GracePeriodSignal()))
-            val accepted = filter.shouldProcessReference(mic!!, false, 0, reference)
-            Log.i(tag, "echo-only accepted=$accepted")
-
-            assertTrue(
-                "output the app itself spoke, heard by its own microphone, must not be accepted as user speech",
-                !accepted,
-            )
+            paired.forEachIndexed { index, observation ->
+                val unusable = observation.unusableReason()
+                Log.i(
+                    tag,
+                    "pair=$index speechSamples=${observation.speech.size} " +
+                        "referenceSamples=${observation.reference.samples.size} " +
+                        "referenceSignalSpan=${observation.referenceSignalSpan} unusable=$unusable",
+                )
+                assertNull("the acoustic sample lacks usable contemporaneous reference coverage (pair=$index)", unusable)
+                val accepted = filter.shouldProcessReference(observation.speech, false, 0, observation.reference)
+                Log.i(tag, "echo-only pair=$index accepted=$accepted")
+                assertTrue(
+                    "output the app itself spoke, heard by its own microphone, must not be accepted as user speech (pair=$index)",
+                    !accepted,
+                )
+            }
         } finally {
             // Each step protected: one failure cannot skip the others.
             runCatching { engine?.release() }
             runCatching { job?.cancel() }
             runCatching { capture.stopCapture() }
             runCatching { capture.closeAcquiredStream() }
+            runCatching { job?.join() }
+            scope.cancel()
         }
     }
 

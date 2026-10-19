@@ -237,6 +237,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                     // and this preparation was silently MINTED AS A NEW REQUEST and sent -- the exact
                     // defect the refusal exists to prevent.
                     isRetry = intent.isRetry,
+                    sourceLanguage = intent.sourceLanguage,
                 ) ?: return VoiceResponse.Silent
                 // DISPATCHED THROUGH THE ALREADY-PREPARED TURN, so the first attempt and a retry take
                 // the SAME path and the identity is the one fixed above rather than a second one minted
@@ -650,6 +651,8 @@ interface VoiceCloudRouteSink {
         logicalRequestId: String? = null,
         /** True when the caller is retrying, so a lookup miss refuses rather than prepares. */
         isRetry: Boolean = false,
+        /** ASR source language retained with the prepared request, including retries. */
+        sourceLanguage: String? = null,
     ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn?
 
     /**

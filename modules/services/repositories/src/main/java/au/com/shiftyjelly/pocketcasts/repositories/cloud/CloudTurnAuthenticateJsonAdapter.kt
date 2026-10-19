@@ -38,6 +38,7 @@ internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<Clou
         writer.name("access_token").value(value.accessToken)
         writer.name("request_id").value(value.requestId)
         writer.name("request").value(value.request)
+        value.sourceLanguage?.let { writer.name("source_language").value(it) }
         // Write context as a raw nested JSON object (not an escaped string).
         // Serialize context with its own adapter and emit the resulting JSON
         // object verbatim. The context adapter uses snake_case field names

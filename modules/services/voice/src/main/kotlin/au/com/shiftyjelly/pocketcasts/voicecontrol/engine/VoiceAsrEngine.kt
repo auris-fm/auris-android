@@ -423,7 +423,18 @@ class VoiceAsrEngine @Inject constructor(
             // A cloud turn outlives the window it was issued in, so it carries
             // that window's identity and cannot extend a later one.
             handler(
-                intent
+                // Bind the immutable input for this recognition, not model-authored cloud text.
+                // Local intents keep their English routing protocol unchanged.
+                (
+                    if (intent is VoiceIntent.CloudRoute) {
+                        intent.copy(
+                            request = input.sourceTranscript ?: input.routerTranscript,
+                            sourceLanguage = input.sourceLanguage?.takeIf { it.isNotBlank() },
+                        )
+                    } else {
+                        intent
+                    }
+                    )
                     .stampedForWindow(windowAtRequest)
                     // Only a CLOUD turn carries a logical identity: it is the one dispatch that is
                     // prepared once and may be retried. A local intent has no wire identity to reuse.
@@ -501,7 +512,8 @@ class VoiceAsrEngine @Inject constructor(
                 Timber.i("[VoicePipeline] cloud escalation ← '%s' (reason=%s)", input.routerTranscript, reason)
                 handler(
                     VoiceIntent.CloudRoute(
-                        request = input.routerTranscript,
+                        request = input.sourceTranscript ?: input.routerTranscript,
+                        sourceLanguage = input.sourceLanguage?.takeIf { it.isNotBlank() },
                         tier = VoiceIntent.CloudTier.Unknown,
                         // STAMPED WITH THE CAPTURED ORIGIN, matching the window this recognition was
                         // issued under -- the same value the chosen-route path uses.
@@ -526,18 +538,6 @@ class VoiceAsrEngine @Inject constructor(
         backend: AsrBackend,
     ): RoutePrep {
         val detected = trimmed.detectedLanguage?.lowercase()
-        if (detected == null) {
-            return RoutePrep(
-                input = IntentRoutingInput(
-                    sourceTranscript = trimmed.text,
-                    sourceLanguage = null,
-                    routerTranscript = trimmed.text,
-                    translationKind = TranslationKind.NONE,
-                ),
-                translateNote = "translate=skip(no lang)",
-                dropWithError = false,
-            )
-        }
         // Backend-native English (Canary de/es/fr→en) before the native-English branch:
         // Canary reports configured source language with English text.
         if (backend.capabilities.canTranslateToEnglish) {
@@ -549,6 +549,18 @@ class VoiceAsrEngine @Inject constructor(
                     translationKind = TranslationKind.BACKEND,
                 ),
                 translateNote = "translate=skip(backend)",
+                dropWithError = false,
+            )
+        }
+        if (detected == null) {
+            return RoutePrep(
+                input = IntentRoutingInput(
+                    sourceTranscript = trimmed.text,
+                    sourceLanguage = null,
+                    routerTranscript = trimmed.text,
+                    translationKind = TranslationKind.NONE,
+                ),
+                translateNote = "translate=skip(no lang)",
                 dropWithError = false,
             )
         }

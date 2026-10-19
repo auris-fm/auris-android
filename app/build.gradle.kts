@@ -22,7 +22,11 @@ android {
     }
 
     sourceSets {
+        getByName("test") {
+            kotlin.srcDir("src/sharedTest/kotlin")
+        }
         getByName("androidTest") {
+            kotlin.srcDir("src/sharedTest/kotlin")
             assets.directories.add("$rootDir/modules/services/model/schemas")
         }
     }

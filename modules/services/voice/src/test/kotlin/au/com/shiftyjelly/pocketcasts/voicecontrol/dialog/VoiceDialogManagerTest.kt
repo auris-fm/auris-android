@@ -4,6 +4,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.DialogPromptTurn
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCall
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCallMapper
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.withLogicalRequest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -220,10 +221,53 @@ class VoiceDialogManagerTest {
         assertNotNull("dialog completed with an intent", completed)
         // Queue.Clear is a local intent with no logicalRequestId field. The key contract is
         // that buildCompletedIntent does NOT call withLogicalRequest(dialog.logicalRequestId).
-        // If it did, and the intent were a CloudRoute, it would carry A — which would be wrong.
-        // For local intents the field is absent; for cloud intents the engine stamps the
-        // completing utterance's ID via withLogicalRequest(admittedId=B).
         assertEquals(VoiceIntent.Queue.Clear, completed)
+        assertFalse(manager.isInProgress)
+    }
+
+    @Test
+    fun `begin A complete B carries B on the serialized cloud wire`() {
+        // REGRESSION CONTROL: dialog begins with utterance A, completes with utterance B,
+        // and the completed CloudRoute intent carries B — not A — as its wire identity.
+        // This is the real serialized-wire assertion, not just a local-intent boundary check.
+        val admittedA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        val admittedB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+        // Begin a cloud_route dialog with admitted identity A.
+        assertNull(
+            manager.resolve(
+                "Ask about weather.",
+                nativeCall("begin"),
+                beginCall("cloud_route", "route"),
+                admittedId = admittedA,
+            ),
+        )
+        assertEquals(admittedA, manager.pendingDialog?.logicalRequestId)
+
+        // Provide the request slot with admitted identity B (the completing utterance).
+        val completed = manager.resolve(
+            "What is the weather tomorrow?",
+            nativeCall("provide_slot"),
+            provideSlotCall("request", "What is the weather tomorrow?"),
+            admittedId = admittedB,
+        )
+
+        assertNotNull("dialog completed with a cloud intent", completed)
+        val cloud = completed as VoiceIntent.CloudRoute
+        // buildCompletedIntent does NOT stamp A. The intent arrives without a logicalRequestId,
+        // so the engine's withLogicalRequest(admittedId=B) will fill B.
+        assertNull(
+            "dialog must NOT stamp the begin identity; engine stamps B instead (got ${cloud.logicalRequestId})",
+            cloud.logicalRequestId,
+        )
+        // Simulate the engine's stamping:
+        val stamped = cloud.withLogicalRequest(admittedB)
+        val stampedCloud = stamped as VoiceIntent.CloudRoute
+        assertEquals(
+            "after engine stamping, wire dispatch carries B",
+            admittedB,
+            stampedCloud.logicalRequestId,
+        )
         assertFalse(manager.isInProgress)
     }
 

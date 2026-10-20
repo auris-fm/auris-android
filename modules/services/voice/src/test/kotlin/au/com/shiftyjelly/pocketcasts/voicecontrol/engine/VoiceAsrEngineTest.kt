@@ -649,16 +649,21 @@ class VoiceAsrEngineTest {
         )
         engine.scope = this
         engine.start(
-            // First segment returns "..." (punctuation only), second returns "pause" (content).
+            // First segment returns "…" in Cantonese (punctuation only, non-English so that
+            // bypassing the guard WOULD trigger translation). Second returns "pause" in English.
             backend = object : AsrBackend {
                 private var callCount = 0
                 override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
                 override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult {
                     callCount++
-                    return if (callCount == 1) AsrResult("...") else AsrResult("pause")
+                    return if (callCount == 1) {
+                        AsrResult("\u2026", detectedLanguage = "yue") // "…" in Cantonese
+                    } else {
+                        AsrResult("pause")
+                    }
                 }
                 override val requiredModel: ModelSpec = ModelSpec(files = emptyList(), targetDir = "")
-                override val capabilities: AsrCapabilities = AsrCapabilities(supportedLanguages = setOf("en"))
+                override val capabilities: AsrCapabilities = AsrCapabilities(supportedLanguages = setOf("en", "yue"))
                 override fun release() = Unit
             },
             audioRoute = AudioRoute.Speaker,
@@ -676,13 +681,19 @@ class VoiceAsrEngineTest {
         )
         assertEquals(VoiceIntent.Playback.Pause, intents.single())
         // DISCARD-SPECIFIC OBSERVATIONS:
-        // 1. Translation was NOT invoked at all: both transcripts are English (no detected
-        //    language), so prepareRoutingInput skips translation. The key point is that the
-        //    discarded utterance never reaches prepareRoutingInput — the guard fires earlier.
-        verify(translationStage, never()).translate(any(), any())
+        // 1. Translation was NOT invoked for the discarded yue transcript: the guard fires
+        //    BEFORE prepareRoutingInput, so ensureReady/translate are never called for it.
+        //    If the guard were bypassed, the Cantonese "…" would trigger translation.
+        verify(translationStage, never()).ensureReady("yue")
+        verify(translationStage, never()).translate(any(), eq("yue"))
         // 2. Grace was NOT extended by the discard: the non-content path returns before
-        //    any feedback or grace interaction, so the window state is unchanged.
-        //    The second utterance still routes under the same open window.
+        //    any feedback or grace interaction. Verify via the signal's captured generation
+        //    — only one wake opened the window, and the discard did not re-arm it.
+        assertEquals(
+            "grace window is still the original (no extra renewal from discard)",
+            1L,
+            signal.capturedGeneration(),
+        )
         // 3. No error earcon for the discard (silent), and no error for the successful route.
         verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
         // 4. MUTATION RECEIPT: if the punctuation transcript were admitted to routing (guard

@@ -1,5 +1,9 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.gate
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Event
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Kind
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Reason
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Source
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
@@ -7,6 +11,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import timber.log.Timber
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics as Trace
 
 data class VoiceControlGateState(
     val allowed: Boolean,
@@ -22,6 +27,7 @@ class VoiceControlGate(
     rules: List<VoiceControlRule>,
     scope: CoroutineScope = CoroutineScope(Dispatchers.Default),
 ) {
+    private val previousDiagnostic = java.util.concurrent.atomic.AtomicReference<VoiceControlGateState?>()
     val state: StateFlow<VoiceControlGateState> = if (rules.isEmpty()) {
         kotlinx.coroutines.flow.MutableStateFlow(
             VoiceControlGateState(allowed = true, rules = emptyMap()),
@@ -58,13 +64,29 @@ class VoiceControlGate(
             rulesMap.entries.joinToString { (id, state) -> "$id=$state" },
         )
 
-        return VoiceControlGateState(
+        val computed = VoiceControlGateState(
             allowed = allowed,
             rules = rulesMap,
             setupPassed = setupPassed,
             conflictsPassed = conflictsPassed,
             contextPassed = contextPassed,
         )
+        val prior = previousDiagnostic.getAndSet(computed)
+        if (prior?.rules != computed.rules) {
+            val changed = (prior?.rules.orEmpty().keys + computed.rules.keys)
+                .filter { prior?.rules?.get(it) != computed.rules[it] }.toSet()
+            Trace.record(
+                Event(
+                    Kind.Gate,
+                    if (prior?.contextPassed == true && !computed.contextPassed) Reason.ContextLost else Reason.Observed,
+                    Source.Gate,
+                    previousGate = prior?.let(Trace::gateMask),
+                    gate = Trace.gateMask(computed),
+                    changedRules = Trace.ruleMask(changed),
+                ),
+            )
+        }
+        return computed
     }
 
     private fun groupAllAllowed(rulesInGroup: List<Pair<VoiceControlRule, VoiceControlRuleState>>?): Boolean {

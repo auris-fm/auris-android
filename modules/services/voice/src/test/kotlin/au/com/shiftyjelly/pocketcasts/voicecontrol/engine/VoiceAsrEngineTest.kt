@@ -2093,6 +2093,250 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
+    @Test
+    fun `engine stamps a dialog-completed cloud route with the current utterance admitted ID`() = runTest {
+        // ENGINE STAMPING CONTROL: when the router returns a CloudRoute WITHOUT a logicalRequestId
+        // (as dialog completion does), the engine must stamp it with the current utterance's
+        // admittedId via withLogicalRequest. This proves the engine is the identity owner —
+        // not the router, not the dialog manager.
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWakeWordDetected()
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = false,
+                confidence = 0f,
+                completionSample = 4000,
+            ),
+        )
+
+        val intents = mutableListOf<VoiceIntent>()
+        var receivedAdmittedId: String? = null
+        // Returns a CloudRoute WITHOUT logicalRequestId (simulating dialog completion).
+        val recognizer = object : VoiceRecognizer {
+            override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+            override suspend fun recognize(
+                input: IntentRoutingInput,
+                context: VoiceRecognitionContext,
+                logicalRequestId: String,
+            ): VoiceRecognizeResult {
+                receivedAdmittedId = logicalRequestId
+                return VoiceRecognizeResult(
+                    intent = VoiceIntent.CloudRoute(
+                        request = "What is the weather?",
+                        tier = VoiceIntent.CloudTier.Unknown,
+                        windowGeneration = null,
+                        origin = VoiceIntent.CloudRouteOrigin.ModelCall,
+                        logicalRequestId = null, // dialog-completed: no identity
+                    ),
+                )
+            }
+            override fun release() = Unit
+        }
+        val engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = signal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+        engine.start(
+            backend = FakeAsrBackend("what is the weather"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { intents += it },
+        )
+        advanceUntilIdle()
+
+        assertEquals("exactly one intent dispatched", 1, intents.size)
+        val cloud = intents.single() as VoiceIntent.CloudRoute
+        assertNotNull("recognizer received an admitted ID", receivedAdmittedId)
+        assertEquals(
+            "engine stamped the dialog-completed route with the utterance's admitted ID",
+            receivedAdmittedId,
+            cloud.logicalRequestId,
+        )
+        assertTrue(
+            "the stamped ID is non-empty",
+            !cloud.logicalRequestId.isNullOrBlank(),
+        )
+
+        engine.stop()
+    }
+
+    @Test
+    fun `engine-stamped dialog completion flows through sink to CloudTurnRoute authenticate frame`() = runTest {
+        // COMPOSED ENGINE→ROUTE CONTROL: the engine processes an utterance whose router result
+        // is a dialog-completed CloudRoute (no logicalRequestId). The engine stamps it with
+        // the utterance's admittedId. We capture that stamped intent, then drive it through
+        // the real CloudRouteSink → CloudTurnRoute to verify the Authenticate frame carries
+        // the engine-stamped ID.
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWakeWordDetected()
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = false,
+                confidence = 0f,
+                completionSample = 4000,
+            ),
+        )
+
+        // Capture the engine-stamped intent.
+        val engineIntents = mutableListOf<VoiceIntent>()
+        var engineAdmittedId: String? = null
+        val recognizer = object : VoiceRecognizer {
+            override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+            override suspend fun recognize(
+                input: IntentRoutingInput,
+                context: VoiceRecognitionContext,
+                logicalRequestId: String,
+            ): VoiceRecognizeResult {
+                engineAdmittedId = logicalRequestId
+                return VoiceRecognizeResult(
+                    intent = VoiceIntent.CloudRoute(
+                        request = "What is the weather?",
+                        tier = VoiceIntent.CloudTier.Unknown,
+                        windowGeneration = null,
+                        origin = VoiceIntent.CloudRouteOrigin.ModelCall,
+                        logicalRequestId = null, // dialog-completed: no identity
+                    ),
+                )
+            }
+            override fun release() = Unit
+        }
+        val engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = signal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+        engine.start(
+            backend = FakeAsrBackend("what is the weather"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { engineIntents += it },
+        )
+        advanceUntilIdle()
+        engine.stop()
+
+        // Step 1: Engine stamped the dialog-completed route with the utterance's admitted ID.
+        assertNotNull("engine minted an admitted ID", engineAdmittedId)
+        assertEquals("exactly one intent dispatched", 1, engineIntents.size)
+        val stampedCloud = engineIntents.single() as VoiceIntent.CloudRoute
+        assertEquals(
+            "engine stamped the dialog-completed route",
+            engineAdmittedId,
+            stampedCloud.logicalRequestId,
+        )
+
+        // Step 2: Drive the engine-stamped intent through real sink → CloudTurnRoute.
+        val authFrames = mutableListOf<au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame.Authenticate>()
+        val capturingTransport = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport {
+            override fun exchange(frame: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame): kotlinx.coroutines.flow.Flow<au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                authFrames += frame as au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame.Authenticate
+                emit(au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent.Done(1, 0))
+            }
+        }
+        val realRoute = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnRoute(
+            baseUrl = "https://example.com",
+            tokenProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding {
+                override suspend fun currentToken(): String = "test-token"
+                override suspend fun refreshToken() = Unit
+            },
+            transport = capturingTransport,
+        )
+        val conversationAdmission = au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudConversationAdmission()
+        val sink = au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSink(
+            resolveBaseUrl = { "https://example.com" },
+            tokenProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding {
+                override suspend fun currentToken(): String = "test-token"
+                override suspend fun refreshToken() = Unit
+            },
+            playbackSink = mock(),
+            fingerprintTimingManager = mock(),
+            playbackContextProvider = mock(),
+            conversationAdmission = conversationAdmission,
+            cloudPlaybackContextState = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudPlaybackContextState>().apply {
+                `when`(snapshot(anyOrNull())).thenReturn(
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudPlaybackContextState.Snapshot(
+                        recentReferencePositions = emptyList(),
+                        previousReferencePositionMs = null,
+                    ),
+                )
+            },
+            analytics = mock(),
+            routeInvoker = { turn -> realRoute.route(turn) },
+            searchResultsRenderer = mock(),
+            templateResolver = mock(),
+            currentLocale = { java.util.Locale.US },
+            isHostPlaying = { false },
+            playbackCommandRevision = { 0L },
+            isPrivacyClosed = { false },
+            privacyClosureCount = { 0 },
+            episodeDurationSeconds = { 0 },
+            audioPlayer = mock(),
+        )
+        conversationAdmission.beginOrigin(stampedCloud.windowGeneration ?: 0L)
+        val prepared = sink.prepareTurn(
+            request = stampedCloud.request,
+            tier = stampedCloud.tier,
+            context = au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext(
+                episodeId = "ep-1",
+                clientPositionMs = 50_000L,
+            ),
+            isLiveGraceTurn = false,
+            capturedOrigin = stampedCloud.windowGeneration ?: 0L,
+            isWakeOriginated = false,
+            hint = null,
+            logicalRequestId = stampedCloud.logicalRequestId,
+            isRetry = false,
+            sourceLanguage = null,
+        )!!
+        sink.dispatchPrepared(prepared)
+
+        // Step 3: Verify the Authenticate frame carries the engine-stamped ID.
+        assertEquals("one Authenticate frame created", 1, authFrames.size)
+        assertEquals(
+            "Authenticate frame carries the engine-stamped admitted ID",
+            engineAdmittedId,
+            authFrames.single().requestId,
+        )
+    }
+
     /** A router that cannot load its model at all. */
     private class NotReadyRecognizer : VoiceRecognizer {
         var recognizes = 0

@@ -168,6 +168,16 @@ class VoiceControlCaptureRestartTest {
                     Thread.sleep(150)
                     scoLinkUp = true
                     android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        // Update the shadow audio manager so the monitor observes an active SCO
+                        // headset and transitions availability from BluetoothA2dpOnly to Headset.
+                        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+                        val am = app.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                        setShadowBluetoothScoOn(am, true)
+                        shadowOf(am).setInputDevices(
+                            listOf(
+                                AudioDeviceInfoBuilder.newBuilder().setType(AudioDeviceInfo.TYPE_BLUETOOTH_SCO).build(),
+                            ),
+                        )
                         @Suppress("DEPRECATION") // The SCO-intent constants the production monitor listens for are deprecated on 34.
                         deliver(
                             Intent(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED)
@@ -183,6 +193,11 @@ class VoiceControlCaptureRestartTest {
         override fun stopBluetoothSco() {
             scoStops++
             scoLinkUp = false
+            // Reset the shadow audio manager so the monitor transitions back.
+            val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+            val am = app.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            setShadowBluetoothScoOn(am, false)
+            shadowOf(am).setInputDevices(emptyList())
             @Suppress("DEPRECATION")
             deliver(
                 Intent(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED)
@@ -307,6 +322,13 @@ class VoiceControlCaptureRestartTest {
     }
 
     // ---- harness -----------------------------------------------------------
+
+    private fun setShadowBluetoothScoOn(am: AudioManager, on: Boolean) {
+        val method = org.robolectric.shadows.ShadowAudioManager::class.java
+            .getDeclaredMethod("setBluetoothScoOn", Boolean::class.javaPrimitiveType)
+        method.isAccessible = true
+        method.invoke(shadowOf(am), on)
+    }
 
     private fun setField(target: Any, name: String, value: Any?) {
         val field: Field = target.javaClass.getDeclaredField(name)

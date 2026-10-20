@@ -581,9 +581,11 @@ class VoiceControlCaptureRestartTest {
             assertEquals("openCount", 2, finalOpen)
             // Both streams were handed off to the engine via RouteAcquisition.handOffStream().
             // After handoff, release() skips closeInputStream — the engine owns teardown
-            // (RouteAcquisition.kt:293). Neither stream has been closed by the engine yet
-            // at this assertion boundary, so closeCount==0 is the correct owned state.
-            assertEquals("closeCount (engine-owned, not yet torn down)", 0, finalClose)
+            // (RouteAcquisition.kt:293). The first capture WAS torn down through engine stop
+            // (nativeStopCaptureAndVad deletes gCapture), but that path does not call
+            // closeInputCapture counted by FakeHardware. closeCount tracks explicit
+            // closeInputStream calls only, not all stream teardown.
+            assertEquals("closeCount (explicit close, not engine teardown)", 0, finalClose)
         } finally {
             runCatching {
                 (getField(service, "modeJob") as? kotlinx.coroutines.Job)?.cancel()

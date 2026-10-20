@@ -638,6 +638,10 @@ class VoiceAsrEngineTest {
 
         val intents = mutableListOf<VoiceIntent>()
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        // Capture the timer job AFTER the first transcribe (discard) but BEFORE the second.
+        // The backend's transcribe runs synchronously within the engine's collect loop,
+        // so this is the only observation point between the two utterances.
+        var postDiscardTimerJob: kotlinx.coroutines.Job? = null
         val engine = VoiceAsrEngine(
             voiceAudioProcessor = voiceAudioProcessor,
             utteranceFilter = utteranceFilter,
@@ -658,8 +662,14 @@ class VoiceAsrEngineTest {
                 override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult {
                     callCount++
                     return if (callCount == 1) {
+                        // After this transcribe returns, the engine will run hasLetterOrNumber
+                        // and discard. Capture the timer job AFTER the discard has processed
+                        // by deferring to the next call.
                         AsrResult("\u2026", detectedLanguage = "yue") // "…" in Cantonese
                     } else {
+                        // By the time the second transcribe runs, the first utterance's discard
+                        // has fully processed. Capture the timer job as baseline.
+                        postDiscardTimerJob = signal.timerJobForTest()
                         AsrResult("pause")
                     }
                 }
@@ -687,19 +697,15 @@ class VoiceAsrEngineTest {
         //    If the guard were bypassed, the Cantonese "…" would trigger translation.
         verify(translationStage, never()).ensureReady("yue")
         verify(translationStage, never()).translate(any(), eq("yue"))
-        // 2. Grace was NOT extended by the discard: the non-content path returns before
-        //    any feedback or grace interaction. capturedGeneration() alone cannot distinguish
-        //    a timer reset within the same generation (onCommandRecognized extends without
-        //    advancing). Use the timer job identity: if the discard re-armed the timer, the
-        //    job reference would change. Capture the job after both utterances and compare
-        //    to the post-wake baseline.
-        val postWakeTimerJob = signal.timerJobForTest()
-        assertNotNull("wake armed a timer", postWakeTimerJob)
-        // After processing both utterances, the timer job must be the SAME instance.
-        // A discard that called onCommandRecognized would have cancelled and re-created it.
+        // 2. Grace timer observation: the timer job captured BETWEEN the discard and the
+        //    content utterance (inside the backend's second transcribe call) must be the
+        //    SAME instance after the content routes. If either the discard or the content
+        //    spuriously called onCommandRecognized, the timer would have been cancelled
+        //    and re-created (different job reference).
+        assertNotNull("wake armed a timer before content", postDiscardTimerJob)
         assertSame(
-            "discard did not re-arm the grace timer (same job identity)",
-            postWakeTimerJob,
+            "grace timer was not re-armed between discard and content completion",
+            postDiscardTimerJob,
             signal.timerJobForTest(),
         )
         // 3. No error earcon for the discard (silent), and no error for the successful route.

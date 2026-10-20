@@ -10,6 +10,7 @@ import android.media.AudioManager
 import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.EpisodeReferenceEligibility
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackendSelector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrCapabilities
@@ -62,7 +63,6 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Before
-import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.Mockito.mock
@@ -374,7 +374,6 @@ class VoiceControlCaptureRestartTest {
         outcome.await().getOrThrow()
     }
 
-    @Ignore("WIP: NPE in PlaybackBufferRecorder.start flow — stalled at Robolectric dispatcher boundary")
     @Test
     fun `the observed stop-restart cycle reproduces and is pinned`() = runBlocking {
         // Connected-but-unrouted AirPods: A2DP output enumerated, SCO input present, link off.
@@ -424,7 +423,7 @@ class VoiceControlCaptureRestartTest {
         val backendSelector = mock(AsrBackendSelector::class.java)
         whenever(backendSelector.select()).thenReturn(FakeBackend())
 
-        val playbackBufferRecorder = PlaybackBufferRecorder(mock())
+        val playbackBufferRecorder = PlaybackBufferRecorder(FingerprintPcmTap())
         // Device parity: the AirPods connected earlier, so by the time voice control starts the
         // platform enumerates A2DP output plus the idle SCO input pair (the HFP input device exists
         // while the profile is idle; the mic becomes SELECTABLE only once startBluetoothSco brings

@@ -15,9 +15,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackendSelector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.CaptureAttachment
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.GracePeriodActiveCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
@@ -187,8 +184,9 @@ class VoiceLifecycleWiringTest {
     @Test
     fun `the actual service observer exports context loss and capture stop`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        val scope = CoroutineScope(Dispatchers.Main + kotlinx.coroutines.SupervisorJob())
+        val scope = CoroutineScope(Dispatchers.Unconfined + kotlinx.coroutines.SupervisorJob())
         val service = VoiceControlService()
+        var pendingCloud: kotlinx.coroutines.Job? = null
         try {
             LifecycleLogCapture().use { log ->
                 val context = ApplicationProvider.getApplicationContext<Context>()
@@ -197,10 +195,77 @@ class VoiceLifecycleWiringTest {
                 shadowOf(context as android.app.Application).grantPermissions(android.Manifest.permission.RECORD_AUDIO, android.Manifest.permission.FOREGROUND_SERVICE_MICROPHONE)
                 val signal = GracePeriodSignal()
                 val ready = ModelsReadyCondition(isReady = false)
-                val gate = VoiceControlGate(listOf(GracePeriodActiveCondition(signal, scope), ready), scope)
+                val visibility = MutableStateFlow(true)
+                val lifecycle = object : au.com.shiftyjelly.pocketcasts.repositories.playback.AppLifecycleProvider {
+                    override val isInForeground = visibility
+                }
+                val foreground = au.com.shiftyjelly.pocketcasts.voicecontrol.foreground.ForegroundStateMonitor(lifecycle, scope, signal)
+                val playbackState = MutableStateFlow(
+                    au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState(
+                        state = au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState.State.PAUSED,
+                        episodeUuid = "episode-id",
+                    ),
+                )
+                val playbackManager = mock<au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackManager>()
+                whenever(playbackManager.playbackStateFlow).thenReturn(playbackState)
+                val playbackMonitor = PlaybackContextMonitor(playbackManager, signal, backgroundScope)
+                val settings = mock<au.com.shiftyjelly.pocketcasts.preferences.Settings>()
+                val disabled = mock<au.com.shiftyjelly.pocketcasts.preferences.UserSetting<Boolean>>()
+                whenever(disabled.flow).thenReturn(MutableStateFlow(false))
+                whenever(settings.voiceControlUserDisabled).thenReturn(disabled)
+                val otherApp = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.OtherAppPlayingCondition().apply { update(false) }
+                val gate = au.com.shiftyjelly.pocketcasts.voicecontrol.di.VoiceControlModule.provideVoiceControlGate(
+                    playbackContextMonitor = playbackMonitor,
+                    settings = settings,
+                    deviceSupported = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.DeviceSupportedCondition(),
+                    modelsReady = ready,
+                    notOnCall = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotOnCallCondition(),
+                    notCasting = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotCastingCondition(),
+                    batteryOk = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.BatteryOkCondition(),
+                    appInForeground = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.AppInForegroundCondition(foreground, scope),
+                    otherAppPlaying = otherApp,
+                    scope = scope,
+                )
+                val requestContext = object : PlaybackContextProvider {
+                    override fun current() = PlaybackContext(episodeId = playbackState.value.episodeUuid.takeIf { it.isNotBlank() })
+                }
+                val entered = CompletableDeferred<Unit>()
+                val finish = CompletableDeferred<Unit>()
+                val config = mock<CloudConfig>()
+                whenever(config.baseUrl()).thenReturn("https://example.invalid")
+                val cloudSink = CloudRouteSink(
+                    cloudConfig = config,
+                    tokenProvider = object : CloudTokenProviding {
+                        override suspend fun currentToken(): String? {
+                            entered.complete(Unit)
+                            finish.await()
+                            return null
+                        }
+                    },
+                    playbackSink = mock(), fingerprintTimingManager = mock(), playbackContextProvider = requestContext,
+                    cloudPlaybackContextState = CloudPlaybackContextState(), analytics = mock(),
+                    templateResolver = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver(emptyMap()),
+                    currentLocale = { java.util.Locale.ENGLISH }, playbackContextMonitor = playbackMonitor,
+                    audioPlayer = null, gracePeriodSignal = signal,
+                )
+                val executor = au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor(
+                    playbackSink = mock(), effectsSink = mock(), volumeSink = mock(), sleepSink = mock(),
+                    chapterSink = mock(), bookmarkSink = mock(), cloudRouteSink = cloudSink,
+                    playbackContextProvider = requestContext, queueSink = mock(), playbackQuerySink = mock(),
+                    statsQuerySink = mock(), gracePeriodSignal = signal, playbackManager = playbackManager,
+                )
                 val route = MutableStateFlow<AudioRoute>(AudioRoute.Headset(true))
                 val monitor = mock<AndroidAudioRouteMonitor>()
-                whenever(monitor.route).thenReturn(route)
+                var reopenBeforeQueuedOff = false
+                whenever(monitor.route).thenAnswer {
+                    if (reopenBeforeQueuedOff) {
+                        reopenBeforeQueuedOff = false
+                        // Eligibility recovers after Off was emitted but before its observer handles it.
+                        visibility.value = true
+                        signal.onWakeWordDetected()
+                    }
+                    route
+                }
                 whenever(monitor.availability).thenReturn(route)
                 val engine = mock<VoiceAsrEngine>()
                 var terminate: () -> Unit = {}
@@ -223,9 +288,9 @@ class VoiceLifecycleWiringTest {
                 }
                 service.voiceRecognizer = mock()
                 whenever(service.voiceRecognizer.ensureReady()).thenReturn(Result.success(Unit))
-                service.voicePlaybackIntentExecutor = mock()
+                service.voicePlaybackIntentExecutor = executor
                 service.voiceDialogManager = mock()
-                service.playbackContextMonitor = mock()
+                service.playbackContextMonitor = playbackMonitor
                 service.audioRouteMonitor = monitor
                 service.listeningModePolicy = ListeningModePolicy(gate, monitor, signal, scope)
                 service.voiceAsrEngine = dagger.Lazy { engine }
@@ -247,12 +312,47 @@ class VoiceLifecycleWiringTest {
                     }
                     error("bounded service observer did not reach expected capture state")
                 }
-                pumpUntil { ready.state.value is VoiceControlRuleState.Allowed }
-                signal.onWakeWordDetected()
                 pumpUntil { service.captureStateHolder.capturing.value }
+                signal.onWakeWordDetected()
+                runCurrent()
+                assertTrue("a fresh wake cannot be canceled by a stale derived Off", signal.isActive.value)
                 terminate()
                 runCurrent()
                 pumpUntil { service.captureStateHolder.capturing.value }
+                val origin = signal.currentGeneration
+                val prepared = cloudSink.prepareTurn(
+                    "controlled question",
+                    VoiceIntent.CloudTier.Premium,
+                    requestContext.current(),
+                    capturedOrigin = origin,
+                    logicalRequestId = "held-question",
+                )!!
+                val cloudReply = async { cloudSink.dispatchPrepared(prepared) }
+                pendingCloud = cloudReply
+                entered.await()
+                visibility.value = false
+                runCurrent()
+                assertTrue("background with a paused playable episode remains eligible", gate.state.value.allowed)
+                assertTrue(service.captureStateHolder.capturing.value)
+                assertTrue(signal.isCurrent(origin))
+                org.junit.Assert.assertSame(prepared, cloudSink.retainedTurnFor("held-question"))
+                playbackState.value = au.com.shiftyjelly.pocketcasts.repositories.playback.PlaybackState()
+                runCurrent()
+                assertFalse("grace must not substitute for the last real listening context", gate.state.value.contextPassed)
+                pumpUntil { !service.captureStateHolder.capturing.value }
+                assertFalse(signal.isActive.value)
+                assertTrue(signal.isClosedByPrivacy())
+                org.junit.Assert.assertNull("the actual service binding retires invalidated work", cloudSink.retainedTurnFor("held-question"))
+                finish.complete(Unit)
+                cloudReply.await()
+                signal.onCommandRecognized(fromGeneration = origin)
+                assertFalse("late cloud completion cannot restore context-invalidated grace", signal.isActive.value)
+                visibility.value = true
+                pumpUntil { service.captureStateHolder.capturing.value }
+                assertFalse("context recovery alone does not reopen grace", signal.isActive.value)
+                signal.onWakeWordDetected()
+                runCurrent()
+                assertTrue("a fresh eligible wake survives derived mode updates", signal.isActive.value)
                 val blockedHold = signal.holdCloudTurn()!!
                 ready.update(isReady = false)
                 pumpUntil { !service.captureStateHolder.capturing.value }
@@ -264,21 +364,32 @@ class VoiceLifecycleWiringTest {
                 assertFalse("clearing the blocker and late completion cannot reopen grace", signal.isActive.value)
                 signal.onWakeWordDetected()
                 pumpUntil { service.captureStateHolder.capturing.value }
-                signal.onAppBackgrounded()
+                visibility.value = false
                 pumpUntil { !service.captureStateHolder.capturing.value }
-                verify(engine, org.mockito.kotlin.times(2)).stop()
-                signal.onWakeWordDetected()
+                verify(engine, org.mockito.kotlin.times(3)).stop()
+                visibility.value = true
                 pumpUntil { service.captureStateHolder.capturing.value }
+                signal.onWakeWordDetected()
+                val oldHold = signal.holdCloudTurn()!!
+                reopenBeforeQueuedOff = true
+                visibility.value = false
+                pumpUntil { !reopenBeforeQueuedOff && service.captureStateHolder.capturing.value }
+                assertTrue("an observed stale Off cannot invalidate the new eligible wake", signal.isActive.value)
+                assertTrue(gate.state.value.allowed)
+                signal.finishCloudTurn(oldHold)
+                assertTrue(signal.isActive.value)
+                assertTrue("the service actually observed Off after eligibility recovered", log.lines().any { it.contains("event=Eligibility") && it.contains("mode=Off") && it.contains("gate=15 ") })
                 service.onDestroy()
                 val lines = log.lines()
                 assertTrue(lines.any { it.contains("event=Capture reason=PipelineTerminated source=CapturePipeline") })
                 assertTrue(lines.any { it.contains("event=Capture reason=ServiceStopped source=ServiceStop") })
                 assertTrue(lines.any { it.contains("event=Capture reason=CaptureStarted") && it.contains("prior_capture=false capture=true") })
                 assertTrue(lines.any { it.contains("event=Eligibility") && it.contains("mode=Off") })
-                assertTrue(lines.any { it.contains("event=Gate") && it.contains("gate=3 ") && it.contains("changed_rules=512") })
+                assertTrue(lines.any { it.contains("event=Gate") && it.contains("gate=3 ") && it.contains("changed_rules=256") })
                 assertTrue(lines.any { it.contains("event=Capture reason=EligibilityOff source=ServiceObserver") && it.contains("prior_capture=true capture=false") })
             }
         } finally {
+            pendingCloud?.cancelAndJoin()
             runCatching { service.onDestroy() }
             scope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
             Dispatchers.resetMain()

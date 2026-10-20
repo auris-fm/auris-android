@@ -285,10 +285,10 @@ class VoiceControlService : Service() {
                     }
                     when (mode) {
                         ListeningMode.Off -> {
-                            // The context group includes grace itself and can lag a new wake. End a
-                            // held window only for independently blocking capture conditions.
+                            // Re-read eligibility: a queued Off emission is not itself a blocker.
+                            // Grace selects a listening mode and never contributes capture context.
                             val gateState = gate.state.value
-                            if (!gateState.setupPassed || !gateState.conflictsPassed ||
+                            if (!gateState.allowed ||
                                 audioRouteMonitor.availability.value.toMicExposure() != MicExposure.Isolated
                             ) {
                                 gracePeriodSignal.onCaptureDisallowed()

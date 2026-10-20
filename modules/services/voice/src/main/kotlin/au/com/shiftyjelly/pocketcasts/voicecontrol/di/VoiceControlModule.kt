@@ -23,7 +23,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRule
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.AppInForegroundCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.BatteryOkCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.DeviceSupportedCondition
-import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.GracePeriodActiveCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotCastingCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.NotOnCallCondition
@@ -199,12 +198,6 @@ abstract class VoiceControlModule {
         ): AppInForegroundCondition = AppInForegroundCondition(foregroundState, scope)
 
         @Provides @Singleton
-        fun provideGracePeriodActiveCondition(
-            gracePeriodSignal: GracePeriodSignal,
-            @ApplicationScope scope: CoroutineScope,
-        ): GracePeriodActiveCondition = GracePeriodActiveCondition(gracePeriodSignal, scope)
-
-        @Provides @Singleton
         fun provideOtherAppPlayingCondition(
             @ApplicationContext context: Context,
             playbackContextMonitor: PlaybackContextMonitor,
@@ -237,7 +230,6 @@ abstract class VoiceControlModule {
             batteryOk: BatteryOkCondition,
             appInForeground: AppInForegroundCondition,
             otherAppPlaying: OtherAppPlayingCondition,
-            gracePeriodActive: GracePeriodActiveCondition,
             @ApplicationScope scope: CoroutineScope,
         ): VoiceControlGate {
             val rules: List<VoiceControlRule> = listOf(
@@ -255,7 +247,6 @@ abstract class VoiceControlModule {
                 // Context group
                 appInForeground,
                 PlaybackContextActiveCondition(playbackContextMonitor.context, scope),
-                gracePeriodActive,
             )
             return VoiceControlGate(rules = rules, scope = scope)
         }

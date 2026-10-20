@@ -109,12 +109,12 @@ class VoiceLifecycleWiringTest {
                 assertFalse(lines.any { it.contains("PRIVATE") || it.contains("example.invalid") })
                 // Cancellation thrown by a child/provider occurs while the outer job is still active.
                 lookupMode = 1
-                val childCancelled = async { sink.dispatchPrepared(prepared) }
+                val childCancelled = async { sink.dispatchPrepared(prepared, isRetry = true) }
                 childCancelled.join()
                 assertTrue(childCancelled.isCancelled)
                 lookupMode = 2
                 kotlinx.coroutines.supervisorScope {
-                    val failed = async { sink.dispatchPrepared(prepared) }
+                    val failed = async { sink.dispatchPrepared(prepared, isRetry = true) }
                     assertTrue(runCatching { failed.await() }.isFailure)
                 }
                 val all = log.lines()

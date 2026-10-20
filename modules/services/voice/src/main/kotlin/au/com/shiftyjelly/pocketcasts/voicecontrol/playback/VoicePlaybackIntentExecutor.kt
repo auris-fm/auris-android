@@ -189,7 +189,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                     // THE SAME CONSUMPTION AS THE OTHER DISPATCH SITE: feedback out, action outcome
                     // recorded. A retry that returns only its feedback would hide an unknowable action
                     // on exactly the path where the caller most needs to know whether it ran.
-                    val retried = cloudRouteSink.dispatchPrepared(alreadyPrepared)
+                    val retried = cloudRouteSink.dispatchPrepared(alreadyPrepared, isRetry = intent.isRetry)
                     outcome.action = retried.action
                     return retried.feedback
                 }
@@ -242,7 +242,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                 // DISPATCHED THROUGH THE ALREADY-PREPARED TURN, so the first attempt and a retry take
                 // the SAME path and the identity is the one fixed above rather than a second one minted
                 // here.
-                val dispatched = cloudRouteSink.dispatchPrepared(preparedTurn)
+                val dispatched = cloudRouteSink.dispatchPrepared(preparedTurn, isRetry = intent.isRetry)
                 // THE REQUEST-OWNED RESULT IS CONSUMED HERE, at the production dispatch site. Its
                 // FEEDBACK is what the user hears; its ACTION OUTCOME is recorded so a caller can tell a
                 // confirmed action from one that was dispatched without a knowable outcome. Reading only
@@ -267,7 +267,6 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         if (capabilityOf(intent, outcome).allowsRecognition) {
             gracePeriodSignal.onCommandRecognized(
                 fromGeneration = intent.windowGenerationOf(),
-                restoresAllowance = intent.restoresAllowance(),
             )
         }
         return response
@@ -694,6 +693,7 @@ interface VoiceCloudRouteSink {
      */
     suspend fun dispatchPrepared(
         prepared: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
+        isRetry: Boolean = false,
     ): CloudTurnResult
 
     /**
@@ -761,13 +761,6 @@ interface VoiceStatsQuerySink {
 
 /** The grace window a dispatched cloud turn belongs to, or null for a local command. */
 internal fun VoiceIntent.windowGenerationOf(): Long? = (this as? VoiceIntent.CloudRoute)?.windowGeneration
-
-/**
- * Whether handling this command earns the window another dispatch. A route the
- * router chose is a deliberate act; the routing-failure fallback is not, since
- * the allowance it is spending exists for exactly that case.
- */
-internal fun VoiceIntent.restoresAllowance(): Boolean = (this as? VoiceIntent.CloudRoute)?.origin != VoiceIntent.CloudRouteOrigin.RoutingFailure
 
 /**
  * True for the commands the user can issue by voice that change play/pause

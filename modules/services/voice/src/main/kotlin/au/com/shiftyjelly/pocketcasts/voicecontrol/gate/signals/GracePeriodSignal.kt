@@ -45,7 +45,7 @@ class GracePeriodSignal @Inject constructor() {
      * window for anything that outlives it, such as a cloud turn still in
      * flight. A completion that carries a stale generation extends nothing: a
      * count of what has been spent in a window cannot tell one window from the
-     * next, so an old request could otherwise re-arm a new session's allowance.
+     * next, so an old completion cannot extend a successor's listening window.
      */
     private var generation = 0L
 
@@ -196,28 +196,12 @@ class GracePeriodSignal @Inject constructor() {
         playbackStopClosures.incrementAndGet()
     }
 
-    /**
-     * One escalation to the cloud service is allowed per grace window: the
-     * window is the user-initiated act, and this bounds a routing failure (or a
-     * deliberate `no_match`) to a single dispatch per act rather than a stream.
-     * Reset by anything that opens or resets the window — a wake or a
-     * recognised command — never by the failure itself.
-     */
-    private var escalationUsed = false
-
-    /** The window the allowance was spent in, so it is spent once per generation. */
-    private var escalatedGeneration = -1L
-
     private var timerJob: Job? = null
     private val scope = CoroutineScope(Job() + Dispatchers.Main)
 
     /**
-     * THE WINDOW-OWNER MONITOR. Every transition and the allowance claim take it.
-     *
-     * `@Synchronized` on `issueEscalation` alone excludes NOTHING, because the writers -- wake/open,
-     * privacy close, timeout -- never took it: a reader and a writer on different locks is no
-     * synchronization at all. This is the one boundary all of them share, so a claim cannot interleave
-     * with the transition that changes what it is claiming against.
+     * All window transitions and liveness checks share this monitor. Dispatch ownership belongs to
+     * the prepared request, not the grace timer.
      */
     private val windowLock = Any()
 
@@ -300,11 +284,8 @@ class GracePeriodSignal @Inject constructor() {
      *
      * [fromGeneration] is the window the handled command was issued under, or
      * null when the app handled a command locally as a fresh act.
-     *
-     * [restoresAllowance] applies only to a dispatched turn: true for one the
-     * router chose, false for the routing-failure fallback.
      */
-    fun onCommandRecognized(fromGeneration: Long? = null, restoresAllowance: Boolean = true) {
+    fun onCommandRecognized(fromGeneration: Long? = null) {
         // A completion that names its window may extend that window only while
         // it is still the current one and still open. It never opens one and
         // never resurrects a window a privacy event ended — including when a
@@ -331,9 +312,6 @@ class GracePeriodSignal @Inject constructor() {
                     ),
                 )
                 _isActive.value = true
-                // Restoring is a separate question from touching the window: a deliberate route earns
-                // the next dispatch, an escalation does not.
-                if (restoresAllowance) escalatedGeneration = -1L
                 generation
             } ?: return
             // ARMED OUTSIDE the monitor: `armTimer` launches and reads the coroutine context, and a
@@ -374,47 +352,8 @@ class GracePeriodSignal @Inject constructor() {
         notifyIfEnded(ended)
     }
 
-    /**
-     * Why a dispatch would be refused right now, for the log line: the two
-     * causes are different problems (nothing is listening vs this window has
-     * already spent its one dispatch) and conflating them made a real run hard
-     * to read.
-     */
-    fun escalationRefusal(): String = synchronized(windowLock) {
-        when {
-            closedByPrivacy -> "no open window (closed by a privacy event)"
-            !_isActive.value -> "no open window"
-            escalationUsed && escalatedGeneration == generation -> "allowance spent in this window"
-            else -> "available"
-        }
-    }
-
-    /** The window a dispatch issued now would belong to. */
+    /** The grace window a request captured now belongs to; independent from request identity. */
     val currentGeneration: Long get() = synchronized(windowLock) { generation }
-
-    // Issues the window's single escalation, returning the generation it was issued under, or null
-    // when it is refused.
-    //
-    // Refused when no window is open -- an utterance with no act behind it has nothing to spend
-    // against -- and when this generation has already spent its one dispatch.
-    //
-    // THE CLAIM IS AGAINST THE REQUEST'S OWN WINDOW, not whichever is current. Recognition takes time,
-    // and a wake arriving meanwhile opens a new window: claiming against the current generation would
-    // let a request issued under the OLD window spend the SUCCESSOR's allowance, leaving the user's
-    // newer act unable to escalate at all. A request whose window is no longer live claims nothing.
-    //
-    // This does **not** constrain a false wake. A false wake is a wake detection, so it opens a window
-    // and its one utterance is the residual we accept knowingly; what this refuses is an utterance
-    // arriving with no window at all.
-
-    fun issueEscalation(origin: Long = generation): Long? = synchronized(windowLock) {
-        if (origin != generation) return@synchronized null
-        if (!_isActive.value || closedByPrivacy) return@synchronized null
-        if (escalationUsed && escalatedGeneration == origin) return@synchronized null
-        escalationUsed = true
-        escalatedGeneration = origin
-        origin
-    }
 
     /** A new act opens a window and begins its generation. */
     private fun openWindow() {
@@ -444,10 +383,6 @@ class GracePeriodSignal @Inject constructor() {
         val held = cloudTurns.size
         cloudTurns.clear()
         generation += 1
-        // EACH WINDOW HAS ITS OWN ALLOWANCE, so opening one CLEARS the spent marker: otherwise a claim
-        // made under a previous window made every later window read as spent.
-        escalationUsed = false
-        escalatedGeneration = -1L
         _isActive.value = true
         armTimerForLocked(ownedGeneration = generation)
         val transitionReason = if (wasActive) {

@@ -18,6 +18,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
@@ -47,6 +48,179 @@ class CloudRouteSinkTest {
         referencePositionMs = 1_230_000L,
         clientPositionMs = 50_000L,
     )
+
+    @Test
+    fun `concurrent callbacks prepare exactly one retained wire identity`() = runTest {
+        val deps = TestDeps()
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(1)
+        val stateLock = checkNotNull(CloudPlaybackContextState::class.java.getDeclaredField("lock").apply { isAccessible = true }.get(deps.cloudPlaybackContextState))
+        val turns = java.util.concurrent.CopyOnWriteArrayList<CloudRouteTurn>()
+        val failures = java.util.concurrent.CopyOnWriteArrayList<Throwable>()
+        fun prepare() = Thread {
+            try {
+                val turn = kotlinx.coroutines.runBlocking {
+                    sink.prepareTurn("question", VoiceIntent.CloudTier.Premium, playbackContext, capturedOrigin = 1, isWakeOriginated = true, logicalRequestId = "one-utterance")
+                }
+                turns += checkNotNull(turn)
+            } catch (t: Throwable) {
+                failures += t
+            }
+        }
+        val first = prepare()
+        val second = prepare()
+        try {
+            synchronized(stateLock) {
+                first.start()
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(3)
+                while (first.state != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.sleep(2)
+                assertTrue("first preparation must wait at the real context snapshot", first.stackTrace.any { it.className == CloudPlaybackContextState::class.java.name && it.methodName == "snapshot" })
+                second.start()
+                while (second.state != Thread.State.BLOCKED && System.nanoTime() < deadline) Thread.sleep(2)
+                assertEquals(Thread.State.BLOCKED, second.state)
+            }
+        } finally {
+            first.join(3_000L)
+            if (second.state != Thread.State.NEW) second.join(3_000L)
+        }
+        assertTrue("preparations terminate", !first.isAlive && !second.isAlive)
+        assertTrue("no preparation failure: $failures", failures.isEmpty())
+        assertEquals(2, turns.size)
+        org.junit.Assert.assertSame("both callbacks reuse one prepared request", turns[0], turns[1])
+        assertEquals(turns[0], deps.conversationAdmission.retained("one-utterance"))
+    }
+
+    @Test
+    fun `duplicate callbacks join one dispatch without repeating feedback`() = runTest(UnconfinedTestDispatcher()) {
+        val entered = CompletableDeferred<Unit>()
+        val finish = CompletableDeferred<Unit>()
+        val deps = TestDeps(routeInvoker = {
+            flow {
+                entered.complete(Unit)
+                finish.await()
+                emit(CloudRouteEvent.Done(1, 0))
+            }
+        })
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(1)
+        val prepared = sink.prepareTurn("question", VoiceIntent.CloudTier.Premium, playbackContext, capturedOrigin = 1, logicalRequestId = "one-utterance")!!
+        val first = async { sink.dispatchPrepared(prepared) }
+        entered.await()
+        val duplicate = async { sink.dispatchPrepared(prepared) }
+        try {
+            assertTrue("duplicate callback must not cancel its own request", first.isActive)
+            assertEquals("one request owns one running dispatch", 1, deps.routeTurns.size)
+            assertTrue(duplicate.isActive)
+            finish.complete(Unit)
+            first.await()
+            assertEquals(VoiceResponse.Silent, duplicate.await().feedback)
+            assertEquals(VoiceResponse.Silent, sink.dispatchPrepared(prepared).feedback)
+            assertEquals("a completed callback does not re-execute", 1, deps.routeTurns.size)
+        } finally {
+            finish.complete(Unit)
+            first.cancel()
+            duplicate.cancel()
+            first.join()
+            duplicate.join()
+        }
+    }
+
+    @Test
+    fun `failure and cancellation release duplicate waiters and explicit retry keeps identity`() = runTest(UnconfinedTestDispatcher()) {
+        for (cancelOwner in listOf(false, true)) {
+            val entered = CompletableDeferred<Unit>()
+            val fail = CompletableDeferred<Unit>()
+            val observed = CompletableDeferred<Throwable>()
+            val expected = IllegalStateException("controlled route failure")
+            var attempts = 0
+            val deps = TestDeps(routeInvoker = {
+                flow {
+                    if (++attempts == 1) {
+                        entered.complete(Unit)
+                        fail.await()
+                        throw expected
+                    }
+                    emit(CloudRouteEvent.Done(1, 0))
+                }
+            })
+            val sink = deps.sink()
+            deps.conversationAdmission.beginOrigin(1)
+            val prepared = sink.prepareTurn("question", VoiceIntent.CloudTier.Premium, playbackContext, capturedOrigin = 1, logicalRequestId = "one-utterance")!!
+            val owner = launch {
+                try {
+                    sink.dispatchPrepared(prepared)
+                } catch (failure: Throwable) {
+                    observed.complete(failure)
+                }
+            }
+            entered.await()
+            val duplicate = async { sink.dispatchPrepared(prepared) }
+            try {
+                assertTrue(duplicate.isActive)
+                if (cancelOwner) owner.cancel() else fail.complete(Unit)
+                withTimeout(1_000) {
+                    owner.join()
+                    assertEquals(VoiceResponse.Silent, duplicate.await().feedback)
+                }
+                if (cancelOwner) assertTrue(observed.await() is CancellationException) else org.junit.Assert.assertSame(expected, observed.await())
+                assertEquals(1, deps.routeTurns.size)
+                sink.dispatchPrepared(prepared, isRetry = true)
+                assertEquals("one explicit retry, no duplicate execution", 2, deps.routeTurns.size)
+                assertEquals("retry preserves the original wire payload", prepared, deps.routeTurns.last())
+            } finally {
+                fail.complete(Unit)
+                owner.cancel()
+                duplicate.cancel()
+                owner.join()
+                duplicate.join()
+            }
+        }
+    }
+
+    @Test
+    fun `old completion cannot retire a successor request with the same logical identity`() = runTest(UnconfinedTestDispatcher()) {
+        val entered = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        val finish = CompletableDeferred<Unit>()
+        val deps = TestDeps(routeInvoker = { turn ->
+            flow {
+                entered.send(Unit)
+                if (turn.capturedOrigin == 1L) awaitCancellation() else finish.await()
+                emit(CloudRouteEvent.Done(1, 0))
+            }
+        })
+        val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(1)
+        val first = sink.prepareTurn("old question", VoiceIntent.CloudTier.Premium, playbackContext, capturedOrigin = 1, logicalRequestId = "one-utterance")!!
+        val oldOwner = launch { sink.dispatchPrepared(first) }
+        entered.receive()
+        deps.conversationAdmission.endWindow(1)
+        deps.conversationAdmission.beginOrigin(2)
+        val successor = sink.prepareTurn("new question", VoiceIntent.CloudTier.Premium, playbackContext, capturedOrigin = 2, logicalRequestId = "one-utterance")!!
+        val newOwner = async { sink.dispatchPrepared(successor) }
+        entered.receive()
+        val duplicate = async { sink.dispatchPrepared(successor) }
+        try {
+            withTimeout(1_000) { oldOwner.join() }
+            assertTrue(oldOwner.isCancelled)
+            org.junit.Assert.assertSame(successor, sink.retainedTurnFor("one-utterance"))
+            assertNotEquals(first.requestId, successor.requestId)
+            assertTrue(newOwner.isActive)
+            assertTrue(duplicate.isActive)
+            assertEquals(2, deps.routeTurns.size)
+            finish.complete(Unit)
+            newOwner.await()
+            assertEquals(VoiceResponse.Silent, duplicate.await().feedback)
+            assertEquals(2, deps.routeTurns.size)
+        } finally {
+            finish.complete(Unit)
+            oldOwner.cancel()
+            newOwner.cancel()
+            duplicate.cancel()
+            oldOwner.join()
+            newOwner.join()
+            duplicate.join()
+        }
+    }
 
     @Test
     fun `interrupted terminal discards output while completed terminal drains it`() = runTest {
@@ -328,7 +502,7 @@ class CloudRouteSinkTest {
         // Dispatch it twice, as a controller retry would. A retry goes through the SAME lifecycle as a
         // first dispatch -- it is not a shortcut to the transport.
         sink.dispatchPrepared(prepared!!)
-        sink.dispatchPrepared(prepared)
+        sink.dispatchPrepared(prepared, isRetry = true)
 
         val turns = deps.routeTurns
         assertEquals("both attempts dispatched", 2, turns.size)

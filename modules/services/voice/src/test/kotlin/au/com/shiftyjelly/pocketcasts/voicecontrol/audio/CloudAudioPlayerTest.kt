@@ -13,7 +13,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [30])
+@Config(sdk = [35])
 class CloudAudioPlayerTest {
 
     private lateinit var player: CloudAudioPlayer
@@ -267,7 +267,7 @@ class CloudAudioPlayerTest {
     // retireProducer that only drops conversion state (samples stay matchable) and by one that trims
     // the whole ring (the episode loses audio it is still playing).
     @Test
-    @org.robolectric.annotation.Config(sdk = [34])
+    @org.robolectric.annotation.Config(sdk = [35])
     fun `a stopped answer cannot reject later speech while the episode's reference survives`() {
         val recorder = au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder(
             au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap(),

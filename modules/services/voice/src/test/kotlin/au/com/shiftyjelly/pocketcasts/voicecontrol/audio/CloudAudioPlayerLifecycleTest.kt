@@ -19,7 +19,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 class CloudAudioPlayerLifecycleTest {
     @Test
     fun `a same codec second turn records new answer audio and starts a fresh playback clock`() = runTest {

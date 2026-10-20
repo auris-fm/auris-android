@@ -54,7 +54,7 @@ import org.robolectric.annotation.Config
 import org.robolectric.shadows.AudioDeviceInfoBuilder
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 class VoiceLifecycleWiringTest {
     @Test
     fun `the injected cloud sink correlates its real hold and cancellation without request text`() = runTest {
@@ -91,7 +91,10 @@ class VoiceLifecycleWiringTest {
                 val prepared = sink.prepareTurn(
                     request = "PRIVATE UTTERANCE", tier = VoiceIntent.CloudTier.Premium, context = PlaybackContext(),
                     isLiveGraceTurn = true, capturedOrigin = signal.currentGeneration, isWakeOriginated = true,
-                    hint = null, logicalRequestId = "test-logical-request", isRetry = false, sourceLanguage = "zh",
+                    // A real utterance identity is a UUID (spec f47e972): the diagnostic records a
+                    // non-UUID as `request_id=invalid`, so a placeholder here would assert the
+                    // opposite of the contract.
+                    hint = null, logicalRequestId = "b7ce1a5e-1c1b-4a4f-9d1e-3f2c8a6d5e70", isRetry = false, sourceLanguage = "zh",
                 )!!
                 val turn = async { sink.dispatchPrepared(prepared) }
                 entered.await()

@@ -42,7 +42,7 @@ import org.robolectric.shadows.ShadowAudioManager
  * the branch.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 class VoiceControlServiceAcquisitionTest {
     private lateinit var context: Context
     private lateinit var audioManager: AudioManager

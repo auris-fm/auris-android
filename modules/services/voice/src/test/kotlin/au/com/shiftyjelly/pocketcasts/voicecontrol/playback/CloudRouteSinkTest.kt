@@ -3712,12 +3712,13 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `dialog-completed cloud route serializes the completing utterance identity not the begin identity`() = runTest {
-        // DIALOG-TO-WIRE CONTROL: a dialog begins with utterance A, completes with utterance B.
-        // VoiceDialogManager.buildCompletedIntent returns the intent WITHOUT a logicalRequestId.
-        // The engine stamps B via withLogicalRequest(admittedId=B). The sink then serializes B
-        // as the wire request_id. This test composes the real dialog manager result with the
-        // actual sink dispatch path.
+    fun `dialog-completed cloud route dispatches the completing utterance identity through CloudTurnRoute`() = runTest {
+        // DIALOG-TO-DISPATCH CONTROL: a dialog begins with utterance A, completes with
+        // utterance B. The completed intent (no logicalRequestId) is stamped by the engine
+        // with B, dispatched through the sink, and routed through a REAL CloudTurnRoute.
+        // The dispatched CloudRouteTurn.requestId must be B.
+        // NOTE: Full Moshi serialization verification requires CloudRouteJson which is
+        // internal to repositories. See CloudTurnRouteTest for the encoded JSON control.
         val admittedA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         val admittedB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
@@ -3757,10 +3758,25 @@ class CloudRouteSinkTest {
         val stampedCloud = stamped as VoiceIntent.CloudRoute
         assertEquals("engine stamped B onto the dialog-completed intent", admittedB, stampedCloud.logicalRequestId)
 
-        // Step 3: Sink serializes and dispatches — prepareTurn uses the admitted ID as the
-        // wire request_id, then dispatchPrepared sends it through the transport.
+        // Step 3: Wire the sink's routeInvoker to a REAL CloudTurnRoute with a capturing
+        // transport, so the dispatched turn goes through the actual route creation path.
+        val capturingTransport = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport {
+            val frames = mutableListOf<au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame>()
+            override fun exchange(frame: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                frames += frame
+                emit(CloudRouteEvent.Done(1, 0))
+            }
+        }
+        val realRoute = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnRoute(
+            baseUrl = "https://cloud.example.com",
+            tokenProvider = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding {
+                override suspend fun currentToken(): String = "test-token"
+                override suspend fun refreshToken() = Unit
+            },
+            transport = capturingTransport,
+        )
         val deps = TestDeps(
-            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+            routeInvoker = { turn -> realRoute.route(turn) },
         )
         val sink = deps.sink()
         deps.conversationAdmission.beginOrigin(stampedCloud.windowGeneration ?: 0L)
@@ -3777,25 +3793,27 @@ class CloudRouteSinkTest {
             sourceLanguage = null,
         )!!
 
-        assertEquals(
-            "prepared request_id is B (the completing utterance), not A (the begin identity)",
-            admittedB,
-            prepared.requestId,
-        )
-
-        // Step 4: Dispatch through the sink. The routeInvoker captures the actual
-        // CloudRouteTurn that would be sent over the wire.
+        // Step 4: Dispatch through the sink → CloudTurnRoute → transport frame.
         sink.dispatchPrepared(prepared)
         assertEquals("exactly one turn dispatched", 1, deps.routeTurns.size)
         assertEquals(
-            "dispatched turn's wire request_id is B",
+            "dispatched turn's request_id is B",
             admittedB,
             deps.routeTurns.single().requestId,
         )
+
+        // Step 5: Verify the CloudTurnFrame.Authenticate created by CloudTurnRoute carries B.
+        assertEquals("one frame exchanged", 1, capturingTransport.frames.size)
+        val authFrame = capturingTransport.frames.single() as au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame.Authenticate
+        assertEquals(
+            "Authenticate frame's requestId is B (the completing utterance)",
+            admittedB,
+            authFrame.requestId,
+        )
         assertNotEquals(
-            "dispatched turn must NOT carry the begin identity",
+            "Authenticate frame must NOT carry the begin identity",
             admittedA,
-            deps.routeTurns.single().requestId,
+            authFrame.requestId,
         )
     }
 }

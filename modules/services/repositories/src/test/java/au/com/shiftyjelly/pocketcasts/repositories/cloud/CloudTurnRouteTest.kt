@@ -277,4 +277,23 @@ class CloudTurnRouteTest {
         val failure = runCatching { CloudRouteJson.authenticateAdapter.toJson(frame) }.exceptionOrNull()
         assertTrue("invalid identity must not serialize", failure is IllegalArgumentException)
     }
+
+    @Test
+    fun `serialized authenticate frame carries the turn request_id on the wire`() = runTest {
+        // ENCODED TRANSPORT CONTROL: the actual JSON serialized by Moshi must carry the
+        // turn's requestId as the wire request_id field. This proves the final link in
+        // the dialog-to-wire chain: whatever requestId is on the CloudRouteTurn is what
+        // gets sent over the WebSocket.
+        val admittedB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        val turnWithB = turn.copy(requestId = admittedB)
+        val transport = FakeTransport(listOf(CloudRouteEvent.Done(1, 0)))
+        route(transport).route(turnWithB).toList()
+        val frame = transport.frames.single() as CloudTurnFrame.Authenticate
+        assertEquals("frame carries B", admittedB, frame.requestId)
+        val json = CloudRouteJson.authenticateAdapter.toJson(frame)
+        assertTrue(
+            "serialized JSON must contain request_id with B's value (json=$json)",
+            json.contains("\"request_id\":\"$admittedB\""),
+        )
+    }
 }

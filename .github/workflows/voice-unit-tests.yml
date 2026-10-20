@@ -1,0 +1,25 @@
+name: "Voice module unit tests"
+
+# The voice module's Robolectric suite (47+ cases covering ASR engine, cloud route sink,
+# intent routing, spoken template resolution, and diagnostics) had no CI job running it.
+# This wires the focused unit-test task into every push and PR so regressions are caught
+# without requiring an emulator or secrets.
+on:
+  push:
+  pull_request:
+
+jobs:
+  voice-unit-tests:
+    name: "voice:testDebugUnitTest"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      # No SDK setup step: ubuntu-latest already ships the Android SDK with ANDROID_HOME set,
+      # matching the android-test-compile workflow in this repo.
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Run voice module Robolectric unit tests
+        run: ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon

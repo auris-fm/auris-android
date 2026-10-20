@@ -30,13 +30,20 @@ class VoiceDialogManager @Inject constructor(
 
     fun promptHistory(): List<DialogPromptTurn> = pending?.promptHistory.orEmpty()
 
+    /**
+     * Resolve a tool call that arrived as part of a multi-turn dialog flow.
+     * [admittedId] is the utterance identity from capture admission; when supplied,
+     * a new dialog begin inherits it instead of minting a fresh UUID, so the
+     * dialog-to-wire identity matches the original request.
+     */
     fun resolve(
         transcript: String,
         generated: String,
         call: ToolCall,
+        admittedId: String? = null,
     ): VoiceIntent? {
         val previous = pending
-        val result = resolve(call)
+        val result = resolve(call, admittedId)
         val previousHistory = if (call.isReplacementBegin(previous)) {
             emptyList()
         } else {
@@ -61,9 +68,9 @@ class VoiceDialogManager @Inject constructor(
      * for multi-turn flows. Returns a [VoiceIntent] only when the dialog is complete; returns
      * null while the dialog is still pending.
      */
-    fun resolve(call: ToolCall): VoiceIntent? {
+    fun resolve(call: ToolCall, admittedId: String? = null): VoiceIntent? {
         if (call.name == "dialog_control") {
-            return handleDialogControl(call)
+            return handleDialogControl(call, admittedId)
         }
         // If there's a pending dialog and a new dispatchable tool call arrives, cancel the dialog.
         // The abandoned dialog's retained turn is FORGOTTEN: nothing will retry that logical request, so
@@ -73,7 +80,7 @@ class VoiceDialogManager @Inject constructor(
         return mapper.map(call)
     }
 
-    private fun handleDialogControl(call: ToolCall): VoiceIntent? {
+    private fun handleDialogControl(call: ToolCall, admittedId: String? = null): VoiceIntent? {
         return when (call.action) {
             "begin" -> {
                 val targetTool = call.stringParam("target_tool") ?: return null
@@ -83,10 +90,10 @@ class VoiceDialogManager @Inject constructor(
                 pending?.let { replaced -> onRequestAbandoned?.invoke(replaced.logicalRequestId) }
                 val isDestructive = targetAction in DESTRUCTIVE_ACTIONS
                 pending = PendingVoiceDialog(
-                    // MINTED AT REGISTRATION: this is the production producer of the logical identity.
-                    // A dialog that is replaced or abandoned starts a NEW one; a retry of the SAME
-                    // request names this value and finds the turn it already prepared.
-                    logicalRequestId = java.util.UUID.randomUUID().toString(),
+                    // INHERITED from capture admission when supplied (the utterance that triggered
+                    // this dialog already has an identity); minted fresh only for dialogs that
+                    // arise without a preceding utterance (e.g. replacement of an abandoned one).
+                    logicalRequestId = admittedId ?: java.util.UUID.randomUUID().toString(),
                     targetTool = targetTool,
                     targetAction = targetAction,
                     requiresConfirmation = isDestructive,

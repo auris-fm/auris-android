@@ -565,6 +565,122 @@ class VoiceAsrEngineTest {
     }
 
     @Test
+    fun `a supplementary letter such as CJK Extension B is not discarded`() = runTest {
+        // U+20000 (𠀀) is a CJK Unified Ideograph Extension B letter, encoded as a surrogate pair
+        // in UTF-16. A Char-unit iteration would miss it; code-point iteration must not.
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        this.nondiscardFixture(recognizer, wakeDetected = true)
+        val handled = mutableListOf<VoiceIntent>()
+        engine.start(
+            backend = FakeAsrBackend("\uD840\uDC00"), // U+20000
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { handled += it },
+        )
+        advanceUntilIdle()
+        assertEquals("supplementary letters are content", listOf(VoiceIntent.Playback.Pause), handled)
+        engine.stop()
+    }
+
+    @Test
+    fun `a supplementary digit such as mathematical bold digit nine is not discarded`() = runTest {
+        // U+1D7DF (𝟟) is MATHEMATICAL BOLD DIGIT NINE, category Nd, outside the BMP.
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        this.nondiscardFixture(recognizer, wakeDetected = true)
+        val handled = mutableListOf<VoiceIntent>()
+        engine.start(
+            backend = FakeAsrBackend("\uD835\uDDDF"), // U+1D7DF
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { handled += it },
+        )
+        advanceUntilIdle()
+        assertEquals("supplementary digits are content", listOf(VoiceIntent.Playback.Pause), handled)
+        engine.stop()
+    }
+
+    @Test
+    fun `a punctuation-only discard followed by content on the same engine routes the second`() = runTest {
+        // SAME-ENGINE CLEANUP CONTROL: a punctuation-only utterance is silently discarded,
+        // then a content-bearing utterance arrives on the SAME running engine. The discard
+        // must not leave state that prevents the next capture from routing normally.
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWakeWordDetected()
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                // First: punctuation only — should be discarded
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+                // Second: real content — should route
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(400, 300, 200, 100), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = false,
+                confidence = 0f,
+                completionSample = 4000,
+            ),
+        )
+
+        val intents = mutableListOf<VoiceIntent>()
+        val engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = RecordingRecognizer(VoiceIntent.Playback.Pause),
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = signal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+        engine.start(
+            // First segment returns "..." (punctuation only), second returns "pause" (content).
+            backend = object : AsrBackend {
+                private var callCount = 0
+                override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+                override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult {
+                    callCount++
+                    return if (callCount == 1) AsrResult("...") else AsrResult("pause")
+                }
+                override val requiredModel: ModelSpec = ModelSpec(files = emptyList(), targetDir = "")
+                override val capabilities: AsrCapabilities = AsrCapabilities(supportedLanguages = setOf("en"))
+                override fun release() = Unit
+            },
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { intents += it },
+        )
+        advanceUntilIdle()
+
+        assertEquals(
+            "only the content utterance routed; the punctuation-only one was silently discarded",
+            1,
+            intents.size,
+        )
+        assertEquals(VoiceIntent.Playback.Pause, intents.single())
+        // No error earcon for the discard (silent), and no error for the successful route.
+        verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
+
+        engine.stop()
+    }
+
+    @Test
     fun `content transcripts still route normally`() = runTest {
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         this.nondiscardFixture(recognizer)
@@ -1483,7 +1599,7 @@ class VoiceAsrEngineTest {
             assertTrue(
                 "Expected source-first log, got: $asrLog",
                 asrLog.matches(
-                    Regex("""\[VoicePipeline\] asr ResultBackend \d+ms lang=yue '播放。' translate=yue→en 'Play\.'"""),
+                    Regex("""\[VoicePipeline\] asr ResultBackend \d+ms lang=yue id=[0-9a-f-]+ '播放。' translate=yue→en 'Play\.'"""),
                 ),
             )
             assertTrue(recognizer.calls.contains("recognize:Play."))

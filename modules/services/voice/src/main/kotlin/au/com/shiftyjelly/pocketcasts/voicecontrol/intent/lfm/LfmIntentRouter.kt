@@ -207,9 +207,10 @@ class LfmIntentRouter internal constructor(
                             transcript = routerText,
                             generated = generated,
                             call = repaired,
+                            admittedId = logicalRequestId,
                         )
                     } else {
-                        dialogManager.resolve(repaired)
+                        dialogManager.resolve(repaired, admittedId = logicalRequestId)
                     }
                 }
                 if (intent == null) {

@@ -201,6 +201,14 @@ class VoiceAsrEngine @Inject constructor(
         val completionSample: Int = 0,
         val speechEndSample: Int = 0,
         val sampleRateHz: Int = 16000,
+        /**
+         * MINTED AT CAPTURE ADMISSION: the shared utterance identity for this
+         * logical turn. Created when the segment is admitted for transcription,
+         * before ASR/trim/translation/routing, so every diagnostic and log from
+         * this point forward can name the same request. Carried through to the
+         * wire request_id unchanged.
+         */
+        val admittedId: String = java.util.UUID.randomUUID().toString(),
     )
 
     /**
@@ -213,12 +221,21 @@ class VoiceAsrEngine @Inject constructor(
         request.completionSample + (request.sampleRateHz * WAKE_ONLY_TOLERANCE_MS / 1000) >=
         request.speechEndSample
 
-    /** True when [text] carries at least one Unicode letter or number (any script). */
-    private fun hasLetterOrNumber(text: String): Boolean = text.any {
-        it.isLetter() ||
-            it.category == CharCategory.DECIMAL_DIGIT_NUMBER ||
-            it.category == CharCategory.LETTER_NUMBER ||
-            it.category == CharCategory.OTHER_NUMBER
+    /**
+     * True when [text] carries at least one Unicode letter or number (any script).
+     * Iterates code points rather than UTF-16 Char units so supplementary letters
+     * and numbers (e.g. U+20000 𠀀, U+1D7DF 𝟟) are recognised correctly.
+     */
+    private fun hasLetterOrNumber(text: String): Boolean {
+        var i = 0
+        while (i < text.length) {
+            val cp = Character.codePointAt(text, i)
+            if (Character.isLetter(cp) || Character.isDigit(cp)) return true
+            val cat = Character.getType(cp)
+            if (cat == Character.LETTER_NUMBER.toInt() || cat == Character.OTHER_NUMBER.toInt()) return true
+            i += Character.charCount(cp)
+        }
+        return false
     }
 
     private suspend fun shouldTranscribe(segment: VoiceSegmenterResult.SpeechEnded): TranscribeRequest? {
@@ -361,10 +378,11 @@ class VoiceAsrEngine @Inject constructor(
         // lookalikes (², ½) count as content while ".", "…" and "?!" do not.
         if (!hasLetterOrNumber(transcript)) {
             Timber.i(
-                "[VoicePipeline] asr %s %dms lang=%s '%s'%s → drop (non-content)",
+                "[VoicePipeline] asr %s %dms lang=%s id=%s '%s'%s → drop (non-content)",
                 b::class.simpleName,
                 asrMs,
                 asrResult.detectedLanguage ?: "?",
+                request.admittedId,
                 transcript,
                 trimNote?.let { " $it" } ?: "",
             )
@@ -380,10 +398,11 @@ class VoiceAsrEngine @Inject constructor(
         //   lang=en 'Play.' translate=yue→en '播放。'
         // read as English ASR that somehow translated into Chinese.
         Timber.i(
-            "[VoicePipeline] asr %s %dms lang=%s '%s'%s%s",
+            "[VoicePipeline] asr %s %dms lang=%s id=%s '%s'%s%s",
             b::class.simpleName,
             asrMs,
             trimmedResult.detectedLanguage ?: "?",
+            request.admittedId,
             trimmedResult.text,
             trimNote?.let { " $it" } ?: "",
             routePrep.translateNote?.let { " $it" } ?: "",
@@ -397,10 +416,10 @@ class VoiceAsrEngine @Inject constructor(
         // "Addressed" is this segment's own wake detection, per core voice-intents.md: a Detected
         // segment that we could not route gets the spoken line, a NotDetected one keeps the earcon.
         // The grace window is true for both, so it cannot make that distinction.
-        processUtterance(routePrep.input!!, addressed = request.wakePositive)
+        processUtterance(routePrep.input!!, addressed = request.wakePositive, admittedId = request.admittedId)
     }
 
-    private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean) {
+    private suspend fun processUtterance(input: IntentRoutingInput, addressed: Boolean, admittedId: String) {
         val recognizer = intentRecognizer
         val handler = onIntent ?: return
 
@@ -426,13 +445,12 @@ class VoiceAsrEngine @Inject constructor(
         // the window that opened during the wait, so a request issued before a successor wake would
         // act as though it belonged to the successor.
         val windowAtRequest = gracePeriodSignal.capturedGeneration()
-        // THE LOGICAL IDENTITY FOR AN ORDINARY CLOUD REQUEST IS MINTED HERE, at input registration and
-        // BEFORE the recognition suspends. It is not derivable from the transcript: a retry of the same
-        // request must name the SAME value, and two separate user acts that happen to say the same
-        // words must not. The dialog path mints its own for clarification flows; this is the producer
-        // for a plain utterance that goes straight to the cloud.
-        val logicalRequestId = java.util.UUID.randomUUID().toString()
-        val outcome = recognizer.recognize(input, ctx, logicalRequestId)
+        // THE ADMITTED IDENTITY arrives from capture admission (TranscribeRequest.admittedId),
+        // minted BEFORE ASR/trim/translation so every diagnostic from that point forward names
+        // the same request. A retry of the same request reuses this value; two separate user acts
+        // that happen to say the same words do not. The dialog path mints its own for
+        // clarification flows; this is the producer for a plain utterance.
+        val outcome = recognizer.recognize(input, ctx, admittedId)
         val elapsedMs = System.currentTimeMillis() - t0
         val intent = outcome.intent
         val diagnostic = outcome.diagnostic
@@ -462,7 +480,7 @@ class VoiceAsrEngine @Inject constructor(
                     .stampedForWindow(windowAtRequest)
                     // Only a CLOUD turn carries a logical identity: it is the one dispatch that is
                     // prepared once and may be retried. A local intent has no wire identity to reuse.
-                    .let { it.withLogicalRequest(logicalRequestId) },
+                    .let { it.withLogicalRequest(admittedId) },
             )
             return
         }
@@ -532,7 +550,7 @@ class VoiceAsrEngine @Inject constructor(
                         // THE REGISTERED IDENTITY, not a second one: this escalation belongs to the SAME
                         // logical request as the recognition it follows, so a retry of that request
                         // names one identity rather than two.
-                        logicalRequestId = logicalRequestId,
+                        logicalRequestId = admittedId,
                     ),
                 )
             }

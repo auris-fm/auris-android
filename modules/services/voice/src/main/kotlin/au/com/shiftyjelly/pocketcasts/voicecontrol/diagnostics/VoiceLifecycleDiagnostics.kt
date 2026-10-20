@@ -94,11 +94,15 @@ object VoiceLifecycleDiagnostics {
         writer.launch {
             for (entry in queue) {
                 when (entry) {
-                    is Entry.Record -> try {
-                        LogBuffer.i("VoiceLifecycle", "%s dropped_before=%d", entry.line, dropped.getAndSet(0))
-                    } catch (_: Exception) {
-                        // Diagnostics cannot terminate the writer or change capture ownership.
-                        dropped.incrementAndGet()
+                    is Entry.Record -> {
+                        val claimed = dropped.getAndSet(0)
+                        try {
+                            LogBuffer.i("VoiceLifecycle", "%s dropped_before=%d", entry.line, claimed)
+                        } catch (_: Exception) {
+                            // The failed export carried these losses; return them with this record,
+                            // preserving drops accumulated concurrently while the writer was running.
+                            dropped.addAndGet(claimed + 1)
+                        }
                     }
 
                     is Entry.Flush -> entry.done.complete(Unit)

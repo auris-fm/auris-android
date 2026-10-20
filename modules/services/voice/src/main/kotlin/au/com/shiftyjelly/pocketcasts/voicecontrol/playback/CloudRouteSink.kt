@@ -25,7 +25,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import java.util.Locale
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -205,6 +204,7 @@ class CloudRouteSink internal constructor(
         isLiveGraceTurn: Boolean,
         capturedOrigin: Long?,
         isWakeOriginated: Boolean,
+        admitted: String?,
     ): CloudTurnResult = routeTurn(
         request = request,
         tier = tier,
@@ -213,6 +213,7 @@ class CloudRouteSink internal constructor(
         capturedOrigin = capturedOrigin,
         isWakeOriginated = isWakeOriginated,
         hint = null,
+        admittedId = admitted,
     )
 
     override suspend fun routeToCloudWithHint(
@@ -223,6 +224,7 @@ class CloudRouteSink internal constructor(
         isLiveGraceTurn: Boolean,
         capturedOrigin: Long?,
         isWakeOriginated: Boolean,
+        admitted: String?,
     ): CloudTurnResult = routeTurn(
         request = request,
         tier = tier,
@@ -231,6 +233,7 @@ class CloudRouteSink internal constructor(
         capturedOrigin = capturedOrigin,
         isWakeOriginated = isWakeOriginated,
         hint = hint,
+        admittedId = admitted,
     )
 
     /**
@@ -259,6 +262,13 @@ class CloudRouteSink internal constructor(
         sourceLanguage: String?,
     ): CloudRouteTurn? {
         return conversationAdmission.retainOrPrepare(logicalRequestId, isRetry) {
+            // THE ADMITTED UTTERANCE IDENTITY IS THE WIRE IDENTITY (spec 3b1def9/f47e972): minted once
+            // at admission, carried unchanged onto the wire. A dispatch without one is a caller bug --
+            // refusing here means no wire request exists that client logs cannot name. Never mint here.
+            val admitted = logicalRequestId?.takeIf { it.isNotBlank() } ?: run {
+                Timber.w("cloud turn refused: no admitted request identity (request=%.40s)", request)
+                return@retainOrPrepare null
+            }
             val origin = capturedOrigin ?: conversationAdmission.currentOriginForTest()
             val admission = conversationAdmission.prepare(
                 origin = origin,
@@ -269,7 +279,7 @@ class CloudRouteSink internal constructor(
                 request = request,
                 sourceLanguage = sourceLanguage,
                 context = buildRouteContext(context),
-                requestId = UUID.randomUUID().toString(),
+                requestId = admitted,
                 capabilities = advertisedCapabilities(),
                 routeHint = hint,
                 conversationId = admission.conversationId,
@@ -360,7 +370,19 @@ class CloudRouteSink internal constructor(
          * a retry sends the SAME logical request rather than minting a second conversation.
          */
         prepared: CloudRouteTurn? = null,
+        /** The admitted client-minted UUID when the caller did not prepare a turn; refused when absent with none prepared. */
+        admittedId: String? = null,
     ): CloudTurnResult {
+        if (prepared == null && admittedId.isNullOrBlank()) {
+            // FAIL CLOSED, BEFORE any admission, state write or connection: a turn without a
+            // client-owned identity would need the sink to mint one, and a wire request no client
+            // log can name is exactly the divergence spec 3b1def9 removes.
+            Timber.w("cloud turn refused: no admitted request identity (request=%.40s)", request)
+            return CloudTurnResult(
+                feedback = VoiceResponse.Silent,
+                action = CloudRouteActionOutcome.None,
+            )
+        }
         if (resolveBaseUrl().isBlank()) {
             val soon = localizedTemplate(KEY_CLOUD_COMING_SOON)
             return CloudTurnResult(
@@ -464,9 +486,9 @@ class CloudRouteSink internal constructor(
 
             val routeContext = buildRouteContext(context)
             // The turn's WIRE identity: the frame's `turn_id` is this value, and a deterministic hold
-            // must be attributed against it. It is a different identity from the local `myId` counter,
-            // and it is read straight off the turn that was built so the two cannot drift.
-            var myRequestId: String? = null
+            // must be attributed against it. Read straight off the turn that was built (the admitted
+            // identity, prepared or supplied), so the two cannot drift.
+            var myRequestId: String? = prepared?.requestId ?: admittedId
             // Prepared HERE, from this turn's captured origin -- not resolved at send time, where a
             // retry or a superseded origin would borrow whichever handle was then current. A turn whose
             // origin is no longer live is discarded rather than admitted against someone else's handle.
@@ -486,10 +508,10 @@ class CloudRouteSink internal constructor(
                 conversationId = admission.conversationId,
                 conversationMode = admission.mode,
                 capturedOrigin = origin,
-                // Stable per logical turn; a transport retry reuses it, and the
-                // server rejects a repeat rather than re-executing (no auto-retry
-                // is attempted by this client).
-                requestId = UUID.randomUUID().toString().also { myRequestId = it },
+                // THE ADMITTED UTTERANCE IDENTITY, unchanged (spec 3b1def9/f47e972): stable per
+                // logical turn, a transport retry reuses it, and the server rejects a repeat rather
+                // than re-executing (no auto-retry is attempted by this client).
+                requestId = admittedId!!,
                 capabilities = advertisedCapabilities(),
                 routeHint = hint,
             )

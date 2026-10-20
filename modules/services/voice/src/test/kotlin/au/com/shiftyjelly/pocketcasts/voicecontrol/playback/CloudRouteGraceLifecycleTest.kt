@@ -28,9 +28,12 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class CloudRouteGraceLifecycleTest {
+
+    private val testWireId = "6f9619ff-8b86-d011-b42d-00c04fc964ff"
+
     @get:Rule
     val mainCoroutineRule = MainCoroutineRule()
 
@@ -48,7 +51,7 @@ class CloudRouteGraceLifecycleTest {
                 emit(CloudRouteEvent.Done(0, 0))
             }
         }
-        val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true) }
+        val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true, admitted = testWireId) }
         try {
             entered.await()
             advanceTimeBy(350L)
@@ -90,7 +93,7 @@ class CloudRouteGraceLifecycleTest {
                 emit(CloudRouteEvent.Done(0, 0))
             }
         }
-        val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true) }
+        val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true, admitted = testWireId) }
         try {
             terminal.await()
             runCurrent()
@@ -161,7 +164,7 @@ class CloudRouteGraceLifecycleTest {
             audioPlayer = null,
             gracePeriodSignal = signal,
         )
-        val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true) }
+        val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true, admitted = testWireId) }
         try {
             entered.await()
             advanceTimeBy(350L)
@@ -199,7 +202,7 @@ class CloudRouteGraceLifecycleTest {
                 kotlinx.coroutines.awaitCancellation()
             }
         }
-        val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true) }
+        val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true, admitted = testWireId) }
         try {
             playing.await()
             advanceTimeBy(350L)
@@ -235,7 +238,7 @@ class CloudRouteGraceLifecycleTest {
                 emit(CloudRouteEvent.Done(0, 0))
             }
         }
-        val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true) }
+        val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true, admitted = testWireId) }
         try {
             entered.await()
             signal.onAudioRouteChanged()
@@ -278,11 +281,11 @@ class CloudRouteGraceLifecycleTest {
                 }
             }
         }
-        val first = async { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true) }
+        val first = async { sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true, admitted = testWireId) }
         var second: kotlinx.coroutines.Deferred<CloudTurnResult>? = null
         try {
             firstEntered.await()
-            second = async { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, PlaybackContext(), true, origin, false) }
+            second = async { sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, PlaybackContext(), true, origin, false, admitted = testWireId) }
             secondEntered.await()
             first.join()
             assertTrue(first.isCancelled)

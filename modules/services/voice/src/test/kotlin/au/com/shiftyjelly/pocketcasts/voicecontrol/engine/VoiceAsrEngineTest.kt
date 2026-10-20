@@ -411,6 +411,177 @@ class VoiceAsrEngineTest {
         }
     }
 
+    // ── Task #78: non-content ASR output is silently discarded before any routing ──
+
+    private fun speechSegment(): Flow<VoiceSegmenterResult> = flowOf(
+        VoiceSegmenterResult.SpeechEnded(
+            listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+            speechOnsetSample = 2,
+        ),
+    )
+
+    private fun CoroutineScope.nondiscardFixture(
+        recognizer: RecordingRecognizer,
+        wakeDetected: Boolean = false,
+    ): Flow<VoiceSegmenterResult> {
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        val capture = speechSegment()
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(capture)
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        kotlinx.coroutines.runBlocking {
+            `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+                WakeWordResult(
+                    detected = wakeDetected,
+                    confidence = if (wakeDetected) 0.95f else 0f,
+                    completionSample = if (wakeDetected) 4 else 4000,
+                ),
+            )
+        }
+        engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = gracePeriodSignal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+        return capture
+    }
+
+    private fun discardAsserts(recognizer: RecordingRecognizer, handled: List<VoiceIntent>) {
+        // Silent discard: the transcript reached ASR, nothing asked the recognizer for a verdict,
+        // nothing was routed, and no cue (error included) was played.
+        assertEquals("routing was never entered", emptyList<String>(), recognizer.calls)
+        assertTrue("the recognizer was never even asked to load", !recognizer.readyAsked)
+        assertEquals("nothing routed", emptyList<VoiceIntent>(), handled)
+        verify(audioFeedbackRenderer, never()).submitEarcon(any<EarconId>())
+        engine.stop()
+    }
+
+    @Test
+    fun `a punctuation-only transcript is silently discarded before routing`() = runTest {
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        this.nondiscardFixture(recognizer)
+        val handled = mutableListOf<VoiceIntent>()
+        engine.start(
+            backend = FakeAsrBackend("."),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { handled += it },
+        )
+        advanceUntilIdle()
+        discardAsserts(recognizer, handled)
+    }
+
+    @Test
+    fun `a whitespace-only transcript is silently discarded before routing`() = runTest {
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        this.nondiscardFixture(recognizer)
+        val handled = mutableListOf<VoiceIntent>()
+        engine.start(
+            backend = FakeAsrBackend("   "),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { handled += it },
+        )
+        advanceUntilIdle()
+        discardAsserts(recognizer, handled)
+    }
+
+    @Test
+    fun `a no-wake transcript still routes exactly as before`() = runTest {
+        // PRODUCTION-ENTRY comparison for the discard guard: with the SAME wake state (no wake
+        // detected) and the same Continuous mode, a content transcript routes. Without this, the
+        // punctuation cases above would pass equally for a guard that swallowed every no-wake turn.
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        this.nondiscardFixture(recognizer, wakeDetected = false)
+        val handled = mutableListOf<VoiceIntent>()
+        engine.start(
+            backend = FakeAsrBackend("pause"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { handled += it },
+        )
+        advanceUntilIdle()
+        assertEquals(listOf(VoiceIntent.Playback.Pause), handled)
+        engine.stop()
+    }
+
+    @Test
+    fun `a wake-trimmed non-content remainder is discarded, not treated as a command`() = runTest {
+        // The rule is applied to the WAKE-TRIMMED text, not the raw one: the tokens under the wake
+        // band are dropped by WakeTranscriptTrimmer, leaving only "..." — which is not a request.
+        // (In-process backends emit tokens; without them the trimmer keeps the raw text, so this
+        // control supplies the timestamps that make the trim happen.)
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        this.nondiscardFixture(recognizer, wakeDetected = true)
+        val handled = mutableListOf<VoiceIntent>()
+        engine.start(
+            backend = FakeAsrBackend(
+                transcript = "hey auris ...",
+                tokens = listOf(
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("hey auris", 0, 100),
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrToken("...", 900, 1000),
+                ),
+            ),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { handled += it },
+        )
+        advanceUntilIdle()
+        assertEquals("nothing routed", emptyList<VoiceIntent>(), handled)
+        engine.stop()
+    }
+
+    @Test
+    fun `numeric content such as a square or fraction mark is not discarded`() = runTest {
+        // Unicode nuance from the shared rule: ² (No) and ½ (No) are numbers, so they are content.
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        this.nondiscardFixture(recognizer, wakeDetected = true)
+        val handled = mutableListOf<VoiceIntent>()
+        engine.start(
+            backend = FakeAsrBackend("\u00B2\u00BD"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { handled += it },
+        )
+        advanceUntilIdle()
+        assertEquals("numeric marks are content, so the turn still routes", listOf(VoiceIntent.Playback.Pause), handled)
+        engine.stop()
+    }
+
+    @Test
+    fun `content transcripts still route normally`() = runTest {
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
+        this.nondiscardFixture(recognizer)
+        val handled = mutableListOf<VoiceIntent>()
+        engine.start(
+            backend = FakeAsrBackend("pause"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { handled += it },
+        )
+        advanceUntilIdle()
+        assertEquals("content is not discarded", listOf(VoiceIntent.Playback.Pause), handled)
+        engine.stop()
+    }
+
     @Test
     fun `transcription initializes recognizer before matching intent`() = runTest {
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
@@ -1679,6 +1850,87 @@ class VoiceAsrEngineTest {
         engine.stop()
     }
 
+    @Test
+    fun `a chosen-route dispatch after a successor wake carries the original window and admitted ID`() = runTest {
+        // STALE-ID NEGATIVE CONTROL: recognition begins in generation 1 and mints admitted ID-A.
+        // A successor wake opens generation 2 WHILE recognition is suspended. The recognition then
+        // returns a successful cloud intent. The dispatch must carry generation 1's window stamp and
+        // ID-A — NOT generation 2's window or a new ID. This proves the admitted identity is bound
+        // to the original recognition, not the successor window.
+        val signal = GracePeriodSignal(timeoutMs = 30_000L)
+        signal.onWakeWordDetected()
+        `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
+        `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(
+            flowOf(
+                VoiceSegmenterResult.SpeechEnded(
+                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                    speechOnsetSample = 2,
+                ),
+            ),
+        )
+        `when`(utteranceFilter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
+        `when`(wakeWordDetector.detect(any(), any(), any())).thenReturn(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.wakeword.WakeWordResult(
+                detected = false,
+                confidence = 0f,
+                completionSample = 4000,
+            ),
+        )
+
+        val intents = mutableListOf<VoiceIntent>()
+        val recognizer = SuccessorWakeWithCloudResultRecognizer(
+            onSuspended = { signal.onWakeWordDetected() },
+        ) { signal.capturedGeneration() }
+        val engine = VoiceAsrEngine(
+            voiceAudioProcessor = voiceAudioProcessor,
+            utteranceFilter = utteranceFilter,
+            // Triggers a successor wake during recognition, then returns a successful cloud intent.
+            intentRecognizer = recognizer,
+            wakeWordDetector = wakeWordDetector,
+            gracePeriodSignal = signal,
+            audioFeedbackRenderer = audioFeedbackRenderer,
+            translationStage = translationStage,
+            context = context,
+        )
+        engine.scope = this
+        engine.start(
+            backend = FakeAsrBackend("play something"),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { PlaybackReference(FloatArray(0), 16_000, startPositionMs = null) },
+            micExposureProvider = { MicExposure.Exposed },
+            onIntent = { intents += it },
+        )
+        advanceUntilIdle()
+
+        assertEquals("exactly one cloud dispatch", 1, intents.size)
+        val cloud = intents.single() as VoiceIntent.CloudRoute
+        assertEquals(
+            "the dispatch carries the ORIGINAL window generation, not the successor's",
+            1L,
+            cloud.windowGeneration!!,
+        )
+        assertTrue(
+            "the dispatch carries an admitted identity",
+            !cloud.logicalRequestId.isNullOrBlank(),
+        )
+        // The successor wake advanced the generation to 2, but the dispatch stays at generation 1.
+        assertNotNull("dispatch must carry a window generation", cloud.windowGeneration)
+        assertTrue(
+            "the signal advanced past the dispatch's window (successor opened)",
+            signal.capturedGeneration() > cloud.windowGeneration,
+        )
+        assertEquals(
+            "the dispatched ID is the SAME one the recognizer received at admission",
+            recognizer.receivedLogicalRequestId,
+            cloud.logicalRequestId,
+        )
+        verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
+
+        engine.stop()
+    }
+
     /** A router that cannot load its model at all. */
     private class NotReadyRecognizer : VoiceRecognizer {
         var recognizes = 0
@@ -1688,6 +1940,7 @@ class VoiceAsrEngineTest {
         override suspend fun recognize(
             input: IntentRoutingInput,
             context: VoiceRecognitionContext,
+            logicalRequestId: String,
         ): VoiceRecognizeResult {
             recognizes += 1
             return VoiceRecognizeResult(intent = null)
@@ -1709,6 +1962,7 @@ class VoiceAsrEngineTest {
         override suspend fun recognize(
             input: IntentRoutingInput,
             context: VoiceRecognitionContext,
+            logicalRequestId: String,
         ): VoiceRecognizeResult {
             onSuspended()
             return VoiceRecognizeResult(
@@ -1725,6 +1979,41 @@ class VoiceAsrEngineTest {
                     reason = reason,
                     stageLatencyMs = emptyMap(),
                     totalLatencyMs = 5L,
+                    requestId = "test-utterance-identity",
+                ),
+            )
+        }
+
+        override fun release() = Unit
+    }
+
+    // A recognizer that opens a SUCCESSOR wake window while recognition is suspended, then returns
+    // a successful cloud intent. Used to verify the dispatch carries the ORIGINAL generation's
+    // window stamp and admitted ID — not the successor's.
+    private class SuccessorWakeWithCloudResultRecognizer(
+        private val onSuspended: () -> Unit,
+        private val currentGeneration: () -> Long,
+    ) : VoiceRecognizer {
+        var receivedLogicalRequestId: String? = null
+            private set
+
+        override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
+
+        override suspend fun recognize(
+            input: IntentRoutingInput,
+            context: VoiceRecognitionContext,
+            logicalRequestId: String,
+        ): VoiceRecognizeResult {
+            receivedLogicalRequestId = logicalRequestId
+            // Open the successor window while this recognition is in flight.
+            onSuspended()
+            return VoiceRecognizeResult(
+                intent = VoiceIntent.CloudRoute(
+                    request = input.routerTranscript,
+                    tier = VoiceIntent.CloudTier.Unknown,
+                    windowGeneration = null, // will be overwritten by engine's stamp
+                    origin = VoiceIntent.CloudRouteOrigin.ModelCall,
+                    logicalRequestId = logicalRequestId,
                 ),
             )
         }
@@ -1738,6 +2027,7 @@ class VoiceAsrEngineTest {
         override suspend fun recognize(
             input: IntentRoutingInput,
             context: VoiceRecognitionContext,
+            logicalRequestId: String,
         ): VoiceRecognizeResult = VoiceRecognizeResult(
             intent = null,
             diagnostic = RouterStageDiagnostic(
@@ -1752,6 +2042,7 @@ class VoiceAsrEngineTest {
                 reason = reason,
                 stageLatencyMs = emptyMap(),
                 totalLatencyMs = 5L,
+                requestId = "test-utterance-identity",
             ),
         )
 
@@ -1764,14 +2055,20 @@ class VoiceAsrEngineTest {
         val calls = mutableListOf<String>()
         val inputs = mutableListOf<IntentRoutingInput>()
 
+        /** True once ensureReady has been asked, so a case can assert the recognizer was CONSULTED. */
+        var readyAsked = false
+            private set
+
         override suspend fun ensureReady(): Result<Unit> {
             calls += "ensureReady"
+            readyAsked = true
             return Result.success(Unit)
         }
 
         override suspend fun recognize(
             input: IntentRoutingInput,
             context: VoiceRecognitionContext,
+            logicalRequestId: String,
         ): VoiceRecognizeResult {
             calls += "recognize:${input.routerTranscript}"
             inputs += input

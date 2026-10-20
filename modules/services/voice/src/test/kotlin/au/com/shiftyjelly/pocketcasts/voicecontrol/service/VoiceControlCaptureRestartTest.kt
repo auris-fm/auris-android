@@ -62,7 +62,6 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -576,12 +575,15 @@ class VoiceControlCaptureRestartTest {
             println("[REPRO] Phase4 final: attach=$finalAttach vadStop=$finalVadStop open=$finalOpen close=$finalClose mode=${policy.mode.value}")
             assertEquals("attachCount", 2, finalAttach)
             // The second VAD is still active at this point — only the first was torn down.
-            // vadStopCount==1 is correct here; the original assertion of 2 expected both
-            // sessions to have stopped, but the second is still running.
+            // vadStopCount==1 is correct: the first VAD stopped during the conflict,
+            // the second VAD is still running.
             assertEquals("vadStopCount", 1, finalVadStop)
             assertEquals("openCount", 2, finalOpen)
-            // closeCount may be 0 if the first stream was reused rather than closed+reopened.
-            assertTrue("closeCount should be 0 or 1", finalClose in 0..1)
+            // Both streams were handed off to the engine via RouteAcquisition.handOffStream().
+            // After handoff, release() skips closeInputStream — the engine owns teardown
+            // (RouteAcquisition.kt:293). Neither stream has been closed by the engine yet
+            // at this assertion boundary, so closeCount==0 is the correct owned state.
+            assertEquals("closeCount (engine-owned, not yet torn down)", 0, finalClose)
         } finally {
             runCatching {
                 (getField(service, "modeJob") as? kotlinx.coroutines.Job)?.cancel()

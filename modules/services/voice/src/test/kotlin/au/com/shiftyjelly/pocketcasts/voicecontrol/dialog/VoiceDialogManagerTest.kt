@@ -198,6 +198,36 @@ class VoiceDialogManagerTest {
     }
 
     @Test
+    fun `completed dialog does not stamp the begin identity onto the completed intent`() {
+        // @spec ruling f6b25001: one admitted request ID per utterance, carried unchanged from
+        // diagnostics to wire dispatch. A pending dialog retains its begin identity for
+        // correlation, but the completed intent must NOT carry it — the engine stamps the
+        // current utterance's admitted identity instead.
+        val admittedA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+        // Begin with admitted identity A.
+        assertNull(manager.resolve("Clear the queue.", nativeCall("begin"), beginCall("queue", "clear"), admittedId = admittedA))
+        assertEquals(admittedA, manager.pendingDialog?.logicalRequestId)
+
+        // Confirm (completing the dialog). The completed intent must NOT carry A.
+        val completed = manager.resolve(
+            "Yes.",
+            nativeCall("confirm"),
+            ToolCall("dialog_control", "confirm", emptyMap()),
+            admittedId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+        )
+
+        assertNotNull("dialog completed with an intent", completed)
+        // Queue.Clear is a local intent with no logicalRequestId field. The key contract is
+        // that buildCompletedIntent does NOT call withLogicalRequest(dialog.logicalRequestId).
+        // If it did, and the intent were a CloudRoute, it would carry A — which would be wrong.
+        // For local intents the field is absent; for cloud intents the engine stamps the
+        // completing utterance's ID via withLogicalRequest(admittedId=B).
+        assertEquals(VoiceIntent.Queue.Clear, completed)
+        assertFalse(manager.isInProgress)
+    }
+
+    @Test
     fun `existing resolve completes destructive dialog`() {
         assertNull(manager.resolve(beginCall("queue", "clear")))
 

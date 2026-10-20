@@ -636,10 +636,11 @@ class VoiceAsrEngineTest {
         )
 
         val intents = mutableListOf<VoiceIntent>()
+        val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
         val engine = VoiceAsrEngine(
             voiceAudioProcessor = voiceAudioProcessor,
             utteranceFilter = utteranceFilter,
-            intentRecognizer = RecordingRecognizer(VoiceIntent.Playback.Pause),
+            intentRecognizer = recognizer,
             wakeWordDetector = wakeWordDetector,
             gracePeriodSignal = signal,
             audioFeedbackRenderer = audioFeedbackRenderer,
@@ -674,8 +675,25 @@ class VoiceAsrEngineTest {
             intents.size,
         )
         assertEquals(VoiceIntent.Playback.Pause, intents.single())
-        // No error earcon for the discard (silent), and no error for the successful route.
+        // DISCARD-SPECIFIC OBSERVATIONS:
+        // 1. Translation was NOT invoked at all: both transcripts are English (no detected
+        //    language), so prepareRoutingInput skips translation. The key point is that the
+        //    discarded utterance never reaches prepareRoutingInput — the guard fires earlier.
+        verify(translationStage, never()).translate(any(), any())
+        // 2. Grace was NOT extended by the discard: the non-content path returns before
+        //    any feedback or grace interaction, so the window state is unchanged.
+        //    The second utterance still routes under the same open window.
+        // 3. No error earcon for the discard (silent), and no error for the successful route.
         verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
+        // 4. MUTATION RECEIPT: if the punctuation transcript were admitted to routing (guard
+        //    bypassed), the RecordingRecognizer would return Pause for it too, producing TWO
+        //    intents. The single-intent result proves the guard, not recognizer filtering,
+        //    prevented the first utterance from reaching the router.
+        assertEquals(
+            "recognizer was consulted exactly once (for the content utterance only)",
+            1,
+            recognizer.calls.count { it.startsWith("recognize:") },
+        )
 
         engine.stop()
     }

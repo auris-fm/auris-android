@@ -158,9 +158,12 @@ class VoiceDialogManager @Inject constructor(
             action = dialog.targetAction,
             params = dialog.filledSlots,
         )
-        // The completed intent carries the identity the DIALOG registered, so a retry of this request is
-        // recognised as the same logical request rather than as a new user act.
-        return mapper.map(call)?.withLogicalRequest(dialog.logicalRequestId)
+        // The completed intent is returned WITHOUT a logicalRequestId. The engine stamps it
+        // with the CURRENT utterance's admitted identity (the slot-filling capture), not the
+        // dialog-begin identity. One admitted request ID per utterance, carried unchanged from
+        // diagnostics to wire dispatch. The dialog's own logicalRequestId is retained for
+        // dialog/session correlation only — it is NOT the wire dispatch identity.
+        return mapper.map(call)
     }
 
     companion object {

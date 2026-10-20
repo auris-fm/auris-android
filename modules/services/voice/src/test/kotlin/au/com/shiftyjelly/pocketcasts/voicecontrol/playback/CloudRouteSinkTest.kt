@@ -3714,29 +3714,50 @@ class CloudRouteSinkTest {
     @Test
     fun `dialog-completed cloud route serializes the completing utterance identity not the begin identity`() = runTest {
         // DIALOG-TO-WIRE CONTROL: a dialog begins with utterance A, completes with utterance B.
-        // VoiceDialogManager.buildCompletedIntent returns a CloudRoute WITHOUT a logicalRequestId.
+        // VoiceDialogManager.buildCompletedIntent returns the intent WITHOUT a logicalRequestId.
         // The engine stamps B via withLogicalRequest(admittedId=B). The sink then serializes B
-        // as the wire request_id. This test exercises the composed path from dialog completion
-        // through engine stamping to sink serialization.
+        // as the wire request_id. This test composes the real dialog manager result with the
+        // actual sink dispatch path.
         val admittedA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         val admittedB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
-        // Simulate dialog completion: a CloudRoute without a logicalRequestId (as
-        // buildCompletedIntent now produces).
-        val dialogCompleted = VoiceIntent.CloudRoute(
-            request = "What is the weather tomorrow?",
-            tier = VoiceIntent.CloudTier.Unknown,
-            windowGeneration = 2L,
-            origin = VoiceIntent.CloudRouteOrigin.ModelCall,
-            logicalRequestId = null, // dialog does NOT stamp A
+        // Step 1: Real dialog manager — begin with A, complete with B.
+        val dialogManager = au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCallMapper(),
         )
+        assertNull(
+            dialogManager.resolve(
+                "Ask about weather.",
+                "<start_function_call>call:dialog_control{action:<escape>begin<escape>}<end_function_call>",
+                au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCall(
+                    name = "dialog_control",
+                    action = "begin",
+                    params = mapOf("target_tool" to "cloud_route", "target_action" to "route"),
+                ),
+                admittedId = admittedA,
+            ),
+        )
+        assertEquals(admittedA, dialogManager.pendingDialog?.logicalRequestId)
 
-        // Engine stamps the completing utterance's admitted identity.
-        val stamped = dialogCompleted.withLogicalRequest(admittedB)
+        // Complete the dialog with utterance B.
+        val completedIntent = dialogManager.resolve(
+            "What is the weather tomorrow?",
+            "<start_function_call>call:dialog_control{action:<escape>provide_slot<escape>}<end_function_call>",
+            au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCall(
+                name = "dialog_control",
+                action = "provide_slot",
+                params = mapOf("slot" to "request", "value" to "What is the weather tomorrow?"),
+            ),
+            admittedId = admittedB,
+        )
+        assertNotNull("dialog completed", completedIntent)
+
+        // Step 2: Engine stamps the completing utterance's admitted identity.
+        val stamped = completedIntent!!.withLogicalRequest(admittedB)
         val stampedCloud = stamped as VoiceIntent.CloudRoute
-        assertEquals("engine stamped B", admittedB, stampedCloud.logicalRequestId)
+        assertEquals("engine stamped B onto the dialog-completed intent", admittedB, stampedCloud.logicalRequestId)
 
-        // Sink serializes: prepareTurn uses the admitted ID as the wire request_id.
+        // Step 3: Sink serializes — prepareTurn uses the admitted ID as the wire request_id.
         val deps = TestDeps()
         val sink = deps.sink()
         val prepared = sink.prepareTurn(
@@ -3744,7 +3765,7 @@ class CloudRouteSinkTest {
             tier = stampedCloud.tier,
             context = playbackContext,
             isLiveGraceTurn = false,
-            capturedOrigin = stampedCloud.windowGeneration,
+            capturedOrigin = stampedCloud.windowGeneration ?: 0L,
             isWakeOriginated = false,
             hint = null,
             logicalRequestId = stampedCloud.logicalRequestId,

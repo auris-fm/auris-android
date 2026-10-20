@@ -332,18 +332,22 @@ class GracePeriodSignalTest {
         // Attempt a wake while the monitor is held. A correct wake writes NOTHING before it waits, so
         // the only wake-originated window is still `window`; a split wake has already written the NEXT
         // generation as wake-originated, and that window does not exist at all.
-        Thread { signal.onWakeWordDetected() }.apply { start() }
-        Thread.sleep(100)
-
-        val ahead = signal.wakeOriginatedGenerationForTest()
-        release.countDown()
-        holder.join(3_000)
-
-        assertTrue(
-            "the wake marker must not name a window ahead of the live one " +
-                "(marker=$ahead live=$window)",
-            ahead == window,
-        )
+        val wake = Thread { signal.onWakeWordDetected() }.apply { start() }
+        try {
+            Thread.sleep(100)
+            val ahead = signal.wakeOriginatedGenerationForTest()
+            assertTrue(
+                "the wake marker must not name a window ahead of the live one " +
+                    "(marker=$ahead live=$window)",
+                ahead == window,
+            )
+        } finally {
+            release.countDown()
+            holder.join(3_000)
+            wake.join(3_000)
+            assertFalse("wake must finish before the test resets Dispatchers.Main", wake.isAlive)
+            signal.onAppBackgrounded()
+        }
     }
 
     @Test

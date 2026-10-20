@@ -27,6 +27,7 @@ object VoiceLifecycleDiagnostics {
         Timeout,
         RouteChanged,
         Backgrounded,
+        BackgroundHoldPreserved,
         HoldAcquired,
         HoldRejectedPrivacy,
         HoldRejectedInactive,

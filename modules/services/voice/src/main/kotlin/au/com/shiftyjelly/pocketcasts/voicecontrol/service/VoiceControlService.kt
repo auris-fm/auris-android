@@ -285,6 +285,14 @@ class VoiceControlService : Service() {
                     }
                     when (mode) {
                         ListeningMode.Off -> {
+                            // The context group includes grace itself and can lag a new wake. End a
+                            // held window only for independently blocking capture conditions.
+                            val gateState = gate.state.value
+                            if (!gateState.setupPassed || !gateState.conflictsPassed ||
+                                audioRouteMonitor.availability.value.toMicExposure() != MicExposure.Isolated
+                            ) {
+                                gracePeriodSignal.onCaptureDisallowed()
+                            }
                             // A gate loss, route change, or Off can arrive while a start is
                             // still suspended in ensureReady(); the acquisition caller clears
                             // its own job before that suspension, so nothing else can cancel

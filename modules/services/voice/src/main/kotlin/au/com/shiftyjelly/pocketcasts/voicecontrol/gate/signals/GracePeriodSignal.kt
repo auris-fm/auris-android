@@ -101,10 +101,8 @@ class GracePeriodSignal @Inject constructor() {
      * the current one -- including when a newer window is open and active.
      */
     fun isCurrent(captured: Long): Boolean = synchronized(windowLock) {
-        // EQUAL GENERATION IS NOT ENOUGH: a window closed by a privacy event must reject even an origin
-        // that still matches numerically, because the whole point of that close is that nothing keeps
-        // listening after the app was backgrounded. Comparing numbers alone would admit a request whose
-        // window has been invalidated.
+        // A privacy close invalidates pending work even when its generation still matches.
+        // Comparing numbers alone would admit a request whose window has ended.
         captured == generation && _isActive.value && !closedByPrivacy
     }
 
@@ -144,10 +142,9 @@ class GracePeriodSignal @Inject constructor() {
 
     /**
      * True once a privacy event has closed the window and no wake has opened a
-     * new one. A close is final: neither a completion that lands afterwards nor
-     * a command can reopen it, because the whole point of the close is that
-     * nothing keeps listening after the app was backgrounded or the audio route
-     * changed. Only a new wake opens a window again.
+     * new one. Capture blockers and route changes invalidate the window: neither a late completion
+     * nor a command can reopen it. Backgrounding alone preserves an active cloud hold.
+     * Only a new wake opens an invalidated window again.
      */
     private var closedByPrivacy = false
 
@@ -171,9 +168,8 @@ class GracePeriodSignal @Inject constructor() {
     /**
      * How many closures coincided with the host's audio actually stopping.
      *
-     * Distinct from [privacyClosureCount]: backgrounding and route changes close the window without
-     * touching playback, so a caller that holds a playback obligation must not treat those as a
-     * fact about playback. Incremented by [noteHostPlaybackStopped], called from where the host's
+     * Distinct from [privacyClosureCount]: window closures do not necessarily stop playback, so a
+     * caller holding a playback obligation must not treat them as a fact about playback. Incremented by [noteHostPlaybackStopped], called from where the host's
      * own state is observable, at the boundary that owns the distinction.
      */
     private val playbackStopClosures = java.util.concurrent.atomic.AtomicLong(0)
@@ -499,11 +495,32 @@ class GracePeriodSignal @Inject constructor() {
     /** Called when audio route changes — immediately ends grace period. */
     fun onAudioRouteChanged(source: Source = Source.Route) = closeByPrivacy(Reason.RouteChanged, source)
 
-    /** Called when app goes to background — immediately ends grace period. */
-    fun onAppBackgrounded() = closeByPrivacy(Reason.Backgrounded, Source.Foreground)
+    /** Backgrounding preserves an existing cloud/audio hold; otherwise it ends grace immediately. */
+    fun onAppBackgrounded() = closeByPrivacy(Reason.Backgrounded, Source.Foreground, preserveHeld = true)
 
-    private fun closeByPrivacy(reason: Reason, source: Source) {
+    /** Capture blockers invalidate even a held window; clearing a blocker cannot reopen it. */
+    fun onCaptureDisallowed() = closeByPrivacy(Reason.EligibilityOff, Source.Gate)
+
+    private fun closeByPrivacy(reason: Reason, source: Source, preserveHeld: Boolean = false) {
         val ended = synchronized(windowLock) {
+            if (reason == Reason.EligibilityOff && closedByPrivacy) return@synchronized null
+            // Test the hold under the same lock as closure: completion and background cannot disagree
+            // about which transition happened first.
+            if (preserveHeld && cloudTurns.isNotEmpty()) {
+                Trace.record(
+                    Event(
+                        Kind.Window,
+                        Reason.BackgroundHoldPreserved,
+                        source,
+                        generation = generation,
+                        previousActive = _isActive.value,
+                        active = _isActive.value,
+                        holdsBefore = cloudTurns.size,
+                        holdsAfter = cloudTurns.size,
+                    ),
+                )
+                return@synchronized null
+            }
             Trace.record(
                 Event(
                     Kind.Window,
@@ -522,7 +539,7 @@ class GracePeriodSignal @Inject constructor() {
             closedByPrivacy = true
             _isActive.value = false
             generation
-        }
+        } ?: return
         onWindowEnded?.invoke(ended)
     }
 }

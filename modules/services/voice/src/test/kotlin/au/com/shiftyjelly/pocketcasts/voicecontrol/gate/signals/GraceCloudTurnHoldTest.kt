@@ -17,6 +17,25 @@ class GraceCloudTurnHoldTest {
     val mainCoroutineRule = MainCoroutineRule()
 
     @Test
+    fun `capture disallowance latches once even after grace has expired`() = runTest {
+        val signal = GracePeriodSignal(timeoutMs = 100L)
+        signal.onWakeWordDetected()
+        advanceTimeBy(100L)
+        runCurrent()
+        assertFalse(signal.isActive.value)
+        val before = signal.privacyClosureCount()
+        signal.onCaptureDisallowed()
+        signal.onCaptureDisallowed()
+        assertTrue("a capture blocker invalidates pending completions even after timeout", signal.isClosedByPrivacy())
+        assertEquals("repeated blocked observations are one closure", before + 1, signal.privacyClosureCount())
+        signal.onCommandRecognized()
+        assertFalse("late recognition cannot restore blocked grace", signal.isActive.value)
+        signal.onWakeWordDetected()
+        assertTrue(signal.isActive.value)
+        signal.onAppBackgrounded()
+    }
+
+    @Test
     fun `only a live matching origin can acquire a hold`() = runTest {
         val signal = GracePeriodSignal(timeoutMs = 100L)
         assertNull(signal.holdCloudTurn())

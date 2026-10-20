@@ -2,7 +2,6 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ProducerScope
 import kotlinx.coroutines.channels.awaitClose
@@ -37,10 +36,8 @@ class WebSocketCloudTurnTransport(
         // bounded channel, we either deliver or fail the turn explicitly.
         val channel = Channel<CloudRouteEvent>(4096)
 
-        // The requested codec is a fallback; the server's auth response supplies the
-        // negotiated codec that binary frames should carry.
-        val requestedCodec = (frame as CloudTurnFrame.Authenticate).codecs.firstOrNull().orEmpty()
-        val negotiatedCodec = AtomicReference<String>(requestedCodec)
+        val offeredCodecs = (frame as CloudTurnFrame.Authenticate).codecs
+        val negotiatedCodec = AtomicReference<String?>(null)
         val request = Request.Builder()
             .url(baseUrl.trimEnd('/') + ROUTE_PATH)
             .build()
@@ -63,6 +60,10 @@ class WebSocketCloudTurnTransport(
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 val codec = negotiatedCodec.get()
+                if (codec == null) {
+                    emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""))
+                    return
+                }
                 emitOrFail(channel, CloudRouteEvent.AudioFrame(codec = codec, bytes = bytes.toByteArray()))
             }
 
@@ -76,8 +77,13 @@ class WebSocketCloudTurnTransport(
                     )
                 } else if (event is CloudRouteEvent.Connected) {
                     // The handshake is where the negotiated codec arrives; binary frames carry it.
-                    negotiatedCodec.set(event.codec.ifBlank { requestedCodec })
-                    emitOrFail(channel, event)
+                    if (event.codec !in offeredCodecs || !negotiatedCodec.compareAndSet(null, event.codec)) {
+                        emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""))
+                    } else {
+                        emitOrFail(channel, event)
+                    }
+                } else if (negotiatedCodec.get() == null && event !is CloudRouteEvent.Error) {
+                    emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""))
                 } else {
                     emitOrFail(channel, event)
                 }

@@ -49,6 +49,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -687,12 +688,19 @@ class VoiceAsrEngineTest {
         verify(translationStage, never()).ensureReady("yue")
         verify(translationStage, never()).translate(any(), eq("yue"))
         // 2. Grace was NOT extended by the discard: the non-content path returns before
-        //    any feedback or grace interaction. Verify via the signal's captured generation
-        //    — only one wake opened the window, and the discard did not re-arm it.
-        assertEquals(
-            "grace window is still the original (no extra renewal from discard)",
-            1L,
-            signal.capturedGeneration(),
+        //    any feedback or grace interaction. capturedGeneration() alone cannot distinguish
+        //    a timer reset within the same generation (onCommandRecognized extends without
+        //    advancing). Use the timer job identity: if the discard re-armed the timer, the
+        //    job reference would change. Capture the job after both utterances and compare
+        //    to the post-wake baseline.
+        val postWakeTimerJob = signal.timerJobForTest()
+        assertNotNull("wake armed a timer", postWakeTimerJob)
+        // After processing both utterances, the timer job must be the SAME instance.
+        // A discard that called onCommandRecognized would have cancelled and re-created it.
+        assertSame(
+            "discard did not re-arm the grace timer (same job identity)",
+            postWakeTimerJob,
+            signal.timerJobForTest(),
         )
         // 3. No error earcon for the discard (silent), and no error for the successful route.
         verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)

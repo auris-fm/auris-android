@@ -16,6 +16,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolv
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.PlaybackContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
+import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.withLogicalRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
@@ -3707,6 +3708,59 @@ class CloudRouteSinkTest {
             "and the unconfirmed reservation again leaves playback untouched (unconfirmed=$unconfirmedOk)",
             emptyList<String>(),
             unconfirmedOk,
+        )
+    }
+
+    @Test
+    fun `dialog-completed cloud route serializes the completing utterance identity not the begin identity`() = runTest {
+        // DIALOG-TO-WIRE CONTROL: a dialog begins with utterance A, completes with utterance B.
+        // VoiceDialogManager.buildCompletedIntent returns a CloudRoute WITHOUT a logicalRequestId.
+        // The engine stamps B via withLogicalRequest(admittedId=B). The sink then serializes B
+        // as the wire request_id. This test exercises the composed path from dialog completion
+        // through engine stamping to sink serialization.
+        val admittedA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        val admittedB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+        // Simulate dialog completion: a CloudRoute without a logicalRequestId (as
+        // buildCompletedIntent now produces).
+        val dialogCompleted = VoiceIntent.CloudRoute(
+            request = "What is the weather tomorrow?",
+            tier = VoiceIntent.CloudTier.Unknown,
+            windowGeneration = 2L,
+            origin = VoiceIntent.CloudRouteOrigin.ModelCall,
+            logicalRequestId = null, // dialog does NOT stamp A
+        )
+
+        // Engine stamps the completing utterance's admitted identity.
+        val stamped = dialogCompleted.withLogicalRequest(admittedB)
+        val stampedCloud = stamped as VoiceIntent.CloudRoute
+        assertEquals("engine stamped B", admittedB, stampedCloud.logicalRequestId)
+
+        // Sink serializes: prepareTurn uses the admitted ID as the wire request_id.
+        val deps = TestDeps()
+        val sink = deps.sink()
+        val prepared = sink.prepareTurn(
+            request = stampedCloud.request,
+            tier = stampedCloud.tier,
+            context = playbackContext,
+            isLiveGraceTurn = false,
+            capturedOrigin = stampedCloud.windowGeneration,
+            isWakeOriginated = false,
+            hint = null,
+            logicalRequestId = stampedCloud.logicalRequestId,
+            isRetry = false,
+            sourceLanguage = null,
+        )!!
+
+        assertEquals(
+            "serialized wire request_id is B (the completing utterance), not A (the begin identity)",
+            admittedB,
+            prepared.requestId,
+        )
+        assertNotEquals(
+            "wire request_id must NOT be the begin identity",
+            admittedA,
+            prepared.requestId,
         )
     }
 }

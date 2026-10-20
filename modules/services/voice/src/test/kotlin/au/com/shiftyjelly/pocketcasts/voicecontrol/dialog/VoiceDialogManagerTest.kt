@@ -226,7 +226,7 @@ class VoiceDialogManagerTest {
     }
 
     @Test
-    fun `begin A complete B carries B on the serialized cloud wire`() {
+    fun `begin A complete B leaves completed intent unstamped for engine to fill with B`() {
         // REGRESSION CONTROL: dialog begins with utterance A, completes with utterance B,
         // and the completed CloudRoute intent carries B — not A — as its wire identity.
         // This is the real serialized-wire assertion, not just a local-intent boundary check.

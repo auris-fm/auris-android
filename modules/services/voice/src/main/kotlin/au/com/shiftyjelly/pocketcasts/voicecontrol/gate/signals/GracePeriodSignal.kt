@@ -1,5 +1,9 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Event
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Kind
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Reason
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Source
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -10,6 +14,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics as Trace
 
 /**
  * Tracks the conversation grace period that starts/resets when a command is recognized
@@ -217,28 +222,61 @@ class GracePeriodSignal @Inject constructor() {
     private val windowLock = Any()
 
     /** Opaque ownership for work that must finish before the inactivity countdown resumes. */
-    class CloudTurnHold internal constructor(internal val generation: Long)
+    class CloudTurnHold internal constructor(internal val generation: Long, internal val owner: Long?)
 
     private val cloudTurns = mutableSetOf<CloudTurnHold>()
 
     /** Holds only an already-live window; an old request cannot borrow its successor's grace. */
-    fun holdCloudTurn(fromGeneration: Long? = null): CloudTurnHold? = synchronized(windowLock) {
-        if (closedByPrivacy || !_isActive.value ||
-            (fromGeneration != null && fromGeneration != generation)
-        ) {
+    fun holdCloudTurn(fromGeneration: Long? = null, owner: Long? = null): CloudTurnHold? = synchronized(windowLock) {
+        val refusal = when {
+            closedByPrivacy -> Reason.HoldRejectedPrivacy
+            !_isActive.value -> Reason.HoldRejectedInactive
+            fromGeneration != null && fromGeneration != generation -> Reason.HoldRejectedGeneration
+            else -> null
+        }
+        if (refusal != null) {
+            Trace.record(
+                Event(
+                    Kind.Hold, refusal, Source.Grace, generation = generation, active = _isActive.value,
+                    holdsBefore = cloudTurns.size, holdsAfter = cloudTurns.size, owner = owner, requestedGeneration = fromGeneration,
+                ),
+            )
             return@synchronized null
         }
-        CloudTurnHold(generation).also {
+        val before = cloudTurns.size
+        CloudTurnHold(generation, owner).also {
             cloudTurns += it
             timerJob?.cancel()
             timerJob = null
+            Trace.record(
+                Event(
+                    Kind.Hold, Reason.HoldAcquired, Source.Grace, generation = generation, active = true,
+                    holdsBefore = before, holdsAfter = cloudTurns.size, owner = owner, requestedGeneration = fromGeneration,
+                ),
+            )
         }
     }
 
     /** Called after turn termination and local playback drain/clear, including failure cleanup. */
-    fun finishCloudTurn(hold: CloudTurnHold) {
+    fun finishCloudTurn(hold: CloudTurnHold, cancelled: Boolean = false) {
         val armFor = synchronized(windowLock) {
-            if (!cloudTurns.remove(hold)) return@synchronized null
+            val before = cloudTurns.size
+            val removed = cloudTurns.remove(hold)
+            Trace.record(
+                Event(
+                    Kind.Hold,
+                    if (!removed) {
+                        Reason.HoldReleaseIgnored
+                    } else if (cancelled) {
+                        Reason.HoldCancelled
+                    } else {
+                        Reason.HoldReleased
+                    },
+                    Source.Grace, generation = generation, active = _isActive.value, holdsBefore = before, holdsAfter = cloudTurns.size,
+                    owner = hold.owner, requestedGeneration = hold.generation,
+                ),
+            )
+            if (!removed) return@synchronized null
             if (hold.generation != generation || closedByPrivacy || !_isActive.value || cloudTurns.isNotEmpty()) {
                 return@synchronized null
             }
@@ -280,6 +318,18 @@ class GracePeriodSignal @Inject constructor() {
             // or the check does not constrain the act at all.
             val armFor = synchronized(windowLock) {
                 if (fromGeneration != generation || !_isActive.value) return@synchronized null
+                Trace.record(
+                    Event(
+                        Kind.Window,
+                        Reason.Extended,
+                        Source.Grace,
+                        generation = generation,
+                        previousActive = _isActive.value,
+                        active = true,
+                        holdsBefore = cloudTurns.size,
+                        holdsAfter = cloudTurns.size,
+                    ),
+                )
                 _isActive.value = true
                 // Restoring is a separate question from touching the window: a deliberate route earns
                 // the next dispatch, an escalation does not.
@@ -297,7 +347,7 @@ class GracePeriodSignal @Inject constructor() {
         // privacy close landing between them would otherwise open a window the close had just ended.
         val ended = synchronized(windowLock) {
             if (closedByPrivacy) return@synchronized null
-            openWindowLocked()
+            openWindowLocked(Reason.RecognizedCommand)
         }
         // THE REPLACED WINDOW IS REPORTED HERE TOO. This branch was discarding the return, so an
         // unstamped command that REPLACED a window retired nothing -- the same "a replacement is an
@@ -317,7 +367,7 @@ class GracePeriodSignal @Inject constructor() {
         // captured under it prepares CREATE even if an older conversation handle exists.
         val ended = synchronized(windowLock) {
             closedByPrivacy = false
-            val previous = openWindowLocked()
+            val previous = openWindowLocked(Reason.Wake)
             wakeGeneration = generation
             previous
         }
@@ -378,7 +428,7 @@ class GracePeriodSignal @Inject constructor() {
      * Returns the generation that ENDED, which the caller reports OUTSIDE the monitor: a callback that
      * runs other components' code inside the lock could deadlock against a component calling back in.
      */
-    private fun openWindowLocked(): Long {
+    private fun openWindowLocked(reason: Reason = Reason.RecognizedCommand): Long {
         // OPENING A WINDOW ENDS THE PREVIOUS ONE. A wake replaces the window in force, so whatever that
         // window was holding stops being retryable at THIS moment -- not when some later request happens
         // to be admitted. Without it, a replaced window whose successor never runs a request kept its
@@ -390,6 +440,8 @@ class GracePeriodSignal @Inject constructor() {
         // AFTER the counter has advanced -- the notification reports the window that ended, which is the
         // previous generation, not the one now current.
         val previous = generation
+        val wasActive = _isActive.value
+        val held = cloudTurns.size
         cloudTurns.clear()
         generation += 1
         // EACH WINDOW HAS ITS OWN ALLOWANCE, so opening one CLEARS the spent marker: otherwise a claim
@@ -398,6 +450,17 @@ class GracePeriodSignal @Inject constructor() {
         escalatedGeneration = -1L
         _isActive.value = true
         armTimerForLocked(ownedGeneration = generation)
+        val transitionReason = if (wasActive) {
+            if (reason == Reason.Wake) Reason.SuccessorWake else Reason.SuccessorCommand
+        } else {
+            reason
+        }
+        Trace.record(
+            Event(
+                Kind.Window, transitionReason, Source.Grace, generation = generation, previousGeneration = previous,
+                previousActive = wasActive, active = true, holdsBefore = held, holdsAfter = 0,
+            ),
+        )
         return previous
     }
 
@@ -457,6 +520,18 @@ class GracePeriodSignal @Inject constructor() {
             if (ownedGeneration != generation) return@synchronized null
             if (timerJob !== thisTimer) return@synchronized null
             if (cloudTurns.isNotEmpty()) return@synchronized null
+            Trace.record(
+                Event(
+                    Kind.Window,
+                    Reason.Timeout,
+                    Source.Grace,
+                    generation = generation,
+                    previousActive = _isActive.value,
+                    active = false,
+                    holdsBefore = cloudTurns.size,
+                    holdsAfter = 0,
+                ),
+            )
             _isActive.value = false
             ownedGeneration
         } ?: return@launch
@@ -487,13 +562,25 @@ class GracePeriodSignal @Inject constructor() {
     var onWindowEnded: ((generation: Long) -> Unit)? = null
 
     /** Called when audio route changes — immediately ends grace period. */
-    fun onAudioRouteChanged() = closeByPrivacy()
+    fun onAudioRouteChanged(source: Source = Source.Route) = closeByPrivacy(Reason.RouteChanged, source)
 
     /** Called when app goes to background — immediately ends grace period. */
-    fun onAppBackgrounded() = closeByPrivacy()
+    fun onAppBackgrounded() = closeByPrivacy(Reason.Backgrounded, Source.Foreground)
 
-    private fun closeByPrivacy() {
+    private fun closeByPrivacy(reason: Reason, source: Source) {
         val ended = synchronized(windowLock) {
+            Trace.record(
+                Event(
+                    Kind.Window,
+                    reason,
+                    source,
+                    generation = generation,
+                    previousActive = _isActive.value,
+                    active = false,
+                    holdsBefore = cloudTurns.size,
+                    holdsAfter = 0,
+                ),
+            )
             privacyClosures.incrementAndGet()
             timerJob?.cancel()
             cloudTurns.clear()

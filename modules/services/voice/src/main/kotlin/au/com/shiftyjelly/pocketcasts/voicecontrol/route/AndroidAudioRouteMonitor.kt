@@ -8,6 +8,7 @@ import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import androidx.core.content.ContextCompat
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Source
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -90,7 +91,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
     // (`BluetoothA2dpOnly` → `Exposed`) even after SCO/BLE selection, and the gate has no new
     // route to act on.
     private val communicationDeviceListener = AudioManager.OnCommunicationDeviceChangedListener {
-        refreshRouteNow()
+        refreshRouteNow(Source.CommunicationDevice)
     }
 
     @Suppress("DEPRECATION") // SCO state has no replacement broadcast; the actions are deprecated, not unused
@@ -99,7 +100,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
             if (intent.action == AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED ||
                 intent.action == AudioManager.ACTION_SCO_AUDIO_STATE_CHANGED
             ) {
-                refreshRouteNow()
+                refreshRouteNow(Source.ScoState)
             }
         }
     }
@@ -121,7 +122,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
         // transition and is taken here, once per event, against the window current when that event
         // arrived — waiting on the debounce would defer it, and a burst cancels the pending job, so a
         // burst cannot defer it either.
-        gracePeriodSignal.onAudioRouteChanged()
+        gracePeriodSignal.onAudioRouteChanged(Source.Devices)
 
         debounceJob?.cancel()
         debounceJob = scope.launch {
@@ -133,7 +134,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
 
     // Selection changes are discrete and leave the device list untouched, so they need no
     // debounce: the route is re-read from the selected state immediately.
-    private fun refreshRouteNow() {
+    private fun refreshRouteNow(source: Source) {
         debounceJob?.cancel()
         mutableRoute.value = readRoute()
         // SELECTION AND SCO STATE CHANGE AVAILABILITY TOO: readAvailability() reads the selected
@@ -142,7 +143,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
         // (connected AirPods stay BluetoothA2dpOnly -> Exposed after acquisition selects them, and the
         // listening mode can never leave Off).
         mutableAvailability.value = readAvailability()
-        gracePeriodSignal.onAudioRouteChanged()
+        gracePeriodSignal.onAudioRouteChanged(source)
     }
 
     /**
@@ -157,7 +158,7 @@ class AndroidAudioRouteMonitor @Inject constructor(
         mutableRoute.value = AudioRoute.Headset(hasMicrophone = true)
         // The confirmed selection is also availability's newest answer -- see refreshRouteNow().
         mutableAvailability.value = readAvailability()
-        gracePeriodSignal.onAudioRouteChanged()
+        gracePeriodSignal.onAudioRouteChanged(Source.Acquisition)
     }
 
     init {

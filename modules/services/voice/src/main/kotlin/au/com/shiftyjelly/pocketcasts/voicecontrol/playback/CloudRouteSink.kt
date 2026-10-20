@@ -15,6 +15,10 @@ import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudConfig
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.CloudIdentity
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintTimingManager
 import au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Event
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Kind
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Reason
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Source
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
@@ -27,6 +31,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
@@ -35,6 +40,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import timber.log.Timber
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics as Trace
 
 @Singleton
 class CloudRouteSink internal constructor(
@@ -442,7 +448,8 @@ class CloudRouteSink internal constructor(
             Timber.w("[CloudRoute] answer audio was cut short by a sink refusal at %d frames", frames)
         }
 
-        val graceHold = gracePeriodSignal?.holdCloudTurn(prepared?.capturedOrigin ?: capturedOrigin)
+        var endReason = Reason.TurnEnded
+        val graceHold = gracePeriodSignal?.holdCloudTurn(prepared?.capturedOrigin ?: capturedOrigin, owner = myId)
 
         // Everything from registration onward sits inside the cleanup path: a
         // throw or cancellation during setup (context build, route opening, the
@@ -497,6 +504,7 @@ class CloudRouteSink internal constructor(
                 capabilities = advertisedCapabilities(),
                 routeHint = hint,
             )
+            Trace.record(Event(Kind.Turn, Reason.TurnStarted, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
             val events = openRoute(turn)
 
             // Hold the user's place: pause the host for the turn, and remember the obligation
@@ -781,6 +789,12 @@ class CloudRouteSink internal constructor(
                     }
                 }
             }
+        } catch (cancelled: CancellationException) {
+            endReason = Reason.TurnCancelled
+            throw cancelled
+        } catch (failure: Exception) {
+            endReason = Reason.TurnFailed
+            throw failure
         } finally {
             // Any exit path — normal return, upstream cancellation, timeouts,
             // unexpected throws — must not leave playback paused silently.
@@ -818,7 +832,16 @@ class CloudRouteSink internal constructor(
                     }
                 }
             } finally {
-                graceHold?.let { gracePeriodSignal.finishCloudTurn(it) }
+                Trace.record(
+                    Event(
+                        Kind.Turn,
+                        if (myJob?.isCancelled == true) Reason.TurnCancelled else endReason,
+                        Source.Cloud,
+                        generation = originForAdmission,
+                        owner = myId,
+                    ),
+                )
+                graceHold?.let { gracePeriodSignal.finishCloudTurn(it, cancelled = endReason == Reason.TurnCancelled || myJob?.isCancelled == true) }
             }
         }
         return CloudTurnResult(

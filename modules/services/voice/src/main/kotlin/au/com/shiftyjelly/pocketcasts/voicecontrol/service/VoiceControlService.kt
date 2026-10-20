@@ -14,6 +14,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackendSelector
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.CanaryFlashBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.SenseVoiceBackend
 import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.WhisperCppBackend
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Event
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Kind
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Reason
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Source
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.PlaybackBufferRecorder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
@@ -56,6 +60,7 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import timber.log.Timber
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics as Trace
 
 @AndroidEntryPoint
 class VoiceControlService : Service() {
@@ -258,6 +263,14 @@ class VoiceControlService : Service() {
                     val decision = "mode=$mode route=$route exposure=$micExposure " +
                         "gateAllowed=${gate.state.value.allowed} acquiring=${acquisitionJob != null}"
                     if (decision != lastObserverDecision) {
+                        Trace.record(
+                            Event(
+                                Kind.Eligibility, Reason.Observed, Source.ServiceObserver,
+                                generation = gracePeriodSignal.currentGeneration, owner = engineStart.generation().toLong(), gate = Trace.gateMask(gate.state.value),
+                                previousMode = currentMode, mode = mode, previousCapture = engineStart.isStarted,
+                                route = route, availability = audioRouteMonitor.availability.value, acquiring = acquisitionJob != null,
+                            ),
+                        )
                         lastObserverDecision = decision
                         Timber.d("[VoicePipeline] observer: %s", decision)
                     }
@@ -294,7 +307,7 @@ class VoiceControlService : Service() {
                                     it == EnabledByUserCondition.ID
                                 }
                                 logCaptureStopped(reasons, isUserRequested)
-                                stopEngine()
+                                stopEngine(Reason.EligibilityOff)
                             } else if (!acquireExternalMicrophoneIfCandidate() &&
                                 !captureWasEverActive && !acquisitionLogged
                             ) {
@@ -581,6 +594,14 @@ class VoiceControlService : Service() {
                     wakeWordRequired = mode == ListeningMode.WakeWord,
                 )
                 notificationManager.notify(notification)
+                Trace.record(
+                    Event(
+                        Kind.Capture, Reason.CaptureStarted, Source.ServiceObserver,
+                        generation = gracePeriodSignal.currentGeneration, owner = generation.toLong(), gate = Trace.gateMask(gate.state.value),
+                        previousMode = currentMode, mode = mode, previousCapture = false, capture = true,
+                        route = audioRouteMonitor.route.value, availability = audioRouteMonitor.availability.value,
+                    ),
+                )
                 Timber.i("[VoicePipeline] engine started mode=%s", mode)
             },
         )
@@ -613,6 +634,13 @@ class VoiceControlService : Service() {
         // A runtime stop, not a user request: the spec requires `mic_capture_stopped` at ERROR with
         // the runtime reason `capture_failure`, so lifecycle monitoring sees it.
         logCaptureStopped(REASON_CAPTURE_FAILURE, isUserRequested = false)
+        Trace.record(
+            Event(
+                Kind.Capture, Reason.PipelineTerminated, Source.CapturePipeline,
+                generation = gracePeriodSignal.currentGeneration, owner = generation.toLong(), gate = Trace.gateMask(gate.state.value),
+                previousMode = currentMode, mode = ListeningMode.Off, previousCapture = engineStart.isStarted, capture = false,
+            ),
+        )
         clearCaptureState()
         recoverCapture()
     }
@@ -753,15 +781,24 @@ class VoiceControlService : Service() {
         }
     }
 
-    private fun stopEngine() {
+    private fun stopEngine(reason: Reason = Reason.ServiceStopped) {
         acquisitionJob?.cancel()
         acquisitionJob = null
         // Stop the engine before releasing acquisition routing: the engine tears down the
         // stream it owns in its own flow `finally`, and release() must never delete a live
         // capture. After hand-off release() only undoes the acquired routing.
         if (engineStart.isStarted) {
+            val priorMode = currentMode
+            val priorOwner = engineStart.generation().toLong()
             voiceAsrEngine.get().stop()
             clearCaptureState()
+            Trace.record(
+                Event(
+                    Kind.Capture, reason, if (reason == Reason.EligibilityOff) Source.ServiceObserver else Source.ServiceStop,
+                    generation = gracePeriodSignal.currentGeneration, owner = priorOwner, gate = Trace.gateMask(gate.state.value),
+                    previousMode = priorMode, mode = ListeningMode.Off, previousCapture = true, capture = false,
+                ),
+            )
             Timber.i("[VoicePipeline] engine stopped")
         } else {
             routeAcquisition.release()

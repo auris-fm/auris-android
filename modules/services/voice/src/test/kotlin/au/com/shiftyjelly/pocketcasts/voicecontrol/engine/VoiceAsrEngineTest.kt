@@ -2182,11 +2182,11 @@ class VoiceAsrEngineTest {
 
     @Test
     fun `engine-stamped dialog completion flows through sink to CloudTurnRoute authenticate frame`() = runTest {
-        // COMPOSED ENGINE→ROUTE CONTROL: the engine processes an utterance whose router result
-        // is a dialog-completed CloudRoute (no logicalRequestId). The engine stamps it with
-        // the utterance's admittedId. We capture that stamped intent, then drive it through
-        // the real CloudRouteSink → CloudTurnRoute to verify the Authenticate frame carries
-        // the engine-stamped ID.
+        // COMPOSED ENGINE→ROUTE CONTROL: a real dialog begins with utterance A, then the engine
+        // processes utterance B which completes the dialog. The real dialog manager returns a
+        // CloudRoute without logicalRequestId. The engine stamps it with B's admittedId.
+        // The stamped intent is driven through real CloudRouteSink → CloudTurnRoute.
+        val admittedA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
         val signal = GracePeriodSignal(timeoutMs = 30_000L)
         signal.onWakeWordDetected()
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
@@ -2208,9 +2208,28 @@ class VoiceAsrEngineTest {
             ),
         )
 
+        // Set up a REAL dialog manager with a pending dialog begun by utterance A.
+        val dialogManager = au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManager(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCallMapper(),
+        )
+        assertNull(
+            dialogManager.resolve(
+                "Ask about weather.",
+                "<start_function_call>call:dialog_control{action:<escape>begin<escape>}<end_function_call>",
+                au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCall(
+                    name = "dialog_control",
+                    action = "begin",
+                    params = mapOf("target_tool" to "cloud_route", "target_action" to "route"),
+                ),
+                admittedId = admittedA,
+            ),
+        )
+        assertEquals(admittedA, dialogManager.pendingDialog?.logicalRequestId)
+
         // Capture the engine-stamped intent.
         val engineIntents = mutableListOf<VoiceIntent>()
         var engineAdmittedId: String? = null
+        // The recognizer uses the REAL dialog manager to complete the dialog with utterance B.
         val recognizer = object : VoiceRecognizer {
             override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
             override suspend fun recognize(
@@ -2219,15 +2238,18 @@ class VoiceAsrEngineTest {
                 logicalRequestId: String,
             ): VoiceRecognizeResult {
                 engineAdmittedId = logicalRequestId
-                return VoiceRecognizeResult(
-                    intent = VoiceIntent.CloudRoute(
-                        request = "What is the weather?",
-                        tier = VoiceIntent.CloudTier.Unknown,
-                        windowGeneration = null,
-                        origin = VoiceIntent.CloudRouteOrigin.ModelCall,
-                        logicalRequestId = null, // dialog-completed: no identity
+                // Complete the real dialog with this utterance (B).
+                val completedIntent = dialogManager.resolve(
+                    "What is the weather?",
+                    "<start_function_call>call:dialog_control{action:<escape>provide_slot<escape>}<end_function_call>",
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.intent.ToolCall(
+                        name = "dialog_control",
+                        action = "provide_slot",
+                        params = mapOf("slot" to "request", "value" to "What is the weather?"),
                     ),
+                    admittedId = logicalRequestId,
                 )
+                return VoiceRecognizeResult(intent = completedIntent)
             }
             override fun release() = Unit
         }
@@ -2263,12 +2285,32 @@ class VoiceAsrEngineTest {
             stampedCloud.logicalRequestId,
         )
 
-        // Step 2: Drive the engine-stamped intent through real sink → CloudTurnRoute.
-        val authFrames = mutableListOf<au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame.Authenticate>()
-        val capturingTransport = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport {
-            override fun exchange(frame: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame): kotlinx.coroutines.flow.Flow<au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent> = kotlinx.coroutines.flow.flow {
-                authFrames += frame as au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnFrame.Authenticate
-                emit(au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent.Done(1, 0))
+        // Step 2: Drive the engine-stamped intent through real sink → real WebSocket transport.
+        val sentTextFrames = mutableListOf<String>()
+        val mockSocket = object : okhttp3.WebSocket {
+            override fun cancel() = Unit
+            override fun close(code: Int, reason: String?) = true
+            override fun queueSize(): Long = 0
+            override fun request(): okhttp3.Request = okhttp3.Request.Builder().url("https://example.com").build()
+            override fun send(text: String): Boolean {
+                sentTextFrames += text
+                return true
+            }
+            override fun send(bytes: okio.ByteString): Boolean = true
+        }
+        val wsClient = object : okhttp3.OkHttpClient() {
+            override fun newWebSocket(request: okhttp3.Request, listener: okhttp3.WebSocketListener): okhttp3.WebSocket {
+                listener.onOpen(
+                    mockSocket,
+                    okhttp3.Response.Builder()
+                        .code(101).message("Switching Protocols")
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .request(request).build(),
+                )
+                listener.onMessage(mockSocket, """{"type":"connected","codec":"pcm_s16le@24k","reservation_id":"r-1"}""")
+                listener.onMessage(mockSocket, """{"type":"done","outcome":"completed","usage":{"input_tokens":0,"output_tokens":0,"speech":{"amount":0,"unit":"characters"}}}""")
+                listener.onClosed(mockSocket, 1000, "")
+                return mockSocket
             }
         }
         val realRoute = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnRoute(
@@ -2277,7 +2319,10 @@ class VoiceAsrEngineTest {
                 override suspend fun currentToken(): String = "test-token"
                 override suspend fun refreshToken() = Unit
             },
-            transport = capturingTransport,
+            transport = au.com.shiftyjelly.pocketcasts.repositories.cloud.WebSocketCloudTurnTransport(
+                "https://example.com",
+                wsClient,
+            ),
         )
         val conversationAdmission = au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudConversationAdmission()
         val sink = au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSink(
@@ -2328,12 +2373,16 @@ class VoiceAsrEngineTest {
         )!!
         sink.dispatchPrepared(prepared)
 
-        // Step 3: Verify the Authenticate frame carries the engine-stamped ID.
-        assertEquals("one Authenticate frame created", 1, authFrames.size)
-        assertEquals(
-            "Authenticate frame carries the engine-stamped admitted ID",
-            engineAdmittedId,
-            authFrames.single().requestId,
+        // Step 3: Verify the encoded wire frame carries the engine-stamped ID.
+        assertTrue("at least one text frame sent", sentTextFrames.isNotEmpty())
+        val encodedFrame = sentTextFrames.first()
+        assertTrue(
+            "encoded wire frame carries the engine-stamped admitted ID (frame=$encodedFrame)",
+            encodedFrame.contains("\"request_id\":\"$engineAdmittedId\""),
+        )
+        assertFalse(
+            "encoded wire frame must NOT carry the begin identity A (frame=$encodedFrame)",
+            encodedFrame.contains(admittedA),
         )
     }
 

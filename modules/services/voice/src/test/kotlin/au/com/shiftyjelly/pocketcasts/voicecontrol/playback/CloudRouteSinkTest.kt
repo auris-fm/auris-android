@@ -3816,4 +3816,56 @@ class CloudRouteSinkTest {
             authFrame.requestId,
         )
     }
+
+    @Test
+    fun `transport diagnostics record auth, socket, terminal and feedback boundaries`() = runTest {
+        val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
+        try {
+            val deps = TestDeps(
+                routeInvoker = {
+                    flowOf(
+                        CloudRouteEvent.Connected("pcm_s16le@24k"),
+                        CloudRouteEvent.Done(0, 0),
+                    )
+                },
+            )
+            val sink = deps.sink()
+            deps.conversationAdmission.beginOrigin(1)
+            val prepared = sink.prepareTurn("question", VoiceIntent.CloudTier.Premium, playbackContext, capturedOrigin = 1, logicalRequestId = testWireId)!!
+            sink.dispatchPrepared(prepared)
+
+            val lines = capture.lines()
+            assertTrue("TurnAuthResolved recorded", lines.any { it.contains("reason=TurnAuthResolved") && it.contains("request_id=$testWireId") })
+            assertTrue("TurnSocketOpened recorded", lines.any { it.contains("reason=TurnSocketOpened") && it.contains("request_id=$testWireId") })
+            assertTrue("TurnTerminalReceived recorded", lines.any { it.contains("reason=TurnTerminalReceived") && it.contains("request_id=$testWireId") })
+            assertTrue("TurnFeedbackSelected recorded", lines.any { it.contains("reason=TurnFeedbackSelected") && it.contains("request_id=$testWireId") })
+        } finally {
+            capture.close()
+        }
+    }
+
+    @Test
+    fun `transport diagnostics record error terminal with request ID`() = runTest {
+        val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
+        try {
+            val deps = TestDeps(
+                routeInvoker = {
+                    flowOf(
+                        CloudRouteEvent.Connected("pcm_s16le@24k"),
+                        CloudRouteEvent.Error(code = "limit_exceeded", message = ""),
+                    )
+                },
+            )
+            val sink = deps.sink()
+            deps.conversationAdmission.beginOrigin(1)
+            val prepared = sink.prepareTurn("question", VoiceIntent.CloudTier.Premium, playbackContext, capturedOrigin = 1, logicalRequestId = testWireId)!!
+            sink.dispatchPrepared(prepared)
+
+            val lines = capture.lines()
+            assertTrue("TurnTerminalReceived on error", lines.any { it.contains("reason=TurnTerminalReceived") && it.contains("request_id=$testWireId") })
+            assertTrue("TurnFeedbackSelected on error", lines.any { it.contains("reason=TurnFeedbackSelected") && it.contains("request_id=$testWireId") })
+        } finally {
+            capture.close()
+        }
+    }
 }

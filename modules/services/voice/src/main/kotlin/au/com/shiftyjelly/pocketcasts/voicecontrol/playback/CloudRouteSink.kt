@@ -565,6 +565,11 @@ class CloudRouteSink internal constructor(
                         // server negotiated. Propagate it so the player builds the right decoder
                         // and sample rate before any binary frame arrives.
                         audioPlayer?.setCodec(event.codec)
+                        // Transport boundaries: auth resolved (token accepted by server) AND
+                        // socket opened (handshake completed). Connected is the first event,
+                        // proving both auth passed and the socket is live.
+                        Trace.record(Event(Kind.Turn, Reason.TurnAuthResolved, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
+                        Trace.record(Event(Kind.Turn, Reason.TurnSocketOpened, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
                     }
 
                     is CloudRouteEvent.Action -> {
@@ -642,6 +647,8 @@ class CloudRouteSink internal constructor(
                     }
 
                     is CloudRouteEvent.Done -> {
+                        // Transport boundary: terminal done received from server.
+                        Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
                         analytics.recordTurn(
                             outcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted",
                             inputTokens = event.inputTokens,
@@ -720,6 +727,8 @@ class CloudRouteSink internal constructor(
                                 if (line.isBlank()) VoiceResponse.Earcon(EarconId.ERROR) else VoiceResponse.Spoken(line)
                             }
                         }
+                        // Transport boundary: feedback/render decision made for this turn.
+                        Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
                     }
 
                     is CloudRouteEvent.Result -> {
@@ -741,6 +750,9 @@ class CloudRouteSink internal constructor(
                     }
 
                     is CloudRouteEvent.Error -> {
+                        // Transport boundary: terminal error received from server.
+                        Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
+                        endReason = Reason.TurnFailed
                         // Genuinely unavailable evidence is a state the results
                         // renderer owns whenever it is present AND this turn had a
                         // results surface (three states, not two).
@@ -785,14 +797,21 @@ class CloudRouteSink internal constructor(
                             spoken.isBlank() -> VoiceResponse.Earcon(EarconId.ERROR)
                             else -> VoiceResponse.Spoken(spoken)
                         }
+                        // Transport boundary: feedback/render decision made for error turn.
+                        Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
                     }
                 }
             }
         } catch (cancelled: CancellationException) {
             endReason = Reason.TurnCancelled
+            // Transport boundary: turn retired by cancellation before server terminal.
+            // Generation/requestId may not be available at this scope; owner identifies the turn.
+            Trace.record(Event(Kind.Turn, Reason.TurnRetired, Source.Cloud, owner = myId))
             throw cancelled
         } catch (failure: Exception) {
             endReason = Reason.TurnFailed
+            // Transport boundary: turn retired by failure before server terminal.
+            Trace.record(Event(Kind.Turn, Reason.TurnRetired, Source.Cloud, owner = myId))
             throw failure
         } finally {
             // Any exit path — normal return, upstream cancellation, timeouts,

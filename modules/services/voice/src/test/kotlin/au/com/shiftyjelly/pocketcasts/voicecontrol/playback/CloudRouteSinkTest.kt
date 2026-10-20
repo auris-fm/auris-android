@@ -3,11 +3,9 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteCapabilities
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
-import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteConversationEntry
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteErrorCodes
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
-import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteLimits
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudSearchEvidenceItem
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudSearchResults
@@ -49,6 +47,32 @@ class CloudRouteSinkTest {
         referencePositionMs = 1_230_000L,
         clientPositionMs = 50_000L,
     )
+
+    @Test
+    fun `interrupted terminal discards output while completed terminal drains it`() = runTest {
+        for (terminal in CloudRouteEvent.Outcome.entries) {
+            val player = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer>()
+            whenever(player.audioWritten).thenReturn(true)
+            whenever(player.drainAndAwaitCompletion()).thenReturn(au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.Completion.Consumed)
+            val deps = TestDeps(
+                audioPlayer = player,
+                events = flowOf(
+                    CloudRouteEvent.Connected("pcm_s16le@24k"),
+                    CloudRouteEvent.AudioFrame("pcm_s16le@24k", byteArrayOf(1, 2)),
+                    CloudRouteEvent.Done(3, 4, terminal),
+                ),
+            )
+            assertEquals(VoiceResponse.Silent, deps.sink().routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext).feedback)
+            org.mockito.kotlin.verify(player).submitFrame(byteArrayOf(1, 2))
+            if (terminal == CloudRouteEvent.Outcome.Interrupted) {
+                org.mockito.kotlin.verify(player, org.mockito.kotlin.never()).drainAndAwaitCompletion()
+                org.mockito.kotlin.verify(player, org.mockito.kotlin.atLeastOnce()).stop()
+            } else {
+                org.mockito.kotlin.verify(player).drainAndAwaitCompletion()
+            }
+            assertEquals(listOf(CloudRouteAnalyticsCall(if (terminal == CloudRouteEvent.Outcome.Completed) "done" else "interrupted", 3, 4)), deps.analytics.calls)
+        }
+    }
 
     @Test
     fun `an ordinary request is retryable while its window lives and retired once it is superseded`() = runTest {
@@ -980,32 +1004,6 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `cloud frames carry NO local conversation history, asserted on the serialized frame`() = runTest {
-        // @spec's requirement: the omission is asserted on the ACTUAL serialized cloud frame, with
-        // local conversation memory POPULATED -- a case that left memory empty could not tell an
-        // intentional omission from an empty one.
-        val deps = TestDeps(
-            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
-        )
-        val sink = deps.sink()
-
-        // Populate LOCAL memory by recording a completed exchange, then ask a question.
-        deps.conversationMemory.record("what is this podcast about", "it is about birds")
-        sink.routeToCloud("and this one", VoiceIntent.CloudTier.Premium, playbackContext).feedback
-
-        val turn = deps.routeTurns.last()
-        assertTrue(
-            "the turn must not carry local history as cloud context " +
-                "(recent=${turn.context.recentConversation})",
-            turn.context.recentConversation.isNullOrEmpty(),
-        )
-
-        // The WIRE assertion lives in the repositories module, where the encoder is visible
-        // (`CloudTurnRouteTest`): it serializes a frame whose context DOES hold history and asserts the
-        // key is absent, so the omission is pinned at the encoder rather than assumed from the model.
-    }
-
-    @Test
     fun `the first turn CREATES a client-minted conversation and a later grace turn RESUMES it`() = runTest {
         // @spec's admission contract: the CLIENT generates the handle, CREATE carries it, and a later
         // turn inside the live grace window resumes the SAME conversation.
@@ -1158,7 +1156,7 @@ class CloudRouteSinkTest {
         val deps = TestDeps(
             routeInvoker = withHold(
                 flow {
-                    emit(CloudRouteEvent.Token("partial "))
+                    emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
                     throw IllegalStateException("upstream blew up")
                 },
             ),
@@ -1177,7 +1175,7 @@ class CloudRouteSinkTest {
         val deps = TestDeps(
             routeInvoker = withHold(
                 flow {
-                    emit(CloudRouteEvent.Token("partial "))
+                    emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
                     awaitCancellation()
                 },
             ),
@@ -1204,29 +1202,6 @@ class CloudRouteSinkTest {
         assertEquals(VoiceResponse.Spoken("Cloud processing is coming soon"), response)
         assertTrue(deps.routeCalls.isEmpty())
         assertTrue(deps.playback.calls.isEmpty())
-    }
-
-    @Test
-    fun `buffers token texts and speaks once on done`() = runTest {
-        val deps = TestDeps(
-            routeInvoker = withHold(
-                flowOf(
-                    CloudRouteEvent.Token("She "),
-                    CloudRouteEvent.Token("is arguing."),
-                    CloudRouteEvent.Done(inputTokens = 10, outputTokens = 5),
-                ),
-            ),
-        )
-        val sink = deps.sink()
-
-        val response = sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
-
-        assertEquals(VoiceResponse.Spoken("She is arguing."), response)
-        assertEquals(listOf("pause", "resume"), deps.playback.calls)
-        assertEquals(
-            listOf(CloudRouteAnalyticsCall("done", 10, 5)),
-            deps.analytics.calls,
-        )
     }
 
     @Test
@@ -1757,11 +1732,11 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `error clears token buffer restores auto pause and speaks message`() = runTest {
+    fun `error restores auto pause and speaks the client line`() = runTest {
         val deps = TestDeps(
             routeInvoker = withHold(
                 flowOf(
-                    CloudRouteEvent.Token("partial"),
+                    CloudRouteEvent.Connected("pcm_s16le@24k"),
                     CloudRouteEvent.Error(code = "connection_lost", message = "Connection lost"),
                 ),
             ),
@@ -1991,6 +1966,7 @@ class CloudRouteSinkTest {
                     CloudSearchResults(
                         kind = CloudSearchResults.KIND_EPISODE_RESULTS,
                         scope = CloudSearchResults.SCOPE_LIBRARY,
+                        items = emptyList(),
                     ),
                 ),
                 CloudRouteEvent.Done(0, 0),
@@ -2005,47 +1981,7 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `a completed turn records local memory, which cloud frames still must not carry`() = runTest {
-        // REVERSED from its earlier form, which asserted that the SECOND turn carried the recorded
-        // exchange as cloud context. The owning spec forbids `recent_conversation` on cloud frames --
-        // the Worker owns cloud history -- so that expectation encoded the defect.
-        //
-        // Local memory still RECORDS the exchange (it serves the local intent path), and this case
-        // keeps that half while asserting the cloud frame does not carry it.
-        val memory = CloudConversationMemory()
-        val deps = TestDeps(
-            conversationMemory = memory,
-            events = flowOf(CloudRouteEvent.Token("an answer"), CloudRouteEvent.Done(1, 1)),
-        )
-        val sink = deps.sink()
-
-        sink.routeToCloud("a question", VoiceIntent.CloudTier.Premium, playbackContext).feedback
-        sink.routeToCloud("a follow-up", VoiceIntent.CloudTier.Premium, playbackContext).feedback
-
-        // The local record IS kept -- both exchanges, in order, which is what local memory is for.
-        val remembered = memory.recent().map { it.role to it.text }
-        assertTrue(
-            "the completed exchange is remembered locally (remembered=$remembered)",
-            remembered.containsAll(
-                listOf(
-                    CloudRouteConversationEntry.ROLE_USER to "a question",
-                    CloudRouteConversationEntry.ROLE_ASSISTANT to "an answer",
-                ),
-            ),
-        )
-        // ...and NEITHER turn carries it as cloud context, whatever memory holds.
-        assertTrue(
-            "no cloud turn carries local history (first=${deps.routeTurns.first().context.recentConversation})",
-            deps.routeTurns.first().context.recentConversation.isNullOrEmpty(),
-        )
-        assertTrue(
-            "not even after memory is populated (last=${deps.routeTurns.last().context.recentConversation})",
-            deps.routeTurns.last().context.recentConversation.isNullOrEmpty(),
-        )
-    }
-
-    @Test
-    fun `interrupted mixed stream keeps executed actions and clears buffered text`() = runTest {
+    fun `failed mixed stream keeps executed actions and reports the client error`() = runTest {
         val deps = TestDeps(
             routeInvoker = withHold(
                 flowOf(
@@ -2054,7 +1990,7 @@ class CloudRouteSinkTest {
                         action = "seek_to",
                         params = mapOf("reference_position_ms" to 500_000L),
                     ),
-                    CloudRouteEvent.Token("She was about to"),
+                    CloudRouteEvent.Connected("pcm_s16le@24k"),
                     CloudRouteEvent.Error(code = "provider_error", message = "The assistant hit an error."),
                 ),
             ),
@@ -2062,7 +1998,7 @@ class CloudRouteSinkTest {
 
         val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
-        // The executed seek is not rolled back; the partial speech is dropped.
+        // The executed seek is not rolled back when the stream fails.
         assertTrue(
             "the executed seek is the MAPPED sink position (calls=${deps.playback.calls})",
             deps.playback.calls.contains("seekTo:545"),
@@ -2147,15 +2083,15 @@ class CloudRouteSinkTest {
                     // `unauthorized` has no template by design, so it earcons.
                     flowOf(CloudRouteEvent.Error("unauthorized", ""))
                 } else {
-                    flowOf(CloudRouteEvent.Token("answer"), CloudRouteEvent.Done(1, 1))
+                    flowOf(CloudRouteEvent.Connected("pcm_s16le@24k"), CloudRouteEvent.Done(1, 1))
                 }
             },
         )
         val sink = deps.sink()
 
-        // Turn 1 succeeds while the token is valid.
+        // Turn 1 reaches its terminal while the token is valid (no answer output).
         assertEquals(
-            VoiceResponse.Spoken("answer"),
+            VoiceResponse.Spoken("Sorry, I couldn't complete that request."),
             sink.routeToCloud("first", VoiceIntent.CloudTier.Premium, playbackContext).feedback,
         )
 
@@ -2273,7 +2209,7 @@ class CloudRouteSinkTest {
                         params = emptyMap(),
                         turnId = turn.requestId,
                     ),
-                    CloudRouteEvent.Token("answer"),
+                    CloudRouteEvent.Connected("pcm_s16le@24k"),
                     CloudRouteEvent.Done(1, 1),
                 )
             },
@@ -2288,13 +2224,13 @@ class CloudRouteSinkTest {
         fail = false
         val second = sink.routeToCloud("second", VoiceIntent.CloudTier.Premium, playbackContext).feedback
 
-        assertEquals(VoiceResponse.Spoken("answer"), second)
+        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), second)
         assertEquals(listOf("pause", "resume"), deps.playback.calls.filter { it == "pause" || it == "resume" })
     }
 
     @Test
     fun `a newer turn cannot pause while an older turn's restore is suspended`() = runTest(UnconfinedTestDispatcher()) {
-        val deps = TestDeps(routeInvoker = withHold(flowOf(CloudRouteEvent.Token("a"), CloudRouteEvent.Done(1, 1))))
+        val deps = TestDeps(routeInvoker = withHold(flowOf(CloudRouteEvent.Connected("pcm_s16le@24k"), CloudRouteEvent.Done(1, 1))))
         val gate = CompletableDeferred<Unit>()
         deps.playback.resumeGate = gate
         val sink = deps.sink()
@@ -2438,33 +2374,6 @@ class CloudRouteSinkTest {
         // detail, as the captured turn did — even when it is a sentence written for the user.
         // The code's own local line is spoken instead.
         assertEquals(VoiceResponse.Spoken("You've reached today's free limit."), response)
-    }
-
-    @Test
-    fun `a whitespace-only answer is not spoken as whitespace but reports the incomplete turn`() = runTest {
-        val deps = TestDeps(
-            events = flowOf(
-                CloudRouteEvent.Token("   "),
-                CloudRouteEvent.Done(1, 0),
-            ),
-        )
-
-        val sink = deps.sink()
-        val response = sink.routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext).feedback
-
-        // Deliberately changed: the rule that blank is not *speech* still holds — "   " is never
-        // sent to the TTS engine — but a turn that delivers no usable answer no longer leaves the
-        // user in silence. It reports the turn as incomplete, which is a different concern from
-        // speaking the whitespace itself.
-        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
-
-        // And it is not worth remembering either: what follows carries no
-        // conversation context, which is only true if nothing was recorded.
-        sink.routeToCloud("a follow-up", VoiceIntent.CloudTier.Premium, playbackContext).feedback
-        // The premise first: null is also the expected value for turn one, so
-        // without this the next line stays green even if the turn never routed.
-        assertEquals("a follow-up", deps.routeTurns.last().request)
-        assertEquals(null, deps.routeTurns.last().context.recentConversation)
     }
 
     @Test
@@ -3001,7 +2910,6 @@ class CloudRouteSinkTest {
 
         /** Play/pause/stop commands issued from outside the voice path. */
         var commandRevision: Long = 0,
-        val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
         private val locale: java.util.Locale = java.util.Locale.ENGLISH,
         private val audioPlayer: au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer? = null,
         /** Whether a privacy event has closed the window during this turn. */
@@ -3087,7 +2995,6 @@ class CloudRouteSinkTest {
                 explicitInvoker?.invoke(turn) ?: events
             },
             searchResultsRenderer = renderer,
-            conversationMemory = conversationMemory,
             templateResolver = templateResolver,
             currentLocale = { locale },
             isHostPlaying = { host.playing },

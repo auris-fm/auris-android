@@ -62,7 +62,7 @@ class CloudTurnRoute(
             // "the current conversation" at send time would let a retry or a superseded origin borrow
             // whichever handle happened to be current.
             conversationId = turn.conversationId,
-            conversationMode = turn.conversationMode?.wireValue,
+            conversationMode = turn.conversationMode,
         )
         val socket = transport ?: WebSocketCloudTurnTransport(baseUrl, okHttpClient)
         // Everything the socket reports is the turn's outcome — including a refused upgrade, which

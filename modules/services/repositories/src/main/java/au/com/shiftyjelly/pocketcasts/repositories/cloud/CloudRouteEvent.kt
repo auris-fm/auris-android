@@ -20,12 +20,16 @@ sealed class CloudRouteEvent {
         val turnId: String? = null,
     ) : CloudRouteEvent()
 
-    data class Token(val text: String) : CloudRouteEvent()
+    enum class Outcome(val wireValue: String) {
+        Completed("completed"),
+        Interrupted("interrupted"),
+    }
 
     data class Done(
-        // Nullable: the server may omit either count, and the analytics sink takes them nullable.
+        // Required on the wire, nullable when the server cannot measure usage.
         val inputTokens: Int?,
         val outputTokens: Int?,
+        val outcome: Outcome = Outcome.Completed,
     ) : CloudRouteEvent()
 
     data class Error(

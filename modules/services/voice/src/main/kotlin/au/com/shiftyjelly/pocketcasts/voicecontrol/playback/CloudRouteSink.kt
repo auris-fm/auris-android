@@ -2,11 +2,9 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteCapabilities
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
-import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteConversationEntry
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteErrorCodes
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteHint
-import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteLimits
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudSearchResults
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTokenProviding
@@ -55,7 +53,6 @@ class CloudRouteSink internal constructor(
     private val routeInvoker: ((CloudRouteTurn) -> Flow<CloudRouteEvent>)?,
     /** Non-null only when this client can render structured discovery results. */
     private val searchResultsRenderer: CloudSearchResultsRenderer? = null,
-    private val conversationMemory: CloudConversationMemory = CloudConversationMemory(),
     private val templateResolver: SpokenTemplateResolver = SpokenTemplateResolver(emptyMap()),
     private val currentLocale: () -> Locale = { Locale.getDefault() },
     /**
@@ -117,7 +114,6 @@ class CloudRouteSink internal constructor(
         gracePeriodSignal = gracePeriodSignal,
         routeInvoker = null,
         searchResultsRenderer = null,
-        conversationMemory = CloudConversationMemory(),
         templateResolver = templateResolver,
         currentLocale = currentLocale,
         isHostPlaying = { playbackContextMonitor.isHostAudioActive.value },
@@ -417,7 +413,6 @@ class CloudRouteSink internal constructor(
             }
         }
         val turnState = TurnState()
-        var tokenBuffer = ""
         // THE TURN'S ACTION OUTCOME IS THREE-VALUED, not a flag. A Boolean collapses "the action was
         // confirmed performed" with "the action was attempted and its outcome is unknown", so an
         // unknowable execution would be reported as DELIVERED -- claiming a success nobody observed.
@@ -630,18 +625,14 @@ class CloudRouteSink internal constructor(
                         audioPlayer?.play()
                     }
 
-                    // No frame this route receives produces a Token — the Worker does emit `token`
-                    // frames, but not over this path — so the branch is inert here; it is kept because
-                    // the event type is part of the contract model and the route tests drive it
-                    // directly.
-                    is CloudRouteEvent.Token -> tokenBuffer += event.text
-
                     is CloudRouteEvent.Done -> {
                         analytics.recordTurn(
-                            outcome = "done",
+                            outcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted",
                             inputTokens = event.inputTokens,
                             outputTokens = event.outputTokens,
                         )
+                        val interrupted = event.outcome == CloudRouteEvent.Outcome.Interrupted
+                        if (interrupted) audioPlayer?.stop()
                         // Restore the host player to full volume.
                         if (ducked) {
                             playbackSink.restore()
@@ -654,7 +645,7 @@ class CloudRouteSink internal constructor(
                         // reaches what was written; an unconsumed or unmeasurable result is recorded
                         // on the local axis, like a refused write, without rewriting the server's
                         // terminal outcome.
-                        if (audioPlayed) {
+                        if (audioPlayed && !interrupted) {
                             val sink = audioPlayer
                             val completion = sink?.let {
                                 try {
@@ -675,12 +666,6 @@ class CloudRouteSink internal constructor(
                                     completion == CloudAudioPlayer.Completion.Unconsumed
                             }
                         }
-                        // Not redundant with the memory's own blank check: a
-                        // blank answer is not an exchange, and record() would
-                        // still add the user half of one.
-                        if (tokenBuffer.isNotBlank()) {
-                            conversationMemory.record(request, tokenBuffer)
-                        }
                         // The local playback failure is reported on its own axis, so the server's
                         // terminal outcome is preserved rather than being rewritten by a local
                         // fault. It is not a replay trigger either: the answer is simply reported
@@ -689,6 +674,8 @@ class CloudRouteSink internal constructor(
                             Timber.w("[CloudRoute] turn completed on the server but its audio was cut short locally")
                         }
                         outcome = when {
+                            interrupted -> VoiceResponse.Silent
+
                             localPlaybackFailed -> VoiceResponse.Earcon(EarconId.ERROR)
 
                             audioPlayer?.audioWritten == true -> VoiceResponse.Silent
@@ -699,8 +686,6 @@ class CloudRouteSink internal constructor(
                                 VoiceResponse.Earcon(EarconId.ERROR)
                             }
 
-                            tokenBuffer.isNotBlank() -> VoiceResponse.Spoken(tokenBuffer)
-
                             // The turn delivered something else — an action it actually performed,
                             // or a result it rendered. Silence is right: that was the answer.
                             // A CONFIRMED action or a rendered result is the answer. An UNKNOWN action is
@@ -710,9 +695,9 @@ class CloudRouteSink internal constructor(
                             actionOutcome != ActionOutcome.None || handledResult -> VoiceResponse.Silent
 
                             else -> {
-                                // No tokens and nothing done: an unexpected empty turn, not a search
+                                // No audio and nothing done: an unexpected empty turn, not a search
                                 // that found nothing. The server's guard should make this
-                                // unreachable, so this covers old servers and regressions. Same
+                                // unreachable; malformed empty turns fail explicitly. Same
                                 // localized-or-earcon rule as the other spoken fallbacks: never
                                 // speak base-language prose on a device set to another language.
                                 val line = localizedTemplate(KEY_CLOUD_INCOMPLETE_TURN)
@@ -723,8 +708,7 @@ class CloudRouteSink internal constructor(
 
                     is CloudRouteEvent.Result -> {
                         // Renderer is present iff we advertised the capability;
-                        // results never auto-play. An unknown result kind is
-                        // ignored (forward compatibility) rather than rendered.
+                        // results never auto-play. Only the negotiated result kind is rendered.
                         val renderer = searchResultsRenderer
                         if (renderer != null &&
                             event.results.kind == CloudSearchResults.KIND_EPISODE_RESULTS
@@ -741,7 +725,6 @@ class CloudRouteSink internal constructor(
                     }
 
                     is CloudRouteEvent.Error -> {
-                        tokenBuffer = ""
                         // Genuinely unavailable evidence is a state the results
                         // renderer owns whenever it is present AND this turn had a
                         // results surface (three states, not two).
@@ -902,9 +885,6 @@ class CloudRouteSink internal constructor(
             // client-side copy diverge from the conversation the server is actually maintaining.
             // Conversation IDENTITY replaces it -- the turn says WHICH conversation it belongs to
             // rather than re-sending what it thinks was said.
-            //
-            // Local conversation memory stays LOCAL: the local intent path still uses it.
-            recentConversation = null,
             // An absent episode stays absent: no substitution, and no empty string that would claim
             // a subject this turn does not have.
             episodeId = episodeId,

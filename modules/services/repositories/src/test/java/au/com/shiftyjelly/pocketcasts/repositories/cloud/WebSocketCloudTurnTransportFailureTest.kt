@@ -1,13 +1,10 @@
 package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import java.util.concurrent.CopyOnWriteArrayList
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.yield
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.WebSocket
@@ -49,6 +46,8 @@ class WebSocketCloudTurnTransportFailureTest {
     }
 
     private fun frame() = CloudTurnFrame.Authenticate(
+        conversationId = "11111111-1111-4111-8111-111111111111",
+        conversationMode = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode.Create,
         accessToken = "token",
         requestId = "req-1",
         request = "play something",
@@ -96,7 +95,7 @@ class WebSocketCloudTurnTransportFailureTest {
 
         // CONTROL: drive a known-good callback first. If a normal message cannot reach
         // the collector, the harness is wrong and the failure assertion below means nothing.
-        l.onMessage(s, "{\"type\":\"connected\",\"codec\":\"opus@48k\"}")
+        l.onMessage(s, "{\"type\":\"connected\",\"codec\":\"opus@48k\",\"reservation_id\":\"r-1\"}")
         delay(200)
         assertTrue(
             "CONTROL: a normal message must reach the collector through this harness: $events",
@@ -135,6 +134,7 @@ class WebSocketCloudTurnTransportFailureTest {
         val l = client.listener!!
         val s = client.socket!!
 
+        l.onMessage(s, """{"type":"connected","codec":"opus@48k","reservation_id":"r-1"}""")
         // An audio frame first, then an undecodable text frame that emits a terminal error.
         l.onMessage(s, ByteString.of(1, 2, 3))
         l.onMessage(s, "not-json")
@@ -191,6 +191,7 @@ class WebSocketCloudTurnTransportFailureTest {
         val l = client.listener!!
         val s = client.socket!!
 
+        l.onMessage(s, """{"type":"connected","codec":"opus@48k","reservation_id":"r-1"}""")
         repeat(4_096 + 10) {
             l.onMessage(s, ByteString.of(it.toByte(), it.toByte()))
         }
@@ -205,5 +206,56 @@ class WebSocketCloudTurnTransportFailureTest {
                 "size=${events.size} threw=${threw?.message}",
             deliveredError || threw != null,
         )
+    }
+
+    @Test
+    fun `audio before negotiation is rejected without emitting audio`() = runBlocking {
+        assertInvalidHandshake { listener, socket -> listener.onMessage(socket, ByteString.of(1, 2)) }
+    }
+
+    @Test
+    fun `unoffered codec is rejected`() = runBlocking {
+        assertInvalidHandshake { listener, socket ->
+            listener.onMessage(socket, """{"type":"connected","codec":"unoffered","reservation_id":"r-1"}""")
+        }
+    }
+
+    @Test
+    fun `duplicate negotiation is rejected`() = runBlocking {
+        assertInvalidHandshake { listener, socket ->
+            repeat(2) { listener.onMessage(socket, """{"type":"connected","codec":"opus@48k","reservation_id":"r-1"}""") }
+        }
+    }
+
+    @Test
+    fun `admission error is valid before negotiation`() = runBlocking {
+        val client = CapturingOkHttpClient()
+        val events = CopyOnWriteArrayList<CloudRouteEvent>()
+        val job = launch { WebSocketCloudTurnTransport("https://example.invalid", client).exchange(frame()).collect { events.add(it) } }
+        withTimeout(5_000) { while (client.listener == null) delay(10) }
+        client.listener!!.onMessage(client.socket!!, """{"type":"error","code":"unauthorized","message":""}""")
+        client.listener!!.onClosed(client.socket!!, 1000, "")
+        withTimeout(5_000) { job.join() }
+        assertEquals(listOf(CloudRouteEvent.Error("unauthorized", "")), events.toList())
+    }
+
+    @Test
+    fun `terminal before negotiation is rejected`() = runBlocking {
+        assertInvalidHandshake { listener, socket ->
+            listener.onMessage(socket, """{"type":"done","outcome":"completed","usage":{"input_tokens":0,"output_tokens":0,"speech":{"amount":0,"unit":"characters"}}}""")
+        }
+    }
+
+    private suspend fun assertInvalidHandshake(send: (WebSocketListener, WebSocket) -> Unit) = kotlinx.coroutines.coroutineScope {
+        val client = CapturingOkHttpClient()
+        val events = CopyOnWriteArrayList<CloudRouteEvent>()
+        val job = launch { WebSocketCloudTurnTransport("https://example.invalid", client).exchange(frame()).collect { events.add(it) } }
+        withTimeout(5_000) { while (client.listener == null) delay(10) }
+        send(client.listener!!, client.socket!!)
+        // Close bounds a broken implementation too; a missing rejection fails an assertion, not a timeout.
+        client.listener!!.onClosed(client.socket!!, 1000, "")
+        withTimeout(5_000) { job.join() }
+        assertEquals(CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""), events.lastOrNull())
+        assertTrue(events.none { it is CloudRouteEvent.AudioFrame })
     }
 }

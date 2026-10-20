@@ -4,7 +4,7 @@ import com.squareup.moshi.JsonAdapter
 import com.squareup.moshi.JsonReader
 import com.squareup.moshi.JsonWriter
 import com.squareup.moshi.Moshi
-import okio.Buffer
+import java.util.UUID
 
 /**
  * Serialises the authentication frame, the first message on a turn.
@@ -15,23 +15,15 @@ import okio.Buffer
  * than sent empty, which the server accepts.
  */
 internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<CloudTurnFrame.Authenticate>() {
-    private val contextAdapter = moshi.adapter(CloudRouteContext::class.java)
     private val hintAdapter = moshi.adapter(CloudRouteHint::class.java)
-    private val options = JsonReader.Options.of(
-        "type",
-        "access_token",
-        "request_id",
-        "request",
-        "context",
-        "capabilities",
-        "codecs",
-        "route_hint",
-    )
 
     override fun toJson(writer: JsonWriter, value: CloudTurnFrame.Authenticate?) {
         if (value == null) {
             writer.nullValue()
             return
+        }
+        require(runCatching { UUID.fromString(value.conversationId).toString() == value.conversationId.lowercase() }.getOrDefault(false)) {
+            "conversation_id must be a UUID"
         }
         writer.beginObject()
         writer.name("type").value("authenticate")
@@ -62,28 +54,15 @@ internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<Clou
             writer.name("route_hint")
             hintAdapter.toJson(writer, hint)
         }
-        // The conversation admission fields travel with the turn's own captured identity. Both are
-        // written or neither: a mode without a handle (or a handle without a mode) is not a state the
-        // contract admits, so it is omitted rather than half-sent.
-        val conversationId = value.conversationId
-        val conversationMode = value.conversationMode
-        if (conversationId != null && conversationMode != null) {
-            writer.name("conversation_id").value(conversationId)
-            writer.name("conversation_mode").value(conversationMode)
-        }
+        writer.name("conversation_id").value(value.conversationId)
+        writer.name("conversation_mode").value(value.conversationMode.wireValue)
         writer.endObject()
     }
 
     /** Emit a [CloudRouteContext] as a raw nested JSON object. */
     private fun writeContextAsRaw(writer: JsonWriter, context: CloudRouteContext) {
         writer.beginObject()
-        // NO CLIENT CONVERSATION HISTORY ON A CLOUD FRAME. The owning spec forbids
-        // `context.recent_conversation` here and requires a wire-omission assertion: the Worker owns
-        // cloud conversation history, so a client copy would duplicate it and could diverge from the
-        // conversation the server maintains. The field is deliberately NOT written even when the
-        // context carries entries -- conversation identity says WHICH conversation the turn belongs to.
-        //
-        // Local conversation memory is unaffected: it serves the local intent path, not this encoder.
+        // Cloud history belongs to the server; only current playback context is written here.
         // Each field is written only when it HAS a value. An absent episode, podcast, position or
         // reference is omitted rather than defaulted: a zero position is a real instant (the very
         // start) and an empty id claims a subject, so neither can stand in for "none".

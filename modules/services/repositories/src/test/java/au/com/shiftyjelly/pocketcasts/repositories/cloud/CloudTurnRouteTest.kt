@@ -27,6 +27,8 @@ class CloudTurnRouteTest {
     }
 
     private val turn = CloudRouteTurn(
+        conversationId = "11111111-1111-4111-8111-111111111111",
+        conversationMode = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode.Create,
         request = "play the next episode",
         context = CloudRouteContext(episodeId = "e-1", clientPositionMs = 1000L),
         requestId = "req-1",
@@ -62,6 +64,8 @@ class CloudTurnRouteTest {
         // second places it at the very start of a recording nobody is playing.
         val transport = FakeTransport(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")))
         val discovery = CloudRouteTurn(
+            conversationId = "11111111-1111-4111-8111-111111111111",
+            conversationMode = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode.Create,
             request = "what podcasts are trending",
             context = CloudRouteContext(), // no episode, no position
             requestId = "req-discovery",
@@ -97,6 +101,8 @@ class CloudTurnRouteTest {
         // above is about absence rather than about the encoder dropping them.
         val transport = FakeTransport(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")))
         val withEpisode = CloudRouteTurn(
+            conversationId = "11111111-1111-4111-8111-111111111111",
+            conversationMode = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode.Create,
             request = "what am I listening to",
             context = CloudRouteContext(
                 episodeId = "e-42",
@@ -120,16 +126,13 @@ class CloudTurnRouteTest {
     }
 
     @Test
-    fun `the admission pair is encoded together and omitted when either half is absent`() = runTest {
-        // @spec's admission contract: a turn carries the conversation it creates or resumes. The pair
-        // is written TOGETHER -- a mode without a handle, or a handle without a mode, is not a state
-        // the contract admits, so it must be omitted rather than half-sent.
+    fun `the required admission pair is encoded together`() = runTest {
         val transport = FakeTransport(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")))
         val firstTurn = CloudRouteTurn(
             request = "start the conversation",
             context = CloudRouteContext(),
             requestId = "req-create",
-            conversationId = "conv-1",
+            conversationId = "11111111-1111-4111-8111-111111111111",
             conversationMode = CloudConversationMode.Create,
         )
 
@@ -137,7 +140,7 @@ class CloudTurnRouteTest {
 
         val json = CloudRouteJson.authenticateAdapter
             .toJson(transport.frames.single() as CloudTurnFrame.Authenticate)
-        assertTrue("the handle is on the wire (json=$json)", json.contains("\"conversation_id\":\"conv-1\""))
+        assertTrue("the handle is on the wire (json=$json)", json.contains("\"conversation_id\":\"11111111-1111-4111-8111-111111111111\""))
         assertTrue("with its mode", json.contains("\"conversation_mode\":\"create\""))
     }
 
@@ -148,7 +151,7 @@ class CloudTurnRouteTest {
             request = "and now this",
             context = CloudRouteContext(),
             requestId = "req-resume",
-            conversationId = "conv-1",
+            conversationId = "11111111-1111-4111-8111-111111111111",
             conversationMode = CloudConversationMode.Resume,
         )
 
@@ -158,44 +161,22 @@ class CloudTurnRouteTest {
             .toJson(transport.frames.single() as CloudTurnFrame.Authenticate)
         assertTrue(
             "the SAME handle is carried, so the two turns share one conversation (json=$json)",
-            json.contains("\"conversation_id\":\"conv-1\""),
+            json.contains("\"conversation_id\":\"11111111-1111-4111-8111-111111111111\""),
         )
         assertTrue("with the resume mode", json.contains("\"conversation_mode\":\"resume\""))
     }
 
     @Test
-    fun `a turn with no conversation identity omits both fields`() = runTest {
-        val transport = FakeTransport(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")))
-
-        route(transport).route(turn).toList()
-
-        val json = CloudRouteJson.authenticateAdapter
-            .toJson(transport.frames.single() as CloudTurnFrame.Authenticate)
-        assertFalse("no conversation means no handle (json=$json)", json.contains("conversation_id"))
-        assertFalse("and no mode", json.contains("conversation_mode"))
-    }
-
-    @Test
     fun `the encoder never writes client conversation history to a cloud frame`() = runTest {
-        // The owning spec forbids `context.recent_conversation` on cloud frames: the Worker owns cloud
-        // history. The context here DOES hold entries, so the case distinguishes an intentional
-        // omission from an empty one -- asserting the model alone would pass either way.
+        // Server-owned history has no client representation. Assert omission at the writer.
         val transport = FakeTransport(listOf(CloudRouteEvent.Connected("pcm_s16le@24k")))
         val withHistory = CloudRouteTurn(
+            conversationId = "11111111-1111-4111-8111-111111111111",
+            conversationMode = au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode.Create,
             request = "and this one",
             context = CloudRouteContext(
                 episodeId = "e-1",
                 clientPositionMs = 1_000L,
-                recentConversation = listOf(
-                    CloudRouteConversationEntry(
-                        role = CloudRouteConversationEntry.ROLE_USER,
-                        text = "what is this podcast about",
-                    ),
-                    CloudRouteConversationEntry(
-                        role = CloudRouteConversationEntry.ROLE_ASSISTANT,
-                        text = "it is about birds",
-                    ),
-                ),
             ),
             requestId = "req-history",
         )
@@ -231,7 +212,7 @@ class CloudTurnRouteTest {
     fun `a failure after delivery is emitted as it is`() = runTest {
         val transport = FakeTransport(
             listOf(
-                CloudRouteEvent.Token("partial"),
+                CloudRouteEvent.AudioFrame("pcm_s16le@24k", byteArrayOf(1, 2)),
                 CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
             ),
         )
@@ -240,7 +221,7 @@ class CloudTurnRouteTest {
 
         assertEquals(
             listOf(
-                CloudRouteEvent.Token("partial"),
+                CloudRouteEvent.AudioFrame("pcm_s16le@24k", byteArrayOf(1, 2)),
                 CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
             ),
             events,
@@ -286,5 +267,14 @@ class CloudTurnRouteTest {
             listOf(CloudRouteEvent.Error(code = CloudRouteErrorCodes.UNAUTHORIZED, message = "")),
             events,
         )
+    }
+
+    @Test
+    fun `invalid conversation identifier is rejected by the actual writer`() = runTest {
+        val transport = FakeTransport(emptyList())
+        route(transport).route(turn.copy(conversationId = "old-conversation")).toList()
+        val frame = transport.frames.single() as CloudTurnFrame.Authenticate
+        val failure = runCatching { CloudRouteJson.authenticateAdapter.toJson(frame) }.exceptionOrNull()
+        assertTrue("invalid identity must not serialize", failure is IllegalArgumentException)
     }
 }

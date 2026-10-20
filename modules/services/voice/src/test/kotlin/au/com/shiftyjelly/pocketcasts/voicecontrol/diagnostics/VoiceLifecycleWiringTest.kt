@@ -16,6 +16,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.CaptureAttachment
 import au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlGate
+import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.GracePeriodActiveCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions.ModelsReadyCondition
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
@@ -171,6 +172,15 @@ class VoiceLifecycleWiringTest {
             visibility.value = false
             runCurrent()
             assertTrue(log.lines().any { it.contains("reason=Backgrounded source=Foreground") && it.contains("prior_active=true active=false") })
+            visibility.value = true
+            runCurrent()
+            signal.onWakeWordDetected()
+            val hold = signal.holdCloudTurn()!!
+            visibility.value = false
+            runCurrent()
+            assertTrue(signal.isActive.value)
+            assertTrue(log.lines().any { it.contains("reason=BackgroundHoldPreserved source=Foreground") && it.contains("prior_active=true active=true holds_before=1 holds_after=1") })
+            signal.finishCloudTurn(hold)
         }
     }
 
@@ -186,7 +196,6 @@ class VoiceLifecycleWiringTest {
                     .apply { isAccessible = true }.invoke(service, context)
                 shadowOf(context as android.app.Application).grantPermissions(android.Manifest.permission.RECORD_AUDIO, android.Manifest.permission.FOREGROUND_SERVICE_MICROPHONE)
                 val signal = GracePeriodSignal()
-                signal.onWakeWordDetected()
                 val ready = ModelsReadyCondition(isReady = false)
                 val gate = VoiceControlGate(listOf(GracePeriodActiveCondition(signal, scope), ready), scope)
                 val route = MutableStateFlow<AudioRoute>(AudioRoute.Headset(true))
@@ -238,13 +247,26 @@ class VoiceLifecycleWiringTest {
                     }
                     error("bounded service observer did not reach expected capture state")
                 }
+                pumpUntil { ready.state.value is VoiceControlRuleState.Allowed }
+                signal.onWakeWordDetected()
                 pumpUntil { service.captureStateHolder.capturing.value }
                 terminate()
                 runCurrent()
                 pumpUntil { service.captureStateHolder.capturing.value }
+                val blockedHold = signal.holdCloudTurn()!!
+                ready.update(isReady = false)
+                pumpUntil { !service.captureStateHolder.capturing.value }
+                assertFalse("a capture blocker invalidates even a live cloud hold", signal.isActive.value)
+                assertTrue(signal.isClosedByPrivacy())
+                signal.finishCloudTurn(blockedHold)
+                ready.update(isReady = true)
+                runCurrent()
+                assertFalse("clearing the blocker and late completion cannot reopen grace", signal.isActive.value)
+                signal.onWakeWordDetected()
+                pumpUntil { service.captureStateHolder.capturing.value }
                 signal.onAppBackgrounded()
                 pumpUntil { !service.captureStateHolder.capturing.value }
-                verify(engine).stop()
+                verify(engine, org.mockito.kotlin.times(2)).stop()
                 signal.onWakeWordDetected()
                 pumpUntil { service.captureStateHolder.capturing.value }
                 service.onDestroy()

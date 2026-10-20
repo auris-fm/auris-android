@@ -73,7 +73,7 @@ class CloudRouteGraceLifecycleTest {
     }
 
     @Test
-    fun `server done and an empty queue do not release grace before the playback head finishes`() = runTest {
+    fun `backgrounding with queued answer and server done preserves grace until the playback head finishes`() = runTest {
         val signal = GracePeriodSignal(timeoutMs = 100L)
         signal.onWakeWordDetected()
         val origin = signal.currentGeneration
@@ -96,6 +96,15 @@ class CloudRouteGraceLifecycleTest {
             runCurrent()
             assertEquals("the entire PCM chunk was submitted", 1_600L, player.trackFramesForTest())
             assertTrue(player.isPlaying)
+            val visibility = kotlinx.coroutines.flow.MutableStateFlow(true)
+            val lifecycle = object : au.com.shiftyjelly.pocketcasts.repositories.playback.AppLifecycleProvider {
+                override val isInForeground = visibility
+            }
+            au.com.shiftyjelly.pocketcasts.voicecontrol.foreground.ForegroundStateMonitor(lifecycle, backgroundScope, signal)
+            runCurrent()
+            visibility.value = false
+            runCurrent()
+            assertTrue("background with unplayed answer audio must keep the hold", signal.isActive.value)
             advanceTimeBy(350L)
             runCurrent()
             assertFalse("done is still awaiting observed local playback", owner.isCompleted)
@@ -229,7 +238,7 @@ class CloudRouteGraceLifecycleTest {
         val owner = async { sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, PlaybackContext(), false, origin, true) }
         try {
             entered.await()
-            signal.onAppBackgrounded()
+            signal.onAudioRouteChanged()
             advanceTimeBy(350L)
             runCurrent()
             assertFalse("a live cloud turn cannot override privacy", signal.isActive.value)

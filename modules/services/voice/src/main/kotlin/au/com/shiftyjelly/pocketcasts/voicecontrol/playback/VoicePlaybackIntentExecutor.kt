@@ -630,6 +630,8 @@ interface VoiceCloudRouteSink {
         capturedOrigin: Long? = null,
         /** True when that window was opened by a wake, so the turn begins a conversation. */
         isWakeOriginated: Boolean = false,
+        /** The admitted client-minted UUID this turn answers as. Required: the wire identity is never minted by the sink. */
+        admitted: String?,
     ): CloudTurnResult
 
     /**
@@ -709,6 +711,8 @@ interface VoiceCloudRouteSink {
         isLiveGraceTurn: Boolean = false,
         capturedOrigin: Long? = null,
         isWakeOriginated: Boolean = false,
+        /** The admitted client-minted UUID this turn answers as. Required: the wire identity is never minted by the sink. */
+        admitted: String?,
     ): CloudTurnResult = routeToCloud(
         request,
         tier,
@@ -716,6 +720,7 @@ interface VoiceCloudRouteSink {
         isLiveGraceTurn,
         capturedOrigin,
         isWakeOriginated,
+        admitted,
     )
 }
 

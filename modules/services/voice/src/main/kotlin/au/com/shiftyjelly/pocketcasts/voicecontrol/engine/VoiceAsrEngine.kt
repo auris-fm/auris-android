@@ -213,6 +213,14 @@ class VoiceAsrEngine @Inject constructor(
         request.completionSample + (request.sampleRateHz * WAKE_ONLY_TOLERANCE_MS / 1000) >=
         request.speechEndSample
 
+    /** True when [text] carries at least one Unicode letter or number (any script). */
+    private fun hasLetterOrNumber(text: String): Boolean = text.any {
+        it.isLetter() ||
+            it.category == CharCategory.DECIMAL_DIGIT_NUMBER ||
+            it.category == CharCategory.LETTER_NUMBER ||
+            it.category == CharCategory.OTHER_NUMBER
+    }
+
     private suspend fun shouldTranscribe(segment: VoiceSegmenterResult.SpeechEnded): TranscribeRequest? {
         // Build float samples from the segment
         val totalSamples = segment.frames.sumOf { it.samples.size }
@@ -346,6 +354,22 @@ class VoiceAsrEngine @Inject constructor(
             // already acknowledged detection.)
             return
         }
+        // Task #78: a transcript with no content -- punctuation, symbols or whitespace only,
+        // after the wake trim -- is not a user request. Discard it silently BEFORE translation,
+        // routing or any feedback: no dialog consumption, no grace extension, no error cue.
+        // Content is any Unicode letter or number, so CJK particles (停, 嗯) and digit
+        // lookalikes (², ½) count as content while ".", "…" and "?!" do not.
+        if (!hasLetterOrNumber(transcript)) {
+            Timber.i(
+                "[VoicePipeline] asr %s %dms lang=%s '%s'%s → drop (non-content)",
+                b::class.simpleName,
+                asrMs,
+                asrResult.detectedLanguage ?: "?",
+                transcript,
+                trimNote?.let { " $it" } ?: "",
+            )
+            return
+        }
         // Translate to English when the ASR backend did not already translate and
         // the detected language is not English (the SenseVoice CJK path).
         // Use the wake-trimmed transcript from LFM's WakeTranscriptTrimmer.
@@ -408,7 +432,7 @@ class VoiceAsrEngine @Inject constructor(
         // words must not. The dialog path mints its own for clarification flows; this is the producer
         // for a plain utterance that goes straight to the cloud.
         val logicalRequestId = java.util.UUID.randomUUID().toString()
-        val outcome = recognizer.recognize(input, ctx)
+        val outcome = recognizer.recognize(input, ctx, logicalRequestId)
         val elapsedMs = System.currentTimeMillis() - t0
         val intent = outcome.intent
         val diagnostic = outcome.diagnostic

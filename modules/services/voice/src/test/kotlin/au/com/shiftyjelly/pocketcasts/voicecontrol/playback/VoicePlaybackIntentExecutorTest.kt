@@ -1413,6 +1413,7 @@ class VoicePlaybackIntentExecutorTest {
             isLiveGraceTurn: Boolean,
             capturedOrigin: Long?,
             isWakeOriginated: Boolean,
+            admitted: String?,
         ): CloudTurnResult {
             calls += "routeToCloud:$request:${tier.name}"
             graceFlags += isLiveGraceTurn

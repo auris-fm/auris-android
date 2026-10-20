@@ -28,7 +28,27 @@ import org.robolectric.RobolectricTestRunner
 
 @RunWith(RobolectricTestRunner::class)
 class LfmIntentRouterTest {
+
+    private val admittedId = "6f9619ff-8b86-d011-b42d-00c04fc964ff"
+
     @get:Rule val tempDir = TemporaryFolder()
+
+    @Test
+    fun diagnostics_carryTheAdmittedUtteranceIdentity() = runTest {
+        // Spec 3b1def9: the routing diagnostic records THE admitted utterance UUID, not a second ID
+        // minted at the routing boundary. The exported VoiceRouter record must pair with the turn by
+        // identity, so the value is an input to recognize(), never generated here.
+        val inference = FakeLfmInference().apply {
+            classifyLabel = "no_match:"
+        }
+        val diagnostics = mutableListOf<RouterStageDiagnostic>()
+        val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
+        val admitted = "6f9619ff-8b86-d011-b42d-00c04fc964ff"
+
+        router.ensureReady().getOrThrow()
+        assertNull(router.recognize(english("hello"), RECOGNITION_CONTEXT, admitted).intent)
+        assertEquals(admitted, diagnostics.single().requestId)
+    }
 
     @Test
     fun noMatch_returnsNull() = runTest {
@@ -39,7 +59,7 @@ class LfmIntentRouterTest {
         val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
 
         router.ensureReady().getOrThrow()
-        assertNull(router.recognize(english("hello"), RECOGNITION_CONTEXT).intent)
+        assertNull(router.recognize(english("hello"), RECOGNITION_CONTEXT, admittedId).intent)
         assertEquals(1, inference.resetCount)
         assertEquals(RouterStageDiagnostic.STAGE_NO_MATCH, diagnostics.single().failedStage)
         assertEquals(RouterInputFormat.EnglishV1.wireName, diagnostics.single().inputFormat)
@@ -57,7 +77,7 @@ class LfmIntentRouterTest {
         val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
 
         router.ensureReady().getOrThrow()
-        assertNull(router.recognize(english("rename my bookmark"), RECOGNITION_CONTEXT).intent)
+        assertNull(router.recognize(english("rename my bookmark"), RECOGNITION_CONTEXT, admittedId).intent)
         assertEquals(RouterStageDiagnostic.STAGE_MAPPER_DIALOG, diagnostics.single().failedStage)
     }
 
@@ -70,7 +90,7 @@ class LfmIntentRouterTest {
         val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
 
         router.ensureReady().getOrThrow()
-        assertNull(router.recognize(english("pause"), RECOGNITION_CONTEXT).intent)
+        assertNull(router.recognize(english("pause"), RECOGNITION_CONTEXT, admittedId).intent)
         assertEquals(0, inference.classifyCount)
         assertEquals(RouterStageDiagnostic.STAGE_EXCEPTION, diagnostics.single().failedStage)
         assertEquals(1, inference.resetCount)
@@ -86,7 +106,7 @@ class LfmIntentRouterTest {
         val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
 
         router.ensureReady().getOrThrow()
-        assertNull(router.recognize(english("pause"), RECOGNITION_CONTEXT).intent)
+        assertNull(router.recognize(english("pause"), RECOGNITION_CONTEXT, admittedId).intent)
         assertEquals(RouterStageDiagnostic.STAGE_GENERATE, diagnostics.single().failedStage)
         assertEquals("playback:pause", diagnostics.single().classifierLabel)
     }
@@ -98,7 +118,7 @@ class LfmIntentRouterTest {
         val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
 
         router.ensureReady().getOrThrow()
-        assertNull(router.recognize(english("   "), RECOGNITION_CONTEXT).intent)
+        assertNull(router.recognize(english("   "), RECOGNITION_CONTEXT, admittedId).intent)
         assertEquals(RouterStageDiagnostic.STAGE_BLANK, diagnostics.single().failedStage)
         assertEquals(0, inference.resetCount)
     }
@@ -109,7 +129,7 @@ class LfmIntentRouterTest {
         val diagnostics = mutableListOf<RouterStageDiagnostic>()
         val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
 
-        assertNull(router.recognize(english("pause"), RECOGNITION_CONTEXT).intent)
+        assertNull(router.recognize(english("pause"), RECOGNITION_CONTEXT, admittedId).intent)
         assertEquals(RouterStageDiagnostic.STAGE_NOT_READY, diagnostics.single().failedStage)
     }
 
@@ -155,7 +175,7 @@ class LfmIntentRouterTest {
         )
         assertEquals(
             VoiceIntent.Playback.Pause,
-            router.recognize(input, RECOGNITION_CONTEXT).intent,
+            router.recognize(input, RECOGNITION_CONTEXT, admittedId).intent,
         )
         assertTrue(inference.tokenizedTexts.any { it == "Go back to 3 minutes." })
         assertFalse(inference.tokenizedTexts.any { it.contains("倒回去") })
@@ -187,7 +207,7 @@ class LfmIntentRouterTest {
         router.ensureReady().getOrThrow()
         assertEquals(
             VoiceIntent.Playback.Pause,
-            router.recognize(english("pause"), RECOGNITION_CONTEXT).intent,
+            router.recognize(english("pause"), RECOGNITION_CONTEXT, admittedId).intent,
         )
         assertEquals(1, diagnostics.size)
         assertEquals(RouterStageDiagnostic.OUTCOME_INTENT, diagnostics.single().finalOutcome)
@@ -208,7 +228,7 @@ class LfmIntentRouterTest {
         router.ensureReady().getOrThrow()
         assertEquals(
             VoiceIntent.Playback.Pause,
-            router.recognize(english("pause"), RECOGNITION_CONTEXT).intent,
+            router.recognize(english("pause"), RECOGNITION_CONTEXT, admittedId).intent,
         )
         assertEquals(1, diagnostics.size)
         assertEquals(RouterStageDiagnostic.OUTCOME_INTENT, diagnostics.single().finalOutcome)
@@ -225,7 +245,7 @@ class LfmIntentRouterTest {
         val router = createRouter(inference).also { it.diagnosticSink = { diagnostics += it } }
 
         router.ensureReady().getOrThrow()
-        assertNull(router.recognize(english("pause"), RECOGNITION_CONTEXT).intent)
+        assertNull(router.recognize(english("pause"), RECOGNITION_CONTEXT, admittedId).intent)
         val diagnostic = diagnostics.single()
         assertEquals(RouterStageDiagnostic.STAGE_EXCEPTION, diagnostic.failedStage)
         assertEquals("playback:pause", diagnostic.classifierLabel)
@@ -248,7 +268,7 @@ class LfmIntentRouterTest {
         now = 2_000L
         assertEquals(
             VoiceIntent.Playback.Pause,
-            router.recognize(english("pause"), RECOGNITION_CONTEXT).intent,
+            router.recognize(english("pause"), RECOGNITION_CONTEXT, admittedId).intent,
         )
         val diagnostic = diagnostics.single()
         assertEquals(
@@ -278,7 +298,7 @@ class LfmIntentRouterTest {
 
         router.ensureReady().getOrThrow()
         now = 500L
-        assertNull(router.recognize(english("hello"), RECOGNITION_CONTEXT).intent)
+        assertNull(router.recognize(english("hello"), RECOGNITION_CONTEXT, admittedId).intent)
         val diagnostic = diagnostics.single()
         assertEquals(
             mapOf(
@@ -302,7 +322,7 @@ class LfmIntentRouterTest {
         router.ensureReady().getOrThrow()
         assertEquals(
             VoiceIntent.Playback.Pause,
-            router.recognize(english("pause"), RECOGNITION_CONTEXT).intent,
+            router.recognize(english("pause"), RECOGNITION_CONTEXT, admittedId).intent,
         )
     }
 
@@ -320,7 +340,7 @@ class LfmIntentRouterTest {
         // in the sign. The separate direction field is for a direction that came *without* one.
         assertEquals(
             VoiceIntent.Playback.SeekRelative(-60),
-            router.recognize(english("go back a minute"), RECOGNITION_CONTEXT).intent,
+            router.recognize(english("go back a minute"), RECOGNITION_CONTEXT, admittedId).intent,
         )
     }
 
@@ -332,7 +352,7 @@ class LfmIntentRouterTest {
         val router = createRouter(inference)
 
         router.ensureReady().getOrThrow()
-        router.recognize(english("play that thing"), RECOGNITION_CONTEXT)
+        router.recognize(english("play that thing"), RECOGNITION_CONTEXT, admittedId)
 
         val line = File(logDir, "debug.log")
             .readLines()

@@ -611,6 +611,11 @@ class VoiceAsrEngineTest {
         // must not leave state that prevents the next capture from routing normally.
         val signal = GracePeriodSignal(timeoutMs = 30_000L)
         signal.onWakeWordDetected()
+        // CAPTURE BASELINE: the timer job armed by the wake, BEFORE any utterance processing.
+        // If either the discard or the content routing spuriously calls onCommandRecognized,
+        // the timer will be cancelled and re-created (different job reference).
+        val preDiscardTimerJob = signal.timerJobForTest()
+        assertNotNull("wake armed a timer", preDiscardTimerJob)
         `when`(context.getSystemService(Context.AUDIO_SERVICE)).thenReturn(audioManager)
         `when`(audioManager.mode).thenReturn(AudioManager.MODE_NORMAL)
         `when`(voiceAudioProcessor.startProcessing()).thenReturn(
@@ -638,10 +643,6 @@ class VoiceAsrEngineTest {
 
         val intents = mutableListOf<VoiceIntent>()
         val recognizer = RecordingRecognizer(VoiceIntent.Playback.Pause)
-        // Capture the timer job AFTER the first transcribe (discard) but BEFORE the second.
-        // The backend's transcribe runs synchronously within the engine's collect loop,
-        // so this is the only observation point between the two utterances.
-        var postDiscardTimerJob: kotlinx.coroutines.Job? = null
         val engine = VoiceAsrEngine(
             voiceAudioProcessor = voiceAudioProcessor,
             utteranceFilter = utteranceFilter,
@@ -662,14 +663,17 @@ class VoiceAsrEngineTest {
                 override suspend fun transcribe(samples: FloatArray, sampleRateHz: Int): AsrResult {
                     callCount++
                     return if (callCount == 1) {
-                        // After this transcribe returns, the engine will run hasLetterOrNumber
-                        // and discard. Capture the timer job AFTER the discard has processed
-                        // by deferring to the next call.
                         AsrResult("\u2026", detectedLanguage = "yue") // "…" in Cantonese
                     } else {
-                        // By the time the second transcribe runs, the first utterance's discard
-                        // has fully processed. Capture the timer job as baseline.
-                        postDiscardTimerJob = signal.timerJobForTest()
+                        // ASSERTION POINT: the discard has fully processed. The timer job must
+                        // still be the same instance that was armed by the wake BEFORE any
+                        // utterance processing. If the discard called onCommandRecognized,
+                        // it would have cancelled and re-created the timer.
+                        assertSame(
+                            "discard did not re-arm the grace timer",
+                            preDiscardTimerJob,
+                            signal.timerJobForTest(),
+                        )
                         AsrResult("pause")
                     }
                 }
@@ -697,15 +701,14 @@ class VoiceAsrEngineTest {
         //    If the guard were bypassed, the Cantonese "…" would trigger translation.
         verify(translationStage, never()).ensureReady("yue")
         verify(translationStage, never()).translate(any(), eq("yue"))
-        // 2. Grace timer observation: the timer job captured BETWEEN the discard and the
-        //    content utterance (inside the backend's second transcribe call) must be the
-        //    SAME instance after the content routes. If either the discard or the content
-        //    spuriously called onCommandRecognized, the timer would have been cancelled
-        //    and re-created (different job reference).
-        assertNotNull("wake armed a timer before content", postDiscardTimerJob)
+        // 2. Grace timer observation: the timer job armed by the wake (captured BEFORE
+        //    engine.start) must survive BOTH the discard and the content routing.
+        //    The mid-processing assertion inside the backend's second transcribe already
+        //    verified the discard didn't re-arm. This final assertion verifies the content
+        //    routing also didn't re-arm.
         assertSame(
-            "grace timer was not re-armed between discard and content completion",
-            postDiscardTimerJob,
+            "grace timer was not re-armed by either discard or content routing",
+            preDiscardTimerJob,
             signal.timerJobForTest(),
         )
         // 3. No error earcon for the discard (silent), and no error for the successful route.

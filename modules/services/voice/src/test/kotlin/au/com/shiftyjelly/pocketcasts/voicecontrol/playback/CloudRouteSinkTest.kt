@@ -3757,9 +3757,13 @@ class CloudRouteSinkTest {
         val stampedCloud = stamped as VoiceIntent.CloudRoute
         assertEquals("engine stamped B onto the dialog-completed intent", admittedB, stampedCloud.logicalRequestId)
 
-        // Step 3: Sink serializes — prepareTurn uses the admitted ID as the wire request_id.
-        val deps = TestDeps()
+        // Step 3: Sink serializes and dispatches — prepareTurn uses the admitted ID as the
+        // wire request_id, then dispatchPrepared sends it through the transport.
+        val deps = TestDeps(
+            routeInvoker = { kotlinx.coroutines.flow.flowOf(CloudRouteEvent.Done(1, 0)) },
+        )
         val sink = deps.sink()
+        deps.conversationAdmission.beginOrigin(stampedCloud.windowGeneration ?: 0L)
         val prepared = sink.prepareTurn(
             request = stampedCloud.request,
             tier = stampedCloud.tier,
@@ -3774,14 +3778,24 @@ class CloudRouteSinkTest {
         )!!
 
         assertEquals(
-            "serialized wire request_id is B (the completing utterance), not A (the begin identity)",
+            "prepared request_id is B (the completing utterance), not A (the begin identity)",
             admittedB,
             prepared.requestId,
         )
+
+        // Step 4: Dispatch through the sink. The routeInvoker captures the actual
+        // CloudRouteTurn that would be sent over the wire.
+        sink.dispatchPrepared(prepared)
+        assertEquals("exactly one turn dispatched", 1, deps.routeTurns.size)
+        assertEquals(
+            "dispatched turn's wire request_id is B",
+            admittedB,
+            deps.routeTurns.single().requestId,
+        )
         assertNotEquals(
-            "wire request_id must NOT be the begin identity",
+            "dispatched turn must NOT carry the begin identity",
             admittedA,
-            prepared.requestId,
+            deps.routeTurns.single().requestId,
         )
     }
 }

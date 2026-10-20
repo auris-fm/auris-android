@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-10-20T15:36:18.176Z" hostname="MacBook-Pro.local" time="5.885">
+  <properties/>
+  <testcase name="dialog-completed cloud route serializes the completing utterance identity not the begin identity" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="5.653"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[Mockito is currently self-attaching to enable the inline-mock-maker. This will no longer work in future releases of the JDK. Please add Mockito as an agent to your build as described in Mockito's documentation: https://javadoc.io/doc/org.mockito/mockito-core/latest/org.mockito/org/mockito/Mockito.html#0.3
+WARNING: A Java agent has been loaded dynamically (/var/folders/v3/wk_148693jd3sk8490hmflxm0000gn/T/byteBuddyAgent1988985115411268593.jar)
+WARNING: If a serviceability tool is in use, please run with -XX:+EnableDynamicAgentLoading to hide this warning
+WARNING: If a serviceability tool is not in use, please run with -Djdk.instrument.traceUsage for more information
+WARNING: Dynamic loading of agents will be disallowed by default in a future release
+]]></system-err>
+</testsuite>

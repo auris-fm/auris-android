@@ -366,9 +366,13 @@ class VoiceControlCaptureRestartTest {
                 outcome.complete(Result.failure(e))
             }
         }
-        // Drive the Main-backed scheduler from here until the watcher settles.
+        // Drive both the test scheduler (Main) and real dispatchers (IO) until the watcher
+        // settles. Production code launches work on Dispatchers.IO which runs independently
+        // of testScheduler; without yielding to real threads, that work never completes.
         while (!outcome.isCompleted) {
             testScheduler.runCurrent()
+            testScheduler.advanceTimeBy(25.milliseconds)
+            Thread.sleep(10)
             kotlinx.coroutines.yield()
         }
         outcome.await().getOrThrow()

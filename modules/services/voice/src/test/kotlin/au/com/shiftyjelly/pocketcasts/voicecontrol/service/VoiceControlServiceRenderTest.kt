@@ -115,13 +115,8 @@ class VoiceControlServiceRenderTest {
             voiceControlServiceController = mock(au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlServiceController::class.java)
         }
         signal.onWakeWordDetected()
-        // Spend this window's single escalation so a renewal would be visible as "available".
-        signal.issueEscalation()
-        assertEquals(
-            "the probe needs a spent escalation",
-            "allowance spent in this window",
-            signal.escalationRefusal(),
-        )
+        val captured = signal.currentGeneration
+        val timerBefore = signal.timerJobForTest()
         try {
             service.handleIntentForTest(VoiceIntent.Playback.Pause)
             awaitRealTime { org.mockito.Mockito.mockingDetails(executor).invocations.size >= 1 }
@@ -129,12 +124,9 @@ class VoiceControlServiceRenderTest {
 
             // No feedback: cancellation is the caller withdrawing, not a failure to report.
             verify(earconPlayer, org.mockito.Mockito.never()).play(EarconId.ERROR)
-            // And the window was not renewed, so the spent allowance stays spent.
-            assertEquals(
-                "cancellation must not reopen or advance the window: refusal=${signal.escalationRefusal()}",
-                "allowance spent in this window",
-                signal.escalationRefusal(),
-            )
+            org.junit.Assert.assertSame("cancellation cannot reset inactivity", timerBefore, signal.timerJobForTest())
+            assertEquals(captured, signal.currentGeneration)
+            org.junit.Assert.assertTrue(signal.isCurrent(captured))
         } finally {
             renderer.release()
         }

@@ -980,46 +980,13 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
-    fun `handling an escalation does not refresh the window budget`() = runTest {
-        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
-        val sinks = FakeSinks()
-        val executor = sinks.executor(signal)
-
-        // A user act opens the window; its one dispatch is spent on this turn.
-        signal.onWakeWordDetected()
-        val generation = signal.issueEscalation()!!
-        executor.execute(
-            VoiceIntent.CloudRoute(
-                request = "what did the guests say about sleep and memory",
-                tier = VoiceIntent.CloudTier.Unknown,
-                windowGeneration = generation,
-                origin = VoiceIntent.CloudRouteOrigin.RoutingFailure,
-            ),
-        )
-
-        // Handling it extends the window, but must not hand the turn a new
-        // allowance — otherwise one unclear question per turn re-arms it forever.
-        assertNull(
-            "a dispatched turn must not fund its own next attempt",
-            signal.issueEscalation(),
-        )
-        assertEquals(
-            listOf(
-                "prepareTurn:what did the guests say about sleep and memory",
-                "dispatchPrepared:what did the guests say about sleep and memory",
-            ),
-            sinks.cloudRoute.calls,
-        )
-    }
-
-    @Test
     fun `a fallback completing after a privacy close leaves the window closed`() = runTest {
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
         val sinks = FakeSinks()
         val executor = sinks.executor(signal)
 
         signal.onWakeWordDetected()
-        val generation = signal.issueEscalation()!!
+        val generation = signal.currentGeneration
 
         // The app is backgrounded while the cloud turn is still in flight.
         sinks.cloudRoute.whileInFlight = { signal.onAppBackgrounded() }
@@ -1035,27 +1002,7 @@ class VoicePlaybackIntentExecutorTest {
         // The turn's completion must not bring the mic back: the privacy close
         // wins over an in-flight turn.
         assertFalse("a completion reopened a closed window", signal.isActive.value)
-        assertNull(signal.issueEscalation())
-    }
-
-    @Test
-    fun `a model-chosen route completing in its window restores the allowance`() = runTest {
-        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
-        val sinks = FakeSinks()
-        val executor = sinks.executor(signal)
-
-        signal.onWakeWordDetected()
-        val generation = signal.issueEscalation()!!
-        executor.execute(
-            VoiceIntent.CloudRoute(
-                request = "summarize this episode",
-                tier = VoiceIntent.CloudTier.Premium,
-                windowGeneration = generation,
-                origin = VoiceIntent.CloudRouteOrigin.ModelCall,
-            ),
-        )
-
-        assertNotNull("a deliberate route earns the next dispatch", signal.issueEscalation())
+        assertFalse(signal.isCurrent(generation))
     }
 
     @Test
@@ -1095,20 +1042,6 @@ class VoicePlaybackIntentExecutorTest {
         )
 
         assertTrue(signal.isActive.value)
-    }
-
-    @Test
-    fun `a locally recognised command refreshes the window budget`() = runTest {
-        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
-        val sinks = FakeSinks()
-        val executor = sinks.executor(signal)
-
-        signal.onWakeWordDetected()
-        assertNotNull(signal.issueEscalation())
-        executor.execute(VoiceIntent.Playback.Pause)
-
-        // A locally handled command is a new act, so it earns a fresh allowance.
-        assertNotNull(signal.issueEscalation())
     }
 
     @Test
@@ -1457,6 +1390,7 @@ class VoicePlaybackIntentExecutorTest {
 
         override suspend fun dispatchPrepared(
             prepared: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
+            isRetry: Boolean,
         ): CloudTurnResult {
             preparedDispatches += prepared
             calls += "dispatchPrepared:${prepared.request}"
@@ -1573,7 +1507,7 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
-    fun `an Unknown cloud outcome does not renew the window budget at the RECOGNIZING site`() = runTest {
+    fun `an Unknown cloud outcome does not reset inactivity at the recognizing site`() = runTest {
         // @reviewer's finding: the EXECUTOR recognized unconditionally, BEFORE any caller could check --
         // so a guard added downstream was defeated by this very call. The guard belongs where the act is.
         val sinks = FakeSinks()
@@ -1583,13 +1517,8 @@ class VoicePlaybackIntentExecutorTest {
 
         signal.onWakeWordDetected()
         val window = signal.capturedGeneration()
-        signal.issueEscalation()
-        assertEquals(
-            "the probe needs a spent escalation",
-            "allowance spent in this window",
-            signal.escalationRefusal(),
-        )
 
+        val timerBefore = signal.timerJobForTest()
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "summarize this episode",
@@ -1598,17 +1527,11 @@ class VoicePlaybackIntentExecutorTest {
             ),
         )
 
-        // THE SPENT ESCALATION STAYS SPENT: recognition would have cleared it. An unknown action outcome
-        // must not earn that, because the turn has not been shown to have done anything.
-        assertEquals(
-            "an unverified action must not renew the budget it did not earn",
-            "allowance spent in this window",
-            signal.escalationRefusal(),
-        )
+        org.junit.Assert.assertSame("an unknown action cannot reset inactivity", timerBefore, signal.timerJobForTest())
     }
 
     @Test
-    fun `a Confirmed cloud outcome DOES renew the window budget`() = runTest {
+    fun `a Confirmed cloud outcome resets inactivity`() = runTest {
         // THE CONTROL, so the case is decided by the OUTCOME rather than by recognition never happening.
         val sinks = FakeSinks()
         sinks.cloudRoute.actionOutcome = CloudRouteActionOutcome.Confirmed
@@ -1617,8 +1540,8 @@ class VoicePlaybackIntentExecutorTest {
 
         signal.onWakeWordDetected()
         val window = signal.capturedGeneration()
-        signal.issueEscalation()
 
+        val timerBefore = signal.timerJobForTest()
         executor.execute(
             VoiceIntent.CloudRoute(
                 request = "summarize this episode",
@@ -1627,10 +1550,6 @@ class VoicePlaybackIntentExecutorTest {
             ),
         )
 
-        assertEquals(
-            "a confirmed action is a recognized command and renews the budget",
-            "available",
-            signal.escalationRefusal(),
-        )
+        org.junit.Assert.assertNotSame("a confirmed action resets inactivity", timerBefore, signal.timerJobForTest())
     }
 }

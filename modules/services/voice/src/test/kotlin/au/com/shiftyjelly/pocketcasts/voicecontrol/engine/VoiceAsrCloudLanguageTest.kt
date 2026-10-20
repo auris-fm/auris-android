@@ -120,6 +120,40 @@ class VoiceAsrCloudLanguageTest {
         }
     }
 
+    @Test
+    fun `two separate routing failures in one grace window send two distinct resumable cloud requests`() = runTest {
+        val fixture = startPipeline("哦，我指的是AI推理。", "zh", "I mean AI reasoning.", intent = null, utterances = 2)
+        try {
+            kotlinx.coroutines.withTimeoutOrNull(5_000L) {
+                while (fixture.client.frames.size < 2) kotlinx.coroutines.delay(10L)
+            }
+            assertEquals("both independent utterances reached the actual router", 2, fixture.inputs.size)
+            assertEquals("each eligible request must reach the actual auth writer", 2, fixture.client.frames.size)
+            val first = JSONObject(fixture.client.frames[0])
+            val second = JSONObject(fixture.client.frames[1])
+            org.junit.Assert.assertNotEquals(first.getString("request_id"), second.getString("request_id"))
+            assertEquals(first.getString("conversation_id"), second.getString("conversation_id"))
+            assertEquals("create", first.getString("conversation_mode"))
+            assertEquals("resume", second.getString("conversation_mode"))
+            assertEquals("哦，我指的是AI推理。", second.getString("request"))
+            assertEquals(fixture.intents[0].let { (it as VoiceIntent.CloudRoute).windowGeneration }, (fixture.intents[1] as VoiceIntent.CloudRoute).windowGeneration)
+        } finally {
+            fixture.close()
+        }
+    }
+
+    @Test
+    fun `recognizer owned request identity survives the engine handoff`() = runTest {
+        val chosen = VoiceIntent.CloudRoute("runtime request", VoiceIntent.CloudTier.Premium, logicalRequestId = "dialog-owned-request")
+        val fixture = startPipeline("A question.", "en", "A question.", chosen)
+        try {
+            kotlinx.coroutines.withTimeout(5_000L) { fixture.completed.await() }
+            assertEquals("dialog-owned-request", (fixture.intents.single() as VoiceIntent.CloudRoute).logicalRequestId)
+        } finally {
+            fixture.close()
+        }
+    }
+
     private suspend fun TestScope.checkCloud(
         source: String,
         language: String?,
@@ -182,6 +216,7 @@ class VoiceAsrCloudLanguageTest {
         routerText: String,
         intent: VoiceIntent?,
         backendTranslation: Boolean = false,
+        utterances: Int = 1,
     ): Fixture {
         val signal = GracePeriodSignal()
         signal.onWakeWordDetected()
@@ -228,15 +263,22 @@ class VoiceAsrCloudLanguageTest {
             )
             override fun release() = Unit
         }
+        val finishedTurns = kotlinx.coroutines.channels.Channel<Unit>(1)
         val processor = mock<VoiceAudioProcessor>()
         whenever(processor.attachCapture()).thenReturn(true)
         whenever(processor.startProcessing()).thenReturn(
-            flowOf(
-                VoiceSegmenterResult.SpeechEnded(
-                    listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
-                    speechOnsetSample = 2,
-                ),
-            ),
+            kotlinx.coroutines.flow.flow {
+                repeat(utterances) {
+                    emit(
+                        VoiceSegmenterResult.SpeechEnded(
+                            listOf(PcmAudioFrame(shortArrayOf(100, 200, 300, 400), 16000)),
+                            speechOnsetSample = 2,
+                        ),
+                    )
+                    // The second utterance follows actual terminal/executor completion of the first.
+                    if (utterances > 1) finishedTurns.receive()
+                }
+            },
         )
         val filter = mock<UtteranceFilter>()
         whenever(filter.shouldProcessReference(any(), any(), any(), any(), anyOrNull())).thenReturn(true)
@@ -279,6 +321,8 @@ class VoiceAsrCloudLanguageTest {
                         completed.complete(Unit)
                     } catch (t: Throwable) {
                         completed.completeExceptionally(t)
+                    } finally {
+                        finishedTurns.trySend(Unit)
                     }
                 }
             },
@@ -309,7 +353,8 @@ class VoiceAsrCloudLanguageTest {
             val socket = mock<WebSocket>()
             whenever(socket.send(any<String>())).thenAnswer { invocation ->
                 frames += invocation.getArgument<String>(0)
-                listener.onMessage(socket, """{"type":"done","usage":{"input_tokens":0,"output_tokens":0}}""")
+                listener.onMessage(socket, """{"type":"connected","codec":"pcm_s16le@24k","reservation_id":"test-reservation"}""")
+                listener.onMessage(socket, """{"type":"done","outcome":"completed","usage":{"input_tokens":0,"output_tokens":0,"speech":{"amount":0,"unit":"characters"}}}""")
                 listener.onClosed(socket, 1000, "complete")
                 true
             }

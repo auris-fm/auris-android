@@ -486,25 +486,11 @@ class VoiceAsrEngine @Inject constructor(
                 // THE ORIGIN IS THE ONE CAPTURED AT REGISTRATION, not the window that happens to be
                 // live now. Recognition can take seconds, and a wake arriving meanwhile opens a NEW
                 // window: escalating under that window would let OLD recognition consume its
-                // SUCCESSOR's allowance and dispatch under the successor's generation. A stale origin is
-                // rejected BEFORE the allowance is claimed, so it cannot spend it either.
+                // successor's conversation. A stale origin is rejected before dispatch.
                 if (!gracePeriodSignal.isCurrent(windowAtRequest)) {
                     Timber.i(
                         "[VoicePipeline] cloud escalation skipped: origin %d is no longer live",
                         windowAtRequest,
-                    )
-                    audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
-                    return
-                }
-                // CLAIMED AGAINST THE REQUEST'S OWN WINDOW. The liveness check above refuses a stale
-                // origin; this makes the CLAIM itself belong to that window, so a request that is about
-                // to be refused cannot spend the successor's allowance on its way out.
-                val issuedUnder = gracePeriodSignal.issueEscalation(windowAtRequest)
-                if (issuedUnder == null) {
-                    // No open window, or this window's one dispatch is spent.
-                    Timber.i(
-                        "[VoicePipeline] cloud escalation skipped (%s)",
-                        gracePeriodSignal.escalationRefusal(),
                     )
                     audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
                     return

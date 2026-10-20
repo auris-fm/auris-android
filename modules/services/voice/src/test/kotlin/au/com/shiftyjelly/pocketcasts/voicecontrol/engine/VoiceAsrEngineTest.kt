@@ -541,8 +541,7 @@ class VoiceAsrEngineTest {
         // and the ASR, so nothing below it may touch grace: no window opened or reset, and no dispatch
         // allowance spent. These are `never` because a single call is the defect.
         verify(gracePeriodSignal, never()).onWakeWordDetected()
-        verify(gracePeriodSignal, never()).onCommandRecognized(any(), any())
-        verify(gracePeriodSignal, never()).issueEscalation()
+        verify(gracePeriodSignal, never()).onCommandRecognized(any())
 
         engine.stop()
     }
@@ -733,7 +732,7 @@ class VoiceAsrEngineTest {
     }
 
     @Test
-    fun `only one escalation is dispatched per grace window`() = runTest {
+    fun `independent utterances in one grace window each dispatch once`() = runTest {
         val signal = GracePeriodSignal(timeoutMs = 30_000L)
         // The bound is per user act, so the window has to be open for either
         // dispatch to be allowed at all.
@@ -783,9 +782,11 @@ class VoiceAsrEngineTest {
         )
         advanceUntilIdle()
 
-        // Two failures in one window: the second is refused, and says so.
-        assertEquals(1, intents.size)
-        verify(audioFeedbackRenderer).submitEarcon(EarconId.ERROR)
+        assertEquals("independent utterances own independent logical dispatches", 2, intents.size)
+        val cloud = intents.map { it as VoiceIntent.CloudRoute }
+        org.junit.Assert.assertNotEquals(cloud[0].logicalRequestId, cloud[1].logicalRequestId)
+        assertEquals(cloud[0].windowGeneration, cloud[1].windowGeneration)
+        verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
 
         engine.stop()
     }
@@ -849,7 +850,7 @@ class VoiceAsrEngineTest {
         )
         // THE ALLOWANCE ITSELF IS PINNED AT THE SIGNAL, not here: driving it through the engine
         // entangles it with the engine's own lifecycle, and in this fixture the window is already
-        // inactive by the time the assertion would run -- so `issueEscalation` returns null for a reason
+        // inactive by the time the assertion would run -- so liveness fails for a reason
         // that has nothing to do with the claim. `GracePeriodSignalTest` asserts the property directly,
         // where the window state is controlled: a claim for a superseded window is refused AND the
         // successor's allowance survives it.

@@ -109,7 +109,7 @@ sealed interface VoiceIntent {
          * dispatched it. Handling the command may extend that window only while
          * it is still current and still open: the turn outlives the window, and
          * without the identity an in-flight turn could hold a later session open
-         * or spend its allowance.
+         * or act under its identity.
          */
         val windowGeneration: Long? = null,
         /**
@@ -142,10 +142,8 @@ sealed interface VoiceIntent {
         /**
          * Who issued this dispatch. Separate from [windowGeneration] on purpose:
          * the generation decides whether the window is touched at all, the
-         * origin decides whether the window's allowance is restored. A
-         * model-chosen route is a deliberate act and restores it; a
-         * routing-failure escalation is what the allowance exists for and does
-         * not, or the fallback would fund its own next attempt.
+         * origin records how the turn was selected. Both paths have one logical dispatch
+         * per request; neither completion nor timer reset grants a second execution.
          */
         val origin: CloudRouteOrigin = CloudRouteOrigin.ModelCall,
         /** ASR source language supplied by the runtime, never by the intent model or app locale. */
@@ -158,12 +156,12 @@ sealed interface VoiceIntent {
 }
 
 /**
- * Stamps [logicalRequestId] on a cloud turn intent, leaving other intents untouched.
+ * Supplies [logicalRequestId] only when a cloud turn has no identity yet. Existing request ownership is retained.
  *
  * Only a cloud turn carries a logical identity: it is the one dispatch that is prepared once and may be
  * retried, so it is the one whose identity a retry must reuse.
  */
-fun VoiceIntent.withLogicalRequest(logicalRequestId: String): VoiceIntent = if (this is VoiceIntent.CloudRoute) copy(logicalRequestId = logicalRequestId) else this
+fun VoiceIntent.withLogicalRequest(logicalRequestId: String): VoiceIntent = if (this is VoiceIntent.CloudRoute && this.logicalRequestId == null) copy(logicalRequestId = logicalRequestId) else this
 
 data class PlaybackContext(
     /** The episode being played, or null when nothing is playing -- discovery with no subject. */

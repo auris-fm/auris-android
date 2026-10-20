@@ -58,18 +58,18 @@ class GraceCloudTurnHoldTest {
     }
 
     @Test
-    fun `a reset while held does not arm an expiry and does not mint another allowance`() = runTest {
+    fun `a reset while held does not arm an expiry or change the live window`() = runTest {
         val signal = GracePeriodSignal(timeoutMs = 100L)
         signal.onWakeWordDetected()
-        val origin = signal.issueEscalation()!!
+        val origin = signal.currentGeneration
         val hold = signal.holdCloudTurn(origin)!!
-        signal.onCommandRecognized(fromGeneration = origin, restoresAllowance = false)
+        signal.onCommandRecognized(fromGeneration = origin)
         signal.armTimerForLockedForTest(origin)
         advanceTimeBy(300L)
         runCurrent()
         assertTrue(signal.isActive.value)
         assertEquals(origin, signal.currentGeneration)
-        assertNull(signal.issueEscalation(origin))
+        assertTrue(signal.isCurrent(origin))
         signal.finishCloudTurn(hold)
         advanceTimeBy(100L)
         runCurrent()

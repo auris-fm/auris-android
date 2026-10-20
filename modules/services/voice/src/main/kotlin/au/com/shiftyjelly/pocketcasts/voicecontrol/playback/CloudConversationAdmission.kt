@@ -4,6 +4,7 @@ import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudConversationMode
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CompletableDeferred
 
 /**
  * Prepares the admission pair a turn carries: which conversation it belongs to, and whether it creates
@@ -46,9 +47,7 @@ class CloudConversationAdmission @Inject constructor() {
         // arrives HERE, and a request from a superseded window stops being retryable the moment a newer
         // one is admitted: a retry is validated against its own window, so nothing will retry it.
         if (origin > currentOrigin) {
-            prepared.filterValues { it.capturedOrigin != null && it.capturedOrigin != origin }
-                .keys.toList()
-                .forEach { prepared.remove(it) }
+            retire { it.capturedOrigin != null && it.capturedOrigin != origin }
         }
         // ADOPTION IS NOT A ONE-TIME EVENT. The earlier version adopted only the very first origin it
         // ever saw, so a valid request under a LATER window was refused as stale -- a successor wake's
@@ -102,9 +101,7 @@ class CloudConversationAdmission @Inject constructor() {
      * @return the identities retired by this advance, so the owner can report or observe them.
      */
     fun beginOrigin(origin: Long): List<String> = synchronized(lock) {
-        val superseded = prepared.filterValues { it.capturedOrigin != null && it.capturedOrigin != origin }
-            .keys.toList()
-        superseded.forEach { prepared.remove(it) }
+        val superseded = retire { it.capturedOrigin != null && it.capturedOrigin != origin }
         currentOrigin = origin
         superseded
     }
@@ -116,9 +113,20 @@ class CloudConversationAdmission @Inject constructor() {
 
     private var currentOrigin: Long = 0
 
-    /** Prepared turns by logical request, so a retry reuses the turn its first attempt fixed. */
-    private val prepared =
-        mutableMapOf<String, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
+    /** One in-memory owner of preparation and dispatch for each retained request. */
+    private class RetainedRequest(
+        val logicalId: String?,
+        val turn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
+        var completion: CompletableDeferred<Unit>? = null,
+    )
+
+    private val prepared = mutableMapOf<String, RetainedRequest>()
+
+    private fun retire(predicate: (au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn) -> Boolean): List<String> {
+        val retired = prepared.filterValues { predicate(it.turn) }
+        retired.keys.forEach { prepared.remove(it) }
+        return retired.values.mapNotNull { it.logicalId }
+    }
 
     /**
      * Retires every prepared turn belonging to [endedGeneration], reporting what it retired.
@@ -128,17 +136,40 @@ class CloudConversationAdmission @Inject constructor() {
      * (`beginOrigin`) cover replacement; this covers the endings that are not a replacement.
      */
     fun endWindow(endedGeneration: Long): List<String> = synchronized(lock) {
-        val retired = prepared.filterValues { it.capturedOrigin == endedGeneration }.keys.toList()
-        retired.forEach { prepared.remove(it) }
-        retired
+        retire { it.capturedOrigin == endedGeneration }
     }
 
     /** The turn already prepared for [logicalRequestId], when a retry names one. */
-    fun retained(logicalRequestId: String): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = synchronized(lock) { prepared[logicalRequestId] }
+    fun retained(logicalRequestId: String): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = synchronized(lock) { prepared["logical:$logicalRequestId"]?.turn }
 
-    /** Retains [turn] for [logicalRequestId] until it is no longer retryable. */
-    fun retain(logicalRequestId: String, turn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn) {
-        synchronized(lock) { prepared[logicalRequestId] = turn }
+    /** Lookup, creation and retention are atomic, so duplicate callbacks cannot mint two wire IDs. */
+    internal fun retainOrPrepare(
+        logicalRequestId: String?,
+        isRetry: Boolean,
+        create: () -> au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn?,
+    ): au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn? = synchronized(lock) {
+        val key = logicalRequestId?.let { "logical:$it" }
+        key?.let { prepared[it]?.let { existing -> return@synchronized existing.turn } }
+        if (isRetry) return@synchronized null
+        val turn = create() ?: return@synchronized null
+        prepared[key ?: "wire:${turn.requestId}"] = RetainedRequest(logicalRequestId, turn)
+        turn
+    }
+
+    internal class Dispatch(
+        val turn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn,
+        val completion: CompletableDeferred<Unit>,
+        val ownsDispatch: Boolean,
+    )
+
+    /** Duplicates join the existing completion. Only an explicit retry can start another attempt. */
+    internal fun claimDispatch(turn: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn, isRetry: Boolean): Dispatch? = synchronized(lock) {
+        val retained = prepared.values.firstOrNull { it.turn.requestId == turn.requestId } ?: return@synchronized null
+        val previous = retained.completion
+        if (previous != null && (!isRetry || !previous.isCompleted)) return@synchronized Dispatch(retained.turn, previous, false)
+        val completion = CompletableDeferred<Unit>()
+        retained.completion = completion
+        Dispatch(retained.turn, completion, true)
     }
 
     /**
@@ -150,7 +181,7 @@ class CloudConversationAdmission @Inject constructor() {
      * abandoned, replaced, or completed without a retry pending.
      */
     fun forgetRetained(logicalRequestId: String) {
-        synchronized(lock) { prepared.remove(logicalRequestId) }
+        synchronized(lock) { prepared.remove("logical:$logicalRequestId") }
     }
 
     /** How many turns are currently retained. Test visibility for the lifecycle contract. */

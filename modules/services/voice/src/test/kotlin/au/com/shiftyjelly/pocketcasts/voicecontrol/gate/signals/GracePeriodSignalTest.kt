@@ -19,80 +19,12 @@ class GracePeriodSignalTest {
     val mainCoroutineRule = MainCoroutineRule()
 
     @Test
-    fun `the cloud escalation allowance is one per window generation`() {
-        val signal = GracePeriodSignal(timeoutMs = 100L)
-
-        // No window is open, so there is no user act to spend against. (This is
-        // not the false-wake case: a false wake opens a window. It is an
-        // utterance with no act behind it at all.)
-        assertNull(signal.issueEscalation())
-
-        // A wake opens a generation and its one dispatch.
-        signal.onWakeWordDetected()
-        val first = signal.issueEscalation()
-        assertNotNull(first)
-        assertNull("once per generation", signal.issueEscalation())
-
-        // A locally handled command is another deliberate act, so it begins the
-        // next generation and earns its own dispatch.
-        signal.onCommandRecognized()
-        val second = signal.issueEscalation()
-        assertNotNull(second)
-        assertNotEquals(first, second)
-        assertNull(signal.issueEscalation())
-
-        // A privacy event ends the generation; only a new wake begins another.
-        signal.onAudioRouteChanged()
-        assertNull(signal.issueEscalation())
-        signal.onWakeWordDetected()
-        assertNotNull(signal.issueEscalation())
-
-        signal.onAppBackgrounded()
-        assertNull(signal.issueEscalation())
-        signal.onWakeWordDetected()
-        assertNotNull(signal.issueEscalation())
-    }
-
-    @Test
-    fun `generation and origin are separate questions`() {
-        // Current × a route the router chose: it is a deliberate act, so the
-        // window earns its next dispatch.
-        val chosen = GracePeriodSignal(timeoutMs = 30_000L)
-        chosen.onWakeWordDetected()
-        val chosenGeneration = chosen.issueEscalation()!!
-        assertNull("the first dispatch spends the allowance", chosen.issueEscalation())
-        chosen.onCommandRecognized(fromGeneration = chosenGeneration, restoresAllowance = true)
-        assertNotNull("a deliberate route restores it", chosen.issueEscalation())
-
-        // Current × the routing-failure fallback: touching the window is fine,
-        // restoring the allowance is not — that is what the bound is for.
-        val failure = GracePeriodSignal(timeoutMs = 30_000L)
-        failure.onWakeWordDetected()
-        val failureGeneration = failure.issueEscalation()!!
-        failure.onCommandRecognized(fromGeneration = failureGeneration, restoresAllowance = false)
-        assertNull("the fallback must not fund its own next attempt", failure.issueEscalation())
-
-        // Stale × either origin: a completion from a window that is gone changes
-        // nothing — neither the window nor the allowance of the current one.
-        val stale = GracePeriodSignal(timeoutMs = 30_000L)
-        stale.onWakeWordDetected()
-        val superseded = stale.issueEscalation()!!
-        stale.onAppBackgrounded()
-        stale.onWakeWordDetected()
-        assertNotNull("the new window has its own dispatch", stale.issueEscalation())
-        stale.onCommandRecognized(fromGeneration = superseded, restoresAllowance = true)
-        assertNull("a stale completion restores nothing", stale.issueEscalation())
-        stale.onCommandRecognized(fromGeneration = superseded, restoresAllowance = false)
-        assertNull("a stale completion changes nothing", stale.issueEscalation())
-    }
-
-    @Test
     fun `a current completion extends the window through the timer`() = runTest {
         // Extending is observable through the timer: a completion that extends
         // pushes expiry past the original deadline.
         val signal = GracePeriodSignal(timeoutMs = 100L)
         signal.onWakeWordDetected()
-        val generation = signal.issueEscalation()!!
+        val generation = signal.currentGeneration
 
         delay(80L)
         signal.onCommandRecognized(fromGeneration = generation)
@@ -105,7 +37,7 @@ class GracePeriodSignalTest {
     fun `a completion from a superseded window does not extend the new one`() = runTest {
         val signal = GracePeriodSignal(timeoutMs = 100L)
         signal.onWakeWordDetected()
-        val superseded = signal.issueEscalation()!!
+        val superseded = signal.currentGeneration
 
         // Privacy close, then a fresh wake: a new window and a new generation.
         signal.onAppBackgrounded()
@@ -125,14 +57,14 @@ class GracePeriodSignalTest {
         val signal = GracePeriodSignal(timeoutMs = 30_000L)
 
         signal.onWakeWordDetected()
-        val generation = signal.issueEscalation()!!
+        val generation = signal.currentGeneration
 
         // The network turn is still in flight when the privacy event lands.
         signal.onAppBackgrounded()
         signal.onCommandRecognized(fromGeneration = generation)
 
         assertFalse("a completion must not undo a close", signal.isActive.value)
-        assertNull(signal.issueEscalation())
+        assertFalse(signal.isCurrent(signal.currentGeneration))
     }
 
     @Test
@@ -140,7 +72,7 @@ class GracePeriodSignalTest {
         val signal = GracePeriodSignal(timeoutMs = 30_000L)
 
         signal.onWakeWordDetected()
-        val generation = signal.issueEscalation()!!
+        val generation = signal.currentGeneration
         signal.onAppBackgrounded()
 
         // No caller can reopen it: not a command, not a completion.
@@ -155,21 +87,21 @@ class GracePeriodSignalTest {
     }
 
     @Test
-    fun `an expired or closed window refuses the escalation`() = runTest {
+    fun `an expired or closed window refuses a captured request origin`() = runTest {
         val signal = GracePeriodSignal(timeoutMs = 100L)
 
         signal.onWakeWordDetected()
         delay(150L)
         assertFalse(signal.isActive.value)
-        assertNull("an expired window is not an open act", signal.issueEscalation())
+        assertFalse("an expired window is not an open act", signal.isCurrent(signal.currentGeneration))
 
         signal.onWakeWordDetected()
         signal.onAudioRouteChanged()
-        assertNull("a privacy-closed window is not an open act", signal.issueEscalation())
+        assertFalse("a privacy-closed window is not an open act", signal.isCurrent(signal.currentGeneration))
 
         signal.onWakeWordDetected()
         signal.onAppBackgrounded()
-        assertNull("a privacy-closed window is not an open act", signal.issueEscalation())
+        assertFalse("a privacy-closed window is not an open act", signal.isCurrent(signal.currentGeneration))
     }
 
     @Test
@@ -331,7 +263,7 @@ class GracePeriodSignalTest {
 
     @Test
     fun `the readers agree with the transitions they read`() {
-        // @reviewer's reader-lock finding. `escalationRefusal`, `isClosedByPrivacy` and `currentGeneration`
+        // @reviewer's reader-lock finding. `isClosedByPrivacy` and `currentGeneration`
         // read the SAME fields the transitions write, so leaving them unlocked meant a reader could
         // observe a HALF-APPLIED transition. Holding the monitor must block them, exactly as it blocks a
         // writer -- if a reader answers while the monitor is held, it is reading a state mid-change.
@@ -355,7 +287,6 @@ class GracePeriodSignalTest {
         // other two still blocked and the thread never finished. A control has to make the reader it is
         // about the only thing that can decide the outcome.
         val readers: List<Pair<String, () -> Any?>> = listOf(
-            "escalationRefusal" to { signal.escalationRefusal() },
             "isClosedByPrivacy" to { signal.isClosedByPrivacy() },
             "currentGeneration" to { signal.currentGeneration },
         )
@@ -591,85 +522,6 @@ class GracePeriodSignalTest {
             "and the old timer did not retire its successor",
             retired.toList() == retiredBefore,
         )
-    }
-
-    @Test
-    fun `a wake transition blocks on the same monitor the allowance claim holds`() {
-        // @reviewer's concurrent-transition case: `issueEscalation` alone being synchronized excludes
-        // NOTHING if the writers take a different lock. This holds the claim's monitor and runs a WAKE
-        // from another thread, so the wake must WAIT -- which is what makes the claim atomic against the
-        // transition that would change what it is claiming against.
-        val signal = GracePeriodSignal(timeoutMs = 30_000L)
-        signal.onWakeWordDetected()
-        val claimed = java.util.concurrent.CountDownLatch(1)
-        val wakeDone = java.util.concurrent.CountDownLatch(1)
-
-        // Hold the monitor from another thread while the wake runs.
-        val holder = Thread {
-            synchronized(signal.windowMonitorForTest()) {
-                claimed.countDown()
-                Thread.sleep(400)
-            }
-        }.apply { start() }
-        claimed.await(2, java.util.concurrent.TimeUnit.SECONDS)
-
-        val wake = Thread {
-            signal.onWakeWordDetected()
-            wakeDone.countDown()
-        }.apply { start() }
-
-        // The wake must NOT have completed while the monitor is held.
-        val completedWhileHeld = wakeDone.await(150, java.util.concurrent.TimeUnit.MILLISECONDS)
-        wake.join(3_000)
-        holder.join(3_000)
-        assertTrue(
-            "a wake transition must block on the monitor the claim holds, not proceed beside it",
-            !completedWhileHeld,
-        )
-    }
-
-    @Test
-    fun `a claim made under a superseded window does not spend the successor's allowance`() {
-        // The property the engine case could not isolate: the ALLOWANCE belongs to the window, so a
-        // claim made for an OLD window must not leave the NEW one reading as spent. A wake that arrives
-        // during recognition is the ordinary way this happens.
-        val signal = GracePeriodSignal(timeoutMs = 30_000L)
-        signal.onWakeWordDetected()
-        val first = signal.capturedGeneration()
-
-        // Recognition is in flight under `first`; a successor wake opens a new window.
-        signal.onWakeWordDetected()
-        val second = signal.capturedGeneration()
-        assertTrue("the window advanced", second != first)
-
-        // The OLD request tries to claim. It belongs to a dead window, so it claims nothing...
-        assertNull(
-            "a claim for a superseded window is refused",
-            signal.issueEscalation(first),
-        )
-        // ...AND THE SUCCESSOR'S ALLOWANCE IS UNTOUCHED.
-        assertNotNull(
-            "the successor's allowance survives the refused claim",
-            signal.issueEscalation(second),
-        )
-        // REPLACEMENT IS AN ENDING TOO, and this is the half that needed its own path: a wake replaces
-        // the window in force, so what the replaced window held must stop being retryable AT THAT
-        // MOMENT -- not when some later request happens to be admitted. A window whose successor never
-        // runs a request otherwise kept its prepared turn indefinitely.
-        val ended = mutableListOf<Long>()
-        signal.onWindowEnded = { ended += it }
-        signal.onWakeWordDetected()
-        assertTrue(
-            "opening a window reports the window it replaced (ended=$ended)",
-            ended.isNotEmpty(),
-        )
-
-        // COVERAGE NOTE, because two mechanisms overlap here and only one is pinned: mutating the
-        // window-open reset away leaves this case PASSING, since the ORIGIN CHECK already refuses the
-        // stale claim before it can spend anything. The reset is defensive -- it matters only for a
-        // claim that SUCCEEDED under an older window, which the origin check prevents by design -- so
-        // this case constrains the origin check and NOT the reset. Saying which one it holds is the
-        // point; a passing case with two candidate mechanisms proves neither by itself.
     }
 
     @Test

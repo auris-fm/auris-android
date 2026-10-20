@@ -35,10 +35,10 @@ class CloudRouteGraceLifecycleTest {
     val mainCoroutineRule = MainCoroutineRule()
 
     @Test
-    fun `a running cloud turn holds grace without spending another allowance`() = runTest {
+    fun `a running cloud turn holds grace and preserves its origin`() = runTest {
         val signal = GracePeriodSignal(timeoutMs = 100L)
         signal.onWakeWordDetected()
-        val origin = signal.issueEscalation()!!
+        val origin = signal.currentGeneration
         val entered = CompletableDeferred<Unit>()
         val finish = CompletableDeferred<Unit>()
         val sink = sink(signal, origin) {
@@ -56,7 +56,7 @@ class CloudRouteGraceLifecycleTest {
             assertFalse(owner.isCompleted)
             assertTrue("in-flight cloud work must prevent inactivity expiry", signal.isActive.value)
             assertEquals(origin, signal.currentGeneration)
-            assertEquals(null, signal.issueEscalation(origin))
+            assertTrue(signal.isCurrent(origin))
             finish.complete(Unit)
             owner.await()
             advanceTimeBy(99L)

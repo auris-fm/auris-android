@@ -258,46 +258,25 @@ class CloudRouteSink internal constructor(
         isRetry: Boolean,
         sourceLanguage: String?,
     ): CloudRouteTurn? {
-        // A RETRY REUSES ITS TURN rather than minting a new one. The caller names the logical request;
-        // if a turn already exists for it, this returns THAT turn unchanged, so its request ID, handle
-        // and mode are the ones the first attempt fixed. This is the sink's half of the retention the
-        // executor keeps, so a direct caller and the executor resolve a retry identically.
-        if (logicalRequestId != null) {
-            conversationAdmission.retained(logicalRequestId)?.let { return it }
-            // A lookup MISS IS NOT A REASON TO PREPARE. The comment above said so and the code did not:
-            // it fell through and built a fresh turn, which resurrected a request that is not retryable.
-            // Only a FIRST ATTEMPT may prepare under a new identity, and the caller says which it is
-            // (`isRetry`), so a miss under a RETRY is refused here rather than filled in.
-            if (isRetry) return null
-            // NOT RETAINED. Either this logical request was never prepared, or it has been RETIRED --
-            // its window closed, or its dialog was abandoned. Preparing a fresh turn under a retired
-            // identity would resurrect a request that is no longer retryable, so absence is reported
-            // rather than filled in.
-            //
-            // A first attempt is distinguished by the caller (`isRetry`), which is the only place that
-            // can tell "prepare this" from "reuse what I prepared".
+        return conversationAdmission.retainOrPrepare(logicalRequestId, isRetry) {
+            val origin = capturedOrigin ?: conversationAdmission.currentOriginForTest()
+            val admission = conversationAdmission.prepare(
+                origin = origin,
+                isLiveGraceTurn = isLiveGraceTurn,
+                isWakeOriginated = isWakeOriginated,
+            ) ?: return@retainOrPrepare null
+            CloudRouteTurn(
+                request = request,
+                sourceLanguage = sourceLanguage,
+                context = buildRouteContext(context),
+                requestId = UUID.randomUUID().toString(),
+                capabilities = advertisedCapabilities(),
+                routeHint = hint,
+                conversationId = admission.conversationId,
+                conversationMode = admission.mode,
+                capturedOrigin = origin,
+            )
         }
-        val origin = capturedOrigin ?: conversationAdmission.currentOriginForTest()
-        val admission = conversationAdmission.prepare(
-            origin = origin,
-            isLiveGraceTurn = isLiveGraceTurn,
-            isWakeOriginated = isWakeOriginated,
-        ) ?: return null
-        val built = CloudRouteTurn(
-            request = request,
-            sourceLanguage = sourceLanguage,
-            context = buildRouteContext(context),
-            requestId = UUID.randomUUID().toString(),
-            capabilities = advertisedCapabilities(),
-            routeHint = hint,
-            conversationId = admission.conversationId,
-            conversationMode = admission.mode,
-            capturedOrigin = origin,
-        )
-        if (logicalRequestId != null) {
-            conversationAdmission.retain(logicalRequestId, built)
-        }
-        return built
     }
 
     /**
@@ -335,17 +314,32 @@ class CloudRouteSink internal constructor(
         retentionReleased = consumer
     }
 
-    override suspend fun dispatchPrepared(prepared: CloudRouteTurn): CloudTurnResult = routeTurn(
-        request = prepared.request,
-        tier = VoiceIntent.CloudTier.Premium,
-        context = PlaybackContext(),
-        hint = prepared.routeHint,
-        // The origin travels WITH the prepared turn, so a retry is validated against the window it was
-        // captured under rather than against whatever is current when it is finally retried.
-        capturedOrigin = prepared.capturedOrigin,
-        isWakeOriginated = false,
-        prepared = prepared,
-    )
+    override suspend fun dispatchPrepared(prepared: CloudRouteTurn, isRetry: Boolean): CloudTurnResult {
+        val claim = conversationAdmission.claimDispatch(prepared, isRetry)
+            ?: return CloudTurnResult(VoiceResponse.Silent, CloudRouteActionOutcome.None)
+        if (!claim.ownsDispatch) {
+            claim.completion.join()
+            // The original owner handles feedback and recognition; a duplicate produces no effects.
+            return CloudTurnResult(VoiceResponse.Silent, CloudRouteActionOutcome.None)
+        }
+        val owned = claim.turn
+        try {
+            return routeTurn(
+                request = owned.request,
+                tier = VoiceIntent.CloudTier.Premium,
+                context = PlaybackContext(),
+                hint = owned.routeHint,
+                // The origin travels WITH the prepared turn, so a retry is validated against the window it was
+                // captured under rather than against whatever is current when it is finally retried.
+                capturedOrigin = owned.capturedOrigin,
+                isWakeOriginated = false,
+                prepared = owned,
+            ).also { claim.completion.complete(Unit) }
+        } catch (failure: Throwable) {
+            claim.completion.completeExceptionally(failure)
+            throw failure
+        }
+    }
 
     private suspend fun routeTurn(
         request: String,

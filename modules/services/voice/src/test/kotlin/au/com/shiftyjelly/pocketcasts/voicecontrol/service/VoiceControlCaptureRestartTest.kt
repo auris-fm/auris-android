@@ -93,7 +93,7 @@ import org.robolectric.shadows.ShadowAudioManager
  * sequence pinned here is therefore PRE-EXISTING lifecycle behavior, not a multiturn regression.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 class VoiceControlCaptureRestartTest {
     companion object {
         /** The id the harness gives the SCO input once the link is up (device ids are platform-owned). */
@@ -301,7 +301,7 @@ class VoiceControlCaptureRestartTest {
 
     private class NoopRecognizer : VoiceRecognizer {
         override suspend fun ensureReady() = Result.success(Unit)
-        override suspend fun recognize(input: IntentRoutingInput, context: VoiceRecognitionContext) = throw IllegalStateException("not used in this reproduction")
+        override suspend fun recognize(input: IntentRoutingInput, context: VoiceRecognitionContext, logicalRequestId: String) = throw IllegalStateException("not used in this reproduction")
         override fun release() = Unit
     }
 

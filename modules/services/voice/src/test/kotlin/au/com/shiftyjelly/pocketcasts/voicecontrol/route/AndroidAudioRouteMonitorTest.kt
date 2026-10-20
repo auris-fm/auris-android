@@ -15,7 +15,7 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 // API 34 supplies AudioManager.getCommunicationDevice(); the Robolectric default does not, and its
 // absence failed these tests with NoSuchMethodError instead of exercising the classification.
-@Config(sdk = [34])
+@Config(sdk = [35])
 class AndroidAudioRouteMonitorTest {
 
     @Test

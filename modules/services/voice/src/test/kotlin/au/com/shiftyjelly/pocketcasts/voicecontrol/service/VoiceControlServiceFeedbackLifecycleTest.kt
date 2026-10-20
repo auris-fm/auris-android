@@ -34,7 +34,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 class VoiceControlServiceFeedbackLifecycleTest {
     @Test
     fun `destroying one service leaves shared feedback usable by the next service`() = runTest {

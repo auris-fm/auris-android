@@ -37,7 +37,7 @@ import org.robolectric.shadows.ShadowAudioManager
  * no public setter for them.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 class AndroidAudioRouteMonitorSelectionTest {
     private lateinit var context: Context
     private lateinit var audioManager: AudioManager

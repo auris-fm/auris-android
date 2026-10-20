@@ -62,7 +62,7 @@ import org.robolectric.annotation.Config
 
 /** Actual ASR preparation → dispatch → executor → prepared turn → socket auth JSON. */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class VoiceAsrCloudLanguageTest {
     @get:Rule
@@ -246,6 +246,7 @@ class VoiceAsrCloudLanguageTest {
             override suspend fun recognize(
                 input: IntentRoutingInput,
                 context: VoiceRecognitionContext,
+                logicalRequestId: String,
             ): VoiceRecognizeResult {
                 inputs += input
                 // A null intent and missing failure reason exercise production routing-failure escalation.

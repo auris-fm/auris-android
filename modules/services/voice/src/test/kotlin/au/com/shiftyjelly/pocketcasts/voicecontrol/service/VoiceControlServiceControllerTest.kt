@@ -41,7 +41,7 @@ import org.robolectric.annotation.Config
  * NoSuchMethodError and the start can never be observed.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34])
+@Config(sdk = [35])
 class VoiceControlServiceControllerTest {
     private lateinit var context: Application
     private lateinit var lifecycle: FakeAppLifecycleProvider

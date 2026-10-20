@@ -21,7 +21,16 @@ jobs:
           java-version: "21"
       - uses: gradle/actions/setup-gradle@v4
       - name: Run voice module Robolectric unit tests
-        run: ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon
+        run: ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon --info 2>&1 | tee voice-test-output.log
+      - name: Upload test reports and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-test-reports
+          path: |
+            modules/services/voice/build/reports/tests/testDebugUnitTest/
+            modules/services/voice/build/test-results/testDebugUnitTest/
+            voice-test-output.log
 
   cloud-transport-tests:
     name: "repositories:cloud transport tests"

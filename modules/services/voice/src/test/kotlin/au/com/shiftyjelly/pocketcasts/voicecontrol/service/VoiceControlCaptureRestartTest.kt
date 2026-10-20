@@ -346,9 +346,9 @@ class VoiceControlCaptureRestartTest {
         predicate: () -> Boolean,
     ) {
         val outcome = kotlinx.coroutines.CompletableDeferred<Result<Unit>>()
-        kotlinx.coroutines.CoroutineScope(
-            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Main.immediate,
-        ).launch {
+        val job = kotlinx.coroutines.SupervisorJob()
+        val scope = kotlinx.coroutines.CoroutineScope(job + kotlinx.coroutines.Dispatchers.Main.immediate)
+        scope.launch {
             try {
                 val deadline = System.currentTimeMillis() + 8_000
                 var last = ""
@@ -366,16 +366,23 @@ class VoiceControlCaptureRestartTest {
                 outcome.complete(Result.failure(e))
             }
         }
-        // Drive both the test scheduler (Main) and real dispatchers (IO) until the watcher
-        // settles. Production code launches work on Dispatchers.IO which runs independently
-        // of testScheduler; without yielding to real threads, that work never completes.
-        while (!outcome.isCompleted) {
-            testScheduler.runCurrent()
-            testScheduler.advanceTimeBy(25.milliseconds)
-            Thread.sleep(10)
-            kotlinx.coroutines.yield()
+        try {
+            // Drive the test scheduler, Robolectric's shadow main looper, and real dispatcher
+            // threads until the watcher settles. Production code uses Dispatchers.IO (real threads)
+            // and posts broadcasts via Handler(Looper.getMainLooper()) — all three must be pumped.
+            while (!outcome.isCompleted) {
+                testScheduler.runCurrent()
+                testScheduler.advanceTimeBy(25.milliseconds)
+                // Drain at most one pending main-looper task per pump cycle to avoid infinite
+                // idle loops when production code continuously schedules work.
+                runCatching { shadowOf(Looper.getMainLooper()).runOneTask() }
+                Thread.sleep(10)
+                kotlinx.coroutines.yield()
+            }
+            outcome.await().getOrThrow()
+        } finally {
+            job.cancel()
         }
-        outcome.await().getOrThrow()
     }
 
     @Test

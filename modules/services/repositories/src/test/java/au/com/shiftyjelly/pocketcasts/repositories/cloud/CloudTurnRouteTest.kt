@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -294,6 +295,69 @@ class CloudTurnRouteTest {
         assertTrue(
             "serialized JSON must contain request_id with B's value (json=$json)",
             json.contains("\"request_id\":\"$admittedB\""),
+        )
+    }
+
+    @Test
+    fun `WebSocket transport sends the turn request_id as the encoded wire frame`() = runBlocking {
+        // ENCODED WIRE CONTROL: drives the REAL WebSocketCloudTurnTransport through a
+        // capturing WebSocket, verifying the actual text frame sent over the socket
+        // contains the turn's requestId as the encoded request_id field.
+        val admittedB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        val turnWithB = turn.copy(requestId = admittedB)
+
+        val sentTextFrames = mutableListOf<String>()
+        val mockSocket = object : okhttp3.WebSocket {
+            override fun cancel() = Unit
+            override fun close(code: Int, reason: String?) = true
+            override fun queueSize(): Long = 0
+            override fun request(): okhttp3.Request = okhttp3.Request.Builder().url("https://example.com").build()
+            override fun send(text: String): Boolean {
+                sentTextFrames += text
+                return true
+            }
+            override fun send(bytes: okio.ByteString): Boolean = true
+        }
+        val client = object : okhttp3.OkHttpClient() {
+            override fun newWebSocket(request: okhttp3.Request, listener: okhttp3.WebSocketListener): okhttp3.WebSocket {
+                // Simulate the server accepting the WebSocket, sending connected, then done.
+                listener.onOpen(
+                    mockSocket,
+                    okhttp3.Response.Builder()
+                        .code(101).message("Switching Protocols")
+                        .protocol(okhttp3.Protocol.HTTP_1_1)
+                        .request(request).build(),
+                )
+                listener.onMessage(mockSocket, """{"type":"connected","codec":"pcm_s16le@24k","reservation_id":"r-1"}""")
+                listener.onMessage(mockSocket, """{"type":"done","outcome":"completed","usage":{"input_tokens":0,"output_tokens":0,"speech":{"amount":0,"unit":"characters"}}}""")
+                listener.onClosed(mockSocket, 1000, "")
+                return mockSocket
+            }
+        }
+
+        val transport = WebSocketCloudTurnTransport("https://example.com", client)
+        val events = mutableListOf<CloudRouteEvent>()
+        kotlinx.coroutines.withTimeout(5_000) {
+            transport.exchange(
+                CloudTurnFrame.Authenticate(
+                    conversationId = turnWithB.conversationId,
+                    conversationMode = turnWithB.conversationMode,
+                    accessToken = "test-token",
+                    requestId = turnWithB.requestId,
+                    request = turnWithB.request,
+                    context = turnWithB.context,
+                    capabilities = turnWithB.capabilities,
+                    codecs = CloudRouteCodecs.advertised,
+                    routeHint = null,
+                ),
+            ).collect { events += it }
+        }
+
+        assertTrue("at least one text frame sent", sentTextFrames.isNotEmpty())
+        val encodedFrame = sentTextFrames.first()
+        assertTrue(
+            "encoded wire frame must contain request_id with B's value (frame=$encodedFrame)",
+            encodedFrame.contains("\"request_id\":\"$admittedB\""),
         )
     }
 }

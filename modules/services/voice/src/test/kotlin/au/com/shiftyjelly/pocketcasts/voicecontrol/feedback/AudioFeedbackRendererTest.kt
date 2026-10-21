@@ -1763,4 +1763,51 @@ class AudioFeedbackRendererTest {
             localRenderer.release()
         }
     }
+
+    @Test
+    fun `endSession before a queued render body starts records exactly one cancellation drop and clears ownership`() {
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture().use { capture ->
+            // Holds the coroutine in the queue until released, so endSession can cancel a
+            // render whose body NEVER started: its catch/finally will not run.
+            val gated = GatedDispatcher()
+            val localRenderer = AudioFeedbackRenderer(earconPlayer, FakeTtsEngine())
+            localRenderer.scopeDispatcherForTest = gated
+            localRenderer.render(VoiceResponse.Spoken("queued answer"), requestId = turnRequestId)
+            localRenderer.endSession()
+
+            val dropped = awaitLine(capture, { it.contains("reason=TurnFeedbackDropped") && it.contains("request_id=$turnRequestId") }, "drop")
+            assertTrue("a never-started render must still record its cancellation: $dropped", dropped.contains("render_cancelled"))
+
+            // Ownership cleared: a later render is not recorded as a supersession of the dead one.
+            gated.release()
+            val secondId = "22222222-2222-4222-8222-222222222222"
+            localRenderer.render(VoiceResponse.Spoken("after session"), requestId = secondId)
+            kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(300) }
+            val falseDrop = capture.lines().firstOrNull {
+                it.contains("reason=TurnFeedbackDropped") && it.contains("request_id=$secondId")
+            }
+            assertNull("ownership must be cleared by the cancel site: $falseDrop", falseDrop)
+            localRenderer.release()
+        }
+    }
+
+    /** Queues dispatched blocks until released, then runs them on the Default dispatcher. */
+    private class GatedDispatcher : kotlinx.coroutines.CoroutineDispatcher() {
+        private val released = java.util.concurrent.atomic.AtomicBoolean(false)
+        private val queue = java.util.concurrent.ConcurrentLinkedQueue<Pair<kotlin.coroutines.CoroutineContext, Runnable>>()
+        override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
+            if (released.get()) {
+                kotlinx.coroutines.Dispatchers.Default.dispatch(context, block)
+            } else {
+                queue.add(context to block)
+            }
+        }
+        fun release() {
+            released.set(true)
+            while (true) {
+                val (ctx, block) = queue.poll() ?: break
+                kotlinx.coroutines.Dispatchers.Default.dispatch(ctx, block)
+            }
+        }
+    }
 }

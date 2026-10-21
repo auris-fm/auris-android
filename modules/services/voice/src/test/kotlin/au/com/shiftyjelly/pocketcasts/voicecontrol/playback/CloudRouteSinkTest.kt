@@ -3860,10 +3860,43 @@ class CloudRouteSinkTest {
             )
             val sink = deps.sink()
 
-            // Scheduling (spec 7b9f3228): the turn runs on this event loop; a REAL driver THREAD
-            // fires the transport's own listener callbacks, so main never blocks waiting for
-            // main-bound work.
-            val feedback = CompletableDeferred<VoiceResponse>()
+            // REAL executor composition (spec f980336e): the service dispatch runs the production
+            // VoicePlaybackIntentExecutor, which prepares the turn on the REAL sink — carrying the
+            // intent's logical request ID — and dispatches it over the REAL transport. The sinks the
+            // CloudRoute branch never touches are mocks; the executor, sink, service and renderer are
+            // real.
+            val earconPlayer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer>()
+            val renderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
+                earconPlayer = earconPlayer,
+                ttsEngine = au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine(),
+            )
+            renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+            val executor = VoicePlaybackIntentExecutor(
+                playbackSink = mock(),
+                effectsSink = mock(),
+                volumeSink = mock(),
+                sleepSink = mock(),
+                chapterSink = mock(),
+                bookmarkSink = mock(),
+                cloudRouteSink = sink,
+                playbackContextProvider = object : PlaybackContextProvider {
+                    override fun current() = playbackContext
+                },
+                queueSink = mock(),
+                playbackQuerySink = mock(),
+                statsQuerySink = mock(),
+                gracePeriodSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(),
+                playbackManager = mock(),
+            )
+            val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
+                audioFeedbackRenderer = renderer
+                voicePlaybackIntentExecutor = executor
+            }
+
+            // Scheduling (spec 7b9f3228): the service dispatch runs on a detached event loop; a REAL
+            // driver THREAD fires the transport's own listener callbacks, so main never blocks
+            // waiting for main-bound work.
+            val dispatched = CompletableDeferred<Unit>()
             val driver = Thread {
                 try {
                     val deadline = System.currentTimeMillis() + 5_000
@@ -3884,20 +3917,23 @@ class CloudRouteSinkTest {
             val turnScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
             val turn = turnScope.launch {
                 try {
-                    feedback.complete(
-                        kotlinx.coroutines.withTimeout(8_000) {
-                            sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId).feedback
-                        },
-                    )
+                    kotlinx.coroutines.withTimeout(8_000) {
+                        service.renderWithFailureHandling(
+                            VoiceIntent.CloudRoute(
+                                request = "question",
+                                tier = VoiceIntent.CloudTier.Premium,
+                                logicalRequestId = testWireId,
+                            ),
+                        )
+                    }
+                    dispatched.complete(Unit)
                 } catch (t: Throwable) {
-                    feedback.completeExceptionally(t)
+                    dispatched.completeExceptionally(t)
                 }
             }
             driver.start()
-            val rawFeedback = runCatching { kotlinx.coroutines.withTimeout(10_000) { feedback.await() } }.getOrNull()
-            capture.lines().takeLast(6).forEach { println("COMPOSITION-LOG " + it.take(220)) }
-            val localized = rawFeedback as? VoiceResponse.Spoken
-            assertNotNull("sink must return localized refusal feedback", localized)
+            val done = runCatching { kotlinx.coroutines.withTimeout(15_000) { dispatched.await() } }.getOrNull()
+            assertNotNull("service dispatch through the REAL executor must complete", done)
             turn.join()
             turnScope.cancel()
             driver.join()
@@ -3907,29 +3943,8 @@ class CloudRouteSinkTest {
             awaitCaptureLine(capture, "SEND_ATTEMPTED", testWireId)
             awaitCaptureLine(capture, "reason=TurnTerminalReceived", testWireId, alsoContains = "limit_exceeded")
 
-            // SERVICE dispatch: the localized refusal goes through the service's render path with
-            // the SAME request ID, into a REAL renderer.
-            val earconPlayer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer>()
-            val renderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
-                earconPlayer = earconPlayer,
-                ttsEngine = au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine(),
-            )
-            renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
-            val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
-                audioFeedbackRenderer = renderer
-                voicePlaybackIntentExecutor = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor>().also { executor ->
-                    whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any())).thenReturn(localized)
-                }
-            }
-            val intent = VoiceIntent.CloudRoute(
-                request = "question",
-                tier = VoiceIntent.CloudTier.Premium,
-                logicalRequestId = testWireId,
-            )
-            service.renderWithFailureHandling(intent)
-
-            // RENDERER observation: entry AND accepted submission, SAME request ID. If the service
-            // drops the ID or never invokes the renderer, neither line appears.
+            // RENDERER observation: entry AND accepted submission, SAME request ID. If the executor
+            // drops the ID or the service never invokes the renderer, neither line appears.
             awaitCaptureLine(capture, "reason=TurnFeedbackSelected", testWireId, alsoContains = "entry_spoken")
             awaitCaptureLine(capture, "reason=TurnFeedbackRendered", testWireId, alsoContains = "spoken_submitted")
             renderer.release()

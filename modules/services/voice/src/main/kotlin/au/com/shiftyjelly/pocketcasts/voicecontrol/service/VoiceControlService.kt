@@ -183,8 +183,12 @@ class VoiceControlService : Service() {
         val response = try {
             voicePlaybackIntentExecutor.execute(intent, turnOutcome)
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
-            // Cancellation is the caller withdrawing, not a failure to report: rethrow so structured
-            // concurrency still unwinds instead of being swallowed into an earcon.
+            // CANCELLATION AT THE EXECUTE→HANDOFF BOUNDARY (reviewer b25287c6): the sink may already
+            // have transferred this turn's hold to the renderer path. Rethrow without releasing and
+            // the hold is orphaned — the render handoff below never runs. Release whatever was
+            // transferred (a no-op when nothing was), then rethrow so structured concurrency unwinds.
+            val cancelledIntent = intent as? au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent.CloudRoute
+            gracePeriodSignal.releaseUnhandedOffHold(cancelledIntent?.logicalRequestId, cancelled = true)
             throw cancellation
         } catch (failure: Exception) {
             Timber.w(failure, "[VoicePipeline] command failed")

@@ -6,6 +6,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsPlaybackIncompleteException
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -119,6 +120,32 @@ class AudioFeedbackRendererTest {
             .idleFor(java.time.Duration.ofMillis(2_500))
 
         assertTrue(renderer.hasEmittedAudio.value)
+    }
+
+    @Test
+    fun `superseding a NEVER-STARTED render releases its transferred hold instead of orphaning it`() {
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
+        signal.onWakeWordDetected()
+        val renderer = AudioFeedbackRenderer(earconPlayer, ttsEngine, signal)
+        // A scheduler we never run: the first render's body is queued but NEVER starts, exactly the
+        // window in which its catch/finally can never run (reviewer b25287c6).
+        val scheduler = kotlinx.coroutines.test.UnconfinedTestDispatcher()
+        val pausedScope = kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.Job() + kotlinx.coroutines.test.StandardTestDispatcher(scheduler.scheduler),
+        )
+        renderer.scopeDispatcherForTest = kotlinx.coroutines.test.StandardTestDispatcher(scheduler.scheduler)
+        val holdA = signal.holdCloudTurn(owner = 1L)!!
+        signal.transferHoldToOutput("never-started-A", holdA)
+        whenever(earconPlayer.play(org.mockito.kotlin.any())).thenReturn(null)
+        renderer.render(VoiceResponse.Spoken("queued body never runs"), requestId = "never-started-A")
+        assertTrue("hold accepted by the queued render", signal.hasOutputHold("never-started-A"))
+        // A successor arrives before the predecessor's body ever starts.
+        renderer.render(VoiceResponse.Silent, requestId = "successor-B")
+        // The supersession site itself must release — the body's catch/finally will never run.
+        assertTrue("hold must not be orphaned by a never-started supersession", !signal.hasOutputHold("never-started-A"))
+        // A Tiny hold check for B's non-existence is trivial; release for cleanliness.
+        renderer.release()
+        pausedScope.cancel()
     }
 
     @Test

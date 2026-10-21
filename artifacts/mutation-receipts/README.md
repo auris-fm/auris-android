@@ -61,3 +61,22 @@ return instead of transferring to the renderer path.
   at the cancellation terminal; window expires.
 - Local playback failure: drain Unconsumed → feedback Earcon(ERROR) and succeeded=false even with
   Done+Completed (reviewer point 4).
+
+## Grace round 4 (reviewer b25287c6)
+
+### Mutant: never-started supersession orphans the hold
+**Production file:** `AudioFeedbackRenderer.kt` — supersession site.
+**Change:** the `!prior.started` release removed.
+**Test:** `superseding a NEVER-STARTED render releases its transferred hold instead of orphaning it`
+**RED XML:** `artifacts/mutation-receipts/never-started-supersession-orphan-RED.xml`
+**GREEN:** full voice suite BUILD SUCCESSFUL restored.
+
+### Round-4 changes (GREEN)
+- Earcon terminal is INVOCATION-OWNED: admission token and consumed verdict live on
+  RenderInvocation; the await runs inside the render job (Earcon-only) or as a job child joined by
+  the Combined arm; timeout is NOT consumption — non-consumed exits stop the admission and release
+  cancelled; supersession/session-end cancellation reaches it via the job.
+- Supersession of a never-started render releases its hold at the site (body catch/finally can
+  never run).
+- The service's execute-cancellation catch releases any already-transferred hold before rethrowing
+  (execute→handoff boundary control included).

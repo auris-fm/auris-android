@@ -3236,11 +3236,16 @@ class CloudRouteSinkTest {
             conversationAdmission = conversationAdmission,
             cloudPlaybackContextState = cloudPlaybackContextState,
             analytics = analytics,
-            routeInvoker = { turn: CloudRouteTurn ->
-                routeCalls += turn.request
-                routeContexts += turn.context
-                routeTurns += turn
-                explicitInvoker?.invoke(turn) ?: events
+            routeInvoker = if (explicitTransportFactory != null && explicitInvoker == null) {
+                // Transport tests need the real openRoute path; don't shadow with the default invoker.
+                null
+            } else {
+                { turn: CloudRouteTurn ->
+                    routeCalls += turn.request
+                    routeContexts += turn.context
+                    routeTurns += turn
+                    explicitInvoker?.invoke(turn) ?: events
+                }
             },
             searchResultsRenderer = renderer,
             templateResolver = templateResolver,
@@ -3821,5 +3826,177 @@ class CloudRouteSinkTest {
             admittedA,
             authFrame.requestId,
         )
+    }
+
+    /** Records transport observer invocations for test assertions. */
+    private class RecordingObserver : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver {
+        val events = mutableListOf<String>()
+        override fun onAuthResolved(requestId: String, outcome: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome) {
+            events += "auth:${outcome.name}"
+        }
+        override fun onSocketOpened(requestId: String) {
+            events += "socket_opened"
+        }
+        override fun onSendAttempted(requestId: String) {
+            events += "send_attempted"
+        }
+        override fun onSendResult(requestId: String, outcome: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.SendOutcome) {
+            events += "send:${outcome.name}"
+        }
+        override fun onTerminalReceived(requestId: String, origin: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.TerminalOrigin, errorCode: String?) {
+            events += "terminal:${origin.name}:$errorCode"
+        }
+        override fun onConnectionFailed(requestId: String) {
+            events += "connection_failed"
+        }
+    }
+
+    @Test
+    fun `refusal before Connected fires connection failure, no server terminal, and localized feedback`() = runTest {
+        val recording = RecordingObserver()
+        val deps = TestDeps(
+            templateResolver = SpokenTemplateResolver(
+                mapOf(
+                    "cloud_error_" + CloudRouteErrorCodes.CONNECTION_LOST to "Connection lost. Please try again.",
+                    "general.cloud_coming_soon" to "Cloud processing is coming soon",
+                    "general.cloud_incomplete_turn" to "Sorry, I couldn't complete that request.",
+                    "cloud_error_generic" to "Sorry, I couldn't complete that request.",
+                ),
+            ),
+            transportFactory = { _, _, observer ->
+                object : CloudTurnTransport {
+                    override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                        val rid = (frame as CloudTurnFrame.Authenticate).requestId
+                        assertEquals(testWireId, rid)
+                        // Auth resolved, then the handshake fails — never Connected.
+                        observer?.onAuthResolved(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome.RESOLVED)
+                        observer?.onConnectionFailed(rid)
+                        recording.onAuthResolved(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome.RESOLVED)
+                        recording.onConnectionFailed(rid)
+                        emit(CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""))
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+        val result = sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId)
+
+        // Transport facts: auth resolved, connection failed, NO server terminal, NO socket opened.
+        assertEquals(listOf("auth:RESOLVED", "connection_failed"), recording.events)
+
+        // Localized refusal feedback was selected (Spoken, not Silent).
+        val feedback = result.feedback
+        assertTrue("expected localized Spoken refusal, got $feedback", feedback is VoiceResponse.Spoken)
+        assertEquals("Connection lost. Please try again.", (feedback as VoiceResponse.Spoken).text)
+    }
+
+    @Test
+    fun `local missing-token produces localized unauthorized feedback without transport exchange`() = runTest {
+        var exchangeCalled = false
+        val deps = TestDeps(
+            userId = "", // No token.
+            templateResolver = SpokenTemplateResolver(
+                mapOf(
+                    "cloud_error_" + CloudRouteErrorCodes.UNAUTHORIZED to "Service is unavailable at the moment.",
+                    "general.cloud_coming_soon" to "Cloud processing is coming soon",
+                    "general.cloud_incomplete_turn" to "Sorry, I couldn't complete that request.",
+                    "cloud_error_generic" to "Sorry, I couldn't complete that request.",
+                ),
+            ),
+            transportFactory = { _, _, _ ->
+                object : CloudTurnTransport {
+                    override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                        exchangeCalled = true
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+        val result = sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId)
+
+        // Transport exchange never reached — missing token stops before socket.
+        assertFalse("exchange should not be called when token is missing", exchangeCalled)
+
+        // Localized unauthorized feedback, not silence.
+        val feedback = result.feedback
+        assertTrue("expected localized Spoken refusal, got $feedback", feedback is VoiceResponse.Spoken)
+        assertEquals("Service is unavailable at the moment.", (feedback as VoiceResponse.Spoken).text)
+    }
+
+    @Test
+    fun `server refusal before render carries limit_exceeded terminal and localized feedback`() = runTest {
+        val recording = RecordingObserver()
+        val deps = TestDeps(
+            templateResolver = SpokenTemplateResolver(
+                mapOf(
+                    "cloud_error_limit_exceeded" to "You have reached your Auris free daily limit. Please try again tomorrow.",
+                    "general.cloud_coming_soon" to "Cloud processing is coming soon",
+                    "general.cloud_incomplete_turn" to "Sorry, I couldn't complete that request.",
+                    "cloud_error_generic" to "Sorry, I couldn't complete that request.",
+                ),
+            ),
+            transportFactory = { _, _, observer ->
+                object : CloudTurnTransport {
+                    override fun exchange(frame: CloudTurnFrame): kotlinx.coroutines.flow.Flow<CloudRouteEvent> = kotlinx.coroutines.flow.flow {
+                        val rid = (frame as CloudTurnFrame.Authenticate).requestId
+                        observer?.onAuthResolved(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome.RESOLVED)
+                        observer?.onSocketOpened(rid)
+                        observer?.onSendAttempted(rid)
+                        observer?.onSendResult(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.SendOutcome.ACCEPTED)
+                        recording.onAuthResolved(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome.RESOLVED)
+                        recording.onSocketOpened(rid)
+                        recording.onSendAttempted(rid)
+                        recording.onSendResult(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.SendOutcome.ACCEPTED)
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        // Server refusal terminal AT DECODE.
+                        observer?.onTerminalReceived(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.TerminalOrigin.SERVER_ERROR, "limit_exceeded")
+                        recording.onTerminalReceived(rid, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.TerminalOrigin.SERVER_ERROR, "limit_exceeded")
+                        emit(CloudRouteEvent.Error(code = "limit_exceeded", message = ""))
+                    }
+                }
+            },
+        )
+        val sink = deps.sink()
+        val result = sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId)
+
+        assertEquals(
+            listOf("auth:RESOLVED", "socket_opened", "send_attempted", "send:ACCEPTED", "terminal:SERVER_ERROR:limit_exceeded"),
+            recording.events,
+        )
+        val feedback = result.feedback
+        assertTrue("expected localized Spoken limit refusal, got $feedback", feedback is VoiceResponse.Spoken)
+        assertEquals(
+            "You have reached your Auris free daily limit. Please try again tomorrow.",
+            (feedback as VoiceResponse.Spoken).text,
+        )
+    }
+
+    @Test
+    fun `renderer records rendered observation with the turn request ID`() = runTest {
+        val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
+        try {
+            val ttsEngine = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsEngine>()
+            val renderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
+                earconPlayer = mock(),
+                ttsEngine = ttsEngine,
+            )
+            renderer.render(
+                VoiceResponse.Spoken("You have reached your Auris free daily limit. Please try again tomorrow."),
+                requestId = testWireId,
+            )
+            // The render coroutine runs on the renderer's own scope; poll briefly for the entry record.
+            var lines: List<String> = emptyList()
+            repeat(20) {
+                lines = capture.lines()
+                if (lines.any { it.contains("reason=TurnFeedbackSelected") && it.contains("request_id=$testWireId") }) return@repeat
+                Thread.sleep(50)
+            }
+            assertTrue(
+                "renderer entry recorded with turn request ID",
+                lines.any { it.contains("reason=TurnFeedbackSelected") && it.contains("request_id=$testWireId") && it.contains("entry_spoken") },
+            )
+        } finally {
+            capture.close()
+        }
     }
 }

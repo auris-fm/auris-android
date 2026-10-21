@@ -934,6 +934,9 @@ class CloudRouteSink internal constructor(
             override fun onSocketOpened(requestId: String) {
                 Trace.record(Event(Kind.Turn, Reason.TurnSocketOpened, Source.Cloud, requestId = requestId))
             }
+            override fun onSendAttempted(requestId: String) {
+                Trace.record(Event(Kind.Turn, Reason.TurnSocketSendComplete, Source.Cloud, requestId = requestId, errorCode = "SEND_ATTEMPTED"))
+            }
             override fun onSendResult(
                 requestId: String,
                 outcome: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.SendOutcome,

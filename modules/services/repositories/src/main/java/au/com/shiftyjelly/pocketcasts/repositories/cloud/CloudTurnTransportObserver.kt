@@ -22,6 +22,9 @@ interface CloudTurnTransportObserver {
     /** WebSocket onOpen fired; auth frame send attempted. */
     fun onSocketOpened(requestId: String)
 
+    /** Send entry: the call to WebSocket.send is about to be made. Encode has passed. */
+    fun onSendAttempted(requestId: String)
+
     /** Auth frame send result. */
     fun onSendResult(requestId: String, outcome: SendOutcome)
 

@@ -62,6 +62,11 @@ class WebSocketCloudTurnTransportRefusalTest {
         var sendReturn = true
         val sendCalls = CopyOnWriteArrayList<String>()
 
+        /** Lets a test substitute its own throwing socket before the transport installs its own. */
+        fun overrideSocket(socket: WebSocket) {
+            this.socket = socket
+        }
+
         override fun newWebSocket(request: Request, listener: WebSocketListener): WebSocket {
             this.listener = listener
             return mock<WebSocket>().also { s ->
@@ -86,9 +91,9 @@ class WebSocketCloudTurnTransportRefusalTest {
         routeHint = null,
     )
 
-    /** The REAL limit refusal: server sends an error frame BEFORE any Connected handshake. */
+    /** The REAL limit refusal: 101 handshake, real send, then an error frame BEFORE protocol Connected. */
     @Test
-    fun `server limit_exceeded before Connected records terminal at decode with no socket-open lie`() = runBlocking {
+    fun `server limit_exceeded after real open-send records terminal at decode before protocol Connected`() = runBlocking {
         val client = CapturingOkHttpClient()
         val observer = RecordingObserver()
         val transport = WebSocketCloudTurnTransport("https://example.invalid", client, observer)
@@ -97,16 +102,27 @@ class WebSocketCloudTurnTransportRefusalTest {
         val job = launch { transport.exchange(frame()).collect { events.add(it) } }
 
         withTimeout(5_000) { while (client.listener == null) delay(10) }
-        delay(100)
+        // The real transport requires the 101 handshake; onOpen drives the actual auth send.
+        val upgrading = mock<Response>().also { org.mockito.kotlin.whenever(it.code).thenReturn(101) }
+        client.listener!!.onOpen(client.socket!!, upgrading)
+        withTimeout(5_000) { while (client.sendCalls.isEmpty()) delay(10) }
         val l = client.listener!!
         val s = client.socket!!
 
-        // The refusal: server accepts the upgrade and immediately answers the auth frame
-        // with limit_exceeded — the owner's observed staging behavior (FREE_DAILY_LIMIT=0).
+        // The refusal: the server answers the auth frame with limit_exceeded BEFORE any
+        // protocol Connected handshake — the owner's observed staging behavior.
         l.onMessage(s, """{"type":"error","code":"limit_exceeded","message":""}""")
         delay(200)
         job.cancel()
 
+        assertTrue(
+            "socket_opened must be recorded — the TCP open truthfully preceded the refusal: ${observer.events}",
+            observer.events.contains("socket_opened"),
+        )
+        assertTrue(
+            "send attempt must precede the refusal: ${observer.events}",
+            observer.events.contains("send_attempted") && observer.events.contains("send:ACCEPTED"),
+        )
         assertTrue(
             "terminal must be recorded at the transport's decode point: ${observer.events}",
             observer.events.contains("terminal:SERVER_ERROR:limit_exceeded"),
@@ -116,9 +132,83 @@ class WebSocketCloudTurnTransportRefusalTest {
             events.any { it is CloudRouteEvent.Error && it.code == "limit_exceeded" },
         )
         assertEquals(
-            "no Connected ever arrived, so no socket lie: ${observer.events}",
+            "no protocol Connected may have been delivered: $events",
             false,
-            observer.events.contains("socket_opened") && !events.any { it is CloudRouteEvent.Connected },
+            events.any { it is CloudRouteEvent.Connected },
+        )
+    }
+
+    /** An unencodable auth frame is ENCODE_FAILED — send was never attempted. */
+    @Test
+    fun `unencodable frame records ENCODE_FAILED without a send attempt`() = runBlocking {
+        val client = CapturingOkHttpClient()
+        val observer = RecordingObserver()
+        val transport = WebSocketCloudTurnTransport("https://example.invalid", client, observer)
+
+        val badFrame = frame().copy(conversationId = "not-a-uuid")
+        val events = CopyOnWriteArrayList<CloudRouteEvent>()
+        val job = launch { transport.exchange(badFrame).collect { events.add(it) } }
+
+        withTimeout(5_000) { while (client.listener == null) delay(10) }
+        val upgrading = mock<Response>().also { org.mockito.kotlin.whenever(it.code).thenReturn(101) }
+        client.listener!!.onOpen(client.socket!!, upgrading)
+        delay(300)
+        job.cancel()
+
+        assertEquals(
+            "encode failure is its own bounded outcome: ${observer.events}",
+            true,
+            observer.events.contains("send:ENCODE_FAILED"),
+        )
+        assertEquals(
+            "no send attempt may be claimed when encode failed: ${observer.events}",
+            false,
+            observer.events.contains("send_attempted"),
+        )
+        assertTrue("nothing reached the socket", client.sendCalls.isEmpty())
+        assertTrue(
+            "the turn must end with the local terminal: $events",
+            events.any { it is CloudRouteEvent.Error && it.code == CloudRouteErrorCodes.CONNECTION_LOST },
+        )
+    }
+
+    /** A throwing send is SEND_THREW — acceptance unknown, not a clean rejection. */
+    @Test
+    fun `throwing send records SEND_THREW and ends the turn locally`() = runBlocking {
+        val client = CapturingOkHttpClient()
+        val observer = RecordingObserver()
+        val transport = WebSocketCloudTurnTransport("https://example.invalid", client, observer)
+        // Simulate a socket whose send throws (channel closing underneath us).
+        val throwingSocket = mock<WebSocket>().also { s ->
+            org.mockito.kotlin.whenever(s.send(org.mockito.kotlin.any<String>())).thenThrow(RuntimeException("socket closed"))
+        }
+        client.overrideSocket(throwingSocket)
+
+        val events = CopyOnWriteArrayList<CloudRouteEvent>()
+        val job = launch { transport.exchange(frame()).collect { events.add(it) } }
+
+        withTimeout(5_000) { while (client.listener == null) delay(10) }
+        val upgrading = mock<Response>().also { org.mockito.kotlin.whenever(it.code).thenReturn(101) }
+        client.listener!!.onOpen(throwingSocket, upgrading)
+        delay(300)
+        job.cancel()
+
+        assertTrue(
+            "send attempt must be recorded before the throw: ${observer.events}",
+            observer.events.contains("send_attempted"),
+        )
+        assertTrue(
+            "a throwing send must be SEND_THREW: ${observer.events}",
+            observer.events.contains("send:SEND_THREW"),
+        )
+        assertEquals(
+            "acceptance is unknown — never claim ACCEPTED or REJECTED: ${observer.events}",
+            false,
+            observer.events.contains("send:ACCEPTED") || observer.events.contains("send:REJECTED"),
+        )
+        assertTrue(
+            "the turn must end with the local terminal: $events",
+            events.any { it is CloudRouteEvent.Error && it.code == CloudRouteErrorCodes.CONNECTION_LOST },
         )
     }
 

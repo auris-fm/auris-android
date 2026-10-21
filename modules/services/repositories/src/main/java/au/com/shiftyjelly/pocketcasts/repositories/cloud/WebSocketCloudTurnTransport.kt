@@ -27,6 +27,7 @@ import timber.log.Timber
 class WebSocketCloudTurnTransport(
     private val baseUrl: String,
     private val okHttpClient: OkHttpClient,
+    private val observer: CloudTurnTransportObserver? = null,
 ) : CloudTurnTransport {
 
     override fun exchange(frame: CloudTurnFrame): Flow<CloudRouteEvent> = callbackFlow {
@@ -44,8 +45,10 @@ class WebSocketCloudTurnTransport(
 
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                val requestId = frame.requestId
                 if (response.code != 101) {
                     Timber.w("Cloud route WebSocket rejected: %d %s", response.code, response.message)
+                    observer?.onSendRejected(requestId, "${response.code} ${response.message}")
                     emitTerminal(
                         channel,
                         CloudRouteEvent.Error(
@@ -55,7 +58,13 @@ class WebSocketCloudTurnTransport(
                     )
                     return
                 }
-                webSocket.send(frame.toJson())
+                observer?.onSocketOpened(requestId)
+                val sent = webSocket.send(frame.toJson())
+                if (sent) {
+                    observer?.onSendAccepted(requestId)
+                } else {
+                    observer?.onSendRejected(requestId, "send_returned_false")
+                }
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
@@ -90,7 +99,9 @@ class WebSocketCloudTurnTransport(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                val requestId = frame.requestId
                 Timber.w(t, "Cloud route socket failed")
+                observer?.onConnectionFailed(requestId, t::class.simpleName ?: "unknown")
                 emitTerminal(
                     channel,
                     CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),

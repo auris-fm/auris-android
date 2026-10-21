@@ -86,6 +86,8 @@ class CloudRouteSink internal constructor(
     /** Audio player for cloud-delivered binary audio frames. */
     private val audioPlayer: CloudAudioPlayer? = null,
     private val gracePeriodSignal: GracePeriodSignal? = null,
+    /** Test seam: inject a transport factory to bypass WebSocket in unit tests. */
+    private val transportFactory: ((String, okhttp3.OkHttpClient, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver?) -> au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport)? = null,
 ) : VoiceCloudRouteSink {
 
     @Inject constructor(
@@ -460,6 +462,9 @@ class CloudRouteSink internal constructor(
         }
 
         var endReason = Reason.TurnEnded
+        // Hoisted for catch-block diagnostics: the request ID is needed even if setup throws.
+        val diagnosticRequestId: String? = prepared?.requestId ?: admittedId
+        val diagnosticOrigin: Long? = prepared?.capturedOrigin ?: capturedOrigin
         val graceHold = gracePeriodSignal?.holdCloudTurn(prepared?.capturedOrigin ?: capturedOrigin, owner = myId)
 
         // Everything from registration onward sits inside the cleanup path: a
@@ -565,11 +570,8 @@ class CloudRouteSink internal constructor(
                         // server negotiated. Propagate it so the player builds the right decoder
                         // and sample rate before any binary frame arrives.
                         audioPlayer?.setCodec(event.codec)
-                        // Transport boundaries: auth resolved (token accepted by server) AND
-                        // socket opened (handshake completed). Connected is the first event,
-                        // proving both auth passed and the socket is live.
-                        Trace.record(Event(Kind.Turn, Reason.TurnAuthResolved, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
-                        Trace.record(Event(Kind.Turn, Reason.TurnSocketOpened, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
+                        // Auth/socket diagnostics are recorded by the transport observer at
+                        // actual onOpen/send callbacks, not here at the sink's Connected event.
                     }
 
                     is CloudRouteEvent.Action -> {
@@ -648,7 +650,8 @@ class CloudRouteSink internal constructor(
 
                     is CloudRouteEvent.Done -> {
                         // Transport boundary: terminal done received from server.
-                        Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
+                        val doneOutcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted"
+                        Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, errorCode = doneOutcome))
                         analytics.recordTurn(
                             outcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted",
                             inputTokens = event.inputTokens,
@@ -728,7 +731,13 @@ class CloudRouteSink internal constructor(
                             }
                         }
                         // Transport boundary: feedback/render decision made for this turn.
-                        Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
+                        val doneFeedbackKind = when (outcome) {
+                            is VoiceResponse.Silent -> "silent"
+                            is VoiceResponse.Spoken -> "spoken"
+                            is VoiceResponse.Earcon -> "earcon_${(outcome as? VoiceResponse.Earcon)?.id?.name ?: "unknown"}"
+                            else -> outcome?.let { it::class.simpleName } ?: "unknown"
+                        }
+                        Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = doneFeedbackKind))
                     }
 
                     is CloudRouteEvent.Result -> {
@@ -750,8 +759,9 @@ class CloudRouteSink internal constructor(
                     }
 
                     is CloudRouteEvent.Error -> {
-                        // Transport boundary: terminal error received from server.
-                        Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
+                        // Transport boundary: terminal error received. Carries the actual
+                        // error code so limit_exceeded vs connection_lost are distinguishable.
+                        Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, errorCode = event.code))
                         endReason = Reason.TurnFailed
                         // Genuinely unavailable evidence is a state the results
                         // renderer owns whenever it is present AND this turn had a
@@ -798,20 +808,25 @@ class CloudRouteSink internal constructor(
                             else -> VoiceResponse.Spoken(spoken)
                         }
                         // Transport boundary: feedback/render decision made for error turn.
-                        Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId))
+                        val errorFeedbackKind = when (outcome) {
+                            is VoiceResponse.Silent -> "silent"
+                            is VoiceResponse.Spoken -> "spoken"
+                            is VoiceResponse.Earcon -> "earcon_${(outcome as? VoiceResponse.Earcon)?.id?.name ?: "unknown"}"
+                            else -> outcome.let { it::class.simpleName } ?: "unknown"
+                        }
+                        Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = errorFeedbackKind))
                     }
                 }
             }
         } catch (cancelled: CancellationException) {
             endReason = Reason.TurnCancelled
             // Transport boundary: turn retired by cancellation before server terminal.
-            // Generation/requestId may not be available at this scope; owner identifies the turn.
-            Trace.record(Event(Kind.Turn, Reason.TurnRetired, Source.Cloud, owner = myId))
+            Trace.record(Event(Kind.Turn, Reason.TurnRetired, Source.Cloud, generation = diagnosticOrigin, owner = myId, requestId = diagnosticRequestId, errorCode = "cancelled"))
             throw cancelled
         } catch (failure: Exception) {
             endReason = Reason.TurnFailed
             // Transport boundary: turn retired by failure before server terminal.
-            Trace.record(Event(Kind.Turn, Reason.TurnRetired, Source.Cloud, owner = myId))
+            Trace.record(Event(Kind.Turn, Reason.TurnRetired, Source.Cloud, generation = diagnosticOrigin, owner = myId, requestId = diagnosticRequestId, errorCode = failure::class.simpleName ?: "unknown"))
             throw failure
         } finally {
             // Any exit path — normal return, upstream cancellation, timeouts,
@@ -891,7 +906,29 @@ class CloudRouteSink internal constructor(
         // upgrade fails the turn visibly rather than falling back, so a completed turn is evidence
         // the negotiated path served it. The choice lives in one place rather than beside a second
         // path — there is no second path to be beside.
-        return CloudTurnRoute(resolveBaseUrl(), tokenProvider).route(turn)
+        val transportObserver = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver {
+            override fun onAuthResolved(requestId: String, success: Boolean) {
+                Trace.record(Event(Kind.Turn, Reason.TurnAuthResolved, Source.Cloud, requestId = requestId))
+            }
+            override fun onSocketOpened(requestId: String) {
+                Trace.record(Event(Kind.Turn, Reason.TurnSocketOpened, Source.Cloud, requestId = requestId))
+            }
+            override fun onSendAccepted(requestId: String) {
+                Trace.record(Event(Kind.Turn, Reason.TurnSocketSendComplete, Source.Cloud, requestId = requestId))
+            }
+            override fun onSendRejected(requestId: String, reason: String) {
+                Trace.record(Event(Kind.Turn, Reason.TurnRetired, Source.Cloud, requestId = requestId))
+            }
+            override fun onTerminalReceived(requestId: String, errorCode: String?) {
+                // Server terminal — recorded at the actual callback, not inferred.
+                Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, requestId = requestId))
+            }
+            override fun onConnectionFailed(requestId: String, reason: String) {
+                Trace.record(Event(Kind.Turn, Reason.TurnRetired, Source.Cloud, requestId = requestId))
+            }
+        }
+        val transport = transportFactory?.invoke(resolveBaseUrl(), CloudTurnRoute.defaultOkHttpClient(), transportObserver)
+        return CloudTurnRoute(resolveBaseUrl(), tokenProvider, transport = transport, observer = transportObserver).route(turn)
     }
 
     /** Advertise a capability only when its renderer is actually available. */

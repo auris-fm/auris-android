@@ -40,14 +40,17 @@ class CloudTurnRoute(
     private val okHttpClient: OkHttpClient = defaultOkHttpClient(),
     /** Socket seam: the unit suite has no WebSocket upgrade, so the transport is injectable. */
     private val transport: CloudTurnTransport? = null,
+    private val observer: CloudTurnTransportObserver? = null,
 ) {
     fun route(turn: CloudRouteTurn): Flow<CloudRouteEvent> = flow {
         // Fail closed, and fail loudly: no token means no request is attempted.
         val token = tokenProvider.currentToken()
         if (token.isNullOrBlank()) {
+            observer?.onAuthResolved(turn.requestId, success = false)
             emit(CloudRouteEvent.Error(code = CloudRouteErrorCodes.UNAUTHORIZED, message = ""))
             return@flow
         }
+        observer?.onAuthResolved(turn.requestId, success = true)
 
         val frame = CloudTurnFrame.Authenticate(
             accessToken = token,
@@ -64,7 +67,7 @@ class CloudTurnRoute(
             conversationId = turn.conversationId,
             conversationMode = turn.conversationMode,
         )
-        val socket = transport ?: WebSocketCloudTurnTransport(baseUrl, okHttpClient)
+        val socket = transport ?: WebSocketCloudTurnTransport(baseUrl, okHttpClient, observer)
         // Everything the socket reports is the turn's outcome — including a refused upgrade, which
         // arrives as `connection_lost` and ends the turn rather than being retried elsewhere.
         emitAll(socket.exchange(frame))

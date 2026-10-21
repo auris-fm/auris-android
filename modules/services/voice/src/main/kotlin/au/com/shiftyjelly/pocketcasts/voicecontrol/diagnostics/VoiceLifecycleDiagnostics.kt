@@ -76,6 +76,8 @@ object VoiceLifecycleDiagnostics {
         val route: au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute? = null,
         val availability: au.com.shiftyjelly.pocketcasts.voicecontrol.route.AudioRoute? = null,
         val acquiring: Boolean? = null,
+        val errorCode: String? = null,
+        val feedbackKind: String? = null,
     )
 
     private sealed interface Entry {
@@ -129,7 +131,8 @@ object VoiceLifecycleDiagnostics {
                 "requested_window=${event.requestedGeneration} request_id=$id " +
                 "prior_gate=${event.previousGate} gate=${event.gate} changed_rules=${event.changedRules} " +
                 "prior_mode=${event.previousMode} mode=${event.mode} " +
-                "prior_capture=${event.previousCapture} capture=${event.capture} route=${event.route} availability=${event.availability} acquiring=${event.acquiring}"
+                "prior_capture=${event.previousCapture} capture=${event.capture} route=${event.route} availability=${event.availability} acquiring=${event.acquiring} " +
+                "error_code=${event.errorCode ?: "-"} feedback_kind=${event.feedbackKind ?: "-"}"
             if (queue.trySend(Entry.Record(line)).isFailure) dropped.incrementAndGet()
         } catch (_: Exception) {
             // A failed platform observation or diagnostic must never change the lifecycle decision.

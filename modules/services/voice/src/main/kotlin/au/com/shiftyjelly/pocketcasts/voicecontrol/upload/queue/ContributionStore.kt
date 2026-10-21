@@ -384,12 +384,13 @@ class ContributionStore(
         // Creating the entry directory adds a NAME to the parent. Syncing only the new directory does
         // not make that name durable, so a crash could leave a directory nothing can find. Barrier the
         // parent at creation, once.
-        if (dir.mkdirs()) {
-            // A failure here is BEFORE the ready transition, so it is uncommitted and must refuse the
-            // preparation rather than be absorbed: publishing into a directory whose name may vanish
-            // is the same defect as an unsynced marker, one level up.
-            dir.parentFile?.let { parent -> syncDirectoryOrFail(parent) }
-        }
+        // The parent barrier runs on EVERY preparation, not only when mkdirs created the directory.
+        // `mkdirs()` returning false means "already exists", which does NOT mean the namespace is
+        // durable: a previous attempt may have created the directory and then failed to sync its
+        // parent. Gating on the mkdir result let that earlier failure be skipped forever, leaving the
+        // directory name undurable while every later preparation reported success.
+        dir.mkdirs()
+        dir.parentFile?.let { parent -> syncDirectoryOrFail(parent) }
         // Generation-owned staging: a stale attempt's cleanup can never reach a successor's paths.
         // Staging is keyed by the UNIQUE attempt (the Admission's reservation id), not merely
         // generation+captureId: two attempts in the same generation for the same capture can never
@@ -484,19 +485,22 @@ class ContributionStore(
                         null
                     } else {
                         // READY MARKER LAST: presence of this file is the ONLY readiness authority.
-                        FileOutputStream(readyFile).close()
-                        fileSync.sync(readyFile)
-                        // Past this point the marker may exist on disk. If the final directory sync
-                        // cannot be confirmed, the outcome is UNCERTAIN (spec ecbe84dd), not a
-                        // definite failure: the entry may be recovered intact at restart, so the
-                        // caller must not mint a new capture id or assume cleanup succeeded.
+                        //
+                        // The uncertain boundary starts at the CREATE, not at the directory sync. The
+                        // moment the marker file exists it may be visible after a crash, so a failure
+                        // in ANY later step (its own content sync, the directory sync) leaves an
+                        // ambiguous transition. Drawing the boundary one operation late was exactly
+                        // the defect: a marker whose content sync failed was collapsed to null even
+                        // though the transition may have occurred.
                         try {
+                            FileOutputStream(readyFile).close()
+                            fileSync.sync(readyFile)
                             syncDirectoryOrFail(dir)
-                        } catch (syncFailure: java.io.IOException) {
+                        } catch (transitionFailure: java.io.IOException) {
                             committed = true
                             throw PublicationUncertain(
-                                "ready marker written but its directory sync failed; publication uncertain",
-                                syncFailure,
+                                "ready marker may exist but its durability could not be confirmed; publication uncertain",
+                                transitionFailure,
                             )
                         }
                         committed = true
@@ -700,6 +704,9 @@ class ContributionStore(
         }.forEach { it.delete() }
         val readyIds = readyIdsBefore.toList()
         val keep = mutableListOf<Entry>()
+        // Entries whose publication could not be confirmed durable. Kept out of the ready set, but NOT
+        // deleted: uncertain is not rejected.
+        val uncertainIds = mutableListOf<String>()
         for (id in readyIds) {
             val wav = File(dir, "$id$SUFFIX_WAV")
             val meta = File(dir, "$id$SUFFIX_META")
@@ -713,7 +720,25 @@ class ContributionStore(
                 File(dir, "$id$SUFFIX_DIGEST").delete()
                 dropCounterOnly(TerminalReason.INVALID_ON_RECOVERY)
             } else {
-                keep += entry
+                // STRUCTURAL validation is not durability confirmation. An entry may have been left by
+                // a publication whose final sync failed (the uncertain outcome), so its files could be
+                // present yet not durable. Before exposing it as ready, re-establish and confirm the
+                // durable state: sync each file's contents, then the directory that names them.
+                // A failure here means the entry is NOT confirmed durable, so it is not exposed.
+                val confirmed = runCatching {
+                    listOf(wav, meta, File(dir, "$id$SUFFIX_DIGEST"), attemptsFile, File(dir, "$id$SUFFIX_CREATED"))
+                        .filter { it.isFile }
+                        .forEach { fileSync.sync(it) }
+                    syncDirectoryOrFail(dir)
+                }.isSuccess
+                if (confirmed) {
+                    keep += entry
+                } else {
+                    // Not exposed this run. The files are LEFT IN PLACE rather than deleted: the entry is
+                    // an uncertain publication, and the spec forbids assuming cleanup succeeded or
+                    // treating uncertainty as rejection. The next confirmation attempt decides.
+                    uncertainIds += id
+                }
             }
         }
         synchronized(lock) {

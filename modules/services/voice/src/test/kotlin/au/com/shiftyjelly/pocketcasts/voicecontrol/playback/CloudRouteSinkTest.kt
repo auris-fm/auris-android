@@ -4338,6 +4338,42 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `cancellation at the execute-to-handoff boundary releases the transferred hold`() = kotlinx.coroutines.runBlocking {
+        // The gap (reviewer b25287c6): the sink transferred the hold, then CancellationException
+        // wins at the execute return — the render handoff never runs, so the service's execute
+        // cancellation catch must release the transferred hold before rethrowing.
+        val graceSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 5_000L)
+        graceSignal.onWakeWordDetected()
+        val executor = org.mockito.Mockito.mock(VoicePlaybackIntentExecutor::class.java)
+        org.mockito.kotlin.whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any()))
+            .thenAnswer {
+                // Simulate the sink's completed transfer, then the caller withdrawing.
+                val intent = it.getArgument<VoiceIntent.CloudRoute>(0)
+                val hold = graceSignal.holdCloudTurn(owner = 3L)!!
+                graceSignal.transferHoldToOutput(intent.logicalRequestId ?: testWireId, hold)
+                throw kotlinx.coroutines.CancellationException("caller withdrew at the boundary")
+            }
+        val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
+            voicePlaybackIntentExecutor = executor
+            audioFeedbackRenderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
+                mock(),
+                au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine(),
+                graceSignal,
+            )
+            gracePeriodSignal = graceSignal
+        }
+        var releasedThenRethrown = false
+        try {
+            service.renderWithFailureHandling(
+                VoiceIntent.CloudRoute(request = "q", tier = VoiceIntent.CloudTier.Premium, logicalRequestId = testWireId),
+            )
+        } catch (expected: kotlinx.coroutines.CancellationException) {
+            releasedThenRethrown = !graceSignal.hasOutputHold(testWireId)
+        }
+        assertTrue("cancellation must rethrow after releasing the transferred hold", releasedThenRethrown)
+    }
+
+    @Test
     fun `local playback failure derives succeeded false even with Done Completed`() = runTest {
         // Drain reporting Unconsumed is the sink's PRODUCTION local-failure path (the head never
         // reached the submitted frames), so localPlaybackFailed is set through real wiring — not a

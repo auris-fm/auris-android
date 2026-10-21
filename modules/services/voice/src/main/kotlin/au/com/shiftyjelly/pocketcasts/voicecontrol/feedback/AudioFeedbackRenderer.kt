@@ -102,6 +102,15 @@ class AudioFeedbackRenderer(
         /** Set when the coroutine body actually begins: a job cancelled before this point never ran its catch/finally. */
         val started = java.util.concurrent.atomic.AtomicBoolean(false)
         lateinit var job: Job
+
+        /**
+         * THIS INVOCATION'S earcon admission, set when the cue is accepted (reviewer b25287c6: the
+         * token is invocation-local state, not a renderer-wide last-value a successor could overwrite).
+         */
+        var earconAdmission: EarconPlayer.AdmissionToken? = null
+
+        /** Observed consumption verdict, written by the earcon terminal await inside the job. */
+        @Volatile var earconConsumed: Boolean = false
     }
 
     /** The in-flight invocation, so supersession names whose turn was dropped. */
@@ -194,6 +203,10 @@ class AudioFeedbackRenderer(
             // the predecessor's own catch does not double-record; the cancel runs AFTER, and the
             // predecessor's finally releases the hold at its actual terminal boundary.
             prior.requestId?.let { recordDrop(it, "superseded", "superseded_by_new_render") }
+            // A NEVER-STARTED predecessor's body catch/finally will never run (reviewer b25287c6):
+            // cancelling its job orphans the transferred hold. The release happens HERE — safe,
+            // because no output has started, so there is nothing to stop or clear first.
+            if (!prior.started.get()) releaseOutputHold(prior.requestId, cancelled = true)
             prior.superseded.set(true)
             prior.job.cancel()
         }
@@ -247,8 +260,12 @@ class AudioFeedbackRenderer(
                         // EARCON TERMINAL IS CONSUMPTION, NOT ADMISSION (reviewer 664f82d0): the hold
                         // releases when the cue is observed to have played every accepted frame. No
                         // spoken half, so the earcon terminal alone ends the output.
+                        thisCall.earconAdmission = lastEarconAdmission
+                        // The await runs INSIDE this job, so every exit — consumed, timed out,
+                        // cancelled, superseded — reports and releases through one owned path.
                         if (earconAdmitted) {
-                            watchEarconTerminal(thisCall, requestId) { releaseOutputHold(requestId, cancelled = false) }
+                            val consumed = thisCall.awaitEarconOutput()
+                            releaseOutputHold(requestId, cancelled = !consumed)
                         } else {
                             releaseOutputHold(requestId, cancelled = true)
                         }
@@ -264,18 +281,22 @@ class AudioFeedbackRenderer(
 
                     is VoiceResponse.Combined -> {
                         earconAdmitted = playEarcon(response.earcon)
+                        thisCall.earconAdmission = lastEarconAdmission
                         recordEarconOutcome()
-                        if (earconAdmitted) {
-                            watchEarconTerminal(thisCall, requestId) { /* joined below */ }
+                        // The earcon terminal runs as a CHILD of this job (not a detached watcher):
+                        // supersession/session-end cancellation reaches it, and its result joins the
+                        // spoken drain below — a timed-out earcon is NOT treated as consumption.
+                        val earconChild = if (earconAdmitted) {
+                            launch { thisCall.awaitEarconOutput() }
+                        } else {
+                            null
                         }
                         speakWithHeartbeat(response.spokenText, language)
                         if (requestId != null) recordSubmitted(requestId, "spoken_submitted")
-                        // The combined response's output ends when BOTH halves end: the awaited
-                        // spoken drain here, and the earcon's observed consumption. Join on the
-                        // watcher's completion instead of releasing at whichever comes first.
-                        val earconWatcher = lastEarconAdmission?.let { earconTerminalForJoin(thisCall) }
-                        if (earconWatcher != null) earconWatcher.join()
-                        releaseOutputHold(requestId, cancelled = false)
+                        earconChild?.join()
+                        // The combined output ends when BOTH halves end; the release is cancelled
+                        // unless the earcon was actually observed consumed.
+                        releaseOutputHold(requestId, cancelled = earconAdmitted && !thisCall.earconConsumed)
                     }
                 }
             } catch (e: TtsPlaybackIncompleteException) {
@@ -790,39 +811,29 @@ class AudioFeedbackRenderer(
     }
 
     /**
-     * Watches ONE earcon admission until its observed OUTPUT terminal — every accepted frame played
-     * (Consumed) — or until superseded/disposed, and then runs [onTerminal]. Admission is not
-     * consumption; the grace hold must not release while the cue is still queued or sounding.
+     * ONE OWNED EARCON TERMINAL (reviewer b25287c6): awaits THIS invocation's admission until the
+     * cue is observed to have played every accepted frame (Consumed) or the observation times out.
+     * Runs INSIDE the render job, so supersession/session-end cancellation reaches it and the
+     * job's cancellation terminal clears output and releases the hold on every exit. Returns
+     * whether consumption was observed; the caller reports stopped/failed/unknown otherwise.
      */
-    private fun watchEarconTerminal(
-        invocation: RenderInvocation,
-        requestId: String?,
-        onTerminal: () -> Unit,
-    ) {
-        val token = lastEarconAdmission
-        scope.launch {
+    private suspend fun RenderInvocation.awaitEarconOutput(): Boolean {
+        val token = earconAdmission ?: return true
+        try {
             val deadline = System.currentTimeMillis() + 15_000L
-            var completed = false
-            while (!disposed && !invocation.superseded.get() && System.currentTimeMillis() < deadline) {
-                val completion = earconPlayer.completionFor(token?.raw)
-                if (completion == EarconPlayer.EarconCompletion.Consumed) {
-                    completed = true
-                    break
+            while (System.currentTimeMillis() < deadline) {
+                if (earconPlayer.completionFor(token.raw) == EarconPlayer.EarconCompletion.Consumed) {
+                    earconConsumed = true
+                    return true
                 }
                 kotlinx.coroutines.delay(50)
             }
-            if (completed && !invocation.superseded.get() && !disposed) onTerminal()
+        } finally {
+            // NON-CONSUMED EXIT: the cue is stopped or failed — clear its output so the gate stops
+            // attributing a sound that will no longer play.
+            if (!earconConsumed) earconPlayer.stopAdmissionNow(token)
         }
-    }
-
-    /** The join job for a Combined response's earcon terminal (see [watchEarconTerminal]). */
-    private fun earconTerminalForJoin(invocation: RenderInvocation) = scope.launch {
-        val token = lastEarconAdmission
-        val deadline = System.currentTimeMillis() + 15_000L
-        while (!disposed && !invocation.superseded.get() && System.currentTimeMillis() < deadline) {
-            if (earconPlayer.completionFor(token?.raw) == EarconPlayer.EarconCompletion.Consumed) break
-            kotlinx.coroutines.delay(50)
-        }
+        return false
     }
 
     /**

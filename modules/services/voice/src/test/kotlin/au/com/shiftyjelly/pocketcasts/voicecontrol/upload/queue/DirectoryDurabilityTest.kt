@@ -161,7 +161,6 @@ class DirectoryDurabilityTest {
         } catch (other: Throwable) {
             throw AssertionError("unexpected exception type ${other::class.simpleName}", other)
         }
-        println("DIAG syncCalls=${failing.calls} outcome=$outcome")
         assertTrue(
             "prepare must report PublicationUncertain when the final sync fails, or a definite " +
                 "published entry; got $outcome",
@@ -484,6 +483,103 @@ class DirectoryDurabilityTest {
             "an uncertain prepare that never entered the index must still be purged, left ${survivors.map { it.name }}",
             survivors.isEmpty(),
         )
+    }
+
+    @Test
+    fun `repeated uncertainty consumes capacity instead of vanishing from the totals`() {
+        // Uncertain files are on disk but NOT ready. If only their ids are tracked, their bytes drop out
+        // of the capacity totals while still occupying the queue, so every repetition of uncertainty
+        // hands out the full budget again over data already stored - an over-commit that compounds.
+        val root = tmp.newFolder("queue-uncertain-capacity")
+        // Records generously so this control isolates BYTE accounting, not the record cap.
+        val tight = QueueLimits.defaults().copy(
+            maxQueueRecords = 32,
+            maxQueueBytes = 4_000_000,
+        )
+        var failSyncs = false
+        val gated = object : DirectorySync {
+            override fun sync(directory: File) {
+                if (failSyncs) throw java.io.IOException("simulated confirmation failure")
+            }
+        }
+        val store = ContributionStore(root, tight, directorySync = gated)
+
+        // Prepare and then withhold several entries; each one still occupies disk.
+        val withheld = mutableListOf<String>()
+        repeat(3) {
+            val id = java.util.UUID.randomUUID().toString()
+            // Prepare with syncs HEALTHY: the fault is injected into RECOVERY, not into publication.
+            failSyncs = false
+            assertTrue("precondition: prepare $id", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+            withheld += id
+            failSyncs = true
+            store.recover()
+            assertTrue("withheld $id", store.readyEntries().none { it.captureId == id })
+        }
+
+        // Bytes on disk for the withheld entries.
+        val onDisk = File(root, "contributions").listFiles()!!.sumOf { it.length() }
+        assertTrue("precondition: withheld bytes occupy the queue ($onDisk)", onDisk > 0)
+
+        // The store must now account for those bytes. With 3 withheld entries of that size against a
+        // 64 kB budget, admittance must be refused rather than granted on top of existing data.
+        val remaining = tight.maxQueueBytes - onDisk
+        val tooBig = store.admit(sampleCount = 4000, metadataBytes = 1024) // comfortably > remaining
+        if (remaining < store.projectedBytesFor(4000, 1024)) {
+            assertTrue(
+                "an admission larger than the remaining budget must be refused, remaining=$remaining",
+                tooBig == null,
+            )
+        }
+
+        assertTrue("precondition: three entries withheld", withheld.size == 3)
+
+        // The assertion must run on the SAME instance that holds the uncertain entries: the accounting is
+        // per-instance state, so a FRESH store over the same directory legitimately knows nothing about
+        // them. An earlier version of this control built a new store and therefore passed even with the
+        // accounting removed - the mutation survived, which is what exposed the flaw.
+        //
+        // A store whose entire budget is exactly what one entry occupies must refuse a second one. With
+        // the withheld bytes counted, the first withheld entry alone consumes the budget; without them,
+        // the budget looks untouched and the second entry is admitted.
+        // The assertion must run on the instance that HOLDS the uncertain entries: the accounting is
+        // per-instance state, so a fresh store over the same directory knows nothing about them (an
+        // earlier version of this control built a new store and passed even with the accounting removed).
+        //
+        // With three entries withheld and each ~4265 bytes, the store's committed byte total is
+        // ~12795. Asking for an entry that only fits in the budget if those bytes were FREE must be
+        // refused. Without the fix the withheld bytes are invisible and it is admitted.
+        val perEntry = bounded().projectedBytesFor(1600, meta(java.util.UUID.randomUUID().toString()).size)
+        val squeezed = ContributionStore(
+            root,
+            tight.copy(maxQueueBytes = perEntry * 3 + perEntry / 2, maxQueueRecords = 64),
+            directorySync = gated,
+        )
+        // Reproduce the same withheld state on THIS instance.
+        val prepared = mutableListOf<String>()
+        repeat(3) {
+            val id = java.util.UUID.randomUUID().toString()
+            failSyncs = false
+            if (squeezed.prepare(id, "epoch-1", chunks(1600), meta(id)) != null) prepared += id
+            failSyncs = true
+            squeezed.recover()
+        }
+        assertTrue("precondition: three entries withheld on this instance", prepared.size == 3)
+        assertTrue("precondition: none ready", squeezed.readyEntries().isEmpty())
+
+        failSyncs = false
+        val overflowId = java.util.UUID.randomUUID().toString()
+        val overflowing = runCatching { squeezed.prepare(overflowId, "epoch-1", chunks(1600), meta(overflowId)) }.getOrNull()
+        assertTrue(
+            "withheld bytes must consume the budget: a 4th entry was admitted although 3 entries' bytes " +
+                "(~${perEntry * 3}) already occupy a ${perEntry * 3 + perEntry / 2}-byte budget",
+            overflowing == null,
+        )
+    }
+
+    private fun bounded(): ContributionStore {
+        val root = tmp.newFolder("queue-probe-${System.nanoTime()}")
+        return ContributionStore(root, QueueLimits.defaults())
     }
 
     @Test

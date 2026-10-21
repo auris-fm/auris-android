@@ -204,8 +204,11 @@ class ContributionStore(
     /** Re-check budgets at publication time (a purge/expiry may have moved them since admission). */
     private fun roomForPublicationLocked(admission: Admission): Boolean {
         val others = reservations.entries.filterNot { it.key == admission.id }
-        val bytes = memoryEntries.values.sumOf { it.audioBytes + it.metadataBytes } + others.sumOf { it.value }
-        val liveRecords = memoryEntries.size + others.size
+        val bytes = memoryEntries.values.sumOf { it.audioBytes + it.metadataBytes } +
+            others.sumOf { it.value } +
+            // Uncertain entries are ON DISK: their bytes are not free just because they are not ready.
+            uncertainPreparedIds.values.sumOf { it[0] + it[1] }
+        val liveRecords = memoryEntries.size + others.size + uncertainPreparedIds.size
         return liveRecords < limits.maxQueueRecords && bytes + admission.projectedBytes <= limits.maxQueueBytes
     }
 
@@ -239,7 +242,8 @@ class ContributionStore(
     private fun roomLocked(projected: Long): Boolean {
         val live = memoryEntries.size + reservations.size
         if (live >= limits.maxQueueRecords) return false
-        val bytes = memoryEntries.values.sumOf { it.audioBytes + it.metadataBytes } + liveReservationBytesLocked()
+        val bytes = memoryEntries.values.sumOf { it.audioBytes + it.metadataBytes } +
+            liveReservationBytesLocked() + uncertainPreparedIds.values.sumOf { it[0] + it[1] }
         return bytes + projected <= limits.maxQueueBytes
     }
 
@@ -272,7 +276,11 @@ class ContributionStore(
         canonicalMetadata: ByteArray,
     ): Entry? {
         val samples = sampleCount(pcmChunks) ?: return null
-        val admission = admit(samples, canonicalMetadata.size) ?: return null
+        val admission = admit(samples, canonicalMetadata.size)
+            ?: run {
+                null
+            }
+            ?: return null
         return prepareAt(fence.currentGeneration(), admission, captureId, enrollmentEpoch, pcmChunks, canonicalMetadata)
     }
 
@@ -450,11 +458,10 @@ class ContributionStore(
                 // (reviewer ee26880c findings 1 and 4). Firing it after validation lets an attempt that
                 // revokes in its own hook publish anyway.
                 hooks.beforePublication?.invoke(generation)
+                val roomOk = roomForPublicationLocked(admission)
                 if (!ownership.isValidUnderLock(generation)) {
                     null
-                } else if (preparedIds.contains(captureId) || memoryEntries.containsKey(captureId) ||
-                    !roomForPublicationLocked(admission)
-                ) {
+                } else if (preparedIds.contains(captureId) || memoryEntries.containsKey(captureId) || !roomOk) {
                     // Ownership is decided atomically with publication: whoever reached the commit point
                     // first owns the id, and a duplicate or over-budget attempt is refused.
                     null
@@ -502,7 +509,14 @@ class ContributionStore(
                             // without this the owner's accounting would not contain it and a purge could
                             // leave the user's audio behind. Ownership is about "this owner created these
                             // files", not "this owner can read them back".
-                            synchronized(lock) { uncertainPreparedIds += captureId }
+                            // Sizes come from the files that actually reached disk, so the capacity
+                            // accounting charges for what is really occupying the queue.
+                            synchronized(lock) {
+                                uncertainPreparedIds[captureId] = longArrayOf(
+                                    wavFinal.length().coerceAtLeast(0),
+                                    metaFinal.length().coerceAtLeast(0),
+                                )
+                            }
                             throw PublicationUncertain(
                                 "ready marker may exist but its durability could not be confirmed; publication uncertain",
                                 transitionFailure,
@@ -659,7 +673,7 @@ class ContributionStore(
             // account purge that skipped it would leave the user's audio on disk after they asked for
             // everything to be removed, and a later healthy recovery would resurrect it. The uncertain set
             // is unioned in HERE, before the snapshot, and cleared only after its files are deleted.
-            val ownedIds = (memoryEntries.keys + uncertainPreparedIds).distinct()
+            val ownedIds = (memoryEntries.keys + uncertainPreparedIds.keys).distinct()
             val stagedAttempts = stagingOwners.toList()
             // Delete only what THIS owner's index actually holds. deleteLocked removes each id as it goes, so
             // the later clear() is a no-op safety net rather than a second sweep.
@@ -718,6 +732,7 @@ class ContributionStore(
         // Entries whose publication could not be confirmed durable. Kept out of the ready set, but NOT
         // deleted: uncertain is not rejected.
         val uncertainIds = mutableListOf<String>()
+        val uncertainSizes = mutableMapOf<String, LongArray>()
         for (id in readyIds) {
             val wav = File(dir, "$id$SUFFIX_WAV")
             val meta = File(dir, "$id$SUFFIX_META")
@@ -762,6 +777,10 @@ class ContributionStore(
                     // an uncertain publication, and the spec forbids assuming cleanup succeeded or
                     // treating uncertainty as rejection. The next confirmation attempt decides.
                     uncertainIds += id
+                    uncertainSizes[id] = longArrayOf(
+                        wav.length().coerceAtLeast(0),
+                        meta.length().coerceAtLeast(0),
+                    )
                 }
             }
         }
@@ -776,12 +795,17 @@ class ContributionStore(
                 // index exactly like a foreign one. Rebuilding from validate() alone would reinsert it
                 // and make the confirmation above decorative for the very entries most likely to be
                 // uncertain (this instance is the one that may have published them).
+                val wavEntry = File(dir, "$id$SUFFIX_WAV")
+                val metaEntry = File(dir, "$id$SUFFIX_META")
                 if (id in uncertainIds) {
-                    uncertainPreparedIds += id
+                    uncertainPreparedIds[id] = longArrayOf(
+                        wavEntry.length().coerceAtLeast(0),
+                        metaEntry.length().coerceAtLeast(0),
+                    )
                     continue
                 }
-                val wav = File(dir, "$id$SUFFIX_WAV")
-                val metaF = File(dir, "$id$SUFFIX_META")
+                val wav = wavEntry
+                val metaF = metaEntry
                 validate(id, wav, metaF, File(dir, "$id$SUFFIX_ATTEMPTS"))?.let { memoryEntries[id] = it }
                     ?: run {
                         preparedIds.remove(id)
@@ -938,8 +962,13 @@ class ContributionStore(
      *
      * They stay on disk and are withheld from the index until a later confirmation succeeds: uncertain
      * is not rejected, but it is also not ready.
+     *
+     * SIZES are kept with the ids on purpose. These files still occupy the queue directory, so dropping
+     * their bytes from the capacity totals would let the store accept new publications up to the full
+     * budget on top of data that is already on disk - an over-commit that grows every time uncertainty
+     * repeats.
      */
-    private val uncertainPreparedIds = mutableSetOf<String>()
+    private val uncertainPreparedIds = LinkedHashMap<String, LongArray>()
     private val reservations = LinkedHashMap<String, Long>()
 
     /** Attempt ids with staging files owned by THIS instance, so purge cleanup stays scoped. */

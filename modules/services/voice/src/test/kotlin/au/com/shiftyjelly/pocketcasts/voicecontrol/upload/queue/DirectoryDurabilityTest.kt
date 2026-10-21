@@ -831,6 +831,37 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `a FAILED intent attempt is still remembered as disposal across later reads`() {
+        // When the intent record cannot be confirmed, destruction is correctly withheld. But the intent
+        // itself must not be LOST: the retry sweep only knows about captures that left a marker, so a
+        // capture whose marker write failed is never retried and lingers as ordinary debris forever. The
+        // user asked for it to go; the store must keep trying, not quietly forget.
+        val root = tmp.newFolder("queue-intent-remembered")
+        val id = java.util.UUID.randomUUID().toString()
+        var blockIntent = true
+        val faulting = object : DirectorySync {
+            override fun sync(directory: File) {
+                if (blockIntent) throw java.io.IOException("simulated intent barrier failure")
+            }
+        }
+        val store = ContributionStore(root, limits(), intentDirectorySyncOverride = faulting)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+
+        store.revokeAndPurge("account_changed")
+        val wav = File(root, "contributions/$id.recording.wav")
+        assertTrue("precondition: nothing destroyed without confirmed intent", wav.isFile)
+
+        // A FRESH store with a healthy barrier must still know this capture was meant to go.
+        blockIntent = false
+        val fresh = ContributionStore(root, limits())
+        fresh.expireOlderThan()
+        assertTrue(
+            "a capture whose intent write failed must still be cleaned up later, not forgotten",
+            !wav.exists(),
+        )
+    }
+
+    @Test
     fun `a marker whose barrier failed is not treated as durable on retry`() {
         // marker.exists() was accepted as proof of durable intent. A marker written but never synced can
         // vanish on crash, so a retry must re-confirm rather than trust its presence.
@@ -851,19 +882,23 @@ class DirectoryDurabilityTest {
         val wav = File(root, "contributions/$id.recording.wav")
         assertTrue("nothing was destroyed while intent could not be confirmed", wav.isFile)
 
-        // Marker now present from a failed attempt; with the barrier healthy it must be re-confirmed and
-        // the cleanup completed.
+        // Marker now present from a failed attempt. A HEALTHY store must not trust its presence: it has to
+        // RE-RUN the barrier, and only then may it destroy. The test asserts the barrier actually executed,
+        // not merely that the files eventually vanished - a store that deleted on presence alone would also
+        // end with the files gone, so a final-state assertion proves nothing.
         failIntent = false
-        val retry = ContributionStore(
+        var barrierRuns = 0
+        val healthy = ContributionStore(
             root,
             limits(),
             intentDirectorySyncOverride = object : DirectorySync {
                 override fun sync(directory: File) {
-                    throw java.io.IOException("blocked")
+                    barrierRuns++
                 }
             },
         )
-        retry.expireOlderThan()
+        healthy.expireOlderThan()
+        assertTrue("the intent barrier must be RE-RUN before deletion, ran $barrierRuns times", barrierRuns > 0)
         assertTrue("cleanup must complete once the barrier is healthy", !wav.exists())
     }
 

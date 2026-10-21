@@ -1047,16 +1047,29 @@ class ContributionStore(
     // that makes it discoverable must have succeeded; a marker written but never synced may vanish on
     // crash, and a marker whose directory entry was not persisted may not be there when it is needed.
     // The presence check is therefore only a shortcut for a marker that was ALREADY fully confirmed.
+    // Records disposal intent as BEST EFFORT, without requiring any barrier to succeed, and returns
+    // whether the record is CONFIRMED durable. Splitting these matters: if intent were only recorded when
+    // its barriers succeeded, a failing barrier would leave NO record at all and the capture would be
+    // forgotten as ordinary debris - the user's request disappearing because the disk refused to co-operate.
+    // The unconfirmed record is what keeps the capture on the retry list; the return value is what gates
+    // destruction. Intent recorded is never intent acted upon without confirmation.
     private fun writeDisqualificationLocked(id: String): Boolean {
         val marker = disqualificationMarker(id)
-        if (marker.exists() && marker.readText().trim() == DISQUALIFIED_CONTENT) return true
+        recordIntentBestEffort(marker)
         // The marker lives in the PARENT of the queue directory, not inside it. The whole reason it is
         // needed is that the queue directory may be precisely what is blocking deletion (read-only or
         // otherwise unwritable); writing intent into the blocked directory would fail in exactly the
         // situation it exists for. Disposal intent must be writable whenever cleanup is not.
         return runCatching {
             val parent = marker.parentFile
+            val existedBefore = parent?.exists() == true
             parent?.mkdirs()
+            // A newly created directory is not durable just because its contents were synced: the entry
+            // that NAMES it lives in ITS parent, which must be barriered too.
+            if (parent != null && !existedBefore) {
+                parent.parentFile?.let { intentDirectorySync.sync(it) }
+                root.let { intentDirectorySync.sync(it) }
+            }
             marker.writeText(DISQUALIFIED_CONTENT)
             // EVERY barrier, each able to fail the transition on its own. Reporting success because the
             // file happens to be visible in this process's cache is exactly the mistake to avoid: the
@@ -1085,6 +1098,15 @@ class ContributionStore(
             val markerDir = File(root, DISQUALIFIED_DIR)
             val ids = markerDir.listFiles()?.map { it.name } ?: return
             for (id in ids) {
+                // A marker on disk does not prove its barriers succeeded: the record is written BEFORE the
+                // syncs, so a crash or failure leaves content identical to a confirmed record. Every retry
+                // therefore RE-RUNS the confirmation before destroying anything; if it fails again,
+                // nothing is deleted and the capture keeps its charge - but the record REMAINS, so the
+                // intent is not forgotten and a later sweep tries again.
+                if (!writeDisqualificationLocked(id)) {
+                    claimOwnedLocked(id, measuredAudioBytes(id), measuredMetadataBytes(id), ready = false)
+                    continue
+                }
                 val gone = deleteAll(
                     id,
                     listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST),
@@ -1096,6 +1118,15 @@ class ContributionStore(
                     claimOwnedLocked(id, measuredAudioBytes(id), measuredMetadataBytes(id), ready = false)
                 }
             }
+        }
+    }
+
+    // The unconfirmed half: write the record so it is DISCOVERABLE by a later sweep, swallowing failures.
+    // A failure here is reported by the caller's confirmation result, never by silently skipping the write.
+    private fun recordIntentBestEffort(marker: File) {
+        runCatching {
+            marker.parentFile?.mkdirs()
+            if (!marker.exists()) marker.writeText(DISQUALIFIED_CONTENT)
         }
     }
 

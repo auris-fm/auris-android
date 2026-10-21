@@ -29,9 +29,11 @@ class SpokenTemplateResolverLocaleTest {
         val resolver = SpokenTemplateResolver(getApplicationContext<Context>())
         // The UI locale no longer decides the line (spec ruling 7c7575f6): the default table is
         // ENGLISH BY CONTRACT, and a locale's wording is selected by the UTTERANCE's language.
-        assertEquals("default line is English on any UI locale",
+        assertEquals(
+            "default line is English on any UI locale",
             "You have reached your Auris free daily limit. Please try again tomorrow.",
-            resolver.resolve("cloud_error_limit_exceeded"))
+            resolver.resolve("cloud_error_limit_exceeded"),
+        )
         val spoken = resolver.resolveLocalized("cloud_error_limit_exceeded", qualifiers.substringBefore('-')).text
         assertEquals(expected, spoken)
         // The contract's shape, independent of wording drift in a future translation edit:

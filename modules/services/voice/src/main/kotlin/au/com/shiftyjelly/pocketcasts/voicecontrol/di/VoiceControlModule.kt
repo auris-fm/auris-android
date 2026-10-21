@@ -263,7 +263,8 @@ abstract class VoiceControlModule {
         fun provideAudioFeedbackRenderer(
             earconPlayer: EarconPlayer,
             ttsEngine: TtsEngine,
-        ): AudioFeedbackRenderer = AudioFeedbackRenderer(earconPlayer, ttsEngine)
+            gracePeriodSignal: au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal,
+        ): AudioFeedbackRenderer = AudioFeedbackRenderer(earconPlayer, ttsEngine, gracePeriodSignal)
 
         /**
          * Supplies the monitor's spoken-pause seam to Dagger.

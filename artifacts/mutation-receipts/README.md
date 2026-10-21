@@ -80,3 +80,23 @@ return instead of transferring to the renderer path.
   never run).
 - The service's execute-cancellation catch releases any already-transferred hold before rethrowing
   (execute→handoff boundary control included).
+
+## Final boundary-order receipts for grace clearance (reviewer b4fc46a6)
+
+Real executor→renderer controls, each asserting the stopped/cleared-before-release ORDER:
+
+- **Generic failure:** `a TTS failure mid-render releases the transferred hold exactly once`
+  (CloudRouteSinkTest) — gated failing TTS; asserts the `submission_failed/render_failed` drop is
+  recorded BEFORE the Hold release event. GREEN XML: `green-boundary-ordering-CloudRouteSinkTest.xml`.
+- **Session cancellation/disposal:** `a cancelled render before acceptance releases the transferred
+  hold via the service` (CloudRouteSinkTest) — renderer.release() mid-render; asserts the
+  `render_cancelled` drop precedes the Hold release event, then window expiry, exactly-once. Same GREEN XML.
+- **Supersession:** `supersession releases the predecessor hold only after its output terminal is
+  recorded` (CloudRouteSinkTest) — real executor→renderer supersession of an in-flight gated render;
+  asserts the superseded/cancelled drop precedes the Hold release event. Same GREEN XML.
+- **No-handoff/disposal:** renderer-level — a disposed renderer REFUSES ownership (render returns
+  false; service releases); never-started supersession releases at its site.
+  GREEN XML: `green-boundary-nohandoff-AudioFeedbackRendererTest.xml`.
+
+Mutant receipts: `earcon-admission-release-RED.xml`, `never-started-supersession-orphan-RED.xml`
+(now committed at this head), plus round-2 receipts.

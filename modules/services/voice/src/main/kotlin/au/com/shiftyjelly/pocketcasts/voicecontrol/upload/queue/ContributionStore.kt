@@ -236,6 +236,24 @@ class ContributionStore(
      * would RE-ENTER the monitor - Java monitors are count-owned, so an external revocation could slip in
      * between two sections of one transaction and observe the ownership boundary as free.
      */
+    // A .part file that will not delete still occupies the queue. Charge the bytes under the name the file
+    // implies so they are owned rather than invisible; a later sweep retries the delete.
+    private fun File.deleteOrChargeOnFailure() {
+        if (!delete() && exists()) {
+            // Charged by the file's ACTUAL name, not by a capture id: a staging name is not a capture, and
+            // measuring "$id$SUFFIX_WAV" for it found nothing and charged zero, which is the same blindness
+            // this delete check exists to remove. The survivor is measured where it actually is.
+            val id = name.removeSuffix(SUFFIX_PART)
+            val survivorBytes = runCatching { measuredPathBytes(this, MeasurementBudget(MEASURE_MAX_ENTRIES)) }
+                .getOrElse {
+                    measurementFailures++
+                    unmeasuredIds += id
+                    limits.maxQueueBytes
+                }
+            claimOwnedLocked(id, survivorBytes, 0, ready = false)
+        }
+    }
+
     private fun deleteStaging(attemptId: String) {
         dir.listFiles()?.forEach { f ->
             if (f.name.startsWith("$STAGING_PREFIX$attemptId.")) f.delete()
@@ -765,7 +783,9 @@ class ContributionStore(
         dir.mkdirs()
         val files = dir.listFiles()?.toList() ?: emptyList()
         // 1) Debris sweep: .part files are NEVER ready; .ready without wav/meta is invalid.
-        files.filter { it.name.endsWith(SUFFIX_PART) }.forEach { it.delete() }
+        // The RESULT of delete() used to be discarded here, so staging bytes that survived occupied the
+        // queue while being charged nowhere (reviewer c71672c0).
+        files.filter { it.name.endsWith(SUFFIX_PART) }.forEach { it.deleteOrChargeOnFailure() }
         val readyIdsBefore = files.filter { it.name.endsWith(SUFFIX_READY) }.map { it.name.removeSuffix(SUFFIX_READY) }.toSet()
         // Unmarked FINAL debris: a .wav/.meta/.sha256 with no matching .ready marker is an
         // interrupted preparation that never reached its commit point. It must not survive recovery
@@ -773,15 +793,16 @@ class ContributionStore(
         files.filter { f ->
             val suffix = listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST).firstOrNull { f.name.endsWith(it) }
             suffix != null && f.name.removeSuffix(suffix) !in readyIdsBefore
-        }.forEach {
-            // A debris sweep that fails leaves bytes on disk. Swallowing that would make the residue
-            // invisible to the accounting below, so it is charged as an unowned capture instead.
-            if (!it.delete() && it.exists()) {
-                val suffix = listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST).first { sfx -> it.name.endsWith(sfx) }
-                val id = it.name.removeSuffix(suffix)
-                // The sweep visits files INDIVIDUALLY. Passing per-file partials would state "no audio"
-                // and "no metadata" alternately, and a transition that only ever raises would then keep
-                // whichever came first. Measure the WHOLE capture every time.
+        }.groupBy { f ->
+            // Grouped by CAPTURE, not visited file by file. A per-file sweep can delete the metadata of a
+            // capture whose WAV refused to delete, leaving a residue that was charged for one file and then
+            // silently changed shape underneath the charge. Each capture is handled once, as a whole.
+            f.name.removeSuffix(listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST).first { sfx -> f.name.endsWith(sfx) })
+        }.forEach { (id, captureFiles) ->
+            val survivors = captureFiles.filter { file -> !file.delete() && file.exists() }
+            if (survivors.isNotEmpty()) {
+                // Measure the WHOLE capture AFTER the attempted deletes, so the charge matches what
+                // actually survived rather than what was there before the sweep touched it.
                 chargeRetainedLocked(id, ready = false)
             }
         }
@@ -1465,6 +1486,8 @@ class ContributionStore(
 
     // Test seam: total bytes currently charged to this owner.
     fun ownedBytesForTest(): Long = synchronized(lock) { ownerBytesLocked() }
+
+    fun ownedIdsForTest(): Set<String> = synchronized(lock) { ownedCharges.keys.toSet() }
 
     // Test seam: the exact bytes currently charged for a capture, so a control can assert the MEASURED
     // charge directly instead of inferring it through an admission probe whose budget has to straddle an

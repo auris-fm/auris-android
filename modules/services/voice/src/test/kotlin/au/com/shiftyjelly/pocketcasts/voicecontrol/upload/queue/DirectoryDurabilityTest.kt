@@ -1060,6 +1060,83 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `a part file that refuses to delete is charged, not silently forgotten`() {
+        // The .part sweep discarded delete()'s result entirely, so a survivor was invisible to accounting.
+        val root = tmp.newFolder("queue-part-delete-failure")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        // A non-empty directory cannot be deleted with File.delete(), which is a deterministic failure.
+        val stuck = File(contributions, "gen\$x.3.someid.recording.wav.part")
+        stuck.mkdirs()
+        File(stuck, "held.bin").writeBytes(ByteArray(2048))
+
+        val store = ContributionStore(root, limits())
+        store.recover()
+
+        assertTrue("precondition: the .part file survived", stuck.exists())
+        assertTrue(
+            "surviving .part bytes must be charged (owned=${store.ownedBytesForTest()})",
+            store.ownedBytesForTest() >= 2048,
+        )
+    }
+
+    @Test
+    fun `a capture is charged ONCE as a whole, not file by file`() {
+        // Per-file semantics charge the id of whichever file refused first, which for a staging residue is
+        // a DIFFERENT id from the capture's. Per-capture semantics charge the capture once. The observable
+        // difference is the number of charges, so this asserts that count rather than an end state both
+        // shapes can reach - my first version of this control could not tell them apart at all.
+        val root = tmp.newFolder("queue-grouped-sweep")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val capture = "7a7a7a7a-1111-2222-3333-444444444444"
+
+        // THREE undeletable siblings of the same capture: per-file visiting charges three times.
+        listOf("$capture.recording.wav", "$capture.metadata.json", "$capture.sha256").forEach { name ->
+            val stuck = File(contributions, name)
+            stuck.mkdirs()
+            File(stuck, "held.bin").writeBytes(ByteArray(256))
+        }
+
+        val store = ContributionStore(root, limits())
+        store.recover()
+
+        assertEquals(
+            "the capture must be charged ONCE, as a whole (owned ids: ${store.ownedIdsForTest()})",
+            1,
+            store.ownedIdsForTest().size,
+        )
+    }
+
+    @Test
+    fun `a capture whose WAV refuses to delete charges what actually SURVIVED`() {
+        // Visiting files one by one could delete a capture's metadata after its WAV refused, so the charge
+        // described a shape the residue no longer had. The sweep now handles each capture as a whole.
+        val root = tmp.newFolder("queue-capture-delete-failure")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val id = "9f9f9f9f-1111-2222-3333-444444444444"
+
+        // The WAV refuses to delete; its metadata sibling is a normal file that WILL be deleted.
+        val stuckWav = File(contributions, "$id.recording.wav")
+        stuckWav.mkdirs()
+        File(stuckWav, "held.bin").writeBytes(ByteArray(4096))
+        val meta = File(contributions, "$id.metadata.json")
+        meta.writeBytes(ByteArray(777))
+        // No .ready sibling, so both are unmarked debris.
+
+        val store = ContributionStore(root, limits())
+        store.recover()
+
+        assertTrue("precondition: the WAV survived", stuckWav.exists())
+        assertTrue("the metadata sibling was swept", !meta.exists())
+        assertTrue(
+            "the survivor must be charged the bytes that REMAIN (owned=${store.ownedBytesForTest()})",
+            store.ownedBytesForTest() >= 4096,
+        )
+    }
+
+    @Test
     fun `staging residue from a crashed attempt is swept by the unmarked-debris pass`() {
         // I suspected staging orphans were charged nowhere. They are not: a staging file is named
         // gen$<attempt>.<generation>.<capture>.<suffix> with no matching .ready, so recovery's

@@ -28,6 +28,23 @@ if (!workerRoot || !casesPath) {
   process.exit(2);
 }
 
+// PROVENANCE: the probe reports the exact Worker revision it loaded so a receipt can never be
+// attributed to "some checkout". A dirty worktree is reported as DIRTY rather than concealed: an
+// uncommitted local patch changes intake behaviour, and a receipt that hid that would be worthless.
+const { execFileSync } = await import("node:child_process");
+function provenance(root) {
+  try {
+    const rev = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const dirty = execFileSync("git", ["-C", root, "status", "--porcelain", "--", "src/contributions"], {
+      encoding: "utf8",
+    }).trim();
+    return `${rev}${dirty.length > 0 ? " DIRTY(src/contributions)" : " CLEAN"}`;
+  } catch {
+    return "UNKNOWN (not a git checkout)";
+  }
+}
+console.log(`# worker-revision\t${provenance(workerRoot)}`);
+
 const intakeModule = await import(
   pathToFileURL(`${workerRoot}/src/contributions/stream_intake.ts`).href
 );

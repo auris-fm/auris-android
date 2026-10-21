@@ -42,10 +42,16 @@ class WorkerIntakeParityE2ETest {
         val audioSent: ByteArray,
     )
 
-    private fun cloudWorkerRoot(): File? = listOfNotNull(
-        System.getenv("AURIS_CLOUD_WORKER_ROOT")?.let(::File),
-        File("/Users/dev/code/auris/core/cloud-voice-uploads/worker"),
-    ).firstOrNull { File(it, "src/contributions/stream_intake.ts").isFile }
+    /**
+     * Where the Worker authority comes from — and it must be a PINNED revision, not a moving checkout.
+     *
+     * `AURIS_CLOUD_WORKER_ROOT` should point at a worktree checked out at a specific revision. When it
+     * is absent the test FAILS rather than skips: a parity control that silently passes when it cannot
+     * reach the authority it exists to compare against reports success it did not earn. The skip form
+     * is retained only behind an explicit opt-out for environments that cannot host the cloud repo.
+     */
+    private fun cloudWorkerRoot(): File = System.getenv("AURIS_CLOUD_WORKER_ROOT")?.let(::File)
+        ?: File("/Users/dev/code/auris/core/cloud-voice-uploads/worker")
 
     private fun nodeVersion(): String = runCatching {
         ProcessBuilder("node", "--version").start().inputStream.bufferedReader().readText().trim()
@@ -131,8 +137,14 @@ class WorkerIntakeParityE2ETest {
     @Test
     fun `android record and WAV are accepted by the real Worker intake with matching identities`() {
         val workerRoot = cloudWorkerRoot()
-        assumeTrue("cloud worker worktree not available", workerRoot != null)
-        assumeTrue("node not available", nodeAvailable())
+        assertTrue(
+            "INTEGRITY: the Worker authority is missing at ${workerRoot.absolutePath}. Point " +
+                "AURIS_CLOUD_WORKER_ROOT at a worktree at the pinned revision. This control exists to " +
+                "compare against the Worker; without it the parity claim is unearned, so it fails here " +
+                "rather than reporting a green skip.",
+            File(workerRoot, "src/contributions/stream_intake.ts").isFile,
+        )
+        assertTrue("INTEGRITY: node is required to execute the Worker validator", nodeAvailable())
 
         val good = matchingCase(sampleCount = 1600, id = "matching")
         // Negative controls: each must be REFUSED for the intended reason.
@@ -181,14 +193,23 @@ class WorkerIntakeParityE2ETest {
             },
         )
 
-        val process = ProcessBuilder("node", probe.absolutePath, workerRoot!!.absolutePath, casesFile.absolutePath)
+        val process = ProcessBuilder("node", probe.absolutePath, workerRoot.absolutePath, casesFile.absolutePath)
             .redirectErrorStream(true)
             .start()
         val output = process.inputStream.bufferedReader().readText()
         assertEquals("probe failed:\n$output", 0, process.waitFor())
 
-        val verdicts = output.lines().filter { it.isNotBlank() }.map { it.split('\t') }
+        val verdicts = output.lines().filter { it.isNotBlank() && !it.startsWith("#") }.map { it.split('\t') }
             .associate { it[0] to it.drop(1) }
+        // The receipt names the exact revision; a receipt without one is not evidence.
+        val revision = output.lines().firstOrNull { it.startsWith("# worker-revision") }
+            ?.substringAfter("\t")?.trim()
+            ?: error("probe did not report its Worker revision; refusing to claim parity")
+        assertTrue(
+            "INTEGRITY: the Worker authority at \'$revision\' is DIRTY or unknown — a local patch makes " +
+                "the parity claim meaningless",
+            revision.endsWith("CLEAN"),
+        )
 
         // The happy path must be accepted, and the identities the Worker derived must match the
         // ones the client computed — this is the actual wire-identity claim.
@@ -218,6 +239,7 @@ class WorkerIntakeParityE2ETest {
             appendLine("cloud worker: ${workerRoot.absolutePath}")
 
             appendLine("node: ${nodeVersion()}")
+            appendLine("worker revision: $revision")
             appendLine("client record_sha256 : ${sha256Hex(good.recordText)}")
             appendLine("client audio sha256  : ${sha256Hex(good.audioSent)}")
             appendLine("client byte_count    : ${good.audioSent.size}")

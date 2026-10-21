@@ -25,13 +25,25 @@ import org.junit.Test
  */
 class WorkerWireParityTest {
 
-    private fun cloudWorkerRoot(): File? {
-        val env = System.getenv("AURIS_CLOUD_WORKER_ROOT")
-        val candidates = listOfNotNull(
-            env?.let(::File),
-            File("/Users/dev/code/auris/core/cloud-voice-uploads/worker"),
+    /**
+     * The Worker authority. Must be a PINNED revision, and absence is a FAILURE, not a skip.
+     *
+     * A parity control that green-skips when it cannot reach the thing it compares against reports
+     * success it did not earn. `AURIS_CLOUD_WORKER_ROOT` should name a worktree at the reviewed
+     * revision; the fallback path only exists so a local run without the variable is still explicit
+     * about which checkout it used.
+     */
+    private fun cloudWorkerRoot(): File = System.getenv("AURIS_CLOUD_WORKER_ROOT")?.let(::File)
+        ?: File("/Users/dev/code/auris/core/cloud-voice-uploads/worker")
+
+    private fun requireAuthority(root: File) {
+        assertTrue(
+            "INTEGRITY: the Worker schema authority is missing at ${root.absolutePath}. Point " +
+                "AURIS_CLOUD_WORKER_ROOT at a worktree at the pinned revision; a skipped parity check " +
+                "is not parity.",
+            File(root, "src/contributions/record_schema.ts").isFile,
         )
-        return candidates.firstOrNull { File(it, "src/contributions/record_schema.ts").isFile }
+        assertTrue("INTEGRITY: node is required to execute the Worker validator", nodeAvailable())
     }
 
     private fun nodeAvailable(): Boolean = runCatching {
@@ -116,8 +128,7 @@ class WorkerWireParityTest {
     @Test
     fun `android-built records are accepted by the actual Worker validator`() {
         val workerRoot = cloudWorkerRoot()
-        assumeTrue("cloud worker worktree not available", workerRoot != null)
-        assumeTrue("node not available", nodeAvailable())
+        requireAuthority(workerRoot)
 
         val records = listOf(
             "fully-populated" to fullyPopulatedRecord(),
@@ -138,7 +149,7 @@ class WorkerWireParityTest {
             },
         )
 
-        val process = ProcessBuilder("node", probe.absolutePath, workerRoot!!.absolutePath, recordsFile.absolutePath)
+        val process = ProcessBuilder("node", probe.absolutePath, workerRoot.absolutePath, recordsFile.absolutePath)
             .redirectErrorStream(true)
             .start()
         val output = process.inputStream.bufferedReader().readText()
@@ -165,8 +176,7 @@ class WorkerWireParityTest {
     @Test
     fun `the Worker refuses the same malformed records the decoder refuses`() {
         val workerRoot = cloudWorkerRoot()
-        assumeTrue("cloud worker worktree not available", workerRoot != null)
-        assumeTrue("node not available", nodeAvailable())
+        requireAuthority(workerRoot)
 
         fun perturbed(mutate: (MutableMap<String, Any?>) -> Unit): String {
             val base = mutableMapOf<String, Any?>(
@@ -239,7 +249,7 @@ class WorkerWireParityTest {
         probe.writeBytes(javaClass.classLoader!!.getResourceAsStream("worker-parity/probe_worker_intake.mjs")!!.readBytes())
         recordsFile.writeText(cases.entries.joinToString("\n") { (id, json) -> """{"id":"$id","record":$json}""" })
 
-        val process = ProcessBuilder("node", probe.absolutePath, workerRoot!!.absolutePath, recordsFile.absolutePath)
+        val process = ProcessBuilder("node", probe.absolutePath, workerRoot.absolutePath, recordsFile.absolutePath)
             .redirectErrorStream(true)
             .start()
         val output = process.inputStream.bufferedReader().readText()

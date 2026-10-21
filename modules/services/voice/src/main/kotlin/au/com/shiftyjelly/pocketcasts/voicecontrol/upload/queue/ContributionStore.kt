@@ -1373,13 +1373,11 @@ class ContributionStore(
                 continue
             }
             val adopted = validate(id, wav, meta, attemptsFile)
-            println("DIAGBRANCH adopt id=$id adopted=${adopted != null}")
             if (adopted != null && confirmDurableLocked(id)) {
                 // CHARGE FIRST, then publish to the in-memory index. The reverse order left a servable
                 // entry behind when the measurement failed: `memoryEntries` still held it, so readiness
                 // came from the index rather than from a measurement that succeeded (reviewer c66fda06).
                 chargeRetainedLocked(id, ready = true)
-                println("DIAGBRANCH charged-ready=${ownedCharges[id]?.ready}")
                 if (ownedCharges[id]?.ready == true) {
                     memoryEntries[id] = adopted
                 } else {

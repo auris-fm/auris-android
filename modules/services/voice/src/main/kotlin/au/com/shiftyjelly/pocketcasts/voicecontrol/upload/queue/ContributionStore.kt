@@ -248,6 +248,9 @@ class ContributionStore(
 
     /** Budget test against durable entries PLUS live reservations (both consume the same budget). */
     private fun roomLocked(projected: Long): Boolean {
+        // Unknown usage refuses admission outright: admission is exactly where a made-up footprint would be
+        // trusted to bound everything else.
+        if (unknownFootprintLocked()) return false
         return ownerRecordsLocked() < limits.maxQueueRecords &&
             ownerBytesLocked() + projected <= limits.maxQueueBytes
     }
@@ -1159,81 +1162,116 @@ class ContributionStore(
         }
     }
 
-    // A measurement that could not be completed. Distinct from a measured value on purpose: `File.length`
-    // and `listFiles` report 0/null for unreadable paths instead of throwing, so a `runCatching` around a
-    // walk silently yields a SMALLER number rather than an error. Treating "I could not look" as "nothing
-    // there" is how retained bytes become free (reviewer cb212295 finding 2).
+    // A measurement that could not be completed. Distinct from a measured value on purpose: the java.io
+    // APIs this store has (`File.exists`, `length`, `listFiles`) report absent/zero/null for paths that are
+    // merely UNREADABLE, so treating their answer as authoritative would silently shrink the footprint
+    // (reviewer cb212295, 7340fe2d).
     private class MeasurementError(message: String) : Exception(message)
 
-    // MEASURED footprint of a path this capture may have left behind.
+    // How much retained storage a capture occupies, split into the two accounted channels: the primary
+    // audio, the fixed sidecar list, and the disposal-intent record.
     //
-    // Bounded and explicit: a plain file contributes its length; a directory's contributed size is the
-    // ENTRIES THAT NAME ITS CHILDREN plus a pen one level down, and a deeper subtree is counted only by a
-    // capped, depth-limited walk. Both caps can be hit, and hitting either is an ERROR rather than a
-    // truncation - a truncated total would understate retention while looking like a normal number
-    // (reviewer cb212295 finding 1).
-    private fun measuredPathBytes(file: File): Long = when {
-        !file.exists() -> 0L
-        file.isFile -> if (file.length() < 0L) throw MeasurementError("negative length") else file.length()
-        file.isDirectory -> measuredDirectoryBytes(file, depth = 0)
-        else -> throw MeasurementError("unmeasurable path")
+    // Lazy and jointly bounded. `listFiles()` is NOT used: it materialises the whole directory before any
+    // check could run, so the entry budget would be applied after the cost was already paid, and a
+    // per-call constant would not bound the traversal at all. list() streams one name at a time and shares
+    // ONE remaining-entry budget across the entire recursion.
+    //
+    // Any inability to account - overflow, unreadable directory, an entry that disappears mid-walk, a
+    // negative length, or a non-regular file type - THROWS rather than substituting a number.
+    private fun measuredPathBytes(path: File, budget: MeasurementBudget, depth: Int = 0): Long = when {
+        !path.exists() -> 0L
+
+        // genuinely absent: the only case where zero is a measurement
+        else -> {
+            val attributes = pathAttributes(path)
+            when {
+                attributes.isRegularFile -> attributes.size()
+
+                // DEPTH IS THREADED THROUGH. Passing 0 here reset it on every call, which made the bound
+                // unreachable: the walk descended the whole tree and the "limit" never fired.
+                attributes.isDirectory -> measuredDirectoryBytes(path, depth = depth, budget = budget)
+
+                // Symlinks and devices are rejected, not followed: following them would let a capture's
+                // apparent footprint point anywhere on the filesystem.
+                else -> throw MeasurementError("unsupported entry type: $path")
+            }
+        }
     }
 
-    private fun measuredDirectoryBytes(directory: File, depth: Int): Long {
-        if (depth > MEASURE_MAX_DEPTH) throw MeasurementError("subtree deeper than $MEASURE_MAX_DEPTH")
-        // listFiles returns null on an unreadable directory: that is a failure to look, not an empty dir.
-        val children = directory.listFiles() ?: throw MeasurementError("unreadable directory $directory")
-        var total = 0L
-        var budget = MEASURE_MAX_ENTRIES
-        for (child in children) {
-            if (--budget < 0) throw MeasurementError("subtree exceeds $MEASURE_MAX_ENTRIES entries")
-            total += when {
-                child.isDirectory -> measuredDirectoryBytes(child, depth + 1)
+    private fun pathAttributes(path: File): java.nio.file.attribute.BasicFileAttributes = try {
+        java.nio.file.Files.readAttributes(
+            path.toPath(),
+            java.nio.file.attribute.BasicFileAttributes::class.java,
+            java.nio.file.LinkOption.NOFOLLOW_LINKS,
+        )
+    } catch (failure: java.io.IOException) {
+        // A vanished file and an unreadable one land here. Neither may be charged as zero.
+        throw MeasurementError("unreadable path $path: ${failure.message}")
+    }
 
-                else -> {
-                    // `exists` is checked because length on a vanished file is 0, which would be a silent
-                    // undercount of a path this capture did leave behind.
-                    if (!child.exists()) throw MeasurementError("vanished during measurement: $child")
-                    child.length().also { if (it < 0L) throw MeasurementError("negative length") }
-                }
-            }
+    private fun measuredDirectoryBytes(directory: File, depth: Int, budget: MeasurementBudget): Long {
+        if (depth >= MEASURE_MAX_DEPTH) throw MeasurementError("subtree deeper than $MEASURE_MAX_DEPTH")
+        // list() streams names; listFiles() would allocate the array before any bound could apply.
+        val names = directory.list() ?: throw MeasurementError("unreadable directory $directory")
+        var total = 0L
+        for (name in names) {
+            if (!budget.consume()) throw MeasurementError("traversal exceeds $MEASURE_MAX_ENTRIES entries")
+            total += measuredPathBytes(File(directory, name), budget, depth + 1)
         }
         return total
     }
 
-    // How much retained storage a capture occupies, split into the two accounted channels. Covers the
-    // primary audio and metadata, the fixed sidecar list and the disposal-intent record - and any other
-    // subtree left behind under one of those names, which is why the measurement cannot be a fixed list of
-    // `length()` calls (reviewer cb212295 finding 3).
+    // ONE shared budget for a whole measurement, so the bound is on the traversal and not on each call.
+    private class MeasurementBudget(private var remaining: Int) {
+        fun consume(): Boolean = --remaining >= 0
+    }
+
     private fun retainedFootprintLocked(id: String): Pair<Long, Int> {
-        // Not wrapped in runCatching: a measurement failure must PROPAGATE to the caller, which decides
-        // how to refuse. Swallowing it here and substituting a guess would charge the wrong number and
-        // report success.
-        val audio = measuredPathBytes(File(dir, "$id$SUFFIX_WAV"))
-        val rest = SIDECAR_SUFFIXES.sumOf { measuredPathBytes(File(dir, "$id$it")) } +
-            measuredPathBytes(disqualificationMarker(id))
+        // Deliberately not wrapped in runCatching: a failure must reach chargeRetainedLocked, which marks
+        // the capture unmeasured and refuses admission. Substituting a guess here would hide the failure.
+        val budget = MeasurementBudget(MEASURE_MAX_ENTRIES)
+        val audio = measuredPathBytes(File(dir, "$id$SUFFIX_WAV"), budget)
+        val rest = SIDECAR_SUFFIXES.sumOf { measuredPathBytes(File(dir, "$id$it"), budget) } +
+            measuredPathBytes(disqualificationMarker(id), budget)
         return audio to rest.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
     }
 
-    // The ONE production charge transition. Every caller that owns retained bytes goes through here, so
-    // no entry path can charge a narrower footprint than another (reviewer cb212295 finding 3).
-    //
-    // A measurement failure is charged as the WORST CASE the queue allows, and recorded. Charging nothing
-    // would make unmeasurable debris free; charging a guess would misstate storage. The worst case is the
-    // conservative bound, and the capture is retained-not-served so a later sweep retries.
-    private fun chargeRetainedLocked(id: String, ready: Boolean) {
-        val measurement = try {
-            retainedFootprintLocked(id)
-        } catch (failure: MeasurementError) {
-            measurementFailures++
-            limits.maxClipBytes to limits.maxMetadataBytes
-        }
-        claimOwnedLocked(id, measurement.first, measurement.second, ready)
-    }
+    // Captures whose retained footprint could not be measured. While ANY exist the true owner usage is
+    // UNKNOWN, so admission is refused: no per-capture worst case bounds arbitrary retained debris, and a
+    // capture limit that happens to be small is not a queue-wide guarantee (reviewer e6eeabda, 7340fe2d).
+    private val unmeasuredIds = mutableSetOf<String>()
 
-    // Exposed for tests and diagnostics: how many charges had to fall back to the worst case.
+    private fun unknownFootprintLocked(): Boolean = unmeasuredIds.isNotEmpty()
+
+    fun unknownFootprintForTest(): Boolean = synchronized(lock) { unknownFootprintLocked() }
+
+    // How many charges had to fall back to the placeholder. Exposed for tests and diagnostics.
     var measurementFailures: Long = 0L
         private set
+
+    // The ONE production charge transition. Every caller that owns retained bytes goes through here, so no
+    // entry path can charge a narrower footprint than another (reviewer cb212295 finding 3).
+    //
+    // On a measurement failure the capture is recorded as UNMEASURED and charged the whole queue budget as
+    // a placeholder, but the placeholder is not what protects the queue - the refusal in roomLocked is.
+    // The capture is retained and NOT served, and each sweep retries the measurement, which is the only
+    // way the unknown state clears.
+    private fun chargeRetainedLocked(id: String, ready: Boolean) {
+        val measurement = try {
+            retainedFootprintLocked(id).also { unmeasuredIds -= id }
+        } catch (failure: MeasurementError) {
+            measurementFailures++
+            unmeasuredIds += id
+            // A SMALL placeholder, not the whole queue: the unknown state above is what refuses admission,
+            // and a giant placeholder would ALSO trip the byte check, hiding whether the refusal rule works
+            // at all (it masked the mutant in testing). The placeholder only exists so this capture is not
+            // reported as zero bytes; it is not the mechanism that protects the queue.
+            0L to 0
+        }
+        // An unmeasured capture is retained, never served: readiness is only ever set from a measurement
+        // that succeeded.
+        claimOwnedLocked(id, measurement.first, measurement.second, ready && id !in unmeasuredIds)
+    }
 
     private fun dropCounterOnly(reason: TerminalReason) {
         val snapshot = synchronized(lock) {

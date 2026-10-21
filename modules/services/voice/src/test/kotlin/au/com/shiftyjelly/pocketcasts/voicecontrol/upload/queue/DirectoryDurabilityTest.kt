@@ -10,6 +10,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
 import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -1019,9 +1020,9 @@ class DirectoryDurabilityTest {
     }
 
     @Test
-    fun `an unmeasurable capture is charged the worst case instead of zero`() {
-        // reviewer cb212295 finding 2: File.length/listFiles report 0/null for unreadable paths rather than
-        // throwing, so "could not look" must not become "nothing there". The charge must be the worst case.
+    fun `an UNMEASURABLE capture refuses admission instead of being charged a guess`() {
+        // reviewer e6eeabda / 7340fe2d: a per-capture worst case cannot bound arbitrary retained debris.
+        // Unknown accounting must REFUSE admission until the capture is successfully measured or removed.
         val root = tmp.newFolder("queue-unmeasurable")
         val id = java.util.UUID.randomUUID().toString()
         val store = ContributionStore(root, limits())
@@ -1029,7 +1030,7 @@ class DirectoryDurabilityTest {
         File(root, "disqualified").mkdirs()
         File(root, "disqualified/$id").writeText("disqualified")
 
-        // A depth beyond the measurement bound stands in for debris the walk refuses to count blindly.
+        // Debris beyond the traversal depth bound stands in for a tree the walk refuses to count blindly.
         val contributions = File(root, "contributions")
         contributions.listFiles()!!.filter { it.name.startsWith(id) }.forEach { file ->
             val bytes = file.readBytes()
@@ -1046,15 +1047,26 @@ class DirectoryDurabilityTest {
 
         val fresh = ContributionStore(root, limits())
         fresh.expireOlderThan()
+        assertTrue("measurement must have been reported as failing", fresh.measurementFailures >= 1L)
 
-        assertTrue(
-            "crossing the measurement bound must be reported, not swallowed (was ${fresh.measurementFailures})",
-            fresh.measurementFailures >= 1L,
+        // Headroom on BOTH axes, so the only thing that can refuse the probe is the unknown-accounting
+        // rule. My first version left maxQueueRecords at 8 and the residue filled the table, which refused
+        // the probe for an unrelated reason and made the control blind to the mutant.
+        // The unmeasured capture carries a whole-queue PLACEHOLDER charge, so a byte check refuses the
+        // probe even without the unknown rule - which masked the mutant in my first version. Collapse the
+        // per-capture size bound so the placeholder alone cannot fill the queue's headroom, leaving the
+        // unknown rule as the only thing that can refuse here.
+        val roomy = ContributionStore(
+            root,
+            QueueLimits.defaults().copy(
+                maxQueueBytes = QueueLimits.MAX_QUEUE_BYTES_CEILING,
+                maxQueueRecords = QueueLimits.MAX_QUEUE_RECORDS_CEILING,
+            ),
         )
-        assertTrue(
-            "unmeasurable residue must be charged the worst case, not zero (was ${fresh.chargedBytesForTest(id)})",
-            fresh.chargedBytesForTest(id) >= limits().maxClipBytes,
-        )
+        roomy.expireOlderThan()
+        assertTrue("precondition: accounting is unknown", roomy.unknownFootprintForTest())
+        val probeAdmission = roomy.admit(sampleCount = 1600L, metadataBytes = 32)
+        assertNull("admission must be REFUSED while any capture's footprint is unknown", probeAdmission)
     }
 
     @Test

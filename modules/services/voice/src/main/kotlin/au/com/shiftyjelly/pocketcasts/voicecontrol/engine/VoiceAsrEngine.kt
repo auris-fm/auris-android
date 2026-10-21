@@ -509,7 +509,11 @@ class VoiceAsrEngine @Inject constructor(
             // They addressed us and we could not place it: say so in their language, falling back
             // to the earcon in a locale this build has no line for.
             CloudEscalation.SPEAK_UNROUTED -> {
-                val line = SpokenLine.forKey(KEY_CLOUD_UNROUTED, templateResolver, currentLocale())
+                val line = SpokenLine.forKey(
+                    KEY_CLOUD_UNROUTED,
+                    templateResolver,
+                    diagnostic?.sourceLanguage,
+                )
                 if (line.isBlank()) {
                     audioFeedbackRenderer.submitEarcon(EarconId.ERROR)
                 } else {

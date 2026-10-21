@@ -1,18 +1,51 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.feedback
 
 import android.content.Context
+import android.content.res.Configuration
 import au.com.shiftyjelly.pocketcasts.voicecontrol.R
+import java.util.Locale
 
 class SpokenTemplateResolver(
     private val templates: Map<String, String>,
+    /**
+     * Per-language template tables, keyed by lowercase ISO language ("zh", "ja", "yue", ...).
+     * Production loads these from the app's locale resources at runtime (see [context]);
+     * tests supply them directly. Lookup order: utterance language -> default line.
+     */
+    private val languageTemplates: Map<String, Map<String, String>> = emptyMap(),
+    /** Retained so a language missing from [languageTemplates] can still resolve from resources. */
+    private val context: Context? = null,
 ) {
-    constructor(context: Context) : this(loadTemplatesFromResources(context))
+    constructor(context: Context) : this(loadTemplatesFromResources(context), context = context)
 
     fun resolve(intentKey: String, params: Map<String, String> = emptyMap()): String {
         val template = templates[intentKey] ?: return ""
         return params.entries.fold(template) { acc, (key, value) ->
             acc.replace("{$key}", value)
         }
+    }
+
+    /**
+     * Resolves a line for the UTTERANCE's language (spec 54287f13): the refusal is spoken in the
+     * language the user spoke, never the device UI locale. Order: an explicit per-language table,
+     * then the app's locale resources for that language, then the default line. A language this
+     * build does not carry falls back to the default (English) line — never to silence.
+     */
+    fun resolveForLanguage(intentKey: String, language: String?): String {
+        val lang = language?.trim()?.substringBefore('-')?.lowercase()?.takeIf { it.isNotEmpty() }
+            ?: return resolve(intentKey)
+        languageTemplates[lang]?.get(intentKey)?.takeIf { it.isNotBlank() }?.let { return it }
+        val ctx = context
+        if (ctx != null && !lang.equals(Locale.ENGLISH.language, ignoreCase = true)) {
+            val localized = runCatching {
+                val config = Configuration(ctx.resources.configuration)
+                config.setLocale(Locale.forLanguageTag(lang))
+                SpokenTemplateResolver(loadTemplatesFromResources(ctx.createConfigurationContext(config)))
+                    .resolve(intentKey)
+            }.getOrNull()
+            if (!localized.isNullOrBlank()) return localized
+        }
+        return resolve(intentKey)
     }
 
     private companion object {

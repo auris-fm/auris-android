@@ -52,7 +52,14 @@ class WorkerIntakeParityE2ETest {
         ?: File("/Users/dev/code/auris/core/cloud-voice-uploads/worker")
 
     /**
-     * The ONE approved Worker revision this control is allowed to compare against.
+     * The Worker revision these controls compare against, and the SCOPE of that comparison.
+     *
+     * SCOPE, stated exactly: `d8fe823c` is pinned for INTAKE GUARD behaviour only — the two digest
+     * checks and the record schema this fixture exercises. It is NOT a whole-server approval: the
+     * reviewer blocked that same revision's route changes (empty-digest reserve placeholders), so
+     * nothing here says anything about upload_route.ts, budgeting or delivery. Advancing this value
+     * is a deliberate edit made when a specific, named behaviour is re-cleared — not a general
+     * blessing of the server revision.
      *
      * Recording whatever HEAD happens to be checked out is provenance, not an authority: a clean
      * checkout of a different revision is a different intake, and a parity claim against it says

@@ -36,7 +36,14 @@ class WorkerWireParityTest {
         ?: File("/Users/dev/code/auris/core/cloud-voice-uploads/worker")
 
     /**
-     * The ONE approved Worker revision, shared with the end-to-end intake control.
+     * The Worker revision these controls compare against, and the SCOPE of that comparison.
+     *
+     * SCOPE, stated exactly: `d8fe823c` is pinned for INTAKE GUARD behaviour only — the two digest
+     * checks and the record schema this fixture exercises. It is NOT a whole-server approval: the
+     * reviewer blocked that same revision's route changes (empty-digest reserve placeholders), so
+     * nothing here says anything about upload_route.ts, budgeting or delivery. Advancing this value
+     * is a deliberate edit made when a specific, named behaviour is re-cleared — not a general
+     * blessing of the server revision.
      *
      * Both controls must compare against the SAME revision, or their combined evidence describes two
      * different servers. Advancing this value is a deliberate, reviewable edit made when a new

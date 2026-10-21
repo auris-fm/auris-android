@@ -49,6 +49,12 @@ class ContributionStore(
      * marker's durability unsubstantiated (review f003b49f finding 2).
      */
     private val directorySync: DirectorySync = DirectorySync.REAL,
+    /**
+     * File-CONTENT durability, injected for the same reason as [directorySync]: a directory force
+     * persists a name, not what the file contains, so sidecars written with writeText were durable in
+     * name only.
+     */
+    private val fileSync: FileSync = FileSync.REAL,
 ) {
 
     data class Entry(
@@ -326,6 +332,12 @@ class ContributionStore(
         }
         val published = try {
             writeAndPublish(generation, admission, captureId, enrollmentEpoch, pcmChunks, samples, canonicalMetadata)
+        } catch (uncertain: PublicationUncertain) {
+            // Re-thrown, NOT converted to null. The spec (ecbe84dd) names this exact mistake: a generic
+            // error handler must not erase the difference between "not published" and "may have been
+            // published". Returning null here would tell the caller the slot is free and invite it to
+            // mint a new capture id for an entry a restart may still find intact.
+            throw uncertain
         } catch (_: Throwable) {
             null
         }
@@ -369,7 +381,15 @@ class ContributionStore(
         canonicalMetadata: ByteArray,
     ): Entry? {
         val createdAt = clock()
-        dir.mkdirs()
+        // Creating the entry directory adds a NAME to the parent. Syncing only the new directory does
+        // not make that name durable, so a crash could leave a directory nothing can find. Barrier the
+        // parent at creation, once.
+        if (dir.mkdirs()) {
+            // A failure here is BEFORE the ready transition, so it is uncommitted and must refuse the
+            // preparation rather than be absorbed: publishing into a directory whose name may vanish
+            // is the same defect as an unsynced marker, one level up.
+            dir.parentFile?.let { parent -> syncDirectoryOrFail(parent) }
+        }
         // Generation-owned staging: a stale attempt's cleanup can never reach a successor's paths.
         // Staging is keyed by the UNIQUE attempt (the Admission's reservation id), not merely
         // generation+captureId: two attempts in the same generation for the same capture can never
@@ -392,13 +412,13 @@ class ContributionStore(
                     out.flush()
                     hooks.onWavPartWrite?.invoke(generation)
                 }
-                out.fd.sync()
             }
+            fileSync.sync(wavPart)
             FileOutputStream(metaPart).use { out ->
                 out.write(canonicalMetadata)
                 out.flush()
-                out.fd.sync()
             }
+            fileSync.sync(metaPart)
             val audioBytes = wavPart.length()
             // An invalid committed size must still give the reservation back: the enclosing try/finally in
             // prepareAt settles EVERY exit, so this returns through it rather than leaking here.
@@ -408,8 +428,8 @@ class ContributionStore(
             FileOutputStream(digestFile).use { out ->
                 out.write(digest.toByteArray(Charsets.UTF_8))
                 out.flush()
-                out.fd.sync()
             }
+            fileSync.sync(digestFile)
             val entry = Entry(
                 captureId,
                 enrollmentEpoch,
@@ -447,9 +467,14 @@ class ContributionStore(
                     syncDirectoryOrFail(dir)
                     // Age + attempt authorities are written BEFORE the marker; failing either is a failed
                     // preparation, not an invented fallback, and must hand the slot back.
+                    // Age and attempt authority are read back on recovery, so their CONTENTS must be
+                    // durable before the marker can claim the entry is ready. A directory force only
+                    // makes the name durable.
                     val sidecarsOk = runCatching {
                         createdFile.writeText(createdAt.toString())
+                        fileSync.sync(createdFile)
                         attemptsFile.writeText("0")
+                        fileSync.sync(attemptsFile)
                     }.isSuccess
                     if (!sidecarsOk) {
                         // Roll the claim back exactly: remove what we just wrote and re-hold nothing.
@@ -459,8 +484,21 @@ class ContributionStore(
                         null
                     } else {
                         // READY MARKER LAST: presence of this file is the ONLY readiness authority.
-                        FileOutputStream(readyFile).use { it.fd.sync() }
-                        syncDirectoryOrFail(dir)
+                        FileOutputStream(readyFile).close()
+                        fileSync.sync(readyFile)
+                        // Past this point the marker may exist on disk. If the final directory sync
+                        // cannot be confirmed, the outcome is UNCERTAIN (spec ecbe84dd), not a
+                        // definite failure: the entry may be recovered intact at restart, so the
+                        // caller must not mint a new capture id or assume cleanup succeeded.
+                        try {
+                            syncDirectoryOrFail(dir)
+                        } catch (syncFailure: java.io.IOException) {
+                            committed = true
+                            throw PublicationUncertain(
+                                "ready marker written but its directory sync failed; publication uncertain",
+                                syncFailure,
+                            )
+                        }
                         committed = true
                         memoryEntries[captureId] = entry
                         preparedIds.add(captureId)

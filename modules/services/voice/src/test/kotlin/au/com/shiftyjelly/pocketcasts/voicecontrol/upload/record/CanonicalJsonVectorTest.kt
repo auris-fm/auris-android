@@ -25,7 +25,7 @@ class CanonicalJsonVectorTest {
         val bs = 92.toChar() // backslash without literal-escape ambiguity
         val input = "q" + '"' + '\n' + bs + '\r' + '\t' + '\u0008' + '\u000C' + '\u001F' + 'a' + '\u0660'
         val expected =
-            "\"q" + bs + "\"" + bs + "n" + bs + bs + bs + "r" + bs + "t" + bs + "b" + bs + "f" + bs + "u001Fa" + "\u0660\""
+            "\"q" + bs + "\"" + bs + "n" + bs + bs + bs + "r" + bs + "t" + bs + "b" + bs + "f" + bs + "u" + "001f" + "a" + "\u0660\""
         assertEquals(expected, CanonicalJson.serialize(RecordNode.Str(input)))
         // Surrogate pairs pass through unescaped (well-formed UTF-16 above the control range).
         assertEquals("\"😀\"", CanonicalJson.serialize(RecordNode.Str("😀")))
@@ -68,9 +68,52 @@ class CanonicalJsonVectorTest {
     }
 
     @Test
+    fun `ES6 digit selection differs from Java DoubletoString at the extremes`() {
+        // Reviewer blocker: Java's shortest repr is NOT ECMAScript's; es6draft vectors must hold.
+        assertEquals("5e-324", CanonicalJson.formatNumber(Double.MIN_VALUE)) // Java prints 4.9E-324
+        assertEquals("1e+308", CanonicalJson.formatNumber(1.0E308))
+        assertEquals("1.7976931348623157e+308", CanonicalJson.formatNumber(Double.MAX_VALUE))
+        assertEquals("1e-7", CanonicalJson.formatNumber(1e-7))
+        assertEquals("0.000001", CanonicalJson.formatNumber(1e-6)) // fixed-form boundary
+        assertEquals("1e+21", CanonicalJson.formatNumber(1e21)) // exponential boundary
+        assertEquals("1e+22", CanonicalJson.formatNumber(1e22))
+        assertEquals("123456789012345680000", CanonicalJson.formatNumber(1.2345678901234568E20))
+        assertEquals("1.5", CanonicalJson.formatNumber(1.5))
+        assertEquals("0", CanonicalJson.formatNumber(-0.0))
+    }
+
+    @Test
+    fun `parser rejects non conformant numbers per RFC 8785 reader rules`() {
+        for (bad in listOf("01", "1.", "-.1", "+1", ".5", "1e", "--1")) {
+            expectCanonicalFailure { CanonicalJson.parse(bad) }
+        }
+        assertEquals(RecordNode.Num(10.0), CanonicalJson.parse("1e1"))
+        assertEquals(RecordNode.Num(0.5), CanonicalJson.parse("0.5"))
+    }
+
+    @Test
+    fun `serializer refuses unpaired surrogates and parser rejects lone escape halves`() {
+        val loneHigh = 0xD83D.toChar().toString()
+        expectCanonicalFailure { CanonicalJson.serialize(RecordNode.Str(loneHigh)) } // serializer guard
+        val loneLowEscape = """ + 92.toChar() + "uDEAD" + """
+        expectCanonicalFailure { CanonicalJson.parse(loneLowEscape) } // parser rejects lone low surrogate
+    }
+
+    @Test
+    fun `canonical text beyond 1 MiB is refused before hashing`() {
+        val huge = RecordNode.Str("a".repeat((1 shl 20) + 8))
+        expectCanonicalFailure { CanonicalJson.canonicalBytes(huge) }
+    }
+
+    @Test
     fun `parser rejects duplicate keys and trailing input`() {
         runCatching { CanonicalJson.parse("""{"a":1,"a":2}""") }.onSuccess { throw AssertionError("duplicate key accepted") }
         runCatching { CanonicalJson.parse("""{"a":1} x""") }.onSuccess { throw AssertionError("trailing input accepted") }
         runCatching { CanonicalJson.parse("""{"a":1e999}""") }.onSuccess { throw AssertionError("non-finite accepted") }
+    }
+
+    private fun expectCanonicalFailure(block: () -> Unit) {
+        runCatching(block).onSuccess { throw AssertionError("expected CanonicalException") }
+            .onFailure { require(it is CanonicalJson.CanonicalException) { "wrong failure: $it" } }
     }
 }

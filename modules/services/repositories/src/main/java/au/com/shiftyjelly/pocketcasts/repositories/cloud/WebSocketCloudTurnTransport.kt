@@ -136,11 +136,16 @@ class WebSocketCloudTurnTransport(
                             event.code,
                         )
                     }
-                    // A SERVER terminal ends the turn: finish the channel after enqueuing so the
-                    // consumer drains in order and the flow completes. emitOrFail alone would leave
-                    // the channel open and the collector suspended forever (the sink hangs after
-                    // selection); emitTerminal gives both ordering and completion.
-                    emitTerminal(channel, event)
+                    // ONLY a server terminal ends the turn: Done/Error enqueue then finish the
+                    // channel so the consumer drains in order and the flow completes. emitOrFail
+                    // alone would leave the channel open and the collector suspended forever (the
+                    // sink hangs after selection); closing on a NONterminal frame would truncate a
+                    // healthy streamed answer mid-flight, so those keep emitOrFail.
+                    if (event is CloudRouteEvent.Done || event is CloudRouteEvent.Error) {
+                        emitTerminal(channel, event)
+                    } else {
+                        emitOrFail(channel, event)
+                    }
                 }
             }
 

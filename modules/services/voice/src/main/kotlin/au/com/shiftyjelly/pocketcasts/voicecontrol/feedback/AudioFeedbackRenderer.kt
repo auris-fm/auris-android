@@ -83,8 +83,18 @@ class AudioFeedbackRenderer(
     }
     private var currentJob: Job? = null
 
-    /** The request ID of the in-flight render, so supersession names whose turn was dropped. */
-    @Volatile private var currentRequestId: String? = null
+    /**
+     * One invocation of [render], owning its own suppression flag: supersession marks the PRIOR
+     * invocation's flag, and that invocation's own catch reads it — no string-ID comparisons and
+     * no shared slot across invocations.
+     */
+    private class RenderInvocation(val requestId: String?) {
+        val superseded = java.util.concurrent.atomic.AtomicBoolean(false)
+        lateinit var job: Job
+    }
+
+    /** The in-flight invocation, so supersession names whose turn was dropped. */
+    @Volatile private var currentInvocation: RenderInvocation? = null
 
     private fun recordSubmitted(requestId: String, feedbackKind: String) {
         VoiceLifecycleDiagnostics.record(
@@ -144,16 +154,14 @@ class AudioFeedbackRenderer(
         }
         // SUPERSESSION / cancellation drop: cancelling a still-active render is an observed drop
         // belonging to the PRIOR invocation, regardless of what replaces it (cloud, local, or a
-        // same-ID retry). Completed renders cleared their own ID, so a stale ID cannot fire.
-        val supersededObserved = java.util.concurrent.atomic.AtomicBoolean(false)
-        currentJob?.takeIf { it.isActive }?.let { prior ->
-            currentRequestId?.let {
-                recordDrop(it, "superseded", "superseded_by_new_render")
-                supersededObserved.set(true)
-            }
-            prior.cancel()
+        // same-ID retry). The PRIOR invocation's own flag is marked so its catch does not add a
+        // second "cancelled" record, and its finally clears nothing of THIS invocation's.
+        val thisCall = RenderInvocation(requestId)
+        currentInvocation?.takeIf { it.job.isActive }?.let { prior ->
+            prior.requestId?.let { recordDrop(it, "superseded", "superseded_by_new_render") }
+            prior.superseded.set(true)
+            prior.job.cancel()
         }
-        currentRequestId = requestId
         // Launched coroutine inherits the Job cancellation: when we cancel currentJob
         // above, any child suspend calls (like TtsEngine.speak) will be cancelled.
         val thisJob = scope.launch {
@@ -239,16 +247,19 @@ class AudioFeedbackRenderer(
                 onPlaybackFailure(e)
             } catch (cancellation: kotlinx.coroutines.CancellationException) {
                 // Observed active cancellation (e.g. session release mid-render): the render did
-                // not complete and must not pass as delivered. Supersession was already observed
-                // at the cancel site. Rethrown so structured concurrency still unwinds.
-                if (requestId != null && !supersededObserved.get()) recordDrop(requestId, "cancelled", "render_cancelled")
+                // not complete and must not pass as delivered. Suppression is THIS invocation's
+                // own flag, marked only when a successor superseded it. Rethrown so structured
+                // concurrency still unwinds.
+                if (requestId != null && !thisCall.superseded.get()) recordDrop(requestId, "cancelled", "render_cancelled")
                 throw cancellation
             } finally {
-                // Clear the invocation context ONLY if it is still this render's: a successor that
-                // already replaced it must not be erased by this job's tail.
-                if (currentRequestId == requestId) currentRequestId = null
+                // Clear the invocation slot ONLY if it is still this invocation's object: a
+                // successor that already replaced it must not be erased by this job's tail.
+                if (currentInvocation === thisCall) currentInvocation = null
             }
         }
+        thisCall.job = thisJob
+        currentInvocation = thisCall
         currentJob = thisJob
     }
 
@@ -705,7 +716,7 @@ class AudioFeedbackRenderer(
      * treating that as disposal meant the next start had no feedback at all -- silently.
      */
     fun endSession() {
-        currentJob?.cancel()
+        currentInvocation?.job?.cancel()
         // End the cue's attribution HERE rather than letting an estimate cover it: the session is
         // stopping, so whatever the output was doing, the user is no longer hearing it and the gate
         // must stop treating it as ours.

@@ -36,6 +36,9 @@ class ContributionStore(
      * generation that a concurrent revocation is free to change underneath it (reviewer ee26880c finding 1).
      */
     internal val ownership: QueueOwnership = QueueOwnership(),
+    // Injection point for the disposal-intent barrier only. Defaults to the queue's barrier so production
+    // behaviour is unchanged; tests override it to fault intent recording independently of the queue.
+    private val intentDirectorySyncOverride: DirectorySync? = null,
     /**
      * Shared generation boundary for revocation, always backed by [ownership] — there is no independently
      * locked fence to invert against.
@@ -693,21 +696,33 @@ class ContributionStore(
             // Deleting through deleteLocked is not usable here: it re-claims residue as an owned charge,
             // and a purge must leave no owned capture behind. Each delete is still CHECKED, and any
             // residue is recorded so a later sweep can retry rather than being forgotten.
+            // CONFIRMED INTENT FIRST, for EVERY owned capture, before a single file is touched. Writing it
+            // afterwards means a purge that dies mid-way leaves no record of what it was doing, and every
+            // survivor it had not reached yet looks like ordinary data to the next healthy store.
+            val intentConfirmed = ownedIds.associateWith { writeDisqualificationLocked(it) }
             val residueIds = mutableListOf<String>()
             ownedIds.forEach { id ->
+                // No confirmed intent means no destruction: the capture stays owned and charged below.
+                if (intentConfirmed[id] != true) {
+                    residueIds += id
+                    return@forEach
+                }
                 val gone = deleteAll(
                     id,
                     listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST),
                 )
-                if (!gone) {
-                    residueIds += id
-                    writeDisqualificationLocked(id)
-                }
+                if (!gone) residueIds += id
             }
             memoryEntries.clear()
             preparedIds.clear()
-            ownedCharges.clear()
             reservations.clear()
+            // Survivors keep a REAL, MEASURED charge. A list of ids is not byte accounting: the queue would
+            // otherwise hold unmeasurable debris while reporting itself empty, and a successor owner would
+            // admit new work straight over it.
+            ownedCharges.keys.toList().forEach { ownedCharges.remove(it) }
+            residueIds.forEach { id ->
+                claimOwnedLocked(id, measuredAudioBytes(id), measuredMetadataBytes(id), ready = false)
+            }
             // Settle our own live handles: their budget is gone with the queue, and leaving them HELD while
             // the table is empty would make a later discard()/adopt() dereference a missing entry.
             ownedAdmissions.values.toList().forEach { it.state = ADMISSION_RELEASED }
@@ -1028,19 +1043,32 @@ class ContributionStore(
     // destructive step: an in-memory `ready = false` is not durable, so a crash or restart between the
     // failed delete and the next sweep would resurrect the entry as ready. The marker outlives the
     // process, so recovery reads it and refuses the entry no matter what survives on disk.
+    // Confirmed intent is not "a file with that name exists". The marker's own content and every barrier
+    // that makes it discoverable must have succeeded; a marker written but never synced may vanish on
+    // crash, and a marker whose directory entry was not persisted may not be there when it is needed.
+    // The presence check is therefore only a shortcut for a marker that was ALREADY fully confirmed.
     private fun writeDisqualificationLocked(id: String): Boolean {
         val marker = disqualificationMarker(id)
-        if (marker.exists()) return true
+        if (marker.exists() && marker.readText().trim() == DISQUALIFIED_CONTENT) return true
         // The marker lives in the PARENT of the queue directory, not inside it. The whole reason it is
         // needed is that the queue directory may be precisely what is blocking deletion (read-only or
         // otherwise unwritable); writing intent into the blocked directory would fail in exactly the
         // situation it exists for. Disposal intent must be writable whenever cleanup is not.
         return runCatching {
-            marker.parentFile?.mkdirs()
-            marker.writeText("disqualified\n")
+            val parent = marker.parentFile
+            parent?.mkdirs()
+            marker.writeText(DISQUALIFIED_CONTENT)
+            // EVERY barrier, each able to fail the transition on its own. Reporting success because the
+            // file happens to be visible in this process's cache is exactly the mistake to avoid: the
+            // caller acts on this answer by starting destructive work.
             fileSync.sync(marker)
-            marker.parentFile?.let { syncDirectoryOrFail(it) }
-            marker.exists()
+            // The marker's OWN directory is barriered, through its OWN barrier rather than the queue's.
+            // Reusing the queue's DirectorySync would let a queue-wide fault make disposal intent
+            // unrecordable, which is precisely the situation the record exists for: intent must remain
+            // recordable while the queue itself is unhealthy. Both are real fsyncs in production; they are
+            // separate injection points because they answer different questions.
+            parent?.let { intentDirectorySync.sync(it) }
+            marker.exists() && marker.readText().trim() == DISQUALIFIED_CONTENT
         }.getOrDefault(false)
     }
 
@@ -1048,18 +1076,23 @@ class ContributionStore(
     // come back. This runs on every sweep: if the files are finally deletable, they go now and the charge
     // is released with them; if not, the capture stays owned, charged, and disqualified.
     private fun retryDisqualifiedCleanupLocked() {
-        val markerDir = File(root, DISQUALIFIED_DIR)
-        val ids = markerDir.listFiles()?.map { it.name } ?: return
-        for (id in ids) {
-            val gone = deleteAll(
-                id,
-                listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST),
-            )
-            if (gone) {
-                disqualificationMarker(id).delete()
-                synchronized(lock) { ownedCharges.remove(id) }
-            } else {
-                synchronized(lock) {
+        // The ENTIRE transaction runs under the shared ownership monitor, not just its charge mutations.
+        // Deleting files and removing the marker outside the monitor let late cleanup interleave with a
+        // successor's publication on the same id: the successor could publish a new capture while this
+        // sweep was still deleting the old one's files, or clear the marker the successor had just written.
+        // File work and accounting are one atomic step or they are not serialized at all.
+        synchronized(lock) {
+            val markerDir = File(root, DISQUALIFIED_DIR)
+            val ids = markerDir.listFiles()?.map { it.name } ?: return
+            for (id in ids) {
+                val gone = deleteAll(
+                    id,
+                    listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST),
+                )
+                if (gone) {
+                    disqualificationMarker(id).delete()
+                    ownedCharges.remove(id)
+                } else {
                     claimOwnedLocked(id, measuredAudioBytes(id), measuredMetadataBytes(id), ready = false)
                 }
             }
@@ -1073,9 +1106,14 @@ class ContributionStore(
     // Discard an owned capture and RELEASE ITS CHARGE ONLY IF THE BYTES ARE ACTUALLY GONE.
     private fun deleteLocked(e: Entry) {
         val id = e.captureId
-        // 1) Durable intent FIRST. If this cannot be written the capture is still not served this run
-        //    (it leaves the index below), but the charge is retained so nothing silently disappears.
-        writeDisqualificationLocked(id)
+        // 1) Durable intent FIRST, and destruction does NOT proceed without it. If the marker cannot be
+        //    confirmed, deleting the files would destroy the only evidence that this capture was meant to
+        //    go, so a crash could resurrect a half-deleted entry as valid. Retain and retry instead.
+        if (!writeDisqualificationLocked(id)) {
+            memoryEntries.remove(id)
+            claimOwnedLocked(id, measuredAudioBytes(id), measuredMetadataBytes(id), ready = false)
+            return
+        }
         // 2) Attempt every delete, regardless of earlier failures.
         val gone = deleteAll(
             id,
@@ -1220,6 +1258,18 @@ class ContributionStore(
      */
     private fun syncDirectoryOrFail(directory: File) = directorySync.sync(directory)
 
+    // Test seam: the ownership monitor, so a control can prove FILE WORK is serialized on it and not
+    // merely the accounting mutations.
+    fun ownerLockForTest(): Any = lock
+
+    // Separate barrier for the DURABLE DISPOSAL INTENT record. Production uses the same real fsync; it is
+    // a distinct injection point so a fault aimed at the queue cannot silently disable intent recording,
+    // and so intent recording can itself be faulted on its own.
+    // Defaults to the REAL barrier, NOT to `directorySync`. A fault aimed at the queue must not be able to
+    // make disposal intent unrecordable: intent is most needed exactly when the queue is unhealthy. Tests
+    // that want to fault intent recording pass the override explicitly.
+    private val intentDirectorySync: DirectorySync = intentDirectorySyncOverride ?: DirectorySync.REAL
+
     companion object {
         private const val DIR_NAME = "contributions"
         private const val COUNTERS_NAME = "terminal-counters.txt"
@@ -1237,6 +1287,9 @@ class ContributionStore(
         private const val SUFFIX_CREATED = ".created"
         private const val SUFFIX_DIGEST = ".sha256"
         private const val DISQUALIFIED_DIR = "disqualified"
+
+        // The marker's content is its confirmation token: presence alone is not durable intent.
+        private const val DISQUALIFIED_CONTENT = "disqualified"
         private const val MAX_ATTEMPTS_SIDECAR_BYTES = 32
         private const val MAX_CREATED_SIDECAR_BYTES = 32
         private const val MAX_DIGEST_SIDECAR_BYTES = 128

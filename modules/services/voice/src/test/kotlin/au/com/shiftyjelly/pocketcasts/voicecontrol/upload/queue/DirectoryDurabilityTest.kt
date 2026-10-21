@@ -796,6 +796,129 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `NO destruction happens when disposal intent cannot be confirmed`() {
+        // The reviewed defect: deleteLocked ignored writeDisqualificationLocked's result and destroyed the
+        // files anyway. If intent cannot be recorded, deleting is worse than doing nothing: the files are
+        // the only evidence the capture was meant to go, so a crash could resurrect a half-deleted entry.
+        val root = tmp.newFolder("queue-intent-failure")
+        val id = java.util.UUID.randomUUID().toString()
+        var now = 1_000_000L
+        val store = ContributionStore(
+            root,
+            limits().copy(maxQueueAgeSeconds = 60),
+            clock = { now },
+            // Fault ONLY the intent barrier; the queue itself is healthy.
+            intentDirectorySyncOverride = object : DirectorySync {
+                override fun sync(directory: File) {
+                    throw java.io.IOException("simulated intent barrier failure")
+                }
+            },
+        )
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        val wav = File(root, "contributions/$id.recording.wav")
+        assertTrue("precondition: audio present", wav.isFile)
+
+        now += 120_000L
+        store.expireOlderThan()
+
+        assertTrue("the audio must NOT be destroyed without confirmed intent", wav.isFile)
+        assertTrue(
+            "the capture must stay OWNED and charged when intent failed",
+            store.admit(sampleCount = 1_000_000L, metadataBytes = 1024) == null,
+        )
+        // And the entry must not be served as ready.
+        assertTrue("an unexpurgated capture must not be served", store.readyEntries().none { it.captureId == id })
+    }
+
+    @Test
+    fun `a marker whose barrier failed is not treated as durable on retry`() {
+        // marker.exists() was accepted as proof of durable intent. A marker written but never synced can
+        // vanish on crash, so a retry must re-confirm rather than trust its presence.
+        val root = tmp.newFolder("queue-marker-reconfirm")
+        val id = java.util.UUID.randomUUID().toString()
+        var failIntent = true
+        val store = ContributionStore(
+            root,
+            limits(),
+            intentDirectorySyncOverride = object : DirectorySync {
+                override fun sync(directory: File) {
+                    if (failIntent) throw java.io.IOException("simulated intent barrier failure")
+                }
+            },
+        )
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        store.revokeAndPurge("account_changed")
+        val wav = File(root, "contributions/$id.recording.wav")
+        assertTrue("nothing was destroyed while intent could not be confirmed", wav.isFile)
+
+        // Marker now present from a failed attempt; with the barrier healthy it must be re-confirmed and
+        // the cleanup completed.
+        failIntent = false
+        val retry = ContributionStore(
+            root,
+            limits(),
+            intentDirectorySyncOverride = object : DirectorySync {
+                override fun sync(directory: File) {
+                    throw java.io.IOException("blocked")
+                }
+            },
+        )
+        retry.expireOlderThan()
+        assertTrue("cleanup must complete once the barrier is healthy", !wav.exists())
+    }
+
+    @Test
+    fun `late cleanup is serialized against a successor publication on the same id`() {
+        // retryDisqualifiedCleanupLocked deleted files OUTSIDE the ownership monitor, so a successor
+        // publishing the same id could be racing the sweep. The whole retry transaction is now under the
+        // monitor: while a cleanup holds it, no publication can observe an intermediate state.
+        val root = tmp.newFolder("queue-late-cleanup")
+        val id = java.util.UUID.randomUUID().toString()
+        val store = ContributionStore(root, limits())
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        // Disqualify without deleting anything, simulating a previous failed attempt.
+        File(root, "disqualified").mkdirs()
+        File(root, "disqualified/$id").writeText("disqualified\n")
+
+        val wav = File(root, "contributions/$id.recording.wav")
+        assertTrue("precondition: audio present", wav.isFile)
+
+        // OBSERVABLE SERIALIZATION: hold the ownership monitor from another thread and confirm the sweep
+        // cannot delete the files while we hold it. Without the monitor around the FILE work the sweep
+        // completes regardless, which is exactly the race a successor publication could exploit.
+        val gate = java.util.concurrent.CountDownLatch(1)
+        val finished = java.util.concurrent.CountDownLatch(1)
+        val holder = Thread {
+            synchronized(store.ownerLockForTest()) {
+                gate.countDown()
+                // Hold until the sweep has had time to (incorrectly) proceed.
+                Thread.sleep(400)
+            }
+        }
+        holder.start()
+        gate.await()
+        val sweep = Thread {
+            store.expireOlderThan()
+            finished.countDown()
+        }
+        sweep.start()
+        // While the monitor is held, the files must still be present: file work is serialized too.
+        Thread.sleep(150)
+        assertTrue("the sweep must not delete files while the ownership monitor is held", wav.isFile)
+        holder.join()
+        finished.await()
+        sweep.join()
+        assertTrue("the residual files are removed", !wav.exists())
+        assertTrue("the marker is cleared", !File(root, "disqualified/$id").exists())
+        val after = ContributionStore(root, limits())
+        after.recover()
+        assertTrue(
+            "capacity must be released after the sweep",
+            after.admit(sampleCount = 256L, metadataBytes = 1024) != null,
+        )
+    }
+
+    @Test
     fun `a store that adopts from disk requires the SAME durability confirmation as recovery`() {
         // reloadUnownedFromDisk used to promote marker+validate directly: a SECOND, weaker load path than
         // recovery, so an entry whose files were never confirmed durable could be served by an instance

@@ -373,7 +373,13 @@ object CanonicalJson {
                 val divisor = TEN.pow(-shift)
                 val q = compact.divide(divisor)
                 val r = compact.mod(divisor)
-                if (r.signum() != 0 && r.shiftLeft(1).compareTo(divisor) >= 0) q.add(BigInteger.ONE) else q
+                // ECMA-262 Number::toString step 5: when two k-digit candidates are equidistant from the
+                // value (an exact tie, twice-r == divisor), choose the even one. Half-up rounding picks
+                // the odd neighbor and misprints every tie value (1424953923781206.25 must render
+                // "1424953923781206.2", not ".3"); RFC 8785 Appendix B pins the same behaviour.
+                val twice = r.shiftLeft(1)
+                val up = twice.compareTo(divisor) > 0 || (twice.compareTo(divisor) == 0 && q.testBit(0))
+                if (up) q.add(BigInteger.ONE) else q
             }
             if (m.signum() == 0) continue
             val head = m.toString()

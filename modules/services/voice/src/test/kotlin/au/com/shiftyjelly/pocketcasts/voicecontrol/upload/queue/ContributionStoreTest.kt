@@ -876,4 +876,40 @@ class ContributionStoreTest {
         assertEquals(id, reloaded.captureId)
         assertEquals("epoch-1", reloaded.enrollmentEpoch)
     }
+// --- Account-change invalidation (task #73 recovery hardening, spec plan Task 5) ---
+
+    @Test
+    fun `account change invalidates the whole queue - entries never survive an identity switch`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val dir = File(root, "contributions")
+        // Two ready entries prepared under account A's enrollment epoch.
+        val idA = UUID.randomUUID().toString()
+        val idB = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(idA, "epoch-A", chunks(64), meta(idA, "epoch-A")))
+        assertNotNull(store.prepare(idB, "epoch-A", chunks(64), meta(idB, "epoch-A")))
+        // A foreign debris entry under a foreign name must also go in a full revocation.
+        File(dir, "not-a-uuid.wav").writeBytes(ByteArray(4))
+
+        // Account switch: full revocation, content-free reason.
+        store.purgeQueue("account_change")
+
+        // Nothing survives in memory or on disk under this owner's namespace.
+        assertTrue(store.readyEntries().isEmpty())
+        for (id in listOf(idA, idB)) {
+            for (suffix in listOf(".wav", ".meta", ".ready", ".attempts", ".created")) {
+                assertFalse("residual $id$suffix after account change", File(dir, "$id$suffix").exists())
+            }
+        }
+        // A later recover() must not resurrect purged entries (recovered latch).
+        assertTrue(ContributionStore(root, QueueLimits.defaults()).recover().isEmpty())
+
+        // A NEW store instance on the same directory models the controller restart after the switch:
+        // still nothing. Then a fresh admission under account B works normally.
+        val storeB = ContributionStore(root, QueueLimits.defaults())
+        assertTrue(storeB.recover().isEmpty())
+        val idC = UUID.randomUUID().toString()
+        assertNotNull(storeB.prepare(idC, "epoch-B", chunks(64), meta(idC, "epoch-B")))
+        assertEquals(listOf(idC), storeB.readyEntries().map { it.captureId })
+    }
 }

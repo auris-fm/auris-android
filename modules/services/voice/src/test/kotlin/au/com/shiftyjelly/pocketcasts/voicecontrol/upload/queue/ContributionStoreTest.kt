@@ -5,6 +5,7 @@ import java.nio.file.Files
 import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -28,6 +29,8 @@ class ContributionStoreTest {
     private fun tempRoot(): File = Files.createTempDirectory("contrib").toFile()
 
     private fun meta(captureId: String, epoch: String = "epoch-1"): ByteArray = ("""{"capture_id":"$captureId","enrollment_epoch": "$epoch"}""").toByteArray()
+
+    private fun sha256HexForTest(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     private fun chunks(vararg sizes: Int) = sizes.map { ShortArray(it) { i -> i.toShort() } to it }
 
@@ -897,7 +900,7 @@ class ContributionStoreTest {
         // Nothing survives in memory or on disk under this owner's namespace.
         assertTrue(store.readyEntries().isEmpty())
         for (id in listOf(idA, idB)) {
-            for (suffix in listOf(".wav", ".meta", ".ready", ".attempts", ".created")) {
+            for (suffix in listOf(".recording.wav", ".metadata.json", ".ready", ".attempts", ".created", ".sha256")) {
                 assertFalse("residual $id$suffix after account change", File(dir, "$id$suffix").exists())
             }
         }
@@ -911,5 +914,66 @@ class ContributionStoreTest {
         val idC = UUID.randomUUID().toString()
         assertNotNull(storeB.prepare(idC, "epoch-B", chunks(64), meta(idC, "epoch-B")))
         assertEquals(listOf(idC), storeB.readyEntries().map { it.captureId })
+    }
+
+    // --- Recovery hardening: bounded reads / digest+size binding / final debris (finding 4) ---
+
+    @Test
+    fun `recovery refuses an oversized metadata file without reading it whole`() {
+        val root = tempRoot()
+        val limits = QueueLimits.defaults().copy(maxMetadataBytes = 512)
+        val store = ContributionStore(root, limits)
+        val id = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id, "epoch-1", chunks(64), meta(id)))
+        // Inflate the metadata far past the bound: recovery must refuse it, not allocate it.
+        val oversized = ByteArray(8 * 1024 * 1024) { ' '.code.toByte() }
+        File(root, "contributions/$id.metadata.json").writeBytes(oversized)
+        // Record the digest of the oversized bytes so the DIGEST binding cannot be what refuses
+        // it: the ONLY remaining reason to refuse is the size bound itself.
+        File(root, "contributions/$id.sha256").writeText(sha256HexForTest(oversized))
+        File(root, "contributions/$id.ready").writeBytes(ByteArray(0))
+        val recovered = ContributionStore(root, limits).recover()
+        assertTrue("oversized metadata admitted on recovery", recovered.isEmpty())
+    }
+
+    @Test
+    fun `digesting metadata is bound to the exact retained metadata bytes`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val id = UUID.randomUUID().toString()
+        val prepared = store.prepare(id, "epoch-1", chunks(64), meta(id))
+        assertNotNull(prepared)
+        // The recorded digest must equal the digest of the bytes actually on disk, and must change
+        // when the metadata content changes (identity is bound to content, not to a size or a name).
+        val onDisk = File(root, "contributions/$id.metadata.json").readBytes()
+        assertEquals(sha256HexForTest(onDisk), prepared!!.recordSha256)
+        val other = UUID.randomUUID().toString()
+        val preparedOther = store.prepare(other, "epoch-1", chunks(64), meta(other, "epoch-2"))
+        assertNotNull(preparedOther)
+        assertNotEquals(preparedOther!!.recordSha256, prepared.recordSha256)
+        // Tamper the retained metadata AFTER preparation (the .ready marker and the recorded digest
+        // stay untouched). Recovery must refuse the entry: identity is bound to the exact bytes.
+        val tampered = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(tampered, "epoch-1", chunks(64), meta(tampered)))
+        File(root, "contributions/$tampered.metadata.json").writeBytes(meta(tampered, "epoch-evil"))
+        assertTrue(
+            "tampered metadata admitted on recovery",
+            ContributionStore(root, QueueLimits.defaults()).recover().none { it.captureId == tampered },
+        )
+    }
+
+    @Test
+    fun `unmarked final debris is swept when it has no ready marker`() {
+        val root = tempRoot()
+        val dir = File(root, "contributions").apply { mkdirs() }
+        val orphanWav = UUID.randomUUID().toString()
+        File(dir, "$orphanWav.recording.wav").writeBytes(ByteArray(64))
+        File(dir, "$orphanWav.metadata.json").writeBytes(meta(orphanWav))
+        val foreign = "garbage-name.recording.wav"
+        File(dir, foreign).writeBytes(ByteArray(8))
+        assertTrue(ContributionStore(root, QueueLimits.defaults()).recover().isEmpty())
+        assertFalse("unmarked final wav survived recovery", File(dir, "$orphanWav.recording.wav").exists())
+        assertFalse("unmarked final meta survived recovery", File(dir, "$orphanWav.metadata.json").exists())
+        assertFalse("foreign-named debris survived recovery", File(dir, foreign).exists())
     }
 }

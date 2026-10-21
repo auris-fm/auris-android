@@ -396,6 +396,12 @@ class ContributionStore(
             // prepareAt settles EVERY exit, so this returns through it rather than leaking here.
             if (audioBytes == 0L || audioBytes > limits.maxClipBytes) return null
             val digest = sha256Hex(canonicalMetadata)
+            val digestFile = File(dir, "$captureId$SUFFIX_DIGEST")
+            FileOutputStream(digestFile).use { out ->
+                out.write(digest.toByteArray(Charsets.UTF_8))
+                out.flush()
+                out.fd.sync()
+            }
             val entry = Entry(
                 captureId,
                 enrollmentEpoch,
@@ -607,7 +613,7 @@ class ContributionStore(
             ownedAdmissions.clear()
             recovered = true // a purged store must not lazily resurrect anything from disk
             ownedIds.forEach { id ->
-                listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED).forEach { suffix ->
+                listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST).forEach { suffix ->
                     File(dir, "$id$suffix").delete()
                 }
             }
@@ -638,7 +644,15 @@ class ContributionStore(
         val files = dir.listFiles()?.toList() ?: emptyList()
         // 1) Debris sweep: .part files are NEVER ready; .ready without wav/meta is invalid.
         files.filter { it.name.endsWith(SUFFIX_PART) }.forEach { it.delete() }
-        val readyIds = files.filter { it.name.endsWith(SUFFIX_READY) }.map { it.name.removeSuffix(SUFFIX_READY) }
+        val readyIdsBefore = files.filter { it.name.endsWith(SUFFIX_READY) }.map { it.name.removeSuffix(SUFFIX_READY) }.toSet()
+        // Unmarked FINAL debris: a .wav/.meta/.sha256 with no matching .ready marker is an
+        // interrupted preparation that never reached its commit point. It must not survive recovery
+        // (an .ready-marked entry is validated below instead).
+        files.filter { f ->
+            val suffix = listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST).firstOrNull { f.name.endsWith(it) }
+            suffix != null && f.name.removeSuffix(suffix) !in readyIdsBefore
+        }.forEach { it.delete() }
+        val readyIds = readyIdsBefore.toList()
         val keep = mutableListOf<Entry>()
         for (id in readyIds) {
             val wav = File(dir, "$id$SUFFIX_WAV")
@@ -650,6 +664,7 @@ class ContributionStore(
                 meta.delete()
                 attemptsFile.delete()
                 File(dir, "$id$SUFFIX_READY").delete()
+                File(dir, "$id$SUFFIX_DIGEST").delete()
                 dropCounterOnly(TerminalReason.INVALID_ON_RECOVERY)
             } else {
                 keep += entry
@@ -696,14 +711,31 @@ class ContributionStore(
         val dSize = le32(sizeHeader, 40)
         try {
             if (WavWriter.HEADER_BYTES.toLong() + dSize != declared) return null
-            val metaBytes = meta.readBytes()
+            // Bounded read: never allocate more than the metadata bound, even for a corrupt or
+            // hostile on-disk file. Read limit+1 so an oversized file is REFUSED, not truncated.
+            if (meta.length() > limits.maxMetadataBytes) return null
+            val metaBytes = meta.inputStream().use { stream ->
+                val buf = ByteArray(limits.maxMetadataBytes + 1)
+                var total = 0
+                while (total < buf.size) {
+                    val n = stream.read(buf, total, buf.size - total)
+                    if (n < 0) break
+                    total += n
+                }
+                buf.copyOf(total)
+            }
             if (metaBytes.size > limits.maxMetadataBytes) return null
             val attempts = attemptsFile.takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull() ?: 0
             // The Durable created-at sidecar is the age authority (a mutable test clock may
             // diverge from filesystem time); mtime is only the fallback for legacy files.
             val created = runCatching { File(dir, "$id$SUFFIX_CREATED").readText().trim().toLongOrNull() }.getOrNull() ?: wav.lastModified()
             val epoch = metaBytes.toString(Charsets.UTF_8).let { EPOCH_RE.find(it)?.value?.substringAfter(':')?.trim()?.trim('"') ?: "" }
-            return Entry(id, epoch, sha256Hex(metaBytes), declared, metaBytes.size, attempts, createdAtMs = created)
+            // Identity is bound to the EXACT retained metadata bytes: the digest recorded at prepare
+            // time is recomputed here, so tampering with the metadata content cannot be admitted.
+            val digest = sha256Hex(metaBytes)
+            val recordedDigest = File(dir, "$id$SUFFIX_DIGEST").takeIf { it.isFile }?.readText()?.trim()
+            if (recordedDigest != null && recordedDigest != digest) return null
+            return Entry(id, epoch, digest, declared, metaBytes.size, attempts, createdAtMs = created)
         } catch (_: Exception) {
             return null
         }
@@ -717,6 +749,7 @@ class ContributionStore(
         File(dir, "$id$SUFFIX_READY").delete()
         File(dir, "$id$SUFFIX_ATTEMPTS").delete()
         File(dir, "$id$SUFFIX_CREATED").delete()
+        File(dir, "$id$SUFFIX_DIGEST").delete()
         memoryEntries.remove(id)
     }
 
@@ -790,6 +823,7 @@ class ContributionStore(
         private const val SUFFIX_ATTEMPTS = ".attempts"
         private const val SAMPLE_RATE_HZ = 16_000L
         private const val SUFFIX_CREATED = ".created"
+        private const val SUFFIX_DIGEST = ".sha256"
         private val UUID_RE = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
         private val EPOCH_RE = Regex("\"enrollment_epoch\"\\s*:\\s*\"[^\"]+\"")
 

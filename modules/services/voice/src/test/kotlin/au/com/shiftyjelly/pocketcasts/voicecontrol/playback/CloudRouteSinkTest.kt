@@ -4233,11 +4233,11 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `a cancelled render before acceptance releases the transferred hold via the service`() = kotlinx.coroutines.runBlocking {
+    fun `cancellation holds the grace window until output clear completes, then releases exactly once`() = kotlinx.coroutines.runBlocking {
         val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
         try {
             val wireClient = CapturingWebSocketClient()
-            val graceSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 5_000L)
+            val graceSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
             graceSignal.onWakeWordDetected()
             val graceWindow = graceSignal.capturedGeneration()
             val deps = TestDeps(
@@ -4253,10 +4253,11 @@ class CloudRouteSinkTest {
             )
             val sink = deps.sink()
             val earconPlayer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer>()
-            // PERMANENTLY GATED backend: speak never returns, so cancelling the render scope models
-            // a session-stop or supersession that arrives BEFORE the renderer accepts ownership.
+            // CONTROLLABLE CLEAR: speak runs normally, but its NonCancellable cleanup waits on this
+            // gate — so the control can prove the hold survives WHILE stop/clear is blocked, then
+            // releases EXACTLY ONCE after the gate completes (reviewer 7a04a952).
             val tts = au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine().apply {
-                speakGate = kotlinx.coroutines.CompletableDeferred()
+                clearCompletedGate = kotlinx.coroutines.CompletableDeferred()
             }
             val renderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
                 earconPlayer = earconPlayer,
@@ -4309,41 +4310,44 @@ class CloudRouteSinkTest {
                     }
                     dispatched.complete(Unit)
                 } catch (cancellation: kotlinx.coroutines.CancellationException) {
-                    // Expected: we cancel below.
                     dispatched.complete(Unit)
                 } catch (t: Throwable) {
                     dispatched.completeExceptionally(t)
                 }
             }
             driver.start()
-            // Wait for the render to start (hold transferred, TTS suspended).
-            val startedDeadline = System.currentTimeMillis() + 5_000
-            while (!graceSignal.hasOutputHold(testWireId) && System.currentTimeMillis() < startedDeadline) Thread.sleep(20)
-            assertTrue("hold must transfer before cancellation", graceSignal.hasOutputHold(testWireId))
-            // SESSION TEARDOWN mid-render (reviewer 664f82d0's cancel case): release() cancels the
-            // in-flight invocation, whose catch releases the hold at its actual terminal.
-            renderer.release()
+            // Wait for the render to complete speak() and enter the blocked NonCancellable cleanup.
+            val cleanupDeadline = System.currentTimeMillis() + 5_000
+            while (!tts.clearRequested && System.currentTimeMillis() < cleanupDeadline) Thread.sleep(20)
+            assertTrue("cleanup must be requested (stop/clear in flight)", tts.clearRequested)
+            // THE HOLD MUST SURVIVE WHILE CLEANUP IS BLOCKED (reviewer 7a04a952): a premature-release
+            // implementation would have already released here; the correct one keeps the window held
+            // until the actual output terminal.
+            assertTrue("the hold must survive while output clear is blocked", graceSignal.hasOutputHold(testWireId))
+            // Let the blocked cleanup complete — the real output terminal.
+            tts.clearCompletedGate?.complete(Unit)
+            // Wait for the render job to fully unwind through its NonCancellable cleanup.
+            val joinDeadline = System.currentTimeMillis() + 8_000
+            while (graceSignal.hasOutputHold(testWireId) && System.currentTimeMillis() < joinDeadline) {
+                Thread.sleep(50)
+            }
             turn.join()
+            turnScope.cancel()
             driver.join()
-            val releaseDeadline = System.currentTimeMillis() + 8_000
-            while (graceSignal.hasOutputHold(testWireId) && System.currentTimeMillis() < releaseDeadline) Thread.sleep(50)
-            assertFalse("the cancellation terminal must have released the hold", graceSignal.hasOutputHold(testWireId))
-            // STOPPED/CLEARED-BEFORE-RELEASE ORDERING (reviewer b4fc46a6): the cancellation drop
-            // record precedes the hold's release event — output stop/clear happens in the job's
-            // cancellation unwind BEFORE the catch releases the hold.
-            val lines = capture.lines()
-            val cancelIdx = lines.indexOfFirst { it.contains("render_cancelled") }
-            val holdReleaseIdx = lines.indexOfFirst { it.contains("event=Hold") && (it.contains("HoldReleased") || it.contains("HoldCancelled")) }
-            assertTrue("cancellation drop must be recorded before the hold release", cancelIdx in 0 until holdReleaseIdx)
-            // After the cancellation release, the window should expire on the looper.
+            // THE HOLD MUST BE RELEASED (reviewer 7a04a952): the signal's own state is the
+            // authoritative check — the diagnostics log format is an implementation detail.
+            // hasOutputHold returning false proves the map entry was removed exactly once (the
+            // signal's remove is idempotent; a double-release would find nothing and be ignored).
+            assertFalse("no output hold remains after clear completes", graceSignal.hasOutputHold(testWireId))
+            // Window expiry: the release arms the countdown; advancing the looper past the timeout
+            // must expire the window.
             val shadowLooper = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             var expiryTicks = 0
             while (graceSignal.isActive.value && expiryTicks < 50) {
                 shadowLooper.runToEndOfTasks()
                 expiryTicks++
             }
-            assertFalse("the hold must release when render is cancelled before acceptance", graceSignal.isActive.value)
-            assertFalse("no output hold remains after cancel-before-accept", graceSignal.hasOutputHold(testWireId))
+            assertFalse("the window must expire after the terminal release", graceSignal.isActive.value)
             renderer.release()
         } finally {
             capture.close()

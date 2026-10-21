@@ -50,13 +50,37 @@ class FakeTtsEngine : TtsEngine {
     /** When set, [speak] throws this instead of completing — models a TTS failure mid-render. */
     var speakFailure: Throwable? = null
 
+    /**
+     * When set, [speak]'s NonCancellable cleanup waits on this gate before completing — so the
+     * control can prove the hold survives while output stop/clear is blocked, then releases once
+     * after the gate completes. Models a real TTS engine whose stop/clear suspends (e.g. AudioTrack
+     * drain, hardware flush).
+     */
+    var clearCompletedGate: kotlinx.coroutines.CompletableDeferred<Unit>? = null
+
+    /** Set to true when the NonCancellable cleanup has begun (stop requested). Test visibility. */
+    @Volatile var clearRequested: Boolean = false
+        private set
+
     override suspend fun speak(text: String, language: String) {
         check(!released) { "Engine is released" }
-        speakGate?.await()
-        speakFailure?.let { throw it }
-        lastSpokenText = text
-        lastSpokenLanguage = language
-        speakReturned?.complete(Unit)
+        try {
+            speakGate?.await()
+            speakFailure?.let { throw it }
+            lastSpokenText = text
+            lastSpokenLanguage = language
+            speakReturned?.complete(Unit)
+        } finally {
+            // NON-CANCELLABLE CLEANUP (reviewer 7a04a952): models a real engine's stop/clear that
+            // suspends. The control asserts the hold remains while this is blocked, then releases
+            // exactly once after the gate completes.
+            if (clearCompletedGate != null) {
+                clearRequested = true
+                kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                    clearCompletedGate?.await()
+                }
+            }
+        }
     }
 
     override fun release() {

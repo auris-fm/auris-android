@@ -3866,9 +3866,10 @@ class CloudRouteSinkTest {
             // CloudRoute branch never touches are mocks; the executor, sink, service and renderer are
             // real.
             val earconPlayer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer>()
+            val tts = au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine()
             val renderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
                 earconPlayer = earconPlayer,
-                ttsEngine = au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine(),
+                ttsEngine = tts,
             )
             renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
             val executor = VoicePlaybackIntentExecutor(
@@ -3947,6 +3948,14 @@ class CloudRouteSinkTest {
             // drops the ID or the service never invokes the renderer, neither line appears.
             awaitCaptureLine(capture, "reason=TurnFeedbackSelected", testWireId, alsoContains = "entry_spoken")
             awaitCaptureLine(capture, "reason=TurnFeedbackRendered", testWireId, alsoContains = "spoken_submitted")
+            // The SUBSTANCE must be the localized Auris daily-limit explanation — not just any
+            // generic spoken error — delivered EXACTLY ONCE through the real TTS.
+            val limitLine = "You have reached your Auris free daily limit. Please try again tomorrow."
+            assertEquals(limitLine, tts.lastSpokenText)
+            val submissions = capture.lines().count {
+                it.contains("reason=TurnFeedbackRendered") && it.contains("spoken_submitted") && it.contains("request_id=$testWireId")
+            }
+            assertEquals("the localized refusal must be submitted exactly once", 1, submissions)
             renderer.release()
         } finally {
             capture.close()

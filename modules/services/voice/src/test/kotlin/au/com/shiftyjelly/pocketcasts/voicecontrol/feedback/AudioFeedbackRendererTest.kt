@@ -1778,11 +1778,20 @@ class AudioFeedbackRendererTest {
             val dropped = awaitLine(capture, { it.contains("reason=TurnFeedbackDropped") && it.contains("request_id=$turnRequestId") }, "drop")
             assertTrue("a never-started render must still record its cancellation: $dropped", dropped.contains("render_cancelled"))
 
-            // Ownership cleared: a later render is not recorded as a supersession of the dead one.
+            // Ownership cleared: a later render runs to completion and is NOT a supersession of
+            // the dead one — and A's cancellation stays a single drop, exactly once.
             gated.release()
             val secondId = "22222222-2222-4222-8222-222222222222"
             localRenderer.render(VoiceResponse.Spoken("after session"), requestId = secondId)
-            kotlinx.coroutines.runBlocking { kotlinx.coroutines.delay(300) }
+            awaitLine(capture, { it.contains("spoken_submitted") && it.contains("request_id=$secondId") }, "second submission")
+            val dropsForA = capture.lines().filter {
+                it.contains("reason=TurnFeedbackDropped") && it.contains("request_id=$turnRequestId")
+            }
+            assertEquals("A must be cancelled exactly once", 1, dropsForA.size)
+            val supersededForA = capture.lines().firstOrNull {
+                it.contains("reason=TurnFeedbackDropped") && it.contains("request_id=$turnRequestId") && it.contains("superseded")
+            }
+            assertNull("no superseded drop may name the cancelled A: $supersededForA", supersededForA)
             val falseDrop = capture.lines().firstOrNull {
                 it.contains("reason=TurnFeedbackDropped") && it.contains("request_id=$secondId")
             }

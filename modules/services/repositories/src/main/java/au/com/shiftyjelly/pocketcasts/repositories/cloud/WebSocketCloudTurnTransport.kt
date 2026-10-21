@@ -61,7 +61,12 @@ class WebSocketCloudTurnTransport(
                     return
                 }
                 observer?.onSocketOpened(requestId)
-                val sent = webSocket.send(frame.toJson())
+                val sent = try {
+                    webSocket.send(frame.toJson())
+                } catch (_: Exception) {
+                    observer?.onSendResult(requestId, CloudTurnTransportObserver.SendOutcome.REJECTED)
+                    return
+                }
                 observer?.onSendResult(
                     requestId,
                     if (sent) CloudTurnTransportObserver.SendOutcome.ACCEPTED else CloudTurnTransportObserver.SendOutcome.REJECTED,

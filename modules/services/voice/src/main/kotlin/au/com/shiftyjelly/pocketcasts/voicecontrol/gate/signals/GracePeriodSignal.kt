@@ -237,6 +237,51 @@ class GracePeriodSignal @Inject constructor() {
         }
     }
 
+    /**
+     * The request-owned holds handed to the FEEDBACK RENDERER (spec ruling 7a6a62e3): a turn whose
+     * feedback is spoken/earcon keeps its hold past sink completion — sink return is NOT the output
+     * boundary — until the renderer's actual output terminal (completion, failure, or clear).
+     * Keyed by the same request ID the renderer observes, so sink and renderer meet without a
+     * shared call chain.
+     */
+    private val outputHolds = mutableMapOf<String, CloudTurnHold>()
+
+    /**
+     * ACKNOWLEDGED HANDOFF: the sink hands its hold to the renderer path before returning. The hold
+     * stays continuously held (no unheld gap); if the window was retired meanwhile (privacy/route),
+     * the hold finishes immediately — retirement wins over output.
+     */
+    fun transferHoldToOutput(requestId: String, hold: CloudTurnHold) = synchronized(windowLock) {
+        if (closedByPrivacy || !_isActive.value || hold.generation != generation) {
+            // Already under windowLock: remove directly, no re-entrant synchronized needed.
+            val retired = cloudTurns.remove(hold)
+            if (retired) {
+                Trace.record(
+                    Event(
+                        Kind.Hold, Reason.HoldReleased, Source.Grace, generation = generation,
+                        active = _isActive.value, holdsBefore = cloudTurns.size + 1, holdsAfter = cloudTurns.size,
+                        owner = hold.owner, requestId = requestId,
+                    ),
+                )
+            }
+            return@synchronized
+        }
+        outputHolds[requestId] = hold
+    }
+
+    /**
+     * The renderer's OUTPUT TERMINAL: completion, failure, or clear. Releases exactly once — a late
+     * or duplicate callback finds nothing and is ignored. [cancelled] marks an output that was
+     * stopped rather than finished.
+     */
+    fun finishOutputHold(requestId: String, cancelled: Boolean = false) {
+        val hold = synchronized(windowLock) { outputHolds.remove(requestId) } ?: return
+        finishCloudTurn(hold, cancelled = cancelled)
+    }
+
+    /** Test/diagnostic visibility: is [requestId]'s output hold still pending release? */
+    fun hasOutputHold(requestId: String): Boolean = synchronized(windowLock) { outputHolds.containsKey(requestId) }
+
     /** Called after turn termination and local playback drain/clear, including failure cleanup. */
     fun finishCloudTurn(hold: CloudTurnHold, cancelled: Boolean = false) {
         val armFor = synchronized(windowLock) {

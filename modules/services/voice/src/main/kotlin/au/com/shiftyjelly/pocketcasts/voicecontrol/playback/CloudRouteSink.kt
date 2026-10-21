@@ -1,7 +1,6 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteCapabilities
-import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.ResolvedSpokenLine
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteErrorCodes
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent
@@ -19,6 +18,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDia
 import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Reason
 import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics.Source
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconId
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.ResolvedSpokenLine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenLine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.SpokenTemplateResolver
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal
@@ -329,11 +329,11 @@ class CloudRouteSink internal constructor(
 
     override suspend fun dispatchPrepared(prepared: CloudRouteTurn, isRetry: Boolean): CloudTurnResult {
         val claim = conversationAdmission.claimDispatch(prepared, isRetry)
-            ?: return CloudTurnResult(VoiceResponse.Silent, CloudRouteActionOutcome.None)
+            ?: return CloudTurnResult(VoiceResponse.Silent, CloudRouteActionOutcome.None, succeeded = false)
         if (!claim.ownsDispatch) {
             claim.completion.join()
             // The original owner handles feedback and recognition; a duplicate produces no effects.
-            return CloudTurnResult(VoiceResponse.Silent, CloudRouteActionOutcome.None)
+            return CloudTurnResult(VoiceResponse.Silent, CloudRouteActionOutcome.None, succeeded = false)
         }
         val owned = claim.turn
         try {
@@ -384,6 +384,7 @@ class CloudRouteSink internal constructor(
             return CloudTurnResult(
                 feedback = VoiceResponse.Silent,
                 action = CloudRouteActionOutcome.None,
+                succeeded = false,
             )
         }
         if (resolveBaseUrl().isBlank()) {
@@ -395,6 +396,7 @@ class CloudRouteSink internal constructor(
                     VoiceResponse.Spoken(soon)
                 },
                 action = CloudRouteActionOutcome.None,
+                succeeded = false,
             )
         }
 
@@ -404,6 +406,14 @@ class CloudRouteSink internal constructor(
         // A server Error terminal (or an empty/unanswerable turn) is a REFUSAL: the turn did
         // nothing for the user, so it must not earn recognition downstream.
         var refusedTerminal = false
+        // POSITIVE success (reviewer73ea2ad5): success is derived from the ACTUAL completed DONE
+        // terminal — never from the absence of a known failure. A flow that ends without Done
+        // (EOF), or a turn that never reaches a terminal, is not successful.
+        var sawDone = false
+        // POSITIVE success (reviewer 73ea2ad5): recorded only at an actual Done terminal whose
+        // outcome is Completed — an Interrupted Done or a transport failure must derive false,
+        // never success-by-absence-of-failure.
+        var sawDoneCompleted = false
         val myJob = currentCoroutineContext()[Job]
         val myId = turnCounter.incrementAndGet()
         // AUTHORITY IS RESOLVED BEFORE ANY SUCCESSOR-OWNED STATE CHANGES. Registration replaces the
@@ -422,6 +432,7 @@ class CloudRouteSink internal constructor(
                 return CloudTurnResult(
                     feedback = VoiceResponse.Silent,
                     action = CloudRouteActionOutcome.None,
+                    succeeded = false,
                 )
             }
         } else {
@@ -434,6 +445,7 @@ class CloudRouteSink internal constructor(
                 return CloudTurnResult(
                     feedback = VoiceResponse.Silent,
                     action = CloudRouteActionOutcome.None,
+                    succeeded = false,
                 )
             }
         }
@@ -661,6 +673,8 @@ class CloudRouteSink internal constructor(
                     }
 
                     is CloudRouteEvent.Done -> {
+                        sawDone = true
+                        if (event.outcome == CloudRouteEvent.Outcome.Completed) sawDoneCompleted = true
                         // Terminal diagnostics are recorded at the actual decode point in
                         // WebSocketCloudTurnTransport.onMessage — not here at sink consumption.
                         val doneOutcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted"
@@ -895,7 +909,25 @@ class CloudRouteSink internal constructor(
                         owner = myId,
                     ),
                 )
-                graceHold?.let { gracePeriodSignal.finishCloudTurn(it, cancelled = endReason == Reason.TurnCancelled || myJob?.isCancelled == true) }
+                graceHold?.let { hold ->
+                    // THE OUTPUT-HOLD HANDOFF (spec ruling 7a6a62e3): when this turn WILL speak
+                    // locally, its hold transfers to the renderer path — sink return is not the
+                    // output boundary, and releasing here would unhold the window WHILE the refusal
+                    // is still being spoken. The renderer's output terminal (completed playback,
+                    // failure, or clear) releases it exactly once. Everything else — cancellation,
+                    // failure (no feedback will be rendered), or silent feedback — releases here at
+                    // terminal turn completion.
+                    // A terminal ERROR can still SPEAK (the localized refusal): TurnFailed with
+                    // spoken feedback renders output, so it transfers too. Only CANCELLATION (no
+                    // feedback will be rendered) or non-spoken feedback releases here.
+                    val willSpeak = endReason != Reason.TurnCancelled &&
+                        outcome?.let { it is VoiceResponse.Spoken || it is VoiceResponse.Combined } == true
+                    if (willSpeak) {
+                        diagnosticRequestId?.let { requestId -> gracePeriodSignal.transferHoldToOutput(requestId, hold) } ?: gracePeriodSignal.finishCloudTurn(hold, cancelled = true)
+                    } else {
+                        gracePeriodSignal.finishCloudTurn(hold, cancelled = endReason == Reason.TurnCancelled || myJob?.isCancelled == true)
+                    }
+                }
             }
         }
         // Feedback selection/return boundary: the sink's chosen feedback is about to be
@@ -923,7 +955,7 @@ class CloudRouteSink internal constructor(
             // could not be established, which is exactly the distinction the three-valued type exists to
             // carry out of the sink.
             action = outcomeOfTurn(actionOutcome),
-            succeeded = !refusedTerminal && endReason != Reason.TurnFailed,
+            succeeded = sawDoneCompleted && !refusedTerminal && endReason == Reason.TurnEnded,
         )
     }
 
@@ -1030,16 +1062,14 @@ class CloudRouteSink internal constructor(
     }
 
     /** A client-owned line for [key], or empty when this locale must not be spoken to: [SpokenLine]. */
-    private fun localizedTemplate(key: String, language: String? = null): String =
-        SpokenLine.forKey(key, templateResolver, language)
+    private fun localizedTemplate(key: String, language: String? = null): String = SpokenLine.forKey(key, templateResolver, language)
 
     /**
      * A line AND the language it was resolved in, so fallbacks stay COHERENT: unknown/unsupported
      * language or missing resources yield the default line with "en" — never one language's text
      * paired with another's voice (spec ruling 7c7575f6).
      */
-    private fun resolveLocalizedLine(key: String, language: String?): ResolvedSpokenLine =
-        templateResolver.resolveLocalized(key, language)
+    private fun resolveLocalizedLine(key: String, language: String?): ResolvedSpokenLine = templateResolver.resolveLocalized(key, language)
 
     /**
      * Whether a privacy closure happened after the turn took its pause obligation. A live flag cannot

@@ -23,3 +23,23 @@ Source was restored to production after each mutant run; green XML is from the s
 
 Both mutants compiled and ran successfully. Failures are assertion-level, not compile errors.
 Source restored to production (`aab5df416`) after each run.
+
+## Grace round 2 mutants (spec ruling 7a6a62e3 / reviewer 73ea2ad5)
+
+### Mutant: hold released at sink return (transfer disabled)
+**Production file:** `CloudRouteSink.kt` — the finally-block handoff.
+**Change:** `if (willSpeak)` replaced with `if (false && willSpeak)` — the hold finishes at sink
+return instead of transferring to the renderer path.
+**Test:** `pre-Connected refusal joins request ID across transport, persisted log, service and renderer`
+**RED XML:** `artifacts/mutation-receipts/hold-transfer-sink-return-RED.xml`
+  - tests="1" failures="1" — `the hold must still be pending while output is in flight (survived sink return)`.
+**GREEN:** full voice suite BUILD SUCCESSFUL with production restored (transfer in place).
+
+### Mutant: success derived by absence-of-failure
+**Production file:** `CloudRouteSink.kt` — the CloudTurnResult predicate.
+**Change:** `succeeded = sawDoneCompleted && ...` replaced with `succeeded = !refusedTerminal && endReason == TurnEnded`
+— Done-with-Interrupted would pass as success.
+**Test:** `interrupted terminal discards output while completed terminal drains it`
+**RED XML:** `artifacts/mutation-receipts/positive-success-absence-RED.xml`
+  - tests="1" failures="1" — `expected:<false> but was:<true>` for the Interrupted terminal.
+**GREEN:** full voice suite BUILD SUCCESSFUL with the positive `sawDoneCompleted` predicate restored.

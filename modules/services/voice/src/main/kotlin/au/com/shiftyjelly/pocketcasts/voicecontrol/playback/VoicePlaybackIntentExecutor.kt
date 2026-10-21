@@ -299,12 +299,15 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         outcome: TurnOutcome,
     ): TurnCapability = when {
         intent !is VoiceIntent.CloudRoute -> TurnCapability.Recognized
+
         // A REFUSED OR FAILED TURN DID NOTHING FOR THE USER (reviewer9489ae5a / spec f02f8dae): a
         // limit refusal reaches an error terminal with no action, and the old code read only the
         // action outcome — None fell into the recognized branch — so a refusal EXTENDED the window.
         // The sink reports whether the turn reached DONE; anything else is unverified.
         outcome.action == CloudRouteActionOutcome.Unknown -> TurnCapability.Unverified
+
         !outcome.turnSucceeded -> TurnCapability.Unverified
+
         else -> TurnCapability.Recognized
     }
 

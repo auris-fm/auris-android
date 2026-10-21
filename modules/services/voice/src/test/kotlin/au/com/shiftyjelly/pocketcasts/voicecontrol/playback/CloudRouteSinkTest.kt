@@ -266,7 +266,11 @@ class CloudRouteSinkTest {
                     CloudRouteEvent.Done(3, 4, terminal),
                 ),
             )
-            assertEquals(VoiceResponse.Silent, deps.sink().routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId).feedback)
+            val turnResult = deps.sink().routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId)
+            assertEquals(VoiceResponse.Silent, turnResult.feedback)
+            // POSITIVE success (reviewer 73ea2ad5): only an actual DONE-Completed terminal is a
+            // success; Interrupted must be derived false, never by absence-of-failure.
+            assertEquals(terminal == CloudRouteEvent.Outcome.Completed, turnResult.succeeded)
             org.mockito.kotlin.verify(player).submitFrame(byteArrayOf(1, 2))
             if (terminal == CloudRouteEvent.Outcome.Interrupted) {
                 org.mockito.kotlin.verify(player, org.mockito.kotlin.never()).drainAndAwaitCompletion()
@@ -1644,7 +1648,6 @@ class CloudRouteSinkTest {
 
         assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
     }
-
 
     @Test
     fun `action-only stream returns silent on done`() = runTest {
@@ -3148,6 +3151,7 @@ class CloudRouteSinkTest {
             }
         },
         val cloudPlaybackContextState: CloudPlaybackContextState = CloudPlaybackContextState(),
+        val gracePeriodSignal: au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal? = null,
         private val events: kotlinx.coroutines.flow.Flow<CloudRouteEvent> = flowOf(CloudRouteEvent.Done(0, 0)),
         val renderer: CloudSearchResultsRenderer? = null,
         /** Whether the host app is playing while this turn runs. */
@@ -3256,6 +3260,7 @@ class CloudRouteSinkTest {
             episodeDurationSeconds = { episodeDurationSeconds },
             audioPlayer = audioPlayer,
             transportFactory = explicitTransportFactory,
+            gracePeriodSignal = gracePeriodSignal,
         )
     }
 
@@ -3939,17 +3944,22 @@ class CloudRouteSinkTest {
         assertEquals("en", result.feedbackLanguage)
     }
 
-
     @Test
     fun `pre-Connected refusal joins request ID across transport, persisted log, service and renderer`() = kotlinx.coroutines.runBlocking {
         val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
         try {
             val wireClient = CapturingWebSocketClient()
+            // A LIVE grace window: the refusal path acquires its hold here, and the assertions below
+            // track it across sink return -> renderer output -> release.
+            val graceSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 5_000L)
+            graceSignal.onWakeWordDetected()
+            val graceWindow = graceSignal.capturedGeneration()
             // REAL RESOURCE CONTROL (reviewer 8004f444 / spec ruling 7c7575f6): the resolver is
             // built from the module's actual locale resources — no custom language maps — so the
             // zh line below must come from values-zh through the real lookup.
             val deps = TestDeps(
                 templateResolver = SpokenTemplateResolver(org.robolectric.RuntimeEnvironment.getApplication()),
+                gracePeriodSignal = graceSignal,
                 transportFactory = { _, _, observer ->
                     au.com.shiftyjelly.pocketcasts.repositories.cloud.WebSocketCloudTurnTransport(
                         "https://example.invalid",
@@ -3966,10 +3976,17 @@ class CloudRouteSinkTest {
             // CloudRoute branch never touches are mocks; the executor, sink, service and renderer are
             // real.
             val earconPlayer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer>()
-            val tts = au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine()
+            // CONTROLLABLY SUSPENDED BACKEND (spec c9c37325): the gate holds speak() in flight so the
+            // control proves the hold survives BOTH sink return and in-flight output, releasing only
+            // when the awaited TTS call actually returns (true output completion).
+            val tts = au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine().apply {
+                speakGate = kotlinx.coroutines.CompletableDeferred()
+                speakReturned = kotlinx.coroutines.CompletableDeferred()
+            }
             val renderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
                 earconPlayer = earconPlayer,
                 ttsEngine = tts,
+                gracePeriodSignal = graceSignal,
             )
             renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
             val executor = VoicePlaybackIntentExecutor(
@@ -3986,7 +4003,7 @@ class CloudRouteSinkTest {
                 queueSink = mock(),
                 playbackQuerySink = mock(),
                 statsQuerySink = mock(),
-                gracePeriodSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(),
+                gracePeriodSignal = graceSignal,
                 playbackManager = mock(),
             )
             val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
@@ -4024,6 +4041,7 @@ class CloudRouteSinkTest {
                                 request = "question",
                                 tier = VoiceIntent.CloudTier.Premium,
                                 logicalRequestId = testWireId,
+                                windowGeneration = graceWindow,
                                 // NON-ENGLISH ASR: the detected utterance language rides the intent
                                 // while the routing transcript stays English — the production shape
                                 // for "user spoke Chinese, pipeline routed in English".
@@ -4050,7 +4068,26 @@ class CloudRouteSinkTest {
 
             // RENDERER observation: entry AND accepted submission, SAME request ID. If the executor
             // drops the ID or the service never invokes the renderer, neither line appears.
+            // Submission lands only after the gated speak() finishes, so the hold assertions below
+            // run FIRST, with output genuinely in flight.
             awaitCaptureLine(capture, "reason=TurnFeedbackSelected", testWireId, alsoContains = "entry_spoken")
+            // THE OUTPUT-HOLD CONTRACT (spec ruling 7a6a62e3, reviewer73ea2ad5): the hold survives
+            // SINK RETURN (dispatch already completed) and IN-FLIGHT OUTPUT (speak() still gated),
+            // and releases EXACTLY ONCE when the awaited TTS call truly returns.
+            assertTrue(
+                "the hold must still be pending while output is in flight (survived sink return)",
+                graceSignal.hasOutputHold(testWireId),
+            )
+            // A live hold keeps the window open past its own timeout while the refusal is sounding.
+            Thread.sleep(400)
+            assertTrue("in-flight refusal output must hold the grace window open", graceSignal.isActive.value)
+
+            tts.speakGate?.complete(Unit)
+            kotlin.runCatching {
+                kotlinx.coroutines.runBlocking {
+                    kotlinx.coroutines.withTimeout(5_000) { tts.speakReturned?.await() }
+                }
+            }
             awaitCaptureLine(capture, "reason=TurnFeedbackRendered", testWireId, alsoContains = "spoken_submitted")
             // The SUBSTANCE must be the UTTERANCE-LANGUAGE Auris daily-limit explanation — not any
             // generic spoken error, not the English default — delivered EXACTLY ONCE, in the
@@ -4061,6 +4098,18 @@ class CloudRouteSinkTest {
                 it.contains("reason=TurnFeedbackRendered") && it.contains("spoken_submitted") && it.contains("request_id=$testWireId")
             }
             assertEquals("the localized refusal must be submitted exactly once", 1, submissions)
+            // Wait out the window timeout AFTER the true output terminal: the release must have
+            // happened, so the window now expires instead of being held forever (no leak). The
+            // signal arms its countdown on the Robolectric main looper, so the clock is advanced
+            // there rather than slept.
+            val shadowLooper = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            var expiryTicks = 0
+            while (graceSignal.isActive.value && expiryTicks < 50) {
+                shadowLooper.runToEndOfTasks()
+                expiryTicks++
+            }
+            assertFalse("the hold must release at the true output terminal", graceSignal.isActive.value)
+            assertFalse("exactly-once: no output hold remains", graceSignal.hasOutputHold(testWireId))
             renderer.release()
         } finally {
             capture.close()

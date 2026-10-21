@@ -21,6 +21,14 @@ import timber.log.Timber
 class AudioFeedbackRenderer(
     private val earconPlayer: EarconPlayer,
     private val ttsEngine: TtsEngine,
+    /**
+     * The grace signal, for OUTPUT-HOLD release (spec ruling 7a6a62e3): a turn whose spoken
+     * feedback keeps its grace hold past sink completion releases it HERE, at the renderer's true
+     * output terminal — the awaited TTS call in [speakWithHeartbeat] returns only after the
+     * AudioTrack has played and drained, so the submit note denotes COMPLETED output, not
+     * acceptance. Null in tests that do not exercise the hold contract.
+     */
+    private val gracePeriodSignal: au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal? = null,
 ) {
     private val _hasEmittedAudio = MutableStateFlow(false)
     private val _lastEmittedAtMs = MutableStateFlow(SystemClock.elapsedRealtime())
@@ -111,6 +119,15 @@ class AudioFeedbackRenderer(
         )
     }
 
+    /**
+     * The renderer's output-terminal hold release, EXACTLY ONCE per request (the signal's map
+     * removal makes late/duplicate callbacks no-ops). [cancelled] distinguishes an output that
+     * finished from one stopped or cleared.
+     */
+    private fun releaseOutputHold(requestId: String?, cancelled: Boolean) {
+        if (requestId != null) gracePeriodSignal?.finishOutputHold(requestId, cancelled = cancelled)
+    }
+
     private fun recordDrop(requestId: String, feedbackKind: String, errorCode: String) {
         VoiceLifecycleDiagnostics.record(
             VoiceLifecycleDiagnostics.Event(
@@ -145,6 +162,7 @@ class AudioFeedbackRenderer(
         if (disposed) {
             // DROP boundary: the renderer can never play this. Observed, not silent.
             if (requestId != null) recordDrop(requestId, "disposed", "renderer_disposed")
+            releaseOutputHold(requestId, cancelled = true)
             return
         }
         // Debug-only diagnostic: what the app is about to say, before TTS. This is the one
@@ -162,6 +180,7 @@ class AudioFeedbackRenderer(
         val thisCall = RenderInvocation(requestId)
         currentInvocation?.takeIf { it.job.isActive }?.let { prior ->
             prior.requestId?.let { recordDrop(it, "superseded", "superseded_by_new_render") }
+            releaseOutputHold(prior.requestId, cancelled = true)
             prior.superseded.set(true)
             prior.job.cancel()
         }
@@ -212,11 +231,18 @@ class AudioFeedbackRenderer(
                     is VoiceResponse.Earcon -> {
                         earconAdmitted = playEarcon(response.id)
                         recordEarconOutcome()
+                        // A bundled cue is sub-second and its admission IS its sounding window's
+                        // start; documented limitation: the earcon hold releases at admission, not
+                        // at the coverage observer's consumed note.
+                        releaseOutputHold(requestId, cancelled = !earconAdmitted)
                     }
 
                     is VoiceResponse.Spoken -> {
+                        // The awaited call returns only after playback drained — this IS the
+                        // output terminal, not mere acceptance.
                         speakWithHeartbeat(response.text, language)
                         if (requestId != null) recordSubmitted(requestId, "spoken_submitted")
+                        releaseOutputHold(requestId, cancelled = false)
                     }
 
                     is VoiceResponse.Combined -> {
@@ -224,6 +250,7 @@ class AudioFeedbackRenderer(
                         recordEarconOutcome()
                         speakWithHeartbeat(response.spokenText, language)
                         if (requestId != null) recordSubmitted(requestId, "spoken_submitted")
+                        releaseOutputHold(requestId, cancelled = false)
                     }
                 }
             } catch (e: TtsPlaybackIncompleteException) {
@@ -240,6 +267,7 @@ class AudioFeedbackRenderer(
                         ),
                     )
                 }
+                releaseOutputHold(requestId, cancelled = true)
                 // The reply did not finish playing. Report it as a delivery failure rather than a
                 // completed reply, and let the caller own whatever cleanup that implies.
                 Timber.e(
@@ -255,6 +283,7 @@ class AudioFeedbackRenderer(
                 // own flag, marked only when a successor superseded it. Rethrown so structured
                 // concurrency still unwinds.
                 if (requestId != null && !thisCall.superseded.get()) recordDrop(requestId, "cancelled", "render_cancelled")
+                releaseOutputHold(requestId, cancelled = true)
                 throw cancellation
             } finally {
                 // Clear the invocation slot ONLY if it is still this invocation's object: a
@@ -714,12 +743,6 @@ class AudioFeedbackRenderer(
     }
 
     /**
-     * Ends a service session: frees audio resources but leaves the renderer usable.
-     *
-     * Called from `stopVoiceControl()`, which runs on EVERY stop. Because this type is a `@Singleton`,
-     * treating that as disposal meant the next start had no feedback at all -- silently.
-     */
-    /**
      * Cancels an active invocation and, when its body never started (cancelled before the
      * dispatcher ran it), records the ID-joined cancellation drop HERE — that job's catch/finally
      * will never execute, so the cancel site is the only place the drop can be observed. The flag
@@ -729,6 +752,7 @@ class AudioFeedbackRenderer(
         if (!invocation.job.isActive) return
         if (!invocation.started.get()) {
             invocation.requestId?.let { recordDrop(it, "cancelled", "render_cancelled") }
+            releaseOutputHold(invocation.requestId, cancelled = true)
             invocation.superseded.set(true)
             currentInvocation = null
         }

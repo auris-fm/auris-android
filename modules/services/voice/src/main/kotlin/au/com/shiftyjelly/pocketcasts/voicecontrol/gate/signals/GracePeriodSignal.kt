@@ -276,11 +276,25 @@ class GracePeriodSignal @Inject constructor() {
      */
     fun finishOutputHold(requestId: String, cancelled: Boolean = false) {
         val hold = synchronized(windowLock) { outputHolds.remove(requestId) } ?: return
+        synchronized(windowLock) {
+            val key = requestId.lowercase()
+            releaseCounts[key] = (releaseCounts[key] ?: 0) + 1
+        }
         finishCloudTurn(hold, cancelled = cancelled, requestId = requestId)
     }
 
     /** Test/diagnostic visibility: is [requestId]'s output hold still pending release? */
     fun hasOutputHold(requestId: String): Boolean = synchronized(windowLock) { outputHolds.containsKey(requestId) }
+
+    /**
+     * TEST VISIBILITY (reviewer 7a04a952): counts how many times finishOutputHold or
+     * releaseUnhandedOffHold actually released a hold for this request ID. Authoritative —
+     * counts real releases, not diagnostic log entries.
+     */
+    private val releaseCounts = mutableMapOf<String, Int>()
+    internal fun releaseCountFor(requestId: String): Int = synchronized(windowLock) {
+        releaseCounts[requestId.lowercase()] ?: 0
+    }
 
     /**
      * EXPLICIT NO-HANDOFF RELEASE (reviewer 664f82d0): the service could not hand off to the renderer
@@ -291,6 +305,10 @@ class GracePeriodSignal @Inject constructor() {
     fun releaseUnhandedOffHold(requestId: String?, cancelled: Boolean) {
         if (requestId == null) return
         val hold = synchronized(windowLock) { outputHolds.remove(requestId) } ?: return
+        synchronized(windowLock) {
+            val key = requestId.lowercase()
+            releaseCounts[key] = (releaseCounts[key] ?: 0) + 1
+        }
         finishCloudTurn(hold, cancelled = cancelled, requestId = requestId)
     }
 

@@ -1,5 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
@@ -696,49 +698,107 @@ class ContributionStore(
         if (!wav.isFile || !meta.isFile) return null
         val declared = wav.length()
         if (declared < WavWriter.HEADER_BYTES || declared > limits.maxClipBytes) return null
-        // Header sanity: RIFF/WAVE + data size consistent with file length (byte_count includes hdr).
-        val header = ByteArray(12)
-        val readOk = runCatching { wav.inputStream().use { require(it.read(header) == 12) } }.isSuccess
-        if (!readOk) return null
-        val riff = String(header, 0, 4, Charsets.US_ASCII)
-        val wave = String(header, 8, 4, Charsets.US_ASCII)
-        if (riff != "RIFF" || wave != "WAVE") return null
-        // The canonical writer emits a fixed 44-byte layout: data size sits at offset 40 of the
-        // header; verify against file length WITHOUT reading the whole body into memory.
-        val sizeHeader = ByteArray(44)
-        val sizeRead = runCatching { wav.inputStream().use { require(it.read(sizeHeader) == 44) } }.isSuccess
-        if (!sizeRead) return null
-        val dSize = le32(sizeHeader, 40)
-        try {
-            if (WavWriter.HEADER_BYTES.toLong() + dSize != declared) return null
-            // Bounded read: never allocate more than the metadata bound, even for a corrupt or
-            // hostile on-disk file. Read limit+1 so an oversized file is REFUSED, not truncated.
-            if (meta.length() > limits.maxMetadataBytes) return null
-            val metaBytes = meta.inputStream().use { stream ->
-                val buf = ByteArray(limits.maxMetadataBytes + 1)
-                var total = 0
-                while (total < buf.size) {
-                    val n = stream.read(buf, total, buf.size - total)
-                    if (n < 0) break
-                    total += n
-                }
-                buf.copyOf(total)
-            }
-            if (metaBytes.size > limits.maxMetadataBytes) return null
-            val attempts = attemptsFile.takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull() ?: 0
-            // The Durable created-at sidecar is the age authority (a mutable test clock may
-            // diverge from filesystem time); mtime is only the fallback for legacy files.
-            val created = runCatching { File(dir, "$id$SUFFIX_CREATED").readText().trim().toLongOrNull() }.getOrNull() ?: wav.lastModified()
-            val epoch = metaBytes.toString(Charsets.UTF_8).let { EPOCH_RE.find(it)?.value?.substringAfter(':')?.trim()?.trim('"') ?: "" }
-            // Identity is bound to the EXACT retained metadata bytes: the digest recorded at prepare
-            // time is recomputed here, so tampering with the metadata content cannot be admitted.
-            val digest = sha256Hex(metaBytes)
-            val recordedDigest = File(dir, "$id$SUFFIX_DIGEST").takeIf { it.isFile }?.readText()?.trim()
-            if (recordedDigest != null && recordedDigest != digest) return null
-            return Entry(id, epoch, digest, declared, metaBytes.size, attempts, createdAtMs = created)
+        return try {
+            // --- Sidecars are BOUNDED reads with strict semantics (no defaults that renew budgets/age) ---
+            // A missing or malformed sidecar is a REFUSAL, never a default: defaulting attempts to 0
+            // would hand back a spent retry budget, and defaulting created-at to mtime would let a
+            // touched file silently renew its queue age.
+            val attempts = readBoundedSidecar(attemptsFile, MAX_ATTEMPTS_SIDECAR_BYTES)
+                ?.trim()?.toIntOrNull()?.takeIf { it >= 0 } ?: return null
+            val created = readBoundedSidecar(File(dir, "$id$SUFFIX_CREATED"), MAX_CREATED_SIDECAR_BYTES)
+                ?.trim()?.toLongOrNull()?.takeIf { it > 0 } ?: return null
+            // --- Mandatory digest identity: this on-disk format is unreleased, so there is NO legacy
+            // fallback. An absent, malformed or mismatched .sha256 refuses the entry. ---
+            val recordedDigest = readBoundedSidecar(File(dir, "$id$SUFFIX_DIGEST"), MAX_DIGEST_SIDECAR_BYTES)
+                ?.trim() ?: return null
+            if (!HEX_SHA256.matches(recordedDigest)) return null
+            // --- Metadata: bounded read, then parsed with the canonical parser (which itself
+            // rejects duplicate keys and non-finite numbers), NOT a regex. ---
+            val metaBytes = readBoundedBytes(meta, limits.maxMetadataBytes) ?: return null
+            val metaText = metaBytes.toString(Charsets.UTF_8)
+            if (sha256Hex(metaBytes) != recordedDigest) return null
+            val record = CanonicalJson.parse(metaText) as? RecordNode.Obj ?: return null
+            // --- Canonical record authority: the immutable record must describe THIS entry. ---
+            if ((record.fields["schema_version"] as? RecordNode.Num)?.value != 1.0) return null
+            if ((record.fields["capture_id"] as? RecordNode.Str)?.value != id) return null
+            val epoch = (record.fields["enrollment_epoch"] as? RecordNode.Str)?.value ?: return null
+            val audio = record.fields["audio"] as? RecordNode.Obj ?: return null
+            // Audio binding: the record declares the exact WAV identity (digest, byte count, format,
+            // rate, channels). A RIFF header sniff cannot establish this; the bytes must match.
+            if (((audio.fields["encoding"] as? RecordNode.Str)?.value) != "pcm_s16le") return null
+            if (((audio.fields["sample_rate_hz"] as? RecordNode.Num)?.value) != 16_000.0) return null
+            if (((audio.fields["channels"] as? RecordNode.Num)?.value) != 1.0) return null
+            val declaredByteCount = (audio.fields["byte_count"] as? RecordNode.Num)?.value?.toLong() ?: return null
+            if (declaredByteCount != declared) return null
+            val declaredAudioSha = (audio.fields["sha256"] as? RecordNode.Str)?.value ?: return null
+            if (!HEX_SHA256.matches(declaredAudioSha)) return null
+            val actualAudioSha = sha256FileBounded(wav, declared) ?: return null
+            if (actualAudioSha != declaredAudioSha) return null
+            // WAV container consistency (the canonical writer's fixed 44-byte layout).
+            val sizeHeader = ByteArray(WavWriter.HEADER_BYTES)
+            if (!readFully(wav, sizeHeader)) return null
+            if (String(sizeHeader, 0, 4, Charsets.US_ASCII) != "RIFF") return null
+            if (String(sizeHeader, 8, 4, Charsets.US_ASCII) != "WAVE") return null
+            if (le16(sizeHeader, 20) != 1) return null // PCM
+            if (le16(sizeHeader, 22) != 1) return null // mono
+            if (le32(sizeHeader, 24) != 16_000L) return null // sample rate
+            if (le16(sizeHeader, 34) != 16) return null // bits per sample
+            if (WavWriter.HEADER_BYTES.toLong() + le32(sizeHeader, 40) != declared) return null
+            Entry(id, epoch, recordedDigest, declared, metaBytes.size, attempts, createdAtMs = created)
         } catch (_: Exception) {
-            return null
+            null
         }
+    }
+
+    /** Read a small sidecar with a hard byte bound; null when absent, oversized or unreadable. */
+    private fun readBoundedSidecar(file: File, maxBytes: Int): String? {
+        if (!file.isFile || file.length() > maxBytes) return null
+        val bytes = readBoundedBytes(file, maxBytes) ?: return null
+        return bytes.toString(Charsets.UTF_8)
+    }
+
+    /** Read at most [maxBytes] bytes; null if the file is larger (refused, never truncated). */
+    private fun readBoundedBytes(file: File, maxBytes: Int): ByteArray? {
+        if (!file.isFile || file.length() > maxBytes) return null
+        val buf = ByteArray(maxBytes + 1)
+        var total = 0
+        file.inputStream().use { stream ->
+            while (total < buf.size) {
+                val n = stream.read(buf, total, buf.size - total)
+                if (n < 0) break
+                total += n
+            }
+        }
+        return if (total > maxBytes) null else buf.copyOf(total)
+    }
+
+    private fun readFully(file: File, into: ByteArray): Boolean = file.inputStream().use { stream ->
+        var total = 0
+        while (total < into.size) {
+            val n = stream.read(into, total, into.size - total)
+            if (n < 0) return false
+            total += n
+        }
+        true
+    }
+
+    /** Streamed SHA-256 over EXACTLY [expectedBytes]; null when the file length differs. */
+    private fun sha256FileBounded(file: File, expectedBytes: Long): String? {
+        if (file.length() != expectedBytes) return null
+        val md = MessageDigest.getInstance("SHA-256")
+        val buf = ByteArray(64 * 1024)
+        var total = 0L
+        file.inputStream().use { stream ->
+            while (true) {
+                val n = stream.read(buf)
+                if (n < 0) break
+                total += n
+                if (total > expectedBytes) return null
+                md.update(buf, 0, n)
+            }
+        }
+        if (total != expectedBytes) return null
+        return md.digest().joinToString("") { "%02x".format(it) }
     }
 
     /** Delete an entry's files; MUST be called while holding [lock]. */
@@ -824,10 +884,16 @@ class ContributionStore(
         private const val SAMPLE_RATE_HZ = 16_000L
         private const val SUFFIX_CREATED = ".created"
         private const val SUFFIX_DIGEST = ".sha256"
+        private const val MAX_ATTEMPTS_SIDECAR_BYTES = 32
+        private const val MAX_CREATED_SIDECAR_BYTES = 32
+        private const val MAX_DIGEST_SIDECAR_BYTES = 128
+        private val HEX_SHA256 = Regex("[0-9a-f]{64}")
         private val UUID_RE = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
         private val EPOCH_RE = Regex("\"enrollment_epoch\"\\s*:\\s*\"[^\"]+\"")
 
         private fun sha256Hex(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+        private fun le16(b: ByteArray, at: Int): Int = (b[at].toInt() and 0xFF) or ((b[at + 1].toInt() and 0xFF) shl 8)
 
         private fun le32(b: ByteArray, at: Int): Long = (b[at].toLong() and 0xFF) or ((b[at + 1].toLong() and 0xFF) shl 8) or ((b[at + 2].toLong() and 0xFF) shl 16) or ((b[at + 3].toLong() and 0xFF) shl 24)
 

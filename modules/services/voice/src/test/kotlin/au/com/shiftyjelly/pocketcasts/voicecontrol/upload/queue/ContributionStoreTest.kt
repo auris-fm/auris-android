@@ -1,5 +1,8 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.AudioBlock
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ContributionRecordBuilder
 import java.io.File
 import java.nio.file.Files
 import java.util.UUID
@@ -28,7 +31,35 @@ class ContributionStoreTest {
 
     private fun tempRoot(): File = Files.createTempDirectory("contrib").toFile()
 
-    private fun meta(captureId: String, epoch: String = "epoch-1"): ByteArray = ("""{"capture_id":"$captureId","enrollment_epoch": "$epoch"}""").toByteArray()
+    /**
+     * A REAL canonical record for the WAV that [chunks] produces: recovery now validates the metadata
+     * through the canonical parser and binds it to the actual audio bytes, so a stub JSON object is
+     * no longer a valid entry. Byte count and audio digest are computed from the exact WAV layout
+     * ([WavWriter]) the store writes.
+     */
+    private fun meta(captureId: String, epoch: String = "epoch-1", sampleCount: Int = 8): ByteArray {
+        val audio = wavBytes(sampleCount)
+        val block = AudioBlock(
+            sha256 = sha256HexForTest(audio),
+            byteCount = audio.size.toLong(),
+            retainedSamples = sampleCount.toLong(),
+            originalFormat = "pcm_s16le",
+            conversionVersion = "1",
+            truncated = false,
+            droppedSpans = emptyList(),
+        )
+        val record = ContributionRecordBuilder(captureId, epoch, 7L)
+            .build(platform = "android", appVersion = "8.20", build = "test", audio = block)
+        return CanonicalJson.canonicalBytes(record)
+    }
+
+    /** The exact WAV bytes the store writes for [sampleCount] samples (16 kHz mono pcm_s16le). */
+    private fun wavBytes(sampleCount: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        WavWriter.writeHeader(out, sampleCount)
+        WavWriter.writePcm(out, ShortArray(sampleCount) { i -> i.toShort() }, sampleCount)
+        return out.toByteArray()
+    }
 
     private fun sha256HexForTest(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
@@ -62,7 +93,7 @@ class ContributionStoreTest {
         assertNotNull(store.prepare(id, "epoch-1", chunks(16), meta(id)))
         // Record cap reached: deny BEFORE any copy; no new files appear.
         assertNull(store.admit(16, 100))
-        assertNull(store.prepare(UUID.randomUUID().toString(), "epoch-1", chunks(16), meta("x")))
+        assertNull(store.prepare(UUID.randomUUID().toString(), "epoch-1", chunks(16), meta(UUID.randomUUID().toString())))
     }
 
     @Test
@@ -551,42 +582,42 @@ class ContributionStoreTest {
 
     @Test
     fun `attempt bump cannot be attributed across a concurrent revocation`() {
-        // Finding 4: validation, index bump and the durable sidecar write are ONE section. A racing revoke can
-        // land before validation (refused) or after the section (consistent world), never between. The
-        // invariant: reported value, in-memory index and on-disk sidecar always agree.
+        // Reviewer correction: the ORIGINAL control reused one entry across 20 rounds and asserted a
+        // refused call left the sidecar at 0. That is wrong — an earlier round legitimately increments
+        // it, so the assertion could fail with no production defect (the "flake" I reported). The
+        // corrected invariant compares each refused call against ITS OWN pre-call baseline, and the
+        // pre/post revocation ordering is pinned with a barrier instead of a busy revoker loop.
         val root = tempRoot()
         val ownership = QueueOwnership()
         val fence = QueueFence(ownership)
         val store = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
-        store.prepare(ID_A, "epoch-A", chunks(8), meta(ID_A))
+        val dir = store.dirForTest()
         repeat(20) { round ->
+            // A FRESH entry per round: no cross-round carry-over can poison the baseline.
+            val id = UUID.randomUUID().toString()
+            assertNotNull(store.prepare(id, "epoch-A", chunks(8), meta(id)))
+            val sidecar = File(dir, "$id.attempts")
+            fun sidecarValue(): Int? = sidecar.takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull()
+
+            // --- Phase 1: a LIVE generation bump must be attributed and durable. ---
             val gen = fence.currentGeneration()
-            val stop = java.util.concurrent.atomic.AtomicBoolean(false)
-            val revoker = Thread {
-                while (!stop.get()) runCatching { fence.revoke() }
-            }.apply {
-                isDaemon = true
-                start()
-            }
-            val reported = store.recordAttempt(gen, ID_A)
-            stop.set(true)
-            revoker.join(5_000)
-            val live = store.readyEntries().firstOrNull { it.captureId == ID_A }
-            val sidecar = File(store.dirForTest(), "$ID_A.attempts").takeIf { it.isFile }?.readText()?.trim()
+            val before = sidecarValue() ?: 0
+            val reported = store.recordAttempt(gen, id)
             if (reported != null) {
-                assertNotNull("round $round: bump reported but the entry vanished", live)
-                assertEquals("round $round: reported/index disagree", reported, live!!.attempts)
-                assertEquals(
-                    "round $round: index/sidecar disagree (write escaped the ownership section)",
-                    live.attempts.toString(),
-                    sidecar,
-                )
-            } else {
-                assertTrue(
-                    "round $round: refused yet the sidecar advanced past the revoked generation",
-                    sidecar == null || sidecar == "0",
-                )
+                assertEquals("round $round: reported value must advance the baseline by one", before + 1, reported)
+                assertEquals("round $round: durable sidecar disagrees with the reported bump", reported, sidecarValue())
             }
+
+            // --- Phase 2: pin the revocation BEFORE the call, then assert against the pre-call baseline. ---
+            fence.revoke()
+            val baseline = sidecarValue()
+            val afterRevoke = store.recordAttempt(gen, id)
+            assertNull("round $round: a stale-generation bump was reported as successful", afterRevoke)
+            assertEquals(
+                "round $round: refused call WROTE the sidecar past its pre-call baseline",
+                baseline,
+                sidecarValue(),
+            )
         }
     }
 
@@ -975,5 +1006,88 @@ class ContributionStoreTest {
         assertFalse("unmarked final wav survived recovery", File(dir, "$orphanWav.recording.wav").exists())
         assertFalse("unmarked final meta survived recovery", File(dir, "$orphanWav.metadata.json").exists())
         assertFalse("foreign-named debris survived recovery", File(dir, foreign).exists())
+    }
+
+    // --- Reviewer round: mandatory digest identity, bounded sidecars, canonical record/WAV authority ---
+
+    @Test
+    fun `a missing digest sidecar refuses the entry - no legacy fallback`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val id = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        // Delete the digest sidecar AND change the metadata: without a mandatory digest the changed
+        // bytes would be accepted as their own identity.
+        File(root, "contributions/$id.sha256").delete()
+        File(root, "contributions/$id.metadata.json").writeBytes(meta(id, "epoch-evil"))
+        assertTrue("entry with no recorded digest was admitted", ContributionStore(root, QueueLimits.defaults()).recover().isEmpty())
+    }
+
+    @Test
+    fun `malformed sidecars refuse the entry instead of defaulting attempts or renewing age`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        // Malformed attempts: must refuse, not default to 0 and hand back a spent retry budget.
+        val id1 = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id1, "epoch-1", chunks(8), meta(id1)))
+        File(root, "contributions/$id1.attempts").writeText("not-a-number")
+        assertTrue("malformed attempts admitted", ContributionStore(root, QueueLimits.defaults()).recover().none { it.captureId == id1 })
+        // Malformed created-at: must refuse, not fall back to mtime and silently renew queue age.
+        val id2 = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id2, "epoch-1", chunks(8), meta(id2)))
+        File(root, "contributions/$id2.created").writeText("bogus")
+        assertTrue("malformed created-at admitted", ContributionStore(root, QueueLimits.defaults()).recover().none { it.captureId == id2 })
+        // Oversized attempts sidecar: bounded read refuses without allocating it.
+        val id3 = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id3, "epoch-1", chunks(8), meta(id3)))
+        File(root, "contributions/$id3.attempts").writeBytes(ByteArray(1024) { '9'.code.toByte() })
+        assertTrue("oversized attempts sidecar admitted", ContributionStore(root, QueueLimits.defaults()).recover().none { it.captureId == id3 })
+    }
+
+    @Test
+    fun `audio tampering is refused - the record binds the actual WAV bytes`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val id = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        val wav = File(root, "contributions/$id.recording.wav")
+        // Flip ONE PCM sample byte deep in the body, leaving the 44-byte header (and the declared
+        // byte_count) untouched: a header sniff cannot detect this, the audio digest must.
+        val bytes = wav.readBytes()
+        val target = WavWriter.HEADER_BYTES + 3
+        bytes[target] = (bytes[target].toInt() xor 0x01).toByte()
+        wav.writeBytes(bytes)
+        assertTrue("tampered audio admitted", ContributionStore(root, QueueLimits.defaults()).recover().isEmpty())
+    }
+
+    @Test
+    fun `record pointing at a different capture is refused`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val id = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        // Replace the metadata with a valid record for a DIFFERENT capture id, and update the digest
+        // sidecar so the digest check passes: only the capture-id binding can refuse this.
+        val other = UUID.randomUUID().toString()
+        val foreign = meta(other)
+        File(root, "contributions/$id.metadata.json").writeBytes(foreign)
+        File(root, "contributions/$id.sha256").writeText(sha256HexForTest(foreign))
+        assertTrue("record for another capture admitted", ContributionStore(root, QueueLimits.defaults()).recover().isEmpty())
+    }
+
+    @Test
+    fun `record declaring a wrong byte_count or sample format is refused`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val id = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        val valid = meta(id).toString(Charsets.UTF_8)
+        // Wrong byte_count in the record vs the actual file length, digest updated to match.
+        val wrongBytes = valid.replace("\"byte_count\"", "\"byte_count_x\"").replace("\"retained_samples\"", "\"retained_samples_x\"")
+        val bad = wrongBytes.replace("\"byte_count_x\":8", "\"byte_count_x\":9")
+        val badBytes = bad.toByteArray(Charsets.UTF_8)
+        File(root, "contributions/$id.metadata.json").writeBytes(badBytes)
+        File(root, "contributions/$id.sha256").writeText(sha256HexForTest(badBytes))
+        assertTrue("record with a wrong byte_count admitted", ContributionStore(root, QueueLimits.defaults()).recover().isEmpty())
     }
 }

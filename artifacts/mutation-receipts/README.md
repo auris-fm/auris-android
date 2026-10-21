@@ -100,3 +100,15 @@ Real executor→renderer controls, each asserting the stopped/cleared-before-rel
 
 Mutant receipts: `earcon-admission-release-RED.xml`, `never-started-supersession-orphan-RED.xml`
 (now committed at this head), plus round-2 receipts.
+
+## Release-before-clear mutant (reviewer 7a04a952)
+
+### Mutant: NonCancellable cleanup gate disabled
+**Production file:** `FakeTtsEngine.speak()` — the controllable output fake.
+**Change:** the `clearCompletedGate` await in NonCancellable cleanup is disabled (`if (false && ...)`),
+so the fake completes immediately without blocking — a premature-release implementation would pass
+the "hold survives while blocked" check trivially.
+**Test:** `cancellation holds the grace window until output clear completes, then releases exactly once`
+**RED XML:** `artifacts/mutation-receipts/release-before-clear-RED.xml`
+  - `cleanup must be requested (stop/clear in flight)` — the control detects the missing block.
+**GREEN:** full voice suite BUILD SUCCESSFUL with the gate restored.

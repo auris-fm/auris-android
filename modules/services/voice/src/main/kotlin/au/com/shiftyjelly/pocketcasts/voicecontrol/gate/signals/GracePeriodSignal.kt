@@ -276,7 +276,7 @@ class GracePeriodSignal @Inject constructor() {
      */
     fun finishOutputHold(requestId: String, cancelled: Boolean = false) {
         val hold = synchronized(windowLock) { outputHolds.remove(requestId) } ?: return
-        finishCloudTurn(hold, cancelled = cancelled)
+        finishCloudTurn(hold, cancelled = cancelled, requestId = requestId)
     }
 
     /** Test/diagnostic visibility: is [requestId]'s output hold still pending release? */
@@ -291,11 +291,11 @@ class GracePeriodSignal @Inject constructor() {
     fun releaseUnhandedOffHold(requestId: String?, cancelled: Boolean) {
         if (requestId == null) return
         val hold = synchronized(windowLock) { outputHolds.remove(requestId) } ?: return
-        finishCloudTurn(hold, cancelled = cancelled)
+        finishCloudTurn(hold, cancelled = cancelled, requestId = requestId)
     }
 
     /** Called after turn termination and local playback drain/clear, including failure cleanup. */
-    fun finishCloudTurn(hold: CloudTurnHold, cancelled: Boolean = false) {
+    fun finishCloudTurn(hold: CloudTurnHold, cancelled: Boolean = false, requestId: String? = null) {
         val armFor = synchronized(windowLock) {
             val before = cloudTurns.size
             val removed = cloudTurns.remove(hold)
@@ -311,6 +311,7 @@ class GracePeriodSignal @Inject constructor() {
                     },
                     Source.Grace, generation = generation, active = _isActive.value, holdsBefore = before, holdsAfter = cloudTurns.size,
                     owner = hold.owner, requestedGeneration = hold.generation,
+                    requestId = requestId,
                 ),
             )
             if (!removed) return@synchronized null

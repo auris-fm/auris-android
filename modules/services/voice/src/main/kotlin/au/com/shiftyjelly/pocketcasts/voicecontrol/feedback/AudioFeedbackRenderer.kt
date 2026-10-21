@@ -90,6 +90,9 @@ class AudioFeedbackRenderer(
      */
     private class RenderInvocation(val requestId: String?) {
         val superseded = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        /** Set when the coroutine body actually begins: a job cancelled before this point never ran its catch/finally. */
+        val started = java.util.concurrent.atomic.AtomicBoolean(false)
         lateinit var job: Job
     }
 
@@ -165,6 +168,7 @@ class AudioFeedbackRenderer(
         // Launched coroutine inherits the Job cancellation: when we cancel currentJob
         // above, any child suspend calls (like TtsEngine.speak) will be cancelled.
         val thisJob = scope.launch {
+            thisCall.started.set(true)
             try {
                 // Renderer ENTRY boundary (request received, not yet submitted).
                 if (requestId != null) {
@@ -715,8 +719,24 @@ class AudioFeedbackRenderer(
      * Called from `stopVoiceControl()`, which runs on EVERY stop. Because this type is a `@Singleton`,
      * treating that as disposal meant the next start had no feedback at all -- silently.
      */
+    /**
+     * Cancels an active invocation and, when its body never started (cancelled before the
+     * dispatcher ran it), records the ID-joined cancellation drop HERE — that job's catch/finally
+     * will never execute, so the cancel site is the only place the drop can be observed. The flag
+     * is marked so a body that DID start does not double-record through its own catch.
+     */
+    private fun cancelInvocation(invocation: RenderInvocation) {
+        if (!invocation.job.isActive) return
+        if (!invocation.started.get()) {
+            invocation.requestId?.let { recordDrop(it, "cancelled", "render_cancelled") }
+            invocation.superseded.set(true)
+            currentInvocation = null
+        }
+        invocation.job.cancel()
+    }
+
     fun endSession() {
-        currentInvocation?.job?.cancel()
+        currentInvocation?.let { cancelInvocation(it) }
         // End the cue's attribution HERE rather than letting an estimate cover it: the session is
         // stopping, so whatever the output was doing, the user is no longer hearing it and the gate
         // must stop treating it as ours.
@@ -756,6 +776,7 @@ class AudioFeedbackRenderer(
     /** Disposes the renderer for good. A later [render] or [playEarcon] is refused. */
     fun release() {
         disposed = true
+        currentInvocation?.let { cancelInvocation(it) }
         scope.cancel()
         earconPlayer.stopNow()
         earconPlayer.release()

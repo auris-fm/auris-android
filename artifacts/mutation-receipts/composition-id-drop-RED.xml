@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" tests="1" skipped="0" failures="1" errors="0" timestamp="2026-10-21T05:07:02.890Z" hostname="MacBook-Pro.local" time="10.808">
+<testsuite name="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" tests="1" skipped="0" failures="1" errors="0" timestamp="2026-10-21T05:17:54.984Z" hostname="MacBook-Pro.local" time="16.43">
   <properties/>
-  <testcase name="pre-Connected refusal joins request ID across transport, persisted log, service and renderer" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="10.606">
+  <testcase name="pre-Connected refusal joins request ID across transport, persisted log, service and renderer" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="15.987">
     <failure message="kotlinx.coroutines.TimeoutCancellationException: Timed out waiting for 5000 ms" type="kotlinx.coroutines.TimeoutCancellationException">kotlinx.coroutines.TimeoutCancellationException: Timed out waiting for 5000 ms
 	at _COROUTINE._BOUNDARY._(CoroutineDebugging.kt:42)
-	at au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest$awaitCaptureLine$2.invokeSuspend(CloudRouteSinkTest.kt:3953)
-	at au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest$pre-Connected refusal joins request ID across transport, persisted log, service and renderer$1.invokeSuspend(CloudRouteSinkTest.kt:3933)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest$awaitCaptureLine$2.invokeSuspend(CloudRouteSinkTest.kt:3968)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest$pre-Connected refusal joins request ID across transport, persisted log, service and renderer$1.invokeSuspend(CloudRouteSinkTest.kt:3948)
+	Suppressed: org.robolectric.android.internal.AndroidTestEnvironment$UnExecutedRunnablesException: Main looper has queued unexecuted runnables. This might be the cause of the test failure. You might need a shadowOf(Looper.getMainLooper()).idle() call.
 Caused by: kotlinx.coroutines.TimeoutCancellationException: Timed out waiting for 5000 ms
 	at kotlinx.coroutines.TimeoutKt.TimeoutCancellationException(Timeout.kt:281)
 	at kotlinx.coroutines.TimeoutCoroutine.run(Timeout.kt:243)
@@ -15,15 +16,9 @@ Caused by: kotlinx.coroutines.TimeoutCancellationException: Timed out waiting fo
 	at java.base/java.lang.Thread.run(Thread.java:1583)
 </failure>
   </testcase>
-  <system-out><![CDATA[COMPOSITION-LOG I 21/10 13:07:08.190 seq=4 elapsed_ms=100 unix_ms=1792559228190 pid=0 event=Turn reason=TurnSocketSendComplete source=Cloud window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null o
-COMPOSITION-LOG I 21/10 13:07:08.191 seq=5 elapsed_ms=100 unix_ms=1792559228191 pid=0 event=Turn reason=TurnSocketSendComplete source=Cloud window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null o
-COMPOSITION-LOG I 21/10 13:07:08.197 seq=6 elapsed_ms=100 unix_ms=1792559228196 pid=0 event=Turn reason=TurnTerminalReceived source=Cloud window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null own
-COMPOSITION-LOG I 21/10 13:07:08.206 seq=7 elapsed_ms=100 unix_ms=1792559228206 pid=0 event=Turn reason=TurnFeedbackSelected source=Cloud window=1 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=
-COMPOSITION-LOG I 21/10 13:07:08.208 seq=8 elapsed_ms=100 unix_ms=1792559228208 pid=0 event=Turn reason=TurnFailed source=Cloud window=0 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=1 requeste
-COMPOSITION-LOG I 21/10 13:07:08.209 seq=9 elapsed_ms=100 unix_ms=1792559228208 pid=0 event=Turn reason=TurnFeedbackSelected source=Cloud window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null own
-]]></system-out>
+  <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[Mockito is currently self-attaching to enable the inline-mock-maker. This will no longer work in future releases of the JDK. Please add Mockito as an agent to your build as described in Mockito's documentation: https://javadoc.io/doc/org.mockito/mockito-core/latest/org.mockito/org/mockito/Mockito.html#0.3
-WARNING: A Java agent has been loaded dynamically (/var/folders/v3/wk_148693jd3sk8490hmflxm0000gn/T/byteBuddyAgent3331323362548285529.jar)
+WARNING: A Java agent has been loaded dynamically (/var/folders/v3/wk_148693jd3sk8490hmflxm0000gn/T/byteBuddyAgent12743654968827075243.jar)
 WARNING: If a serviceability tool is in use, please run with -XX:+EnableDynamicAgentLoading to hide this warning
 WARNING: If a serviceability tool is not in use, please run with -Djdk.instrument.traceUsage for more information
 WARNING: Dynamic loading of agents will be disallowed by default in a future release

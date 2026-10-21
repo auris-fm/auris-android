@@ -18,6 +18,14 @@ class StoreHooks(
 
     /** Invoked inside the ownership section immediately before the durable attempts sidecar write. */
     val beforeAttemptWrite: ((Long) -> Unit)? = null,
+
+    /**
+     * Invoked for each directory entry the footprint measurement enumerates, with the number already
+     * yielded. Reviewer e4c9a80d requires a control that fails AFTER a child was yielded, not only at open:
+     * iteration and close failures must still become unknown accounting. A hook that throws here simulates
+     * exactly that.
+     */
+    val onMeasurementEntry: ((Int) -> Unit)? = null,
 ) {
     companion object {
         val NONE = StoreHooks()

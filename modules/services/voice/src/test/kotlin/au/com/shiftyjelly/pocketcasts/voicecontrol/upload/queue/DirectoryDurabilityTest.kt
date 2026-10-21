@@ -1020,6 +1020,129 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `a measurement failure AFTER a child was yielded is unknown accounting`() {
+        // reviewer e4c9a80d: open failure alone is not enough. Iteration and close can throw too, and those
+        // failures previously escaped as raw IO/runtime errors, bypassing the unmeasured transition.
+        val root = tmp.newFolder("queue-fail-mid-iteration")
+        val id = java.util.UUID.randomUUID().toString()
+        val writer = ContributionStore(root, limits())
+        assertTrue("precondition: prepare", writer.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        File(root, "disqualified").mkdirs()
+        File(root, "disqualified/$id").writeText("disqualified")
+
+        // Make a sidecar a directory with TWO entries, so the fault lands after one was yielded.
+        val ready = File(File(root, "contributions"), "$id.ready")
+        ready.delete()
+        ready.mkdirs()
+        File(ready, "one").writeBytes(ByteArray(8))
+        File(ready, "two").writeBytes(ByteArray(8))
+
+        var yielded = 0
+        val reader = ContributionStore(
+            root,
+            limits(),
+            hooks = StoreHooks(
+                onMeasurementEntry = { count ->
+                    yielded = count
+                    // Yield at least one child, then fail mid-iteration.
+                    if (count >= 1) throw java.io.UncheckedIOException(java.io.IOException("injected mid-iteration failure"))
+                },
+            ),
+        )
+        reader.recover()
+
+        assertTrue("precondition: a child was yielded before the failure (yielded=$yielded)", yielded >= 1)
+        assertTrue(
+            "a mid-iteration failure must become unknown accounting (failures=${reader.measurementFailures})",
+            reader.measurementFailures >= 1L,
+        )
+        assertTrue("and it must refuse admission", reader.unknownFootprintForTest())
+    }
+
+    @Test
+    fun `an oversized sidecar sum is unknown accounting, not a clamp`() {
+        // reviewer e4c9a80d: clamping an oversized sum UNDERSTATES the charge - a residue larger than the
+        // metadata channel would be reported as Int.MAX_VALUE and look measurable. It must become unknown.
+        // Build a sidecar whose measured size exceeds Int.MAX_VALUE without writing 2 GiB by counting a
+        // sparse file that reports a huge logical length.
+        val root = tmp.newFolder("queue-oversized-sidecar")
+        val id = java.util.UUID.randomUUID().toString()
+        val store = ContributionStore(root, limits())
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+
+        val contributions = File(root, "contributions")
+        val digest = File(contributions, "$id.sha256")
+        digest.delete()
+        val huge = java.nio.file.Files.newByteChannel(
+            digest.toPath(),
+            java.util.EnumSet.of(
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.WRITE,
+            ),
+        ).use { channel ->
+            channel.position(Int.MAX_VALUE.toLong() + 1024L)
+            channel.write(java.nio.ByteBuffer.wrap(byteArrayOf(0)))
+        }
+        assertTrue("precondition: sparse file is oversized", digest.length() > Int.MAX_VALUE)
+
+        // Disqualify so the capture is charged WITHOUT validation, which would otherwise reject the
+        // oversized digest and drop the entry before any measurement of it happens.
+        File(root, "disqualified").mkdirs()
+        File(root, "disqualified/$id").writeText("disqualified")
+
+        val fresh = ContributionStore(root, limits())
+        fresh.recover()
+
+        assertTrue(
+            "an unrepresentable sidecar sum must be unknown accounting (failures=${fresh.measurementFailures})",
+            fresh.measurementFailures >= 1L,
+        )
+        assertTrue("and it must refuse admission", fresh.unknownFootprintForTest())
+    }
+
+    @Test
+    fun `an ADOPTED entry whose measurement failed is not served`() {
+        // reviewer e4c9a80d recipe: an UNRECOVERED store, a valid entry written by a SEPARATE owner, and
+        // expireOlderThan called BEFORE anything marks the target store recovered. reloadUnownedFromDisk is
+        // gated on `!recovered`, so any earlier recover()/readyEntries()/admit() on this instance would
+        // disable the very path under test - which is what defeated my earlier attempts.
+        val root = tmp.newFolder("queue-adopt-unmeasured")
+        val id = java.util.UUID.randomUUID().toString()
+
+        // Separate owner publishes a complete, valid entry.
+        val writer = ContributionStore(root, limits())
+        assertTrue("precondition: prepare", writer.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+
+        // Make a SIDECAR unmeasurable while leaving the entry VALID. Burying the digest would fail
+        // validation (it is read as content), so the debris goes under the .ready marker, which is only
+        // ever tested for existence - the entry still adopts, and the measurement still fails.
+        val readyMarker = File(File(root, "contributions"), "$id.ready")
+        assertTrue("precondition: ready marker exists", readyMarker.isFile)
+        readyMarker.delete()
+        readyMarker.mkdirs()
+        var deep = readyMarker
+        repeat(measureDepthPastBound) {
+            deep = File(deep, "d")
+            deep.mkdirs()
+        }
+        File(deep, "tail.bin").writeBytes(ByteArray(16))
+
+        // A fresh, UNRECOVERED store adopts from disk on its first expireOlderThan.
+        val reader = ContributionStore(root, limits())
+        reader.expireOlderThan()
+
+        assertTrue(
+            "the adopt branch must have measured and failed (${reader.measurementFailures})",
+            reader.measurementFailures >= 1L,
+        )
+        assertTrue("accounting must be unknown", reader.unknownFootprintForTest())
+        assertTrue(
+            "an entry whose measurement failed must not be served, but readyEntries() returned it",
+            reader.readyEntries().none { it.captureId == id },
+        )
+    }
+
+    @Test
     fun `an UNMEASURABLE capture refuses admission instead of being charged a guess`() {
         // reviewer e6eeabda / 7340fe2d: a per-capture worst case cannot bound arbitrary retained debris.
         // Unknown accounting must REFUSE admission until the capture is successfully measured or removed.

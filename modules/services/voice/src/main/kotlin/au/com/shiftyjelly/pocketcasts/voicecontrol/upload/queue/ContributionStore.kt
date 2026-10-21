@@ -1232,24 +1232,48 @@ class ContributionStore(
         if (depth >= MEASURE_MAX_DEPTH) throw MeasurementError("subtree deeper than $MEASURE_MAX_DEPTH")
         // A real lazy stream. `list()` and `listFiles()` both allocate the WHOLE directory eagerly, so a
         // budget checked after either has already paid the cost the bound exists to prevent.
-        val children = try {
-            java.nio.file.Files.newDirectoryStream(directory.toPath())
-        } catch (failure: java.io.IOException) {
-            throw MeasurementError("unreadable directory $directory: ${failure.message}")
-        }
-        children.use { stream ->
-            var total = 0L
-            for (child in stream) {
-                if (!budget.consume()) throw MeasurementError("traversal exceeds $MEASURE_MAX_ENTRIES entries")
-                total += measuredPathBytes(
-                    child.toFile(),
-                    budget,
-                    depth + 1,
-                    optional = false, // enumerated: it existed a moment ago
-                )
+        // The WHOLE lifetime is wrapped, not just the open: iteration can throw
+        // DirectoryIteratorException and close can throw IOException, and either would escape as a raw
+        // runtime/IO failure instead of becoming unknown accounting (reviewer e4c9a80d).
+        var total = 0L
+        var yielded = 0
+        var yieldedCount = 0
+        try {
+            java.nio.file.Files.newDirectoryStream(directory.toPath()).use { stream ->
+                for (child in stream) {
+                    if (!budget.consume()) throw MeasurementError("traversal exceeds $MEASURE_MAX_ENTRIES entries")
+                    // Injected AFTER a child was yielded: proves the failure is normalized mid-iteration.
+                    hooks.onMeasurementEntry?.invoke(yielded++)
+                    yieldedCount = yielded
+                    total = checkedAdd(
+                        total,
+                        measuredPathBytes(
+                            child.toFile(),
+                            budget,
+                            depth + 1,
+                            optional = false, // enumerated: it existed a moment ago
+                        ),
+                    )
+                }
             }
-            return total
+        } catch (unknown: MeasurementError) {
+            throw unknown
+        } catch (failure: java.io.IOException) {
+            // Covers open, per-entry iteration and close, including DirectoryIteratorException.
+            throw MeasurementError("unreadable directory $directory: ${failure.message}")
+        } catch (failure: RuntimeException) {
+            // Anything else raised while iterating or closing - including an injected fault after a child
+            // was yielded - normalizes to unknown accounting rather than escaping as a raw failure.
+            throw MeasurementError("measurement failed after $yieldedCount entries in $directory: ${failure.message}")
         }
+        return total
+    }
+
+    // Checked accumulation: a wrapped sum is a SMALLER charge, i.e. an understated one. Refuse instead.
+    private fun checkedAdd(left: Long, right: Long): Long = try {
+        Math.addExact(left, right)
+    } catch (overflow: ArithmeticException) {
+        throw MeasurementError("footprint overflows: $left + $right")
     }
 
     // ONE shared budget for a whole measurement, so the bound is on the traversal and not on each call.
@@ -1264,9 +1288,18 @@ class ContributionStore(
         // Top-level artifacts: a capture may legitimately never have written any one of them, so absence
         // is a real zero here. Everything below them is enumerated and must account for itself.
         val audio = measuredPathBytes(File(dir, "$id$SUFFIX_WAV"), budget, optional = true)
-        val rest = SIDECAR_SUFFIXES.sumOf { measuredPathBytes(File(dir, "$id$it"), budget, optional = true) } +
-            measuredPathBytes(disqualificationMarker(id), budget, optional = true)
-        return audio to rest.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+        var rest = 0L
+        for (suffix in SIDECAR_SUFFIXES) {
+            rest = checkedAdd(rest, measuredPathBytes(File(dir, "$id$suffix"), budget, optional = true))
+        }
+        rest = checkedAdd(rest, measuredPathBytes(disqualificationMarker(id), budget, optional = true))
+        // No saturating clamp. `coerceIn(0, Int.MAX_VALUE)` made an oversized residue look SMALLER than it
+        // is - an understated charge is worse than a refused one (reviewer e4c9a80d). A rest figure that
+        // does not fit the metadata channel is unrepresentable, so it becomes unknown accounting.
+        if (rest < 0L || rest > Int.MAX_VALUE.toLong()) {
+            throw MeasurementError("sidecar footprint unrepresentable: $rest")
+        }
+        return audio to rest.toInt()
     }
 
     // Captures whose retained footprint could not be measured. While ANY exist the true owner usage is
@@ -1340,11 +1373,13 @@ class ContributionStore(
                 continue
             }
             val adopted = validate(id, wav, meta, attemptsFile)
+            println("DIAGBRANCH adopt id=$id adopted=${adopted != null}")
             if (adopted != null && confirmDurableLocked(id)) {
                 // CHARGE FIRST, then publish to the in-memory index. The reverse order left a servable
                 // entry behind when the measurement failed: `memoryEntries` still held it, so readiness
                 // came from the index rather than from a measurement that succeeded (reviewer c66fda06).
                 chargeRetainedLocked(id, ready = true)
+                println("DIAGBRANCH charged-ready=${ownedCharges[id]?.ready}")
                 if (ownedCharges[id]?.ready == true) {
                     memoryEntries[id] = adopted
                 } else {

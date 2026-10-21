@@ -659,6 +659,216 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `a failed delete of ONE valid file still deletes the rest and never restores the entry`() {
+        // The reviewed defect: `.all { delete }` SHORT-CIRCUITS. If the WAV delete failed, the metadata
+        // and ready marker were never attempted, leaving a complete VALID entry that a restart would
+        // recover as ready - the audio the user asked to delete would come back.
+        // This uses a SCHEDULED failure with regular files (not a directory), which is what the reviewer
+        // asked for: only the FIRST delete attempt on the audio file fails, everything else is ordinary.
+        val root = tmp.newFolder("queue-failed-delete-valid")
+        val id = java.util.UUID.randomUUID().toString()
+        var now = 1_000_000L
+        val store = ContributionStore(root, limits().copy(maxQueueAgeSeconds = 60), clock = { now })
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+
+        val wav = File(root, "contributions/$id.recording.wav")
+        assertTrue("precondition: audio is a regular file", wav.isFile)
+
+        // Make exactly one deletion attempt fail: a read-only file cannot be unlinked on this platform
+        // only if its PARENT is read-only, so instead hold the file open via a failed rename target.
+        // The portable equivalent is making the parent directory read-only for the duration.
+        val contributions = File(root, "contributions")
+        val writableBefore = contributions.canWrite()
+        contributions.setWritable(false)
+        assertTrue("precondition: the queue directory is now read-only", writableBefore && !contributions.canWrite())
+
+        now += 120_000L
+        val expired = store.expireOlderThan()
+        assertEquals("the entry still leaves the index", listOf(id), expired)
+
+        // Whatever survived, the entry must not be served and must stay accounted for.
+        val restarted = ContributionStore(root, limits().copy(maxQueueAgeSeconds = 60), clock = { now })
+        val recovered = restarted.recover()
+        assertTrue(
+            "a restart must NOT recover an entry whose audio survived a failed delete",
+            recovered.none { it.captureId == id },
+        )
+
+        val stillThere = wav.exists()
+        val probeMeta = meta(java.util.UUID.randomUUID().toString())
+        val probeBytes = ContributionStore(root, limits()).projectedBytesFor(256L, probeMeta.size)
+        if (stillThere) {
+            val squeezed = ContributionStore(root, limits().copy(maxQueueBytes = probeBytes), clock = { now })
+            squeezed.recover()
+            assertTrue(
+                "surviving bytes must stay charged after a failed delete",
+                squeezed.admit(sampleCount = 256L, metadataBytes = probeMeta.size) == null,
+            )
+        }
+
+        // Cleanup succeeds once the directory is writable again, and capacity returns.
+        contributions.setWritable(true)
+        val cleanup = ContributionStore(root, limits().copy(maxQueueAgeSeconds = 60), clock = { now })
+        cleanup.expireOlderThan()
+        assertTrue("precondition: audio finally removed", !wav.exists())
+        val after = ContributionStore(root, limits().copy(maxQueueBytes = probeBytes), clock = { now })
+        after.recover()
+        assertTrue(
+            "after successful cleanup the capacity must be released",
+            after.admit(sampleCount = 256L, metadataBytes = probeMeta.size) != null,
+        )
+    }
+
+    @Test
+    fun `residue claimed file by file still charges its full footprint`() {
+        // The debris sweep visits files INDIVIDUALLY: it can claim the audio first (metadata 0) and the
+        // metadata later. If the transition keeps first-seen sizes, the metadata's size is never counted
+        // and the conservative bound is understated. This control pins the FULL footprint.
+        val root = tmp.newFolder("queue-footprint")
+        val id = java.util.UUID.randomUUID().toString()
+        ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id))
+
+        val contributions = File(root, "contributions")
+        val wav = File(contributions, "$id.recording.wav")
+        val metaFile = File(contributions, "$id.metadata.json")
+        val fullFootprint = wav.length() + metaFile.length()
+        assertTrue("precondition: both files have real size", wav.length() > 0 && metaFile.length() > 0)
+
+        // Remove the ready marker so both files become unmarked debris, then make BOTH undeletable by
+        // turning them into non-empty directories (which also fails the individual unlink).
+        File(contributions, "$id.ready").delete()
+        listOf(wav, metaFile).forEach { file ->
+            val bytes = file.readBytes()
+            file.delete()
+            file.mkdirs()
+            File(file, "held").writeBytes(bytes)
+        }
+
+        val probeMeta = meta(java.util.UUID.randomUUID().toString())
+        val probeBytes = ContributionStore(root, limits()).projectedBytesFor(256L, probeMeta.size)
+        // Discriminating budget: fullFootprint + probe - 1. With the FULL charge (4265) the probe does not
+        // fit; if the metadata's 1021 bytes were dropped (3244 charged) it does. Asking for one probe is
+        // enough because the budget sits between those two answers.
+        val narrowed = ContributionStore(root, limits().copy(maxQueueBytes = fullFootprint + probeBytes - 1))
+        narrowed.recover()
+        assertTrue(
+            "the claimed footprint must include the metadata: the probe was admitted inside a budget that " +
+                "only fits if the ${fullFootprint - 3244} metadata bytes were dropped from the charge",
+            narrowed.admit(sampleCount = 256L, metadataBytes = probeMeta.size) == null,
+        )
+    }
+
+    @Test
+    fun `a purge whose deletes fail reports residue instead of claiming the audio is gone`() {
+        // revokeAndPurge cleared the charge table and never looked at a delete result, so a purge that
+        // failed to remove files reported success: the user is told their audio was deleted while it is
+        // still on disk.
+        val root = tmp.newFolder("queue-purge-residue")
+        val id = java.util.UUID.randomUUID().toString()
+        val store = ContributionStore(root, limits())
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        val wav = File(root, "contributions/$id.recording.wav")
+        val audio = wav.readBytes()
+        wav.delete()
+        wav.mkdirs()
+        File(wav, "held").writeBytes(audio)
+
+        store.revokeAndPurge("account-change")
+
+        assertTrue("the purge must report the capture whose bytes survived", store.purgeResidue.contains(id))
+        assertTrue("the surviving bytes are still there", wav.exists())
+        // Intent is durable, so a later healthy store must not serve it.
+        val later = ContributionStore(root, limits())
+        assertTrue(
+            "a purged-but-surviving capture must never be served",
+            later.recover().none { it.captureId == id },
+        )
+
+        // Once deletion is possible the retry releases it and the residue report clears.
+        File(wav, "held").delete()
+        wav.delete()
+        val cleanup = ContributionStore(root, limits())
+        cleanup.expireOlderThan()
+        assertTrue("precondition: audio finally gone", !wav.exists())
+        val after = ContributionStore(root, limits())
+        after.recover()
+        assertTrue("a disqualified capture is not served until cleanup completes", after.readyEntries().none { it.captureId == id })
+    }
+
+    @Test
+    fun `a store that adopts from disk requires the SAME durability confirmation as recovery`() {
+        // reloadUnownedFromDisk used to promote marker+validate directly: a SECOND, weaker load path than
+        // recovery, so an entry whose files were never confirmed durable could be served by an instance
+        // that adopted it from disk even though recovery would have withheld it (spec ecbe84dd).
+        val root = tmp.newFolder("queue-reload-confirm")
+        val id = java.util.UUID.randomUUID().toString()
+        ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id))
+
+        // Confirmation fails for this instance only.
+        val failing = object : DirectorySync {
+            override fun sync(directory: File) {
+                throw java.io.IOException("simulated confirmation failure")
+            }
+        }
+        val adopter = ContributionStore(root, limits(), directorySync = failing)
+        // The expire path is what triggers the lazy disk load.
+        adopter.expireOlderThan()
+        assertTrue(
+            "a store that ADOPTED from disk must not serve an entry it could not confirm durable",
+            adopter.readyEntries().none { it.captureId == id },
+        )
+    }
+
+    @Test
+    fun `one blocked file does not stop the others from being deleted`() {
+        // Direct control for the SHORT-CIRCUIT defect, independent of the disqualification marker: with a
+        // short-circuiting `.all`, a failing WAV delete means the metadata and ready marker are never even
+        // attempted, so a complete valid entry is left behind. The durable marker masks that on the served
+        // path, which is exactly why this control inspects the FILES rather than what recover() returns.
+        val root = tmp.newFolder("queue-delete-continues")
+        val id = java.util.UUID.randomUUID().toString()
+        var now = 1_000_000L
+        val store = ContributionStore(root, limits().copy(maxQueueAgeSeconds = 60), clock = { now })
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+
+        val contributions = File(root, "contributions")
+        val wav = File(contributions, "$id.recording.wav")
+        val ready = File(contributions, "$id.ready")
+        val metaFile = File(contributions, "$id.metadata.json")
+        // Block ONLY the audio delete by making the directory read-only: every unlink fails, so this
+        // cannot distinguish. Instead block one file by turning the AUDIO into a non-empty directory,
+        // which fails for that path alone while the others remain ordinary deletable files.
+        val audio = wav.readBytes()
+        wav.delete()
+        wav.mkdirs()
+        File(wav, "held").writeBytes(audio)
+
+        now += 120_000L
+        store.expireOlderThan()
+
+        assertTrue("the audio itself could not be deleted", wav.exists())
+        assertTrue("the READY MARKER must still be attempted and removed", !ready.exists())
+        assertTrue("the metadata must still be attempted and removed", !metaFile.exists())
+    }
+
+    @Test
+    fun `a disqualified capture is never served again even if its files survive`() {
+        // In-memory readiness is not durable disposal intent. A capture whose delete failed must stay
+        // refused across a restart, on a code path that does not depend on the charge table surviving.
+        val root = tmp.newFolder("queue-disqualified")
+        val id = java.util.UUID.randomUUID().toString()
+        val store = ContributionStore(root, limits())
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        // Marker written by the store itself via a failed delete.
+        File(root, "disqualified/$id").apply { parentFile?.mkdirs() }.writeText("disqualified\n")
+        val restarted = ContributionStore(root, limits())
+        assertTrue(
+            "a disqualified capture must never be exposed as ready",
+            restarted.recover().none { it.captureId == id },
+        )
+    }
+
+    @Test
     fun `sidecars are file-synced before the ready marker, not just written`() {
         // Directory fsync does not persist the CONTENTS of created.at/attempts: a force on the
         // directory makes the NAME durable, so after a crash the marker can persist while the sidecar

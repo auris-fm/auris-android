@@ -583,6 +583,114 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `a FRESH store charges entries it cannot confirm, not just ones it prepared`() {
+        // The physical resource bound applies after a restart too. A fresh store that only charged entries
+        // it had itself prepared would see an empty queue on disk and admit new work up to the FULL budget
+        // on top of data already there - the same over-commit as the uncertain-entry bug, one lifecycle
+        // later.
+        val root = tmp.newFolder("queue-fresh-capacity")
+        val prepId = java.util.UUID.randomUUID().toString()
+        ContributionStore(root, limits()).prepare(prepId, "epoch-1", chunks(1600), meta(prepId))
+
+        val onDisk = File(root, "contributions").listFiles()!!.sumOf { it.length() }
+        assertTrue("precondition: bytes on disk ($onDisk)", onDisk > 0)
+
+        // The probe must be SMALLER than one stored entry, otherwise it is refused for being too big
+        // regardless of accounting and the control proves nothing. That is exactly how the first version of
+        // this test let a mutant survive: it asked for a 16556-byte clip against a 4343-byte budget.
+        val probeSamples = 256L
+        val probeMeta = meta(java.util.UUID.randomUUID().toString())
+        val probeBytes = ContributionStore(root, limits()).projectedBytesFor(probeSamples, probeMeta.size)
+        assertTrue("precondition: the probe fits within one entry ($probeBytes <= $onDisk)", probeBytes <= onDisk)
+
+        // A fresh store whose budget is exactly what is on disk must refuse the probe, because the bytes
+        // already stored consume the entire budget.
+        val fresh = ContributionStore(root, limits().copy(maxQueueBytes = onDisk), directorySync = RecordingSync())
+        assertEquals("the fresh store confirms the existing entry", listOf(prepId), fresh.recover().map { it.captureId })
+        assertTrue(
+            "a fresh store must charge the entries it recovered: probe admitted over full-budget disk data",
+            fresh.admit(sampleCount = probeSamples, metadataBytes = probeMeta.size) == null,
+        )
+        // Complement: with headroom the SAME probe must succeed, so the control discriminates.
+        val roomy = ContributionStore(root, limits().copy(maxQueueBytes = onDisk + probeBytes), directorySync = RecordingSync())
+        roomy.recover()
+        assertTrue(
+            "the control must be discriminating: the same probe with headroom must succeed",
+            roomy.admit(sampleCount = probeSamples, metadataBytes = probeMeta.size) != null,
+        )
+    }
+
+    @Test
+    fun `uncertain entries count against the RECORD bound too`() {
+        // Byte accounting and record accounting are separate bounds, and the record count was the one that
+        // disagreed between the two admission paths. Use a byte budget that cannot bind.
+        val root = tmp.newFolder("queue-record-bound")
+        val store = ContributionStore(
+            root,
+            limits().copy(maxQueueRecords = 2, maxQueueBytes = 64L * 1024 * 1024),
+            directorySync = RecordingSync(),
+        )
+        repeat(2) {
+            val id = java.util.UUID.randomUUID().toString()
+            assertTrue("precondition: prepare $it", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+            store.recover()
+        }
+        // Two records are stored; the third must be refused on the RECORD bound, not the byte bound.
+        assertTrue(
+            "an uncertain/ready entry must occupy a record slot: admission beyond maxQueueRecords succeeded",
+            store.admit(sampleCount = 1600, metadataBytes = meta(java.util.UUID.randomUUID().toString()).size) == null,
+        )
+    }
+
+    @Test
+    fun `reconciling an uncertain entry does not double-count its bytes or records`() {
+        // The leak the separate-maps design produced: reconciliation re-added the capture while its
+        // uncertain charge stayed, so bytes and records were charged twice for the entry's whole life.
+        //
+        // The discriminating store must (a) be tight enough that one charge fits and two do not, and (b)
+        // be the instance that itself withheld and reconciled the entry, so the double-count actually
+        // occurs in the branch under test. A fresh store over the same files would take the foreign path,
+        // where there is no prior charge to duplicate, and every version of this mutant would survive.
+        //
+        // Sizes are fixed by the fixture, so the budget is derived from a probe store first.
+        val id = java.util.UUID.randomUUID().toString()
+        val tinyMeta = meta(java.util.UUID.randomUUID().toString())
+        val tinySamples = 256L
+        val sizing = tmp.newFolder("queue-reconcile-sizing")
+        val probeStore = ContributionStore(sizing, limits())
+        assertTrue("precondition: prepare", probeStore.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        val charge = probeStore.readyEntries().single().let { it.audioBytes + it.metadataBytes }
+        val probeBytes = probeStore.projectedBytesFor(tinySamples, tinyMeta.size)
+        assertTrue("precondition: charge ($charge) exceeds probe ($probeBytes)", charge > probeBytes)
+
+        // One charge plus the probe fits; two charges plus the probe does not.
+        val budget = charge + probeBytes
+        val root = tmp.newFolder("queue-reconcile-accounting")
+        var failSyncs = false
+        val gated = object : DirectorySync {
+            override fun sync(directory: File) {
+                if (failSyncs) throw java.io.IOException("simulated confirmation failure")
+            }
+        }
+        val store = ContributionStore(root, limits().copy(maxQueueBytes = budget), directorySync = gated)
+        assertTrue("precondition: prepare on the budgeted store", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+
+        failSyncs = true
+        store.recover()
+        assertTrue("withheld", store.readyEntries().isEmpty())
+
+        failSyncs = false
+        assertEquals("reconciled back to ready", listOf(id), store.recover().map { it.captureId })
+        assertEquals("and ready", listOf(id), store.readyEntries().map { it.captureId })
+
+        assertTrue(
+            "a reconciled entry must be charged ONCE: a $probeBytes-byte probe must fit a $budget-byte budget " +
+                "alongside one $charge-byte charge",
+            store.admit(sampleCount = tinySamples, metadataBytes = tinyMeta.size) != null,
+        )
+    }
+
+    @Test
     fun `sidecars are file-synced before the ready marker, not just written`() {
         // Directory fsync does not persist the CONTENTS of created.at/attempts: a force on the
         // directory makes the NAME durable, so after a crash the marker can persist while the sidecar

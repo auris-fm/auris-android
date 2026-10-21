@@ -201,16 +201,21 @@ class ContributionStore(
      */
     private fun liveReservationBytesLocked(): Long = reservations.values.sumOf { it }
 
+    /**
+     * THE single definition of what this owner already occupies. Both admission paths call it, so they
+     * cannot disagree: owner charges (ready AND uncertain alike - the files are on disk either way) plus
+     * any live reservation. [exclude] drops one reservation, for re-checking an attempt that already
+     * holds it.
+     */
+    private fun ownerBytesLocked(exclude: String? = null): Long = ownedCharges.values.sumOf { it.bytes } +
+        reservations.entries.filterNot { it.key == exclude }.sumOf { it.value }
+
+    /** Records occupied = every owned capture (ready or uncertain) + live reservations. */
+    private fun ownerRecordsLocked(exclude: String? = null): Int = ownedCharges.size + reservations.keys.count { it != exclude }
+
     /** Re-check budgets at publication time (a purge/expiry may have moved them since admission). */
-    private fun roomForPublicationLocked(admission: Admission): Boolean {
-        val others = reservations.entries.filterNot { it.key == admission.id }
-        val bytes = memoryEntries.values.sumOf { it.audioBytes + it.metadataBytes } +
-            others.sumOf { it.value } +
-            // Uncertain entries are ON DISK: their bytes are not free just because they are not ready.
-            uncertainPreparedIds.values.sumOf { it[0] + it[1] }
-        val liveRecords = memoryEntries.size + others.size + uncertainPreparedIds.size
-        return liveRecords < limits.maxQueueRecords && bytes + admission.projectedBytes <= limits.maxQueueBytes
-    }
+    private fun roomForPublicationLocked(admission: Admission): Boolean = ownerRecordsLocked(exclude = admission.id) < limits.maxQueueRecords &&
+        ownerBytesLocked(exclude = admission.id) + admission.projectedBytes <= limits.maxQueueBytes
 
     /**
      * Claim the capture's final names for this attempt, refusing when any of them already exist: a live
@@ -239,13 +244,8 @@ class ContributionStore(
     }
 
     /** Budget test against durable entries PLUS live reservations (both consume the same budget). */
-    private fun roomLocked(projected: Long): Boolean {
-        val live = memoryEntries.size + reservations.size
-        if (live >= limits.maxQueueRecords) return false
-        val bytes = memoryEntries.values.sumOf { it.audioBytes + it.metadataBytes } +
-            liveReservationBytesLocked() + uncertainPreparedIds.values.sumOf { it[0] + it[1] }
-        return bytes + projected <= limits.maxQueueBytes
-    }
+    private fun roomLocked(projected: Long): Boolean = ownerRecordsLocked() < limits.maxQueueRecords &&
+        ownerBytesLocked() + projected <= limits.maxQueueBytes
 
     /** Playback duration of [sampleCount] samples at the specced 16 kHz mono capture rate. */
     private fun durationMs(sampleCount: Long): Long = sampleCount * 1000L / SAMPLE_RATE_HZ
@@ -472,6 +472,10 @@ class ContributionStore(
                 } else {
                     // Adopt the reservation into the durable index (removes it from the live set).
                     admission.adopt()
+                    // Ownership transfers here, so the owner charge is created here and nowhere else.
+                    // It starts NOT ready: readiness is asserted only after the marker is durable, and a
+                    // failure in between must leave an owned-but-uncertain capture rather than none.
+                    ownedCharges[captureId] = OwnedCharge(entry.audioBytes, entry.metadataBytes, ready = false)
                     syncDirectoryOrFail(dir)
                     // Age + attempt authorities are written BEFORE the marker; failing either is a failed
                     // preparation, not an invented fallback, and must hand the slot back.
@@ -489,6 +493,7 @@ class ContributionStore(
                         deleteLocked(entry)
                         memoryEntries.remove(captureId)
                         preparedIds.remove(captureId)
+                        ownedCharges.remove(captureId)
                         null
                     } else {
                         // READY MARKER LAST: presence of this file is the ONLY readiness authority.
@@ -509,13 +514,12 @@ class ContributionStore(
                             // without this the owner's accounting would not contain it and a purge could
                             // leave the user's audio behind. Ownership is about "this owner created these
                             // files", not "this owner can read them back".
-                            // Sizes come from the files that actually reached disk, so the capacity
-                            // accounting charges for what is really occupying the queue.
+                            // The charge already exists from adoption and stays NOT ready: exactly one
+                            // owner entry per capture, so this path cannot double-count.
                             synchronized(lock) {
-                                uncertainPreparedIds[captureId] = longArrayOf(
-                                    wavFinal.length().coerceAtLeast(0),
-                                    metaFinal.length().coerceAtLeast(0),
-                                )
+                                ownedCharges.getOrPut(captureId) {
+                                    OwnedCharge(entry.audioBytes, entry.metadataBytes, ready = false)
+                                }.ready = false
                             }
                             throw PublicationUncertain(
                                 "ready marker may exist but its durability could not be confirmed; publication uncertain",
@@ -525,6 +529,8 @@ class ContributionStore(
                         committed = true
                         memoryEntries[captureId] = entry
                         preparedIds.add(captureId)
+                        // Flip the EXISTING owner charge; never add a second one.
+                        ownedCharges[captureId]?.ready = true
                         entry
                     }
                 }
@@ -673,14 +679,14 @@ class ContributionStore(
             // account purge that skipped it would leave the user's audio on disk after they asked for
             // everything to be removed, and a later healthy recovery would resurrect it. The uncertain set
             // is unioned in HERE, before the snapshot, and cleared only after its files are deleted.
-            val ownedIds = (memoryEntries.keys + uncertainPreparedIds.keys).distinct()
+            val ownedIds = (memoryEntries.keys + ownedCharges.keys).distinct()
             val stagedAttempts = stagingOwners.toList()
             // Delete only what THIS owner's index actually holds. deleteLocked removes each id as it goes, so
             // the later clear() is a no-op safety net rather than a second sweep.
             ownedIds.forEach { id -> memoryEntries[id]?.let { deleteLocked(it) } }
             memoryEntries.clear()
             preparedIds.clear()
-            uncertainPreparedIds.clear()
+            ownedCharges.clear()
             reservations.clear()
             // Settle our own live handles: their budget is gone with the queue, and leaving them HELD while
             // the table is empty would make a later discard()/adopt() dereference a missing entry.
@@ -732,7 +738,6 @@ class ContributionStore(
         // Entries whose publication could not be confirmed durable. Kept out of the ready set, but NOT
         // deleted: uncertain is not rejected.
         val uncertainIds = mutableListOf<String>()
-        val uncertainSizes = mutableMapOf<String, LongArray>()
         for (id in readyIds) {
             val wav = File(dir, "$id$SUFFIX_WAV")
             val meta = File(dir, "$id$SUFFIX_META")
@@ -772,15 +777,19 @@ class ContributionStore(
                 }.isSuccess
                 if (confirmed) {
                     keep += entry
+                    // Charged ONCE as ready. Applies to foreign entries too: a fresh store over an
+                    // existing queue owns what is on disk and must account for it, otherwise it admits
+                    // new work up to the full budget on top of it.
+                    ownedCharges[id] = OwnedCharge(
+                        entry.audioBytes,
+                        entry.metadataBytes,
+                        ready = true,
+                    )
                 } else {
                     // Not exposed this run. The files are LEFT IN PLACE rather than deleted: the entry is
                     // an uncertain publication, and the spec forbids assuming cleanup succeeded or
                     // treating uncertainty as rejection. The next confirmation attempt decides.
                     uncertainIds += id
-                    uncertainSizes[id] = longArrayOf(
-                        wav.length().coerceAtLeast(0),
-                        meta.length().coerceAtLeast(0),
-                    )
                 }
             }
         }
@@ -798,21 +807,36 @@ class ContributionStore(
                 val wavEntry = File(dir, "$id$SUFFIX_WAV")
                 val metaEntry = File(dir, "$id$SUFFIX_META")
                 if (id in uncertainIds) {
-                    uncertainPreparedIds[id] = longArrayOf(
+                    // Charged once, as uncertain. This instance owns these bytes whether or not it can
+                    // hand them back, so they must count after a restart exactly as they did before it.
+                    ownedCharges[id] = OwnedCharge(
                         wavEntry.length().coerceAtLeast(0),
-                        metaEntry.length().coerceAtLeast(0),
+                        metaEntry.length().coerceAtLeast(0).toInt(),
+                        ready = false,
                     )
                     continue
                 }
                 val wav = wavEntry
                 val metaF = metaEntry
-                validate(id, wav, metaF, File(dir, "$id$SUFFIX_ATTEMPTS"))?.let { memoryEntries[id] = it }
-                    ?: run {
-                        preparedIds.remove(id)
-                        File(dir, "$id$SUFFIX_READY").delete()
-                    }
+                validate(id, wav, metaF, File(dir, "$id$SUFFIX_ATTEMPTS"))?.let {
+                    memoryEntries[id] = it
+                    // RECONCILIATION adds no new charge: the capture already holds exactly one, and this
+                    // only marks it ready. Adding a second charge here is what double-counted bytes and
+                    // records for the life of the entry.
+                    ownedCharges.getOrPut(id) { OwnedCharge(it.audioBytes, it.metadataBytes, ready = false) }
+                        .ready = true
+                } ?: run {
+                    preparedIds.remove(id)
+                    File(dir, "$id$SUFFIX_READY").delete()
+                }
             }
-            keep.forEach { memoryEntries[it.captureId] = it }
+            keep.forEach {
+                memoryEntries[it.captureId] = it
+                // Readiness on the SINGLE existing charge; a missing charge is created once, never added to.
+                ownedCharges.getOrPut(it.captureId) {
+                    OwnedCharge(it.audioBytes, it.metadataBytes, ready = false)
+                }.ready = true
+            }
             recovered = true
         }
         return keep.sortedBy { it.createdAtMs }
@@ -958,17 +982,28 @@ class ContributionStore(
     private val preparedIds = mutableSetOf<String>()
 
     /**
-     * Entries this instance prepared whose durability recovery could NOT re-confirm (spec ecbe84dd).
+     * OWNER ACCOUNTING: one charge per immutable capture this instance owns, with readiness as STATE.
      *
-     * They stay on disk and are withheld from the index until a later confirmation succeeds: uncertain
-     * is not rejected, but it is also not ready.
+     * Every capture this owner has ever published, withheld, or failed to confirm occupies exactly one
+     * entry here, and that single entry is the ONLY source of its bytes/record charge. Readiness is a
+     * state flag on that same entry, never a second map.
      *
-     * SIZES are kept with the ids on purpose. These files still occupy the queue directory, so dropping
-     * their bytes from the capacity totals would let the store accept new publications up to the full
-     * budget on top of data that is already on disk - an over-commit that grows every time uncertainty
-     * repeats.
+     * Earlier versions kept readiness in [memoryEntries] and uncertainty in a separate id->sizes map.
+     * Because the two could overlap, the same capture was charged twice after reconciliation, zero times
+     * after a restart, and the record count disagreed between the two admission paths. One entry per
+     * capture removes the possibility instead of patching each symptom.
      */
-    private val uncertainPreparedIds = LinkedHashMap<String, LongArray>()
+    private val ownedCharges = LinkedHashMap<String, OwnedCharge>()
+
+    /** One owner's charge for one immutable capture. Readiness is state, not identity. */
+    private class OwnedCharge(
+        val audioBytes: Long,
+        val metadataBytes: Int,
+        /** True once the capture may be handed back as ready; false while it is uncertain. */
+        var ready: Boolean,
+    ) {
+        val bytes: Long get() = audioBytes + metadataBytes
+    }
     private val reservations = LinkedHashMap<String, Long>()
 
     /** Attempt ids with staging files owned by THIS instance, so purge cleanup stays scoped. */

@@ -333,6 +333,94 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `an ALREADY PREPARED entry is withheld when recovery cannot re-confirm it`() {
+        // The branch the fresh-store test cannot reach. When the SAME instance prepared the entry, recover()
+        // rebuilds the index from `preparedIds`; if that rebuild re-validates and reinserts without
+        // consulting the confirmation result, the confirmation is decorative for exactly the entries most
+        // likely to be uncertain. `uncertainIds` was collected and never read - dead state posing as a
+        // control. This test pins that.
+        val root = tmp.newFolder("queue-self-uncertain")
+        val id = java.util.UUID.randomUUID().toString()
+        var failSyncs = false
+        val gated = object : DirectorySync {
+            override fun sync(directory: File) {
+                if (failSyncs) throw java.io.IOException("simulated recovery confirmation failure")
+            }
+        }
+        val store = ContributionStore(root, limits(), directorySync = gated, fileSync = FileSync { })
+        assertTrue("precondition: the entry prepares", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertEquals("precondition: it is ready", listOf(id), store.readyEntries().map { it.captureId })
+
+        failSyncs = true
+        val recovered = store.recover()
+
+        assertTrue(
+            "recover() must withhold an already-prepared entry it cannot re-confirm, got ${recovered.map { it.captureId }}",
+            recovered.none { it.captureId == id },
+        )
+        assertTrue(
+            "readyEntries() must not expose an already-prepared entry whose confirmation failed",
+            store.readyEntries().none { it.captureId == id },
+        )
+        // Uncertainty is NOT rejection: the same immutable entry must survive for later reconciliation.
+        assertTrue(
+            "the entry's files must be preserved for later reconciliation",
+            File(root, "contributions/$id.ready").isFile,
+        )
+
+        // And a later successful recovery MUST reconcile it back - withheld, not lost.
+        failSyncs = false
+        assertEquals(
+            "a later successful recovery must re-expose the same immutable entry",
+            listOf(id),
+            store.recover().map { it.captureId },
+        )
+        assertEquals("and it must be ready again", listOf(id), store.readyEntries().map { it.captureId })
+    }
+
+    @Test
+    fun `recovery re-confirms the ready MARKER and the queue parent namespace`() {
+        // Recovery must re-establish the SAME barriers publication relies on. A mutant that omits the
+        // ready marker (or the parent namespace) survived the earlier recovery tests, because those
+        // only made the whole FileSync throw - which any subset of barriers still triggers. This test
+        // makes each barrier fail IN ISOLATION, so a missing barrier is unobservable no longer.
+        val id = java.util.UUID.randomUUID().toString()
+
+        // (a) marker-content barrier: every other file syncs fine, only the marker throws.
+        run {
+            val root = tmp.newFolder("queue-marker-barrier")
+            ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id))
+            val onlyMarkerFails = FileSync { file ->
+                if (file.name.endsWith(".ready")) throw java.io.IOException("simulated marker sync failure")
+            }
+            val fresh = ContributionStore(root, limits(), fileSync = onlyMarkerFails)
+            assertTrue(
+                "recovery must re-confirm the ready MARKER's contents; omitting it exposes an unconfirmed entry",
+                fresh.recover().none { it.captureId == id },
+            )
+        }
+
+        // (b) parent-namespace barrier: files and the entry directory sync fine, only the parent throws.
+        run {
+            val root = tmp.newFolder("queue-parent-barrier")
+            ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id))
+            val entriesDir = File(root, "contributions")
+            val onlyParentFails = object : DirectorySync {
+                override fun sync(directory: File) {
+                    if (directory.absolutePath == root.absolutePath) {
+                        throw java.io.IOException("simulated parent namespace failure")
+                    }
+                }
+            }
+            val fresh = ContributionStore(root, limits(), directorySync = onlyParentFails)
+            assertTrue(
+                "recovery must re-confirm the queue parent namespace at [${entriesDir.absolutePath}]",
+                fresh.recover().none { it.captureId == id },
+            )
+        }
+    }
+
+    @Test
     fun `sidecars are file-synced before the ready marker, not just written`() {
         // Directory fsync does not persist the CONTENTS of created.at/attempts: a force on the
         // directory makes the NAME durable, so after a crash the marker can persist while the sidecar

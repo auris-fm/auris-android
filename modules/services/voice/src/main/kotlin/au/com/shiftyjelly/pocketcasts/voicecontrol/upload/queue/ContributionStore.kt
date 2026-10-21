@@ -649,6 +649,7 @@ class ContributionStore(
     fun revokeAndPurge(reason: String) {
         synchronized(lock) {
             ownership.revokeUnderLock()
+            uncertainPreparedIds.clear()
             val ownedIds = memoryEntries.keys.toList()
             val stagedAttempts = stagingOwners.toList()
             // Delete only what THIS owner's index actually holds. deleteLocked removes each id as it goes, so
@@ -725,11 +726,24 @@ class ContributionStore(
                 // present yet not durable. Before exposing it as ready, re-establish and confirm the
                 // durable state: sync each file's contents, then the directory that names them.
                 // A failure here means the entry is NOT confirmed durable, so it is not exposed.
+                // Re-establish the SAME barriers publication relies on, not a subset:
+                //  - every content file, INCLUDING the ready marker, because marker-content durability
+                //    is now an explicit uncertain case at publication time and recovery must not be
+                //    more trusting than the writer;
+                //  - the queue directory that names them;
+                //  - the queue directory's PARENT namespace, which is what makes the directory
+                //    reachable at all (the same barrier publication performs at creation).
                 val confirmed = runCatching {
-                    listOf(wav, meta, File(dir, "$id$SUFFIX_DIGEST"), attemptsFile, File(dir, "$id$SUFFIX_CREATED"))
-                        .filter { it.isFile }
-                        .forEach { fileSync.sync(it) }
+                    listOf(
+                        wav,
+                        meta,
+                        File(dir, "$id$SUFFIX_DIGEST"),
+                        attemptsFile,
+                        File(dir, "$id$SUFFIX_CREATED"),
+                        File(dir, "$id$SUFFIX_READY"),
+                    ).filter { it.isFile }.forEach { fileSync.sync(it) }
                     syncDirectoryOrFail(dir)
+                    dir.parentFile?.let { parent -> syncDirectoryOrFail(parent) }
                 }.isSuccess
                 if (confirmed) {
                     keep += entry
@@ -748,6 +762,14 @@ class ContributionStore(
             val self = memoryEntries.keys.filter { it in preparedIds }.toSet()
             memoryEntries.clear()
             for (id in self) {
+                // A self-prepared entry whose durability confirmation FAILED must be withheld from the
+                // index exactly like a foreign one. Rebuilding from validate() alone would reinsert it
+                // and make the confirmation above decorative for the very entries most likely to be
+                // uncertain (this instance is the one that may have published them).
+                if (id in uncertainIds) {
+                    uncertainPreparedIds += id
+                    continue
+                }
                 val wav = File(dir, "$id$SUFFIX_WAV")
                 val metaF = File(dir, "$id$SUFFIX_META")
                 validate(id, wav, metaF, File(dir, "$id$SUFFIX_ATTEMPTS"))?.let { memoryEntries[id] = it }
@@ -900,6 +922,14 @@ class ContributionStore(
 
     private val memoryEntries = LinkedHashMap<String, Entry>()
     private val preparedIds = mutableSetOf<String>()
+
+    /**
+     * Entries this instance prepared whose durability recovery could NOT re-confirm (spec ecbe84dd).
+     *
+     * They stay on disk and are withheld from the index until a later confirmation succeeds: uncertain
+     * is not rejected, but it is also not ready.
+     */
+    private val uncertainPreparedIds = mutableSetOf<String>()
     private val reservations = LinkedHashMap<String, Long>()
 
     /** Attempt ids with staging files owned by THIS instance, so purge cleanup stays scoped. */

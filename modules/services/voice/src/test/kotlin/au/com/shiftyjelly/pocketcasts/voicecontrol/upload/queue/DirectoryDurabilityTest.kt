@@ -421,6 +421,72 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `an uncertain entry is still OWNED and is purged on revocation`() {
+        // Ownership is about "this owner created these files", not "this owner can read them back".
+        // Withholding an uncertain entry from readiness by removing it from the index silently removed it
+        // from the purge accounting too, and revokeAndPurge cleared the uncertain set BEFORE collecting
+        // the ids it would delete. Result: a user asking for everything to be removed kept their audio,
+        // and a later healthy store recovered it. This pins the whole sequence.
+        val root = tmp.newFolder("queue-uncertain-purge")
+        val id = java.util.UUID.randomUUID().toString()
+        var failSyncs = false
+        val gated = object : DirectorySync {
+            override fun sync(directory: File) {
+                if (failSyncs) throw java.io.IOException("simulated confirmation failure")
+            }
+        }
+        val store = ContributionStore(root, limits(), directorySync = gated)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+
+        failSyncs = true
+        store.recover() // confirmation fails -> withheld, recorded as uncertain
+        assertTrue("withheld from ready", store.readyEntries().none { it.captureId == id })
+        assertTrue("files preserved while uncertain", File(root, "contributions/$id.ready").isFile)
+
+        store.revokeAndPurge("account_changed")
+
+        // EVERY owned artifact must be gone, not only the readable ones.
+        val survivors = File(root, "contributions").listFiles()?.filter { it.name.startsWith(id) } ?: emptyList()
+        assertTrue("purge left owned files behind: ${survivors.map { it.name }}", survivors.isEmpty())
+
+        // And no resurrection: a fresh healthy store must not bring it back.
+        failSyncs = false
+        val fresh = ContributionStore(root, limits())
+        assertEquals("a fresh store resurrected a purged entry", emptyList<String>(), fresh.recover().map { it.captureId })
+        assertEquals("nothing may be ready after purge", emptyList<String>(), fresh.readyEntries().map { it.captureId })
+    }
+
+    @Test
+    fun `an uncertain prepare that never reached the index is still owned and purgable`() {
+        // The same hole on the OTHER path: prepare throws PublicationUncertain before inserting into
+        // memoryEntries. Without recording ownership at the throw site the files exist on disk but belong
+        // to nobody, so revocation cannot find them.
+        val root = tmp.newFolder("queue-uncertain-throw-purge")
+        val id = java.util.UUID.randomUUID().toString()
+        val failingFileSync = FileSync { file ->
+            if (file.name.endsWith(".ready")) throw java.io.IOException("simulated marker sync failure")
+        }
+        val store = ContributionStore(root, limits(), fileSync = failingFileSync)
+        val outcome = runCatching { store.prepare(id, "epoch-1", chunks(1600), meta(id)) }
+        assertTrue(
+            "precondition: prepare must be uncertain, got ${outcome.exceptionOrNull()}",
+            outcome.exceptionOrNull() is PublicationUncertain,
+        )
+        assertTrue(
+            "precondition: the marker may exist on disk",
+            File(root, "contributions").listFiles()?.any { it.name.startsWith(id) } == true,
+        )
+
+        store.revokeAndPurge("account_changed")
+
+        val survivors = File(root, "contributions").listFiles()?.filter { it.name.startsWith(id) } ?: emptyList()
+        assertTrue(
+            "an uncertain prepare that never entered the index must still be purged, left ${survivors.map { it.name }}",
+            survivors.isEmpty(),
+        )
+    }
+
+    @Test
     fun `sidecars are file-synced before the ready marker, not just written`() {
         // Directory fsync does not persist the CONTENTS of created.at/attempts: a force on the
         // directory makes the NAME durable, so after a crash the marker can persist while the sidecar

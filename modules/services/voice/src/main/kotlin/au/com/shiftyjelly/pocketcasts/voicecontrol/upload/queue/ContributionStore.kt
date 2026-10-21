@@ -498,6 +498,11 @@ class ContributionStore(
                             syncDirectoryOrFail(dir)
                         } catch (transitionFailure: java.io.IOException) {
                             committed = true
+                            // Recorded as OWNED before throwing. The entry never reached memoryEntries, so
+                            // without this the owner's accounting would not contain it and a purge could
+                            // leave the user's audio behind. Ownership is about "this owner created these
+                            // files", not "this owner can read them back".
+                            synchronized(lock) { uncertainPreparedIds += captureId }
                             throw PublicationUncertain(
                                 "ready marker may exist but its durability could not be confirmed; publication uncertain",
                                 transitionFailure,
@@ -649,14 +654,19 @@ class ContributionStore(
     fun revokeAndPurge(reason: String) {
         synchronized(lock) {
             ownership.revokeUnderLock()
-            uncertainPreparedIds.clear()
-            val ownedIds = memoryEntries.keys.toList()
+            // OWNERSHIP IS INDEPENDENT OF READINESS. An uncertain entry was removed from memoryEntries so
+            // it could not be exposed as ready, but that must not drop it from the owner's accounting: an
+            // account purge that skipped it would leave the user's audio on disk after they asked for
+            // everything to be removed, and a later healthy recovery would resurrect it. The uncertain set
+            // is unioned in HERE, before the snapshot, and cleared only after its files are deleted.
+            val ownedIds = (memoryEntries.keys + uncertainPreparedIds).distinct()
             val stagedAttempts = stagingOwners.toList()
             // Delete only what THIS owner's index actually holds. deleteLocked removes each id as it goes, so
             // the later clear() is a no-op safety net rather than a second sweep.
             ownedIds.forEach { id -> memoryEntries[id]?.let { deleteLocked(it) } }
             memoryEntries.clear()
             preparedIds.clear()
+            uncertainPreparedIds.clear()
             reservations.clear()
             // Settle our own live handles: their budget is gone with the queue, and leaving them HELD while
             // the table is empty would make a later discard()/adopt() dereference a missing entry.

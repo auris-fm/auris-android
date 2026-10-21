@@ -1081,6 +1081,64 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `discardCurrentPartials charges a partial that refuses to delete`() {
+        // discardCurrentPartials ignored its delete results, so a surviving partial was charged nowhere.
+        val root = tmp.newFolder("queue-discard-partials")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val stuck = File(contributions, "gen\$z.9.someid.recording.wav.part")
+        stuck.mkdirs()
+        File(stuck, "held.bin").writeBytes(ByteArray(1536))
+
+        val store = ContributionStore(root, limits())
+        store.discardCurrentPartials()
+
+        assertTrue("precondition: the partial survived", stuck.exists())
+        assertTrue(
+            "a surviving partial must be charged (owned=${store.ownedBytesForTest()})",
+            store.ownedBytesForTest() >= 1536,
+        )
+    }
+
+    @Test
+    fun `a transient part-file failure releases its charge when a later sweep succeeds`() {
+        // reviewer e4342946: the .part charge had no reverse transition. Once a later sweep deleted the file,
+        // the charge and any unknown state stayed forever, permanently consuming capacity and keeping
+        // admission refused over bytes that no longer exist. Same store, failure then success.
+        val root = tmp.newFolder("queue-part-charge-release")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val partName = "gen\$y.5.someid.recording.wav.part"
+        val stuck = File(contributions, partName)
+        stuck.mkdirs()
+        File(stuck, "held.bin").writeBytes(ByteArray(2048))
+
+        val store = ContributionStore(root, limits())
+        store.recover()
+        val chargedAfterFailure = store.ownedBytesForTest()
+        assertTrue("precondition: the failure charged the survivor ($chargedAfterFailure)", chargedAfterFailure >= 2048)
+        // The store's SUFFIX_PART is ".wav.part", so the synthetic id drops the whole suffix.
+        val idAfterFailure = partName.removeSuffix(".wav.part")
+        assertTrue("precondition: the survivor is owned", idAfterFailure in store.ownedIdsForTest())
+
+        // The obstruction is removed, so the NEXT sweep on the SAME store can delete the file.
+        File(stuck, "held.bin").delete()
+        store.recover()
+
+        assertTrue("precondition: the file is finally gone", !stuck.exists())
+        assertTrue(
+            "the transient failure's charge must be released once the bytes are gone " +
+                "(owned=${store.ownedBytesForTest()})",
+            store.ownedBytesForTest() == 0L,
+        )
+        assertTrue(
+            "and its synthetic id must no longer be owned (ids=${store.ownedIdsForTest()})",
+            idAfterFailure !in store.ownedIdsForTest(),
+        )
+        assertTrue("and accounting must not stay unknown", !store.unknownFootprintForTest())
+    }
+
+    @Test
     fun `a capture is charged ONCE as a whole, not file by file`() {
         // Per-file semantics charge the id of whichever file refused first, which for a staging residue is
         // a DIFFERENT id from the capture's. Per-capture semantics charge the capture once. The observable

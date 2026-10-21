@@ -239,7 +239,17 @@ class ContributionStore(
     // A .part file that will not delete still occupies the queue. Charge the bytes under the name the file
     // implies so they are owned rather than invisible; a later sweep retries the delete.
     private fun File.deleteOrChargeOnFailure() {
-        if (!delete() && exists()) {
+        if (delete() || !exists()) {
+            // REVERSE TRANSITION. A previous sweep may have charged this exact file; now that the bytes are
+            // gone, that charge and any unknown state keyed to it must go too, or a transient failure would
+            // permanently consume capacity and keep admission refused over bytes that no longer exist
+            // (reviewer e4342946).
+            val id = name.removeSuffix(SUFFIX_PART)
+            ownedCharges.remove(id)
+            unmeasuredIds -= id
+            return
+        }
+        if (exists()) {
             // Charged by the file's ACTUAL name, not by a capture id: a staging name is not a capture, and
             // measuring "$id$SUFFIX_WAV" for it found nothing and charged zero, which is the same blindness
             // this delete check exists to remove. The survivor is measured where it actually is.
@@ -256,7 +266,9 @@ class ContributionStore(
 
     private fun deleteStaging(attemptId: String) {
         dir.listFiles()?.forEach { f ->
-            if (f.name.startsWith("$STAGING_PREFIX$attemptId.")) f.delete()
+            // Checked, like every other deletion: a staging file that refuses to delete still occupies the
+            // queue, and discarding the result left those bytes charged nowhere (reviewer e4342946).
+            if (f.name.startsWith("$STAGING_PREFIX$attemptId.")) f.deleteOrChargeOnFailure()
         }
     }
 
@@ -770,7 +782,9 @@ class ContributionStore(
 
     /** Listening/permission closure: remove IN-PROGRESS preparation only; ready entries stay. */
     fun discardCurrentPartials() {
-        dir.listFiles()?.forEach { f -> if (f.name.endsWith(SUFFIX_PART)) f.delete() }
+        // Same checked deletion as the recovery sweep. Discarding the result here left surviving partials
+        // invisible to accounting (reviewer e4342946).
+        dir.listFiles()?.forEach { f -> if (f.name.endsWith(SUFFIX_PART)) f.deleteOrChargeOnFailure() }
     }
 
     /**

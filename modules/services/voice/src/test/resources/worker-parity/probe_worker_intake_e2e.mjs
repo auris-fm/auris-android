@@ -35,10 +35,12 @@ const { execFileSync } = await import("node:child_process");
 function provenance(root) {
   try {
     const rev = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    const dirty = execFileSync("git", ["-C", root, "status", "--porcelain", "--", "src/contributions"], {
-      encoding: "utf8",
-    }).trim();
-    return `${rev}${dirty.length > 0 ? " DIRTY(src/contributions)" : " CLEAN"}`;
+    // REPO-WIDE cleanliness, deliberately conservative: `record_schema.ts` and `stream_intake.ts`
+    // import across the contributions package, so a dirty file anywhere in the imported closure can
+    // change intake behaviour. Scoping the check to src/contributions would miss an edited helper
+    // elsewhere that the intake still executes.
+    const dirty = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" }).trim();
+    return `${rev}${dirty.length > 0 ? " DIRTY" : " CLEAN"}`;
   } catch {
     return "UNKNOWN (not a git checkout)";
   }

@@ -7,7 +7,6 @@ import java.util.Base64
 import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 /**
@@ -25,8 +24,9 @@ import org.junit.Test
  * declared audio identity, would be broken in a way no schema check could reveal. Each negative case
  * asserts the Worker REFUSES for the intended reason.
  *
- * Skipped when the cloud worktree or node is unavailable; the committed receipt
- * `artifacts/receipts/wire-parity-intake-e2e.txt` preserves a real run.
+ * The Worker authority is PINNED to [approvedWorkerRevision] and this test FAILS — it does not
+ * skip — when the authority is absent, dirty, or at a different revision. A parity control that
+ * green-skips or accepts an arbitrary clean checkout reports success it has not earned.
  */
 class WorkerIntakeParityE2ETest {
 
@@ -45,13 +45,43 @@ class WorkerIntakeParityE2ETest {
     /**
      * Where the Worker authority comes from — and it must be a PINNED revision, not a moving checkout.
      *
-     * `AURIS_CLOUD_WORKER_ROOT` should point at a worktree checked out at a specific revision. When it
-     * is absent the test FAILS rather than skips: a parity control that silently passes when it cannot
-     * reach the authority it exists to compare against reports success it did not earn. The skip form
-     * is retained only behind an explicit opt-out for environments that cannot host the cloud repo.
+     * `AURIS_CLOUD_WORKER_ROOT` must point at a worktree at [approvedWorkerRevision]; the fallback
+     * path only saves typing a variable for a local run and is checked just as strictly.
      */
     private fun cloudWorkerRoot(): File = System.getenv("AURIS_CLOUD_WORKER_ROOT")?.let(::File)
         ?: File("/Users/dev/code/auris/core/cloud-voice-uploads/worker")
+
+    /**
+     * The ONE approved Worker revision this control is allowed to compare against.
+     *
+     * Recording whatever HEAD happens to be checked out is provenance, not an authority: a clean
+     * checkout of a different revision is a different intake, and a parity claim against it says
+     * nothing about the revision anyone reviewed. So the SHA is explicit here and a mismatch FAILS.
+     * Advancing it is a deliberate edit made when a new revision is cleared, which is exactly the
+     * reviewable event this should be.
+     */
+    private val approvedWorkerRevision = "5bba6716988e35c8c003c982dd088c369833f87c"
+
+    /** Reads the probe's provenance line and returns the revision it actually loaded. */
+    private fun assertApprovedRevision(output: String) {
+        val line = output.lines().firstOrNull { it.startsWith("# worker-revision") }
+            ?: error("probe did not report its Worker revision; refusing to claim parity")
+        val reported = line.substringAfter("\t").trim()
+        assertTrue(
+            "INTEGRITY: the Worker authority reports '$reported' — a partial or dirty checkout is " +
+                "not an authority",
+            reported.endsWith("CLEAN"),
+        )
+        val revision = reported.removeSuffix("CLEAN").trim()
+        assertEquals(
+            "INTEGRITY: parity ran against '$revision' but the approved authority is " +
+                "$approvedWorkerRevision. A clean checkout of a different revision proves nothing " +
+                "about the revision under review. Point AURIS_CLOUD_WORKER_ROOT at the approved " +
+                "revision (or advance approvedWorkerRevision deliberately).",
+            approvedWorkerRevision,
+            revision,
+        )
+    }
 
     private fun nodeVersion(): String = runCatching {
         ProcessBuilder("node", "--version").start().inputStream.bufferedReader().readText().trim()
@@ -199,17 +229,10 @@ class WorkerIntakeParityE2ETest {
         val output = process.inputStream.bufferedReader().readText()
         assertEquals("probe failed:\n$output", 0, process.waitFor())
 
+        assertApprovedRevision(output)
+        val revision = approvedWorkerRevision
         val verdicts = output.lines().filter { it.isNotBlank() && !it.startsWith("#") }.map { it.split('\t') }
             .associate { it[0] to it.drop(1) }
-        // The receipt names the exact revision; a receipt without one is not evidence.
-        val revision = output.lines().firstOrNull { it.startsWith("# worker-revision") }
-            ?.substringAfter("\t")?.trim()
-            ?: error("probe did not report its Worker revision; refusing to claim parity")
-        assertTrue(
-            "INTEGRITY: the Worker authority at \'$revision\' is DIRTY or unknown — a local patch makes " +
-                "the parity claim meaningless",
-            revision.endsWith("CLEAN"),
-        )
 
         // The happy path must be accepted, and the identities the Worker derived must match the
         // ones the client computed — this is the actual wire-identity claim.

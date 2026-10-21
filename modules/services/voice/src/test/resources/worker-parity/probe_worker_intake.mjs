@@ -20,6 +20,21 @@ if (!workerRoot || !recordsPath) {
   process.exit(2);
 }
 
+// PROVENANCE: report the exact Worker revision loaded, so a receipt names its authority rather than
+// "some checkout". Repo-wide cleanliness: the schema module imports within the package, so a dirty
+// file anywhere in the closure can change what this probe measures.
+const { execFileSync } = await import("node:child_process");
+function provenance(root) {
+  try {
+    const rev = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const dirty = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" }).trim();
+    return `${rev}${dirty.length > 0 ? " DIRTY" : " CLEAN"}`;
+  } catch {
+    return "UNKNOWN (not a git checkout)";
+  }
+}
+console.log(`# worker-revision\t${provenance(workerRoot)}`);
+
 const moduleUrl = pathToFileURL(`${workerRoot}/src/contributions/record_schema.ts`).href;
 const { validateContributionRecord } = await import(moduleUrl);
 

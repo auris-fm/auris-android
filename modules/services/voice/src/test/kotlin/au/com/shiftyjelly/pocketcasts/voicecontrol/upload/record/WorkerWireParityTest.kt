@@ -6,7 +6,6 @@ import java.nio.file.Files
 import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Test
 
 /**
@@ -19,9 +18,9 @@ import org.junit.Test
  * local constants proves nothing about the wire, so the authority here is the Worker's
  * `record_schema.ts`, executed directly.
  *
- * The test is skipped when the cloud worktree or a node binary is unavailable (CI without the cloud
- * checkout). The committed receipt `artifacts/receipts/wire-parity-worker-intake.txt` records a real
- * run so the evidence is not lost when the test cannot execute.
+ * The authority is PINNED to [approvedWorkerRevision] and a failure — not a skip — is the correct
+ * outcome when it is unavailable, dirty, or at another revision. The committed receipt
+ * `artifacts/receipts/wire-parity-worker-intake.txt` records a real run against that revision.
  */
 class WorkerWireParityTest {
 
@@ -36,14 +35,37 @@ class WorkerWireParityTest {
     private fun cloudWorkerRoot(): File = System.getenv("AURIS_CLOUD_WORKER_ROOT")?.let(::File)
         ?: File("/Users/dev/code/auris/core/cloud-voice-uploads/worker")
 
+    /**
+     * The ONE approved Worker revision, shared with the end-to-end intake control.
+     *
+     * Both controls must compare against the SAME revision, or their combined evidence describes two
+     * different servers. Advancing this value is a deliberate, reviewable edit made when a new
+     * revision is cleared.
+     */
+    private val approvedWorkerRevision = "5bba6716988e35c8c003c982dd088c369833f87c"
+
     private fun requireAuthority(root: File) {
         assertTrue(
             "INTEGRITY: the Worker schema authority is missing at ${root.absolutePath}. Point " +
-                "AURIS_CLOUD_WORKER_ROOT at a worktree at the pinned revision; a skipped parity check " +
-                "is not parity.",
+                "AURIS_CLOUD_WORKER_ROOT at a worktree at $approvedWorkerRevision; a skipped " +
+                "parity check is not parity.",
             File(root, "src/contributions/record_schema.ts").isFile,
         )
         assertTrue("INTEGRITY: node is required to execute the Worker validator", nodeAvailable())
+    }
+
+    /** A clean checkout of some other revision is a different server; that is a refusal, not a pass. */
+    private fun assertApprovedRevision(output: String) {
+        val line = output.lines().firstOrNull { it.startsWith("# worker-revision") }
+            ?: error("probe did not report its Worker revision; refusing to claim parity")
+        val reported = line.substringAfter("\t").trim()
+        assertTrue("INTEGRITY: authority reports '$reported' — dirty is not an authority", reported.endsWith("CLEAN"))
+        assertEquals(
+            "INTEGRITY: parity ran against '${reported.removeSuffix("CLEAN").trim()}' but the approved " +
+                "authority is $approvedWorkerRevision",
+            approvedWorkerRevision,
+            reported.removeSuffix("CLEAN").trim(),
+        )
     }
 
     private fun nodeAvailable(): Boolean = runCatching {
@@ -155,7 +177,8 @@ class WorkerWireParityTest {
         val output = process.inputStream.bufferedReader().readText()
         assertEquals("probe failed: $output", 0, process.waitFor())
 
-        val verdicts = output.lines().filter { it.isNotBlank() }.associate { line ->
+        assertApprovedRevision(output)
+        val verdicts = output.lines().filter { it.isNotBlank() && !it.startsWith("#") }.associate { line ->
             val parts = line.split('\t')
             parts[0] to parts.drop(1).joinToString("\t")
         }
@@ -255,7 +278,8 @@ class WorkerWireParityTest {
         val output = process.inputStream.bufferedReader().readText()
         assertEquals("probe failed: $output", 0, process.waitFor())
 
-        val verdicts = output.lines().filter { it.isNotBlank() }.associate { line ->
+        assertApprovedRevision(output)
+        val verdicts = output.lines().filter { it.isNotBlank() && !it.startsWith("#") }.associate { line ->
             val parts = line.split('\t')
             parts[0] to parts.drop(1).joinToString("\t")
         }

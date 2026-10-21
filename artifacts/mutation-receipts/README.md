@@ -112,3 +112,25 @@ the "hold survives while blocked" check trivially.
 **RED XML:** `artifacts/mutation-receipts/release-before-clear-RED.xml`
   - `cleanup must be requested (stop/clear in flight)` — the control detects the missing block.
 **GREEN:** full voice suite BUILD SUCCESSFUL with the gate restored.
+
+## Release-before-clear PRODUCTION mutant (reviewer 7a04a952, corrected)
+
+The previous mutant disabled the fake's gate — that only proved the test requires its own setup.
+This mutant moves the production hold release to the cancellation-request site BEFORE output
+cleanup, which is the actual defect the control must kill.
+
+### Mutant: premature release in cancelInvocation for started invocations
+**Production file:** `AudioFeedbackRenderer.cancelInvocation()` 
+**Change:** `releaseOutputHold` moved before the `!started` check, so it fires for ALL invocations
+(including started ones with in-flight output) at the cancellation REQUEST site, before their
+NonCancellable cleanup runs.
+**Test:** `cancellation holds the grace window until output clear completes, then releases exactly once`
+**RED XML:** `artifacts/mutation-receipts/release-before-clear-production-RED.xml`
+  - `the hold must survive cancellation while clear is still blocked`
+**GREEN XML:** `artifacts/mutation-receipts/green-release-before-clear-control.xml`
+  - Full voice suite BUILD SUCCESSFUL with production restored.
+
+### Control also counts releases authoritatively
+`GracePeriodSignal.releaseCountFor(requestId)` tracks actual release calls per request ID.
+The control asserts `assertEquals(1, releaseCountFor(testWireId))` — exactly one release, counted
+from the signal's own state, not inferred from map absence or diagnostic log parsing.

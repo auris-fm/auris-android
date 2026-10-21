@@ -4324,6 +4324,16 @@ class CloudRouteSinkTest {
             // implementation would have already released here; the correct one keeps the window held
             // until the actual output terminal.
             assertTrue("the hold must survive while output clear is blocked", graceSignal.hasOutputHold(testWireId))
+            // CANCEL THE RENDER WHILE CLEANUP IS BLOCKED (reviewer 7a04a952): this is the exact
+            // scenario that kills a premature-release implementation. The cancellation arrives
+            // while the NonCancellable cleanup is still awaiting the gate — the hold must survive
+            // both the cancel request AND the blocked cleanup, releasing only after the gate
+            // completes.
+            renderer.release()
+            // Brief pause to let the cancellation propagate into the job.
+            Thread.sleep(200)
+            // THE HOLD MUST STILL SURVIVE AFTER CANCELLATION (while cleanup remains blocked).
+            assertTrue("the hold must survive cancellation while clear is still blocked", graceSignal.hasOutputHold(testWireId))
             // Let the blocked cleanup complete — the real output terminal.
             tts.clearCompletedGate?.complete(Unit)
             // Wait for the render job to fully unwind through its NonCancellable cleanup.
@@ -4334,10 +4344,9 @@ class CloudRouteSinkTest {
             turn.join()
             turnScope.cancel()
             driver.join()
-            // THE HOLD MUST BE RELEASED (reviewer 7a04a952): the signal's own state is the
-            // authoritative check — the diagnostics log format is an implementation detail.
-            // hasOutputHold returning false proves the map entry was removed exactly once (the
-            // signal's remove is idempotent; a double-release would find nothing and be ignored).
+            // EXACTLY-ONCE RELEASE (reviewer 7a04a952): count the actual releases for this
+            // request ID, not infer from map absence.
+            assertEquals("exactly one hold release for this request", 1, graceSignal.releaseCountFor(testWireId))
             assertFalse("no output hold remains after clear completes", graceSignal.hasOutputHold(testWireId))
             // Window expiry: the release arms the countdown; advancing the looper past the timeout
             // must expire the window.

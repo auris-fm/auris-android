@@ -3940,6 +3940,7 @@ class CloudRouteSinkTest {
     }
 
 
+    @Test
     fun `pre-Connected refusal joins request ID across transport, persisted log, service and renderer`() = kotlinx.coroutines.runBlocking {
         val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
         try {

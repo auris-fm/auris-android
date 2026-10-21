@@ -1062,14 +1062,7 @@ class ContributionStore(
         // situation it exists for. Disposal intent must be writable whenever cleanup is not.
         return runCatching {
             val parent = marker.parentFile
-            val existedBefore = parent?.exists() == true
             parent?.mkdirs()
-            // A newly created directory is not durable just because its contents were synced: the entry
-            // that NAMES it lives in ITS parent, which must be barriered too.
-            if (parent != null && !existedBefore) {
-                parent.parentFile?.let { intentDirectorySync.sync(it) }
-                root.let { intentDirectorySync.sync(it) }
-            }
             marker.writeText(DISQUALIFIED_CONTENT)
             // EVERY barrier, each able to fail the transition on its own. Reporting success because the
             // file happens to be visible in this process's cache is exactly the mistake to avoid: the
@@ -1081,6 +1074,14 @@ class ContributionStore(
             // recordable while the queue itself is unhealthy. Both are real fsyncs in production; they are
             // separate injection points because they answer different questions.
             parent?.let { intentDirectorySync.sync(it) }
+            // The NAMING namespace, barriered on EVERY confirmation. Two ways of getting this wrong, both
+            // of which I made: sampling "did the directory exist before?" is unreliable because recording
+            // intent already created it, and treating visibility as durability is exactly the token
+            // shortcut one level up. A directory's creation is persisted by the entry that names it, so
+            // that entry's directory must be barriered unconditionally - not only when this call believes
+            // it just created something.
+            parent?.parentFile?.let { intentDirectorySync.sync(it) }
+            root.let { intentDirectorySync.sync(it) }
             marker.exists() && marker.readText().trim() == DISQUALIFIED_CONTENT
         }.getOrDefault(false)
     }

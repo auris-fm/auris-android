@@ -903,6 +903,60 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `the disqualified directory's NAMING namespace must be confirmed on every attempt`() {
+        // The directory-creation barrier was UNREACHABLE on the successful path: recording intent already
+        // ran mkdirs(), so the "did it exist before?" sample was always true and the parent/root barrier was
+        // skipped. An earlier failed creation barrier was likewise skipped just because the directory had
+        // since become visible - existence treated as durability, one level up from the token shortcut.
+        val root = tmp.newFolder("queue-namespace-barrier")
+        val id = java.util.UUID.randomUUID().toString()
+        // ONLY the root namespace barrier fails. The file/content barrier and the marker's own directory
+        // barrier are healthy, so this isolates the naming-namespace confirmation.
+        var blockNamespace = true
+        val faulting = object : DirectorySync {
+            override fun sync(directory: File) {
+                if (blockNamespace && directory.canonicalFile == root.canonicalFile) {
+                    throw java.io.IOException("simulated naming-namespace barrier failure")
+                }
+            }
+        }
+        val store = ContributionStore(root, limits(), intentDirectorySyncOverride = faulting)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: no disqualified directory yet", !File(root, "disqualified").exists())
+
+        val wav = File(root, "contributions/$id.recording.wav")
+        store.revokeAndPurge("account_changed")
+        assertTrue("precondition: nothing destroyed without a confirmed record", wav.isFile)
+        assertTrue("the record was still made discoverable", File(root, "disqualified/$id").isFile)
+
+        // REPEATED sweeps must not destroy anything: the namespace is still unconfirmed.
+        repeat(2) { store.expireOlderThan() }
+        assertTrue("repeated sweeps must not destroy with an unconfirmed namespace", wav.isFile)
+
+        // And a FRESH owner, which never saw the earlier attempts, must also refuse.
+        val fresh = ContributionStore(root, limits(), intentDirectorySyncOverride = faulting)
+        fresh.recover()
+        fresh.expireOlderThan()
+        assertTrue("a fresh owner must not destroy with an unconfirmed namespace", wav.isFile)
+
+        // Once the namespace is healthy the barrier must RUN and only then may deletion happen.
+        blockNamespace = false
+        var namespaceRuns = 0
+        val healthy = ContributionStore(
+            root,
+            limits(),
+            intentDirectorySyncOverride = object : DirectorySync {
+                override fun sync(directory: File) {
+                    if (directory.canonicalFile == root.canonicalFile) namespaceRuns++
+                }
+            },
+        )
+        healthy.expireOlderThan()
+        assertTrue("the naming namespace must be barriered before deletion, ran $namespaceRuns", namespaceRuns > 0)
+        assertTrue("cleanup completes once the namespace is confirmed", !wav.exists())
+    }
+
+    @Test
     fun `late cleanup is serialized against a successor publication on the same id`() {
         // retryDisqualifiedCleanupLocked deleted files OUTSIDE the ownership monitor, so a successor
         // publishing the same id could be racing the sweep. The whole retry transaction is now under the

@@ -1171,9 +1171,28 @@ class ContributionStore(
         else -> file.length()
     }
 
-    private fun measuredAudioBytes(id: String): Long = footprintBytes(File(dir, "$id$SUFFIX_WAV"))
+    // Full retained footprint of a capture, split into the two accounted channels. EVERYTHING the capture
+    // keeps on disk is included: primary audio and metadata, the sidecars (attempts, created, sha256, ready)
+    // and its disposal-intent record. Charging only the primary files understates retention, and an owner
+    // could then hold unbounded debris inside a bound that claims to cover it (reviewer ca97f609).
+    //
+    // Traversal is BOUNDED: a fixed suffix list, no unbounded walk, and a failure to measure FAILS CLOSED
+    // by charging conservatively rather than reporting zero.
+    private fun retainedFootprintLocked(id: String): Pair<Long, Int> {
+        val measured = runCatching {
+            val audio = footprintBytes(File(dir, "$id$SUFFIX_WAV"))
+            val rest = SIDECAR_SUFFIXES.sumOf { footprintBytes(File(dir, "$id$it")) } +
+                footprintBytes(disqualificationMarker(id))
+            audio to rest.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+        }.getOrNull()
+        // Fail CLOSED. An unmeasurable capture is charged the worst case a capture can occupy, so a
+        // measurement error can never make retained bytes free.
+        return measured ?: (limits.maxClipBytes to limits.maxMetadataBytes)
+    }
 
-    private fun measuredMetadataBytes(id: String): Int = footprintBytes(File(dir, "$id$SUFFIX_META")).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+    private fun measuredAudioBytes(id: String): Long = retainedFootprintLocked(id).first
+
+    private fun measuredMetadataBytes(id: String): Int = retainedFootprintLocked(id).second
 
     private fun dropCounterOnly(reason: TerminalReason) {
         val snapshot = synchronized(lock) {
@@ -1294,6 +1313,11 @@ class ContributionStore(
     // merely the accounting mutations.
     fun ownerLockForTest(): Any = lock
 
+    // Test seam: the exact bytes currently charged for a capture, so a control can assert the MEASURED
+    // charge directly instead of inferring it through an admission probe whose budget has to straddle an
+    // (often tiny) sidecar band.
+    fun chargedBytesForTest(captureId: String): Long = synchronized(lock) { ownedCharges[captureId]?.bytes ?: 0L }
+
     // Separate barrier for the DURABLE DISPOSAL INTENT record. Production uses the same real fsync; it is
     // a distinct injection point so a fault aimed at the queue cannot silently disable intent recording,
     // and so intent recording can itself be faulted on its own.
@@ -1318,6 +1342,10 @@ class ContributionStore(
         private const val SAMPLE_RATE_HZ = 16_000L
         private const val SUFFIX_CREATED = ".created"
         private const val SUFFIX_DIGEST = ".sha256"
+
+        // Everything a capture can leave on disk besides its primary audio and metadata. Kept as a fixed
+        // list so measurement is bounded; a new artifact must be added here or it goes unaccounted.
+        private val SIDECAR_SUFFIXES = listOf(SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST)
         private const val DISQUALIFIED_DIR = "disqualified"
 
         // The marker's content is its confirmation token: presence alone is not durable intent.

@@ -957,59 +957,48 @@ class DirectoryDurabilityTest {
     }
 
     @Test
-    fun `retained residue charges the FULL footprint, not just audio and metadata`() {
-        // measuredAudioBytes/measuredMetadataBytes cover only the two primary files. Everything else a
-        // capture leaves on disk - attempts, created, sha256, ready - is real retained storage that the
-        // queue does not count, so an owner can hold unbounded debris while reporting itself empty.
-        val root = tmp.newFolder("queue-full-footprint")
+    fun `residue charges sidecar bytes ABOVE the audio+metadata baseline`() {
+        // The previous version of this control compared "audio only" against "everything", so charging
+        // audio+metadata already refused the probe: it could not see uncharged sidecars (reviewer
+        // ca97f609). The baseline here is audio+metadata, and the discriminator is the SIDECAR bytes above
+        // it - attempts, created, sha256, ready and the disposal-intent record.
+        val root = tmp.newFolder("queue-sidecar-footprint")
         val id = java.util.UUID.randomUUID().toString()
         val store = ContributionStore(root, limits())
         assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        // Real captures accumulate retry state; the digest is a fixed-size file. Together they make the
+        // sidecar band wide enough to place a probe inside it, which is what isolates these bytes.
+        repeat(4) { store.recordAttempt(store.ownership.currentGeneration(), id) }
 
-        // Disqualify, then make EVERY file undeletable by turning it into a non-empty directory, so the
-        // whole residue survives the sweep and must all be charged.
+        // Disqualify so the intent record itself is part of the retained footprint.
         File(root, "disqualified").mkdirs()
-        File(root, "disqualified/$id").writeText("disqualified\n")
+        // Exactly the content the store itself writes, so the measured footprint matches production.
+        File(root, "disqualified/$id").writeText("disqualified")
+
         val contributions = File(root, "contributions")
-        val ownFiles = contributions.listFiles()!!.filter { it.name.startsWith(id) }
-        assertTrue("precondition: several files exist: ${ownFiles.map { it.name }}", ownFiles.size >= 4)
-        ownFiles.forEach { file ->
+        // Make EVERY file undeletable so the whole residue survives and must all be charged.
+        contributions.listFiles()!!.filter { it.name.startsWith(id) }.forEach { file ->
             val bytes = file.readBytes()
             file.delete()
             file.mkdirs()
             File(file, "held").writeBytes(bytes)
         }
-        val totalFootprint = contributions.listFiles()!!.filter { it.name.startsWith(id) }
-            .sumOf { dir -> dir.walkTopDown().filter { it.isFile }.sumOf { it.length() } }
 
-        // AUDIO-ONLY footprint, which is what a charge covering just the primary file would amount to.
-        val audioOnly = File(contributions, "$id.recording.wav").walkTopDown().filter { it.isFile }.sumOf { it.length() }
-        assertTrue(
-            "precondition: the extra files are a real part of the footprint ($audioOnly of $totalFootprint)",
-            totalFootprint > audioOnly + 64,
-        )
+        fun subtree(f: File) = if (f.exists()) f.walkTopDown().filter { it.isFile }.sumOf { it.length() } else 0L
+        val audio = subtree(File(contributions, "$id.recording.wav"))
+        val metaBytes = subtree(File(contributions, "$id.metadata.json"))
+        val baseline = audio + metaBytes
+        val sidecars = listOf(".ready", ".attempts", ".created", ".sha256").sumOf { subtree(File(contributions, "$id$it")) } +
+            subtree(File(root, "disqualified/$id"))
 
-        // The discriminator: a budget between audio-only and the full footprint, admitting a probe that
-        // fills the gap. Charged fully the probe does not fit; charged audio-only it does. A probe larger
-        // than the whole footprint (my first version) is refused either way and proves nothing.
-        val probeMeta = meta(java.util.UUID.randomUUID().toString())
-        val gapBytes = totalFootprint - audioOnly
-        // Find a sample count whose projection lands just under the gap.
-        var samples = 1L
-        while (ContributionStore(root, limits()).projectedBytesFor(samples + 1, probeMeta.size) < gapBytes) samples++
-        val probeBytes = ContributionStore(root, limits()).projectedBytesFor(samples, probeMeta.size)
-        assertTrue("precondition: the probe sits inside the gap ($probeBytes of $gapBytes)", probeBytes < gapBytes)
-
-        // Do NOT call recover() first: recovery adopts and charges before the sweep, which masks whatever
-        // the sweep itself would charge. The sweep must be the FIRST and ONLY accounting that touches it.
-        val fresh = ContributionStore(root, limits().copy(maxQueueBytes = audioOnly + probeBytes))
-        fresh.expireOlderThan()
-
-        assertTrue(
-            "residue must charge its FULL $totalFootprint-byte footprint: a $probeBytes-byte probe fit in a " +
-                "budget that only covers the $audioOnly-byte audio file",
-            fresh.admit(sampleCount = samples, metadataBytes = probeMeta.size) == null,
-        )
+        // Assert the MEASURED CHARGE DIRECTLY. A sidecar band of this fixture is only tens of bytes, so no
+        // admission budget can straddle it reliably; the reviewer offered this form explicitly. The charge
+        // must equal the WHOLE retained footprint, not just the audio+metadata baseline.
+        val fresh = ContributionStore(root, limits())
+        fresh.expireOlderThan() // first and only accounting for this capture
+        val charged = fresh.chargedBytesForTest(id)
+        assertEquals("the charge must cover the full retained footprint", baseline + sidecars, charged)
+        assertTrue("the sidecar bytes must not be free", charged > baseline)
     }
 
     @Test
@@ -1023,7 +1012,8 @@ class DirectoryDurabilityTest {
         assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
         // Disqualify without deleting anything, simulating a previous failed attempt.
         File(root, "disqualified").mkdirs()
-        File(root, "disqualified/$id").writeText("disqualified\n")
+        // Exactly the content the store itself writes, so the measured footprint matches production.
+        File(root, "disqualified/$id").writeText("disqualified")
 
         val wav = File(root, "contributions/$id.recording.wav")
         assertTrue("precondition: audio present", wav.isFile)

@@ -133,25 +133,29 @@ class AudioFeedbackRenderer(
                         ),
                     )
                 }
+                var earconAdmitted: Boolean? = null
                 when (response) {
                     is VoiceResponse.Silent -> { /* no-op */ }
 
-                    is VoiceResponse.Earcon -> playEarcon(response.id)
+                    is VoiceResponse.Earcon -> earconAdmitted = playEarcon(response.id)
 
                     is VoiceResponse.Spoken -> speakWithHeartbeat(response.text, language)
 
                     is VoiceResponse.Combined -> {
-                        playEarcon(response.earcon)
+                        earconAdmitted = playEarcon(response.earcon)
                         speakWithHeartbeat(response.spokenText, language)
                     }
                 }
-                // SUBMISSION boundary: the player accepted and drained without throwing.
+                // SUBMISSION boundary: the player accepted and drained without throwing. The earcon
+                // admission result is observed, not assumed: a refused cue is a drop, not a submission.
                 if (requestId != null) {
-                    val submittedKind = when (response) {
-                        is VoiceResponse.Silent -> "silent"
-                        is VoiceResponse.Earcon -> "earcon_submitted"
-                        is VoiceResponse.Spoken -> "spoken_submitted"
-                        is VoiceResponse.Combined -> "combined_submitted"
+                    val refusedEarcon = earconAdmitted == false
+                    val submittedKind = when {
+                        refusedEarcon -> "earcon_refused"
+                        earconAdmitted == true && response is VoiceResponse.Earcon -> "earcon_submitted"
+                        earconAdmitted == true -> "combined_submitted"
+                        response is VoiceResponse.Spoken -> "spoken_submitted"
+                        else -> "silent"
                     }
                     VoiceLifecycleDiagnostics.record(
                         VoiceLifecycleDiagnostics.Event(
@@ -160,6 +164,7 @@ class AudioFeedbackRenderer(
                             source = VoiceLifecycleDiagnostics.Source.Cloud,
                             requestId = requestId,
                             feedbackKind = submittedKind,
+                            errorCode = if (refusedEarcon) "admission_refused" else null,
                         ),
                     )
                 }

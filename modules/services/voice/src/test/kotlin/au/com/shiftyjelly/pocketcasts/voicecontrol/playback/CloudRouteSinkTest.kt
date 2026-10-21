@@ -3970,33 +3970,4 @@ class CloudRouteSinkTest {
             (feedback as VoiceResponse.Spoken).text,
         )
     }
-
-    @Test
-    fun `renderer records rendered observation with the turn request ID`() = runTest {
-        val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
-        try {
-            val ttsEngine = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsEngine>()
-            val renderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
-                earconPlayer = mock(),
-                ttsEngine = ttsEngine,
-            )
-            renderer.render(
-                VoiceResponse.Spoken("You have reached your Auris free daily limit. Please try again tomorrow."),
-                requestId = testWireId,
-            )
-            // The render coroutine runs on the renderer's own scope; poll briefly for the entry record.
-            var lines: List<String> = emptyList()
-            repeat(20) {
-                lines = capture.lines()
-                if (lines.any { it.contains("reason=TurnFeedbackSelected") && it.contains("request_id=$testWireId") }) return@repeat
-                Thread.sleep(50)
-            }
-            assertTrue(
-                "renderer entry recorded with turn request ID",
-                lines.any { it.contains("reason=TurnFeedbackSelected") && it.contains("request_id=$testWireId") && it.contains("entry_spoken") },
-            )
-        } finally {
-            capture.close()
-        }
-    }
 }

@@ -1592,4 +1592,74 @@ class AudioFeedbackRendererTest {
     private fun currentTrackOf(player: EarconPlayer): android.media.AudioTrack? = player.javaClass.getDeclaredField("track")
         .apply { isAccessible = true }
         .get(player) as android.media.AudioTrack?
+
+    /** Deadline-bounded wait for a captured diagnostics line, so the assertion cannot pass vacuously. */
+    private fun awaitLine(
+        capture: au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture,
+        predicate: (String) -> Boolean,
+        description: String,
+    ): String = kotlinx.coroutines.runBlocking {
+        kotlinx.coroutines.withTimeout(5_000) {
+            var found: String? = null
+            while (found == null) {
+                found = capture.lines().firstOrNull(predicate)
+                if (found == null) kotlinx.coroutines.delay(10)
+            }
+            found
+        }
+    }
+
+    private val turnRequestId = "6f9619ff-8b86-d011-b42d-00c04fc964ff"
+
+    @Test
+    fun `renderer records entry and submission observations joined to the turn request ID`() {
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture().use { capture ->
+            val localRenderer = AudioFeedbackRenderer(earconPlayer, FakeTtsEngine())
+            localRenderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+            localRenderer.render(VoiceResponse.Spoken("You have reached your limit."), requestId = turnRequestId)
+
+            val entry = awaitLine(capture, { it.contains("reason=TurnFeedbackSelected") && it.contains("request_id=$turnRequestId") }, "entry")
+            assertTrue("entry must name the kind, not claim a submission: $entry", entry.contains("entry_spoken"))
+
+            val submitted = awaitLine(capture, { it.contains("reason=TurnFeedbackRendered") && it.contains("request_id=$turnRequestId") }, "submission")
+            assertTrue("accepted TTS drain must record submission: $submitted", submitted.contains("spoken_submitted"))
+            localRenderer.release()
+        }
+    }
+
+    @Test
+    fun `refused earcon records a drop, not a submission`() {
+        whenever(earconPlayer.play(org.mockito.kotlin.any())).thenReturn(null)
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture().use { capture ->
+            val localRenderer = AudioFeedbackRenderer(earconPlayer, FakeTtsEngine())
+            localRenderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+            localRenderer.render(VoiceResponse.Earcon(EarconId.ERROR), requestId = turnRequestId)
+
+            val refused = awaitLine(capture, { it.contains("reason=TurnFeedbackRendered") && it.contains("request_id=$turnRequestId") }, "refusal")
+            assertTrue("refused admission must be a drop: $refused", refused.contains("earcon_refused"))
+            assertTrue("refused admission must carry the bounded reason: $refused", refused.contains("admission_refused"))
+            localRenderer.release()
+        }
+    }
+
+    @Test
+    fun `incomplete TTS records submission_failed, not spoken_submitted`() {
+        val failing = object : TtsEngine {
+            override suspend fun warmUp(language: String) {}
+            override suspend fun speak(text: String, language: String) {
+                throw TtsPlaybackIncompleteException(framesWritten = 10, framesPlayed = 4)
+            }
+            override fun release() {}
+        }
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture().use { capture ->
+            val localRenderer = AudioFeedbackRenderer(earconPlayer, failing)
+            localRenderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+            localRenderer.render(VoiceResponse.Spoken("partial answer"), requestId = turnRequestId)
+
+            val failed = awaitLine(capture, { it.contains("reason=TurnFeedbackRendered") && it.contains("request_id=$turnRequestId") }, "failure")
+            assertTrue("incomplete drain must be a failure: $failed", failed.contains("submission_failed"))
+            assertTrue("incomplete drain must carry the bounded reason: $failed", failed.contains("tts_incomplete"))
+            localRenderer.release()
+        }
+    }
 }

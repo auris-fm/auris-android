@@ -274,7 +274,8 @@ object RecordValidator {
 
             StageName.Asr -> {
                 textIfPresent(f["text"]) ?: return null
-                textIfPresent(f["source_language"]) ?: return null
+                // Language tags are short fields on the wire (512 bytes), not text (64 KiB).
+                textIfPresent(f["source_language"], WireBounds.SHORT_FIELD_BYTES) ?: return null
                 textIfPresent(f["router_input"]) ?: return null
                 // Missing text stays ABSENT with a state/reason: an empty transcript claiming
                 // success is the exact defect the spec names, and text present on a
@@ -288,7 +289,7 @@ object RecordValidator {
 
             StageName.Translation -> {
                 textIfPresent(f["translated_text"]) ?: return null
-                textIfPresent(f["target_language"]) ?: return null
+                textIfPresent(f["target_language"], WireBounds.SHORT_FIELD_BYTES) ?: return null
             }
 
             StageName.Routing -> {
@@ -306,7 +307,10 @@ object RecordValidator {
 
                     else -> return null
                 }
-                f["arguments"]?.let { if (it !is RecordNode.Obj) return null }
+                if ("arguments" in f) {
+                    val intent = (f["predicted_intent"] as? RecordNode.Str)?.value ?: ""
+                    validateArguments(f["arguments"], intent) ?: return null
+                }
             }
 
             StageName.Execution -> enumIfPresent(f["outcome"], EXECUTION_OUTCOMES) ?: return null
@@ -332,6 +336,63 @@ object RecordValidator {
         "cancelled_by_user",
     )
 
+    /**
+     * `routing.arguments` authorization and content boundary, mirroring the Worker.
+     *
+     * A missing argument authorization is NOT a licence to retain the payload locally: a record that
+     * the server refuses would be kept and trusted on the device and could never be uploaded. The
+     * remedy the Worker names is for the client to omit `arguments` entirely BEFORE finalizing.
+     *
+     * An intent with no approved list refuses ANY arguments; an approved intent refuses unknown
+     * members, and every value must be a bounded scalar — a structured value could carry content the
+     * forbidden-name list at the key level cannot see.
+     */
+    private fun validateArguments(node: RecordNode?, intent: String): Unit? {
+        val obj = node as? RecordNode.Obj ?: return null
+        val allowed = INTENT_ARGUMENT_ALLOWLIST[intent] ?: return null
+        for ((key, value) in obj.fields) {
+            if (isForbidden(key)) return null
+            if (!allowed.contains(key)) return null
+            when (value) {
+                is RecordNode.Str -> {
+                    if (value.value.isEmpty()) return null
+                    if (WireBounds.utf8Length(value.value) > WireBounds.ARGUMENT_VALUE_BYTES) return null
+                }
+
+                is RecordNode.Num -> if (!value.value.isFinite()) return null
+
+                is RecordNode.Bool, RecordNode.Null -> Unit
+
+                // Arrays and nested objects are refused without naming them.
+                else -> return null
+            }
+        }
+        return Unit
+    }
+
+    // Approved argument members per intent. A Map, not a plain object lookup, so an intent named
+    // `constructor` or `__proto__` resolves to "no approved list" rather than to inherited members.
+
+    /**
+     * The same authorization/content boundary the decoder applies, callable by the ENCODE side.
+     *
+     * The builder previously accepted any `routing.arguments` payload: it checked field NAMES only,
+     * so an unauthorized intent with a private payload could be finalized into an immutable record
+     * that the Worker would refuse and the device would have already hashed and could not repair.
+     * Returning a failure reason rather than throwing keeps this usable from a builder `require`.
+     */
+    fun argumentRefusal(arguments: RecordNode?, intent: String): String? {
+        if (validateArguments(arguments, intent) == null) return "arguments are not authorized for this intent"
+        return null
+    }
+
+    private val INTENT_ARGUMENT_ALLOWLIST: Map<String, Set<String>> = mapOf(
+        "playlist.play" to setOf("playlist_hint"),
+        "track.play" to setOf("track_hint", "artist_hint"),
+        "track.pause" to emptySet(),
+        "sleep_timer.set" to setOf("duration_minutes"),
+    )
+
     private fun validateLinks(node: RecordNode): RecordNode.Obj? {
         val obj = node as? RecordNode.Obj ?: return null
         for ((key, value) in obj.fields) {
@@ -342,18 +403,25 @@ object RecordValidator {
         return obj
     }
 
-    /** Optional enumerated string: absent is fine, present must be in [allowed]. */
-    private fun enumIfPresent(node: RecordNode?, allowed: Set<String>): Boolean? = when (node) {
-        null -> true
-        is RecordNode.Str -> allowed.contains(node.value)
-        else -> false
+    /**
+     * Optional enumerated string: absent is fine, present must be in [allowed].
+     *
+     * Returns a NON-NULL marker when valid and `null` when invalid, so `?: return null` is correct.
+     * The previous version returned `Boolean?` with `false` for an invalid value; call sites used
+     * `?: return null`, which rejects only null, so every invalid enum was ACCEPTED. A three-state
+     * result cannot be checked correctly by an elvis operator, so the result now has two states.
+     */
+    private fun enumIfPresent(node: RecordNode?, allowed: Set<String>): Unit? = when (node) {
+        null -> Unit
+        is RecordNode.Str -> if (allowed.contains(node.value)) Unit else null
+        else -> null
     }
 
     /** Optional text field: absent is fine, present must be a non-empty bounded string. */
-    private fun textIfPresent(node: RecordNode?): Boolean? = when (node) {
-        null -> true
-        is RecordNode.Str -> node.value.isNotEmpty() && WireBounds.utf8Length(node.value) <= WireBounds.TEXT_FIELD_BYTES
-        else -> false
+    private fun textIfPresent(node: RecordNode?, maxBytes: Int = WireBounds.TEXT_FIELD_BYTES): Unit? = when (node) {
+        null -> Unit
+        is RecordNode.Str -> if (node.value.isNotEmpty() && WireBounds.utf8Length(node.value) <= maxBytes) Unit else null
+        else -> null
     }
 
     private fun numOf(node: RecordNode): Double? = (node as? RecordNode.Num)?.value?.takeIf { it.isFinite() }

@@ -153,4 +153,126 @@ class WorkerWireParityTest {
         }
         assertTrue("no verdicts produced", verdicts.isNotEmpty())
     }
+
+    /**
+     * The DECODER's refusals must match the WORKER's, case for case.
+     *
+     * The decoder rules added for review findings 1-3 are only correct if the Worker refuses the same
+     * inputs. Without this test, "the decoder refuses X" is my opinion of the contract; with it, the
+     * Worker's own validator is the authority and the decoder is measured against it. Each record here
+     * is well-formed except for exactly one rule, so a single ACCEPT identifies the rule I got wrong.
+     */
+    @Test
+    fun `the Worker refuses the same malformed records the decoder refuses`() {
+        val workerRoot = cloudWorkerRoot()
+        assumeTrue("cloud worker worktree not available", workerRoot != null)
+        assumeTrue("node not available", nodeAvailable())
+
+        fun perturbed(mutate: (MutableMap<String, Any?>) -> Unit): String {
+            val base = mutableMapOf<String, Any?>(
+                "schema_version" to 1L,
+                "capture_id" to UUID.randomUUID().toString(),
+                "enrollment_epoch" to "epoch-1",
+                "capture_session_id" to "42",
+                "platform" to "android",
+                "app_version" to "8.20",
+                "build" to "12345",
+                "models" to mapOf(
+                    "vad" to mapOf("id" to "silero-vad", "version" to "4.0"),
+                    "wakeword" to mapOf("id" to "auris-wake", "version" to "1.2"),
+                    "asr" to mapOf("id" to "whisper-small", "version" to "2024-11"),
+                    "translation" to null,
+                    "router" to mapOf("id" to "lfm-intent", "version" to "0.3"),
+                ),
+                "audio" to mapOf(
+                    "sha256" to "a".repeat(64),
+                    "byte_count" to 3244L,
+                    "retained_samples" to 1600L,
+                    "sample_rate_hz" to 16000L,
+                    "channels" to 1L,
+                    "encoding" to "pcm_s16le",
+                    "original_format" to "pcm_s16le",
+                    "conversion_version" to "1",
+                    "truncated" to false,
+                    "dropped_spans" to emptyList<Any>(),
+                ),
+                "observations" to mutableMapOf<String, Any?>(
+                    "wake" to mutableMapOf<String, Any?>("state" to "completed", "decision" to "detected"),
+                    "bleed" to mutableMapOf<String, Any?>("state" to "completed", "decision" to "no_overlap"),
+                    "asr" to mutableMapOf<String, Any?>("state" to "completed", "text" to "skip this ad", "source_language" to "en"),
+                    "translation" to mutableMapOf<String, Any?>("state" to "not_run", "reason" to "no_text"),
+                    "routing" to mutableMapOf<String, Any?>(
+                        "state" to "completed",
+                        "predicted_intent" to "track.play",
+                        "arguments" to mutableMapOf<String, Any?>("track_hint" to "queen"),
+                    ),
+                    "execution" to mutableMapOf<String, Any?>("state" to "completed", "outcome" to "success"),
+                ),
+                "links" to mapOf("conversation_id" to UUID.randomUUID().toString()),
+            )
+            mutate(base)
+            return CanonicalJson.canonicalBytes(jsonNode(base)).toString(Charsets.UTF_8)
+        }
+
+        val cases = linkedMapOf<String, String>(
+            // Finding 1: enum values outside the enumeration.
+            "wake-decision-bogus" to perturbed { stageOf(it, "wake")["decision"] = "bogus" },
+            "routing-validation-bogus" to perturbed { stageOf(it, "routing")["validation"] = "bogus" },
+            "execution-outcome-bogus" to perturbed { stageOf(it, "execution")["outcome"] = "bogus" },
+            // Finding 3: language above the SHORT bound but below the text bound.
+            "source-language-over-short-bound" to perturbed { stageOf(it, "asr")["source_language"] = "x".repeat(WireBounds.SHORT_FIELD_BYTES + 1) },
+            // Finding 2: argument authorization and content boundary.
+            "arguments-unauthorized-intent" to perturbed {
+                stageOf(it, "routing")["predicted_intent"] = "unknown.intent"
+                stageOf(it, "routing")["arguments"] = mapOf("anything" to "value")
+            },
+            "arguments-unapproved-member" to perturbed {
+                stageOf(it, "routing")["arguments"] = mapOf("track_hint" to "queen", "access_token" to "abc")
+            },
+            "arguments-structured-value" to perturbed {
+                stageOf(it, "routing")["arguments"] = mapOf("track_hint" to mapOf("nested" to "x"))
+            },
+        )
+
+        val recordsFile = Files.createTempFile("android-negative-records", ".jsonl").toFile()
+        val probe = File(recordsFile.parentFile, "probe_worker_intake.mjs")
+        probe.writeBytes(javaClass.classLoader!!.getResourceAsStream("worker-parity/probe_worker_intake.mjs")!!.readBytes())
+        recordsFile.writeText(cases.entries.joinToString("\n") { (id, json) -> """{"id":"$id","record":$json}""" })
+
+        val process = ProcessBuilder("node", probe.absolutePath, workerRoot!!.absolutePath, recordsFile.absolutePath)
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().readText()
+        assertEquals("probe failed: $output", 0, process.waitFor())
+
+        val verdicts = output.lines().filter { it.isNotBlank() }.associate { line ->
+            val parts = line.split('\t')
+            parts[0] to parts.drop(1).joinToString("\t")
+        }
+        for (id in cases.keys) {
+            assertTrue(
+                "the Worker ACCEPTED '$id', but the decoder refuses it — the decoder is over-strict: ${verdicts[id]}",
+                verdicts[id]?.startsWith("REJECT") == true,
+            )
+        }
+        println("WORKER-NEGATIVE-VERDICTS")
+        verdicts.forEach { (id, v) -> println("  $id -> $v") }
+    }
+
+    private fun stageOf(record: MutableMap<String, Any?>, name: String): MutableMap<String, Any?> {
+        @Suppress("UNCHECKED_CAST")
+        return (record["observations"] as MutableMap<String, MutableMap<String, Any?>>)[name]!!
+    }
+
+    private fun jsonNode(value: Any?): RecordNode = when (value) {
+        null -> RecordNode.Null
+        is String -> RecordNode.Str(value)
+        is Long -> RecordNode.Num(value.toDouble())
+        is Int -> RecordNode.Num(value.toDouble())
+        is Double -> RecordNode.Num(value)
+        is Boolean -> RecordNode.Bool(value)
+        is Map<*, *> -> RecordNode.Obj(value.entries.associate { (k, v) -> k as String to jsonNode(v) })
+        is List<*> -> RecordNode.Arr(value.map { jsonNode(it) })
+        else -> error("unsupported: ${value::class}")
+    }
 }

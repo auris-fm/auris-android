@@ -117,6 +117,9 @@ object WireBounds {
     const val TEXT_FIELD_BYTES = 64 * 1024
     const val SHORT_FIELD_BYTES = 512
 
+    /** One allowlisted action argument value (`MAX_ARGUMENT_VALUE_BYTES` in the Worker). */
+    const val ARGUMENT_VALUE_BYTES = 128
+
     fun utf8Length(value: String): Int = value.toByteArray(Charsets.UTF_8).size
 
     fun requireShort(value: String, what: String) {
@@ -192,6 +195,16 @@ class ContributionRecordBuilder(
             require(StageReasons.isAllowed(stage, reason)) { "reason '$reason' is not enumerated for ${stage.wire}" }
         } else {
             require(!entry.fields.containsKey("reason")) { "stage ${stage.wire} is completed: reason must be absent" }
+        }
+        // routing.arguments is AUTHORIZED at build time too. A record is immutable once finalized,
+        // so a payload the Worker would refuse must be refused HERE — afterwards the device holds a
+        // hashed record it can never upload and cannot repair.
+        if (stage == StageName.Routing) {
+            entry.fields["arguments"]?.let { args ->
+                val intent = (entry.fields["predicted_intent"] as? RecordNode.Str)?.value ?: ""
+                val refusal = RecordValidator.argumentRefusal(args, intent)
+                require(refusal == null) { refusal ?: "" }
+            }
         }
         stages[stage] = entry
         return this

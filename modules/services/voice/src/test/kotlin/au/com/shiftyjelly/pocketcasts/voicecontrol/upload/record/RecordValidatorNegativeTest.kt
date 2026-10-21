@@ -197,6 +197,76 @@ class RecordValidatorNegativeTest {
         assertRefused("translation.target_language above 512 bytes", r2)
     }
 
+    // ---- The ENCODE side must refuse the same payloads, not just the decoder ----
+
+    private fun builderWithArguments(intent: String, arguments: RecordNode): () -> Unit = {
+        val audio = AudioBlock(
+            sha256 = "a".repeat(64),
+            byteCount = 3244,
+            retainedSamples = 1600,
+            originalFormat = "pcm_s16le",
+            conversionVersion = "1",
+            truncated = false,
+            droppedSpans = emptyList(),
+        )
+        ContributionRecordBuilder("6f1e5c2a-0000-4000-8000-000000000001", "epoch-1", "42")
+            .model("vad", ModelRef.Named("silero-vad", "4.0"))
+            .model("wakeword", ModelRef.Named("auris-wake", "1.2"))
+            .model("asr", ModelRef.Named("whisper-small", "2024-11"))
+            .model("translation", ModelRef.None)
+            .model("router", ModelRef.Named("lfm-intent", "0.3"))
+            .stage(StageName.Wake, StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("detected"))))
+            .stage(StageName.Bleed, StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("no_overlap"))))
+            .stage(StageName.Asr, StageEntry(StageState.Completed, mapOf("text" to RecordNode.Str("play queen"))))
+            .stage(StageName.Translation, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text"))))
+            .stage(
+                StageName.Routing,
+                StageEntry(
+                    StageState.Completed,
+                    mapOf("predicted_intent" to RecordNode.Str(intent), "arguments" to arguments),
+                ),
+            )
+            .stage(StageName.Execution, StageEntry(StageState.Completed, mapOf("outcome" to RecordNode.Str("success"))))
+            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio)
+        Unit
+    }
+
+    private fun assertBuilderRefuses(what: String, build: () -> Unit) {
+        val failure = runCatching(build).exceptionOrNull()
+        assertTrue("$what must be REFUSED by the builder but was accepted", failure != null)
+    }
+
+    @Test
+    fun `builder refuses an unauthorized intent carrying arguments`() {
+        assertBuilderRefuses("unknown intent + arguments") {
+            builderWithArguments("unknown.intent", RecordNode.Obj(mapOf("anything" to RecordNode.Str("value"))))()
+        }
+    }
+
+    @Test
+    fun `builder refuses an unapproved argument member`() {
+        assertBuilderRefuses("unapproved argument member") {
+            builderWithArguments(
+                "track.play",
+                RecordNode.Obj(mapOf("track_hint" to RecordNode.Str("queen"), "access_token" to RecordNode.Str("abc"))),
+            )()
+        }
+    }
+
+    @Test
+    fun `builder refuses a structured argument value`() {
+        assertBuilderRefuses("structured argument value") {
+            builderWithArguments("track.play", RecordNode.Obj(mapOf("track_hint" to RecordNode.Obj(mapOf("nested" to RecordNode.Str("x"))))))()
+        }
+    }
+
+    @Test
+    fun `builder still accepts an authorized intent with scalar arguments`() {
+        // Guard against over-refusal: the legitimate shape must remain buildable.
+        val build = builderWithArguments("track.play", RecordNode.Obj(mapOf("track_hint" to RecordNode.Str("queen"))))
+        build()
+    }
+
     @Test
     fun `the baseline fixture stays accepted after the fixes`() {
         // Guards against "fix by refusing everything": the negative controls above must not have made

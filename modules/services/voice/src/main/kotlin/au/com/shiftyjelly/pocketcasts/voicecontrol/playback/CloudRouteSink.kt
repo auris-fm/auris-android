@@ -649,7 +649,7 @@ class CloudRouteSink internal constructor(
                         // Audio submission boundary: play() called on the cloud audio player.
                         // This is a submission/request, not confirmed audible output.
                         if (audioPlayer != null) {
-                            Trace.record(Event(Kind.Turn, Reason.TurnFeedbackRendered, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = "cloud_audio_submitted"))
+                            Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = "cloud_audio_submitted"))
                         }
                     }
 

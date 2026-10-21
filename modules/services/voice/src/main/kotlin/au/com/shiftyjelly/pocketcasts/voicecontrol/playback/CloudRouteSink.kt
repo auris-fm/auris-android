@@ -646,8 +646,10 @@ class CloudRouteSink internal constructor(
                         }
                         audioPlayer?.submitFrame(event.bytes)
                         audioPlayer?.play()
-                        // Render boundary: audio playback actually started.
-                        Trace.record(Event(Kind.Turn, Reason.TurnFeedbackRendered, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = "audio"))
+                        // Render boundary: cloud audio playback requested (not confirmed audible).
+                        if (audioPlayer != null) {
+                            Trace.record(Event(Kind.Turn, Reason.TurnFeedbackRendered, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = "cloud_audio"))
+                        }
                     }
 
                     is CloudRouteEvent.Done -> {
@@ -879,8 +881,20 @@ class CloudRouteSink internal constructor(
                 graceHold?.let { gracePeriodSignal.finishCloudTurn(it, cancelled = endReason == Reason.TurnCancelled || myJob?.isCancelled == true) }
             }
         }
+        // Render/drop boundary for local feedback (spoken refusal, earcon, silent).
+        // Cloud audio render is observed at play() above; this covers the non-audio paths.
+        val finalFeedback = outcome ?: VoiceResponse.Silent
+        val localRenderKind = when (finalFeedback) {
+            is VoiceResponse.Spoken -> "spoken"
+            is VoiceResponse.Earcon -> "earcon"
+            is VoiceResponse.Silent -> "silent"
+            else -> null
+        }
+        if (localRenderKind != null) {
+            Trace.record(Event(Kind.Turn, Reason.TurnFeedbackRendered, Source.Cloud, generation = diagnosticOrigin, owner = myId, requestId = diagnosticRequestId, feedbackKind = localRenderKind))
+        }
         return CloudTurnResult(
-            feedback = outcome ?: VoiceResponse.Silent,
+            feedback = finalFeedback,
             // THE TURN'S OWN ACCUMULATED OUTCOME, not a fresh None. Hardcoding None here DISCARDED
             // everything `noteOutcome` accumulated: the request-owned result reported "no action" for a
             // turn whose action was confirmed, and -- worse -- reported the same for one whose outcome
@@ -933,9 +947,8 @@ class CloudRouteSink internal constructor(
                 Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, requestId = requestId, errorCode = boundedCode, terminalOrigin = origin.name))
             }
             override fun onConnectionFailed(requestId: String) {
-                // Connection failure is a transport fact, not lifecycle retirement.
-                // Retirement is recorded separately when the turn actually ends.
-                Trace.record(Event(Kind.Turn, Reason.TurnRetired, Source.Cloud, requestId = requestId, errorCode = "connection_failed", terminalOrigin = "LOCAL_CONNECTION_FAILED"))
+                // Transport connection failure — distinct from lifecycle retirement.
+                Trace.record(Event(Kind.Turn, Reason.TurnConnectionFailed, Source.Cloud, requestId = requestId, terminalOrigin = "LOCAL_CONNECTION_FAILED"))
             }
         }
         val transport = transportFactory?.invoke(resolveBaseUrl(), CloudTurnRoute.defaultOkHttpClient(), transportObserver)

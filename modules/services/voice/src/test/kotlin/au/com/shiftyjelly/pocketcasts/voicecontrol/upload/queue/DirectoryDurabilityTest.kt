@@ -36,6 +36,8 @@ class DirectoryDurabilityTest {
     @get:Rule
     val tmp = TemporaryFolder()
 
+    private val measureDepthPastBound = 8
+
     private fun limits() = QueueLimits.defaults().copy(maxQueueRecords = 8)
 
     private class RecordingSync : DirectorySync {
@@ -954,6 +956,105 @@ class DirectoryDurabilityTest {
         healthy.expireOlderThan()
         assertTrue("the naming namespace must be barriered before deletion, ran $namespaceRuns", namespaceRuns > 0)
         assertTrue("cleanup completes once the namespace is confirmed", !wav.exists())
+    }
+
+    @Test
+    fun `recovery whose invalid cleanup FAILS charges the full footprint of what survives`() {
+        // M36 survived with no control reaching this branch, so the recovery failed-cleanup path was
+        // charging through the old primary-files-only measurement unnoticed.
+        val root = tmp.newFolder("queue-recovery-failed-cleanup")
+        val id = java.util.UUID.randomUUID().toString()
+        val store = ContributionStore(root, limits())
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+
+        // Make the capture INVALID (recovery's invalid branch) and undeletable (cleanup fails), with an
+        // extra unexpected subtree so a primary-files-only charge is measurably narrower.
+        val contributions = File(root, "contributions")
+        File(contributions, "$id.metadata.json").writeText("{ not json")
+        contributions.listFiles()!!.filter { it.name.startsWith(id) }.forEach { file ->
+            val bytes = file.readBytes()
+            file.delete()
+            file.mkdirs()
+            File(file, "held").writeBytes(bytes)
+        }
+        val debris = File(contributions, "$id.sha256")
+        File(debris, "extra").writeBytes(ByteArray(2048))
+
+        val fresh = ContributionStore(root, limits())
+        fresh.recover() // invalid -> attempts cleanup -> every delete fails
+
+        val charged = fresh.chargedBytesForTest(id)
+        assertTrue(
+            "survivors of a failed cleanup must be charged their FULL retained footprint, " +
+                "including the 2048-byte unexpected subtree (was $charged)",
+            charged >= 2048,
+        )
+    }
+
+    @Test
+    fun `deep debris under a capture name is measured, not capped away`() {
+        // reviewer cb212295 finding 1: a fixed outer suffix list does not bound arbitrary DESCENDANTS, and
+        // a walk that silently truncates would report a smaller footprint that still looks like a number.
+        val root = tmp.newFolder("queue-deep-debris")
+        val id = java.util.UUID.randomUUID().toString()
+        val store = ContributionStore(root, limits())
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+
+        // Replace the attempts sidecar with a matching directory holding a nested payload.
+        val attempts = File(File(root, "contributions"), "$id.attempts")
+        attempts.delete()
+        attempts.mkdirs()
+        File(attempts, "level1").mkdirs()
+        val payload = File(attempts, "level1/payload.bin")
+        payload.writeBytes(ByteArray(4096))
+
+        val direct = ContributionStore(root, limits())
+        direct.expireOlderThan()
+        val charged = direct.chargedBytesForTest(id)
+        assertTrue(
+            "the nested 4096-byte payload must be part of the measured charge (was $charged)",
+            charged >= 4096,
+        )
+        assertEquals("measurement must not have fallen back to a guess", 0L, direct.measurementFailures)
+    }
+
+    @Test
+    fun `an unmeasurable capture is charged the worst case instead of zero`() {
+        // reviewer cb212295 finding 2: File.length/listFiles report 0/null for unreadable paths rather than
+        // throwing, so "could not look" must not become "nothing there". The charge must be the worst case.
+        val root = tmp.newFolder("queue-unmeasurable")
+        val id = java.util.UUID.randomUUID().toString()
+        val store = ContributionStore(root, limits())
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        File(root, "disqualified").mkdirs()
+        File(root, "disqualified/$id").writeText("disqualified")
+
+        // A depth beyond the measurement bound stands in for debris the walk refuses to count blindly.
+        val contributions = File(root, "contributions")
+        contributions.listFiles()!!.filter { it.name.startsWith(id) }.forEach { file ->
+            val bytes = file.readBytes()
+            file.delete()
+            file.mkdirs()
+            File(file, "held").writeBytes(bytes)
+        }
+        var deep = File(contributions, "$id.recording.wav")
+        repeat(measureDepthPastBound) {
+            deep = File(deep, "d")
+            deep.mkdirs()
+        }
+        File(deep, "tail.bin").writeBytes(ByteArray(16))
+
+        val fresh = ContributionStore(root, limits())
+        fresh.expireOlderThan()
+
+        assertTrue(
+            "crossing the measurement bound must be reported, not swallowed (was ${fresh.measurementFailures})",
+            fresh.measurementFailures >= 1L,
+        )
+        assertTrue(
+            "unmeasurable residue must be charged the worst case, not zero (was ${fresh.chargedBytesForTest(id)})",
+            fresh.chargedBytesForTest(id) >= limits().maxClipBytes,
+        )
     }
 
     @Test

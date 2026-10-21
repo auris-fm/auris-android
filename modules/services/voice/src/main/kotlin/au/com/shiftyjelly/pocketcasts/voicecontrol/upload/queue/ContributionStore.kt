@@ -721,7 +721,7 @@ class ContributionStore(
             // admit new work straight over it.
             ownedCharges.keys.toList().forEach { ownedCharges.remove(it) }
             residueIds.forEach { id ->
-                claimOwnedLocked(id, measuredAudioBytes(id), measuredMetadataBytes(id), ready = false)
+                chargeRetainedLocked(id, ready = false)
             }
             // Settle our own live handles: their budget is gone with the queue, and leaving them HELD while
             // the table is empty would make a later discard()/adopt() dereference a missing entry.
@@ -779,7 +779,7 @@ class ContributionStore(
                 // The sweep visits files INDIVIDUALLY. Passing per-file partials would state "no audio"
                 // and "no metadata" alternately, and a transition that only ever raises would then keep
                 // whichever came first. Measure the WHOLE capture every time.
-                claimOwnedLocked(id, measuredAudioBytes(id), measuredMetadataBytes(id), ready = false)
+                chargeRetainedLocked(id, ready = false)
             }
         }
         val readyIds = readyIdsBefore.toList()
@@ -791,7 +791,7 @@ class ContributionStore(
             // A capture disqualified by a previous failed deletion is NEVER served again, whatever
             // survives on disk: the marker is durable, so intent outlives the process that formed it.
             if (isDisqualified(id)) {
-                claimOwnedLocked(id, measuredAudioBytes(id), measuredMetadataBytes(id), ready = false)
+                chargeRetainedLocked(id, ready = false)
                 continue
             }
             val wav = File(dir, "$id$SUFFIX_WAV")
@@ -810,12 +810,9 @@ class ContributionStore(
                     File(dir, "$id$SUFFIX_DIGEST"),
                 ).all { !it.exists() || it.delete() || !it.exists() }
                 if (!cleaned) {
-                    claimOwnedLocked(
-                        id,
-                        wav.length().coerceAtLeast(0),
-                        meta.length().coerceAtLeast(0).toInt(),
-                        ready = false,
-                    )
+                    // The pre-fix version measured wav.length() and meta.length(): primary files only, and
+                    // `length()` on a survivor directory reports the entry size, not the retained subtree.
+                    chargeRetainedLocked(id, ready = false)
                 }
                 dropCounterOnly(TerminalReason.INVALID_ON_RECOVERY)
             } else {
@@ -1105,7 +1102,7 @@ class ContributionStore(
                 // nothing is deleted and the capture keeps its charge - but the record REMAINS, so the
                 // intent is not forgotten and a later sweep tries again.
                 if (!writeDisqualificationLocked(id)) {
-                    claimOwnedLocked(id, measuredAudioBytes(id), measuredMetadataBytes(id), ready = false)
+                    chargeRetainedLocked(id, ready = false)
                     continue
                 }
                 val gone = deleteAll(
@@ -1116,7 +1113,7 @@ class ContributionStore(
                     disqualificationMarker(id).delete()
                     ownedCharges.remove(id)
                 } else {
-                    claimOwnedLocked(id, measuredAudioBytes(id), measuredMetadataBytes(id), ready = false)
+                    chargeRetainedLocked(id, ready = false)
                 }
             }
         }
@@ -1143,7 +1140,7 @@ class ContributionStore(
         //    go, so a crash could resurrect a half-deleted entry as valid. Retain and retry instead.
         if (!writeDisqualificationLocked(id)) {
             memoryEntries.remove(id)
-            claimOwnedLocked(id, measuredAudioBytes(id), measuredMetadataBytes(id), ready = false)
+            chargeRetainedLocked(id, ready = false)
             return
         }
         // 2) Attempt every delete, regardless of earlier failures.
@@ -1158,41 +1155,85 @@ class ContributionStore(
             ownedCharges.remove(id)
         } else {
             // Residual bytes stay OWNED and CHARGED; the capture is not ready, and a later cleanup retries.
-            claimOwnedLocked(id, measuredAudioBytes(id), measuredMetadataBytes(id), ready = false)
+            chargeRetainedLocked(id, ready = false)
         }
     }
 
-    // MEASURED footprint of whatever remains on disk for this capture. `File.length()` on a directory is
-    // the directory entry size, not its retained contents, so a subtree is walked. Returning 0 for a
-    // missing path is correct; returning a directory's own length would understate retention badly.
-    private fun footprintBytes(file: File): Long = when {
-        !file.exists() -> 0L
-        file.isDirectory -> file.walkTopDown().filter { it.isFile }.sumOf { it.length() }
-        else -> file.length()
-    }
+    // A measurement that could not be completed. Distinct from a measured value on purpose: `File.length`
+    // and `listFiles` report 0/null for unreadable paths instead of throwing, so a `runCatching` around a
+    // walk silently yields a SMALLER number rather than an error. Treating "I could not look" as "nothing
+    // there" is how retained bytes become free (reviewer cb212295 finding 2).
+    private class MeasurementError(message: String) : Exception(message)
 
-    // Full retained footprint of a capture, split into the two accounted channels. EVERYTHING the capture
-    // keeps on disk is included: primary audio and metadata, the sidecars (attempts, created, sha256, ready)
-    // and its disposal-intent record. Charging only the primary files understates retention, and an owner
-    // could then hold unbounded debris inside a bound that claims to cover it (reviewer ca97f609).
+    // MEASURED footprint of a path this capture may have left behind.
     //
-    // Traversal is BOUNDED: a fixed suffix list, no unbounded walk, and a failure to measure FAILS CLOSED
-    // by charging conservatively rather than reporting zero.
-    private fun retainedFootprintLocked(id: String): Pair<Long, Int> {
-        val measured = runCatching {
-            val audio = footprintBytes(File(dir, "$id$SUFFIX_WAV"))
-            val rest = SIDECAR_SUFFIXES.sumOf { footprintBytes(File(dir, "$id$it")) } +
-                footprintBytes(disqualificationMarker(id))
-            audio to rest.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
-        }.getOrNull()
-        // Fail CLOSED. An unmeasurable capture is charged the worst case a capture can occupy, so a
-        // measurement error can never make retained bytes free.
-        return measured ?: (limits.maxClipBytes to limits.maxMetadataBytes)
+    // Bounded and explicit: a plain file contributes its length; a directory's contributed size is the
+    // ENTRIES THAT NAME ITS CHILDREN plus a pen one level down, and a deeper subtree is counted only by a
+    // capped, depth-limited walk. Both caps can be hit, and hitting either is an ERROR rather than a
+    // truncation - a truncated total would understate retention while looking like a normal number
+    // (reviewer cb212295 finding 1).
+    private fun measuredPathBytes(file: File): Long = when {
+        !file.exists() -> 0L
+        file.isFile -> if (file.length() < 0L) throw MeasurementError("negative length") else file.length()
+        file.isDirectory -> measuredDirectoryBytes(file, depth = 0)
+        else -> throw MeasurementError("unmeasurable path")
     }
 
-    private fun measuredAudioBytes(id: String): Long = retainedFootprintLocked(id).first
+    private fun measuredDirectoryBytes(directory: File, depth: Int): Long {
+        if (depth > MEASURE_MAX_DEPTH) throw MeasurementError("subtree deeper than $MEASURE_MAX_DEPTH")
+        // listFiles returns null on an unreadable directory: that is a failure to look, not an empty dir.
+        val children = directory.listFiles() ?: throw MeasurementError("unreadable directory $directory")
+        var total = 0L
+        var budget = MEASURE_MAX_ENTRIES
+        for (child in children) {
+            if (--budget < 0) throw MeasurementError("subtree exceeds $MEASURE_MAX_ENTRIES entries")
+            total += when {
+                child.isDirectory -> measuredDirectoryBytes(child, depth + 1)
 
-    private fun measuredMetadataBytes(id: String): Int = retainedFootprintLocked(id).second
+                else -> {
+                    // `exists` is checked because length on a vanished file is 0, which would be a silent
+                    // undercount of a path this capture did leave behind.
+                    if (!child.exists()) throw MeasurementError("vanished during measurement: $child")
+                    child.length().also { if (it < 0L) throw MeasurementError("negative length") }
+                }
+            }
+        }
+        return total
+    }
+
+    // How much retained storage a capture occupies, split into the two accounted channels. Covers the
+    // primary audio and metadata, the fixed sidecar list and the disposal-intent record - and any other
+    // subtree left behind under one of those names, which is why the measurement cannot be a fixed list of
+    // `length()` calls (reviewer cb212295 finding 3).
+    private fun retainedFootprintLocked(id: String): Pair<Long, Int> {
+        // Not wrapped in runCatching: a measurement failure must PROPAGATE to the caller, which decides
+        // how to refuse. Swallowing it here and substituting a guess would charge the wrong number and
+        // report success.
+        val audio = measuredPathBytes(File(dir, "$id$SUFFIX_WAV"))
+        val rest = SIDECAR_SUFFIXES.sumOf { measuredPathBytes(File(dir, "$id$it")) } +
+            measuredPathBytes(disqualificationMarker(id))
+        return audio to rest.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+    }
+
+    // The ONE production charge transition. Every caller that owns retained bytes goes through here, so
+    // no entry path can charge a narrower footprint than another (reviewer cb212295 finding 3).
+    //
+    // A measurement failure is charged as the WORST CASE the queue allows, and recorded. Charging nothing
+    // would make unmeasurable debris free; charging a guess would misstate storage. The worst case is the
+    // conservative bound, and the capture is retained-not-served so a later sweep retries.
+    private fun chargeRetainedLocked(id: String, ready: Boolean) {
+        val measurement = try {
+            retainedFootprintLocked(id)
+        } catch (failure: MeasurementError) {
+            measurementFailures++
+            limits.maxClipBytes to limits.maxMetadataBytes
+        }
+        claimOwnedLocked(id, measurement.first, measurement.second, ready)
+    }
+
+    // Exposed for tests and diagnostics: how many charges had to fall back to the worst case.
+    var measurementFailures: Long = 0L
+        private set
 
     private fun dropCounterOnly(reason: TerminalReason) {
         val snapshot = synchronized(lock) {
@@ -1214,7 +1255,7 @@ class ContributionStore(
             val id = f.name.removeSuffix(SUFFIX_WAV)
             if (id in preparedIds || memoryEntries.containsKey(id)) continue
             if (isDisqualified(id)) {
-                claimOwnedLocked(id, footprintBytes(f), measuredMetadataBytes(id), ready = false)
+                chargeRetainedLocked(id, ready = false)
                 continue
             }
             val ready = File(dir, "$id$SUFFIX_READY").exists()
@@ -1224,20 +1265,21 @@ class ContributionStore(
             if (!ready) {
                 // Residual from an incomplete deletion: charged and NOT ready, so it is never served but
                 // still bounds capacity until a later cleanup removes the bytes.
-                claimOwnedLocked(id, footprintBytes(wav), footprintBytes(meta).toInt(), ready = false)
+                chargeRetainedLocked(id, ready = false)
                 continue
             }
             val adopted = validate(id, wav, meta, attemptsFile)
             if (adopted != null && confirmDurableLocked(id)) {
                 memoryEntries[id] = adopted
                 // Adopting from disk is a production entry path: these bytes occupy the queue, so they
-                // must be charged here exactly as a publication charges them.
-                claimOwnedLocked(id, adopted.audioBytes, adopted.metadataBytes, ready = true)
+                // are charged through the SAME transition as every other one. The validated entry's own
+                // sizes would omit the sidecars this capture also retains.
+                chargeRetainedLocked(id, ready = true)
             } else if (wav.exists() || meta.exists()) {
                 // An entry that FAILED validation OR durability confirmation still holds bytes on disk.
                 // Dropping it silently left those bytes occupying the queue uncharged. Charged, not
                 // ready, not served - the next confirmation attempt decides.
-                claimOwnedLocked(id, footprintBytes(wav), footprintBytes(meta).toInt(), ready = false)
+                chargeRetainedLocked(id, ready = false)
             }
         }
     }
@@ -1345,6 +1387,9 @@ class ContributionStore(
 
         // Everything a capture can leave on disk besides its primary audio and metadata. Kept as a fixed
         // list so measurement is bounded; a new artifact must be added here or it goes unaccounted.
+        // Measurement bounds. Hitting either is an ERROR, never a silent truncation.
+        private const val MEASURE_MAX_DEPTH = 4
+        private const val MEASURE_MAX_ENTRIES = 512
         private val SIDECAR_SUFFIXES = listOf(SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST)
         private const val DISQUALIFIED_DIR = "disqualified"
 

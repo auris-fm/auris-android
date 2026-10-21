@@ -196,7 +196,10 @@ class VoiceControlService : Service() {
         // THE UTTERANCE'S LANGUAGE drives TTS (spec 54287f13): the reply — including a localized
         // refusal — is spoken in the language the user spoke, not the device locale. Falls back
         // to English when the ASR detected nothing this build understands.
-        val renderLanguage = cloudIntent?.sourceLanguage?.takeIf { it.isNotBlank() } ?: "en"
+        // The language the feedback was ACTUALLY RESOLVED in (coherent text+voice, spec ruling
+        // 7c7575f6): the sink reports the resolved language for cloud turns; anything unspoken or
+        // local defaults to English, never the raw detected language nor the device locale.
+        val renderLanguage = turnOutcome.feedbackLanguage ?: "en"
         audioFeedbackRenderer.render(response, language = renderLanguage, requestId = renderRequestId)
     }
 

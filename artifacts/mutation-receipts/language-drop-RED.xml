@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" tests="114" skipped="0" failures="1" errors="0" timestamp="2026-10-21T06:16:38.176Z" hostname="MacBook-Pro.local" time="6.755">
+<testsuite name="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" tests="116" skipped="0" failures="1" errors="0" timestamp="2026-10-21T06:36:40.051Z" hostname="MacBook-Pro.local" time="20.125">
   <properties/>
-  <testcase name="a dispatch with no admitted identity is refused and sends nothing" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="4.85"/>
-  <testcase name="seek_to uses fingerprint mapping when available" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.064"/>
-  <testcase name="a refusal speaks the utterance language, not the device locale" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.032">
+  <testcase name="a dispatch with no admitted identity is refused and sends nothing" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="16.3"/>
+  <testcase name="seek_to uses fingerprint mapping when available" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.112"/>
+  <testcase name="a refusal speaks the utterance language, not the device locale" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.035">
     <failure message="org.junit.ComparisonFailure: expected:&lt;[你已达到 Auris 的每日免费额度，请明天再试。]&gt; but was:&lt;[You have reached your Auris free daily limit. Please try again tomorrow.]&gt;" type="org.junit.ComparisonFailure">org.junit.ComparisonFailure: expected:&lt;[你已达到 Auris 的每日免费额度，请明天再试。]&gt; but was:&lt;[You have reached your Auris free daily limit. Please try again tomorrow.]&gt;
 	at org.junit.Assert.assertEquals(Assert.java:117)
 	at org.junit.Assert.assertEquals(Assert.java:146)
@@ -44,120 +44,122 @@
 	at java.base/java.lang.Thread.run(Thread.java:1583)
 </failure>
   </testcase>
-  <testcase name="a token that expires between turns fails the next turn closed" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.018"/>
-  <testcase name="old completion cannot retire a successor request with the same logical identity" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.027"/>
-  <testcase name="a setup failure with no predecessor leaves no stale ownership" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.019"/>
-  <testcase name="a turn while the host is playing pauses and restores it" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.019"/>
-  <testcase name="a valid request under a LATER window is adopted, not refused as stale" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.015"/>
-  <testcase name="an empty turn speaks the default line whatever the device locale" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.016"/>
-  <testcase name="duplicate callbacks join one dispatch without repeating feedback" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.018"/>
-  <testcase name="result event renders items and never auto-plays" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.015"/>
-  <testcase name="every dispatched turn carries the conversation identity the Worker requires" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.021"/>
-  <testcase name="the terminal result carries the outcome the turn ACCUMULATED" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.016"/>
-  <testcase name="interrupted terminal discards output while completed terminal drains it" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.074"/>
+  <testcase name="a token that expires between turns fails the next turn closed" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.026"/>
+  <testcase name="old completion cannot retire a successor request with the same logical identity" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.04"/>
+  <testcase name="a refusal for an unsupported language speaks English text with an English voice" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.028"/>
+  <testcase name="a setup failure with no predecessor leaves no stale ownership" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.021"/>
+  <testcase name="a turn while the host is playing pauses and restores it" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.02"/>
+  <testcase name="a valid request under a LATER window is adopted, not refused as stale" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.018"/>
+  <testcase name="an empty turn speaks the default line whatever the device locale" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.022"/>
+  <testcase name="duplicate callbacks join one dispatch without repeating feedback" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.035"/>
+  <testcase name="result event renders items and never auto-plays" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.022"/>
+  <testcase name="every dispatched turn carries the conversation identity the Worker requires" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.017"/>
+  <testcase name="the terminal result carries the outcome the turn ACCUMULATED" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.015"/>
+  <testcase name="interrupted terminal discards output while completed terminal drains it" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.084"/>
   <testcase name="a turn while the host is paused neither pauses nor resumes" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
-  <testcase name="a privacy closure blocks the restore, which the command revision cannot see" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
+  <testcase name="a privacy closure blocks the restore, which the command revision cannot see" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.012"/>
   <testcase name="a negative position_seconds resolves as an offset back from the episode end" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
   <testcase name="unknown result kind is ignored for forward compatibility" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
-  <testcase name="a retry of an earlier logical request reuses its turn on the REAL sink path" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.012"/>
-  <testcase name="the first turn CREATES a client-minted conversation and a later grace turn RESUMES it" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.014"/>
-  <testcase name="a user pause is handled the same with and without the confirmation" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.019"/>
+  <testcase name="a retry of an earlier logical request reuses its turn on the REAL sink path" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.014"/>
+  <testcase name="the first turn CREATES a client-minted conversation and a later grace turn RESUMES it" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.012"/>
+  <testcase name="a user pause is handled the same with and without the confirmation" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.03"/>
   <testcase name="upstream throw during collect still restores auto pause" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.015"/>
-  <testcase name="a REFUSED bound skip is not reported as a performed action" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
-  <testcase name="a closure without a playback stop releases the turn hold and resumes" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
-  <testcase name="a single present form that does not parse refuses without mutating" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
-  <testcase name="unseekable result items never produce a timed jump" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.014"/>
-  <testcase name="a turn does not override a user pause that changed nothing" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
-  <testcase name="action-only stream returns silent on done" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.012"/>
-  <testcase name="a retry whose window was superseded is refused, not dispatched" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
-  <testcase name="a skip that is UNKNOWN reports Unknown, not a confirmed or empty action" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.014"/>
-  <testcase name="a client code without a template falls back to the client generic line" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.012"/>
+  <testcase name="a REFUSED bound skip is not reported as a performed action" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.015"/>
+  <testcase name="a closure without a playback stop releases the turn hold and resumes" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.015"/>
+  <testcase name="a single present form that does not parse refuses without mutating" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.014"/>
+  <testcase name="unseekable result items never produce a timed jump" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.016"/>
+  <testcase name="a turn does not override a user pause that changed nothing" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.019"/>
+  <testcase name="action-only stream returns silent on done" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.017"/>
+  <testcase name="a retry whose window was superseded is refused, not dispatched" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.02"/>
+  <testcase name="a skip that is UNKNOWN reports Unknown, not a confirmed or empty action" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.018"/>
+  <testcase name="a client code without a template falls back to the client generic line" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.016"/>
   <testcase name="empty result renders the empty state not the unavailable state" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
-  <testcase name="a cloud-requested pause during an answer hold supersedes it without a revision bump" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
+  <testcase name="a cloud-requested pause during an answer hold supersedes it without a revision bump" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.019"/>
   <testcase name="server refusal before render carries limit_exceeded terminal and localized feedback" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.167"/>
-  <testcase name="a window ending by TIMEOUT or PRIVACY retires what it was holding, not only replacement" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
-  <testcase name="a throwing pause does not leave a stale obligation to resume" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
-  <testcase name="newer turn cancels the superseded in-flight turn" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
-  <testcase name="a no-answer error from the service is spoken rather than left silent" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
-  <testcase name="a superseded turn never restores audio owned by the newer turn" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
-  <testcase name="distinct utterances send their own admitted identities unchanged" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.017"/>
-  <testcase name="an unstated amount with an unknown direction is refused instead of defaulted" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
-  <testcase name="a bound skip keeps the CALLER'S expectation rather than adopting the current episode" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
-  <testcase name="dialog-completed cloud route dispatches the completing utterance identity through CloudTurnRoute" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.018"/>
-  <testcase name="both forms present refuses even when only one value parses" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.012"/>
-  <testcase name="a privacy closure invalidates the turn before any successor registers" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.012"/>
-  <testcase name="a later turn is not blocked by an old closure flag once privacy reopens" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
-  <testcase name="a closure WITH an observed playback stop still withholds the resume" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.012"/>
-  <testcase name="composite steps stay unknown when one step was not established" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="play_quote captures position seeks and resumes" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="an unstated amount applies the interval in the stated direction" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
-  <testcase name="concurrent callbacks prepare exactly one retained wire identity" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.016"/>
-  <testcase name="a refusal with no detected language speaks the default line whatever the device locale" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
-  <testcase name="a retry under a still-live window is dispatched with its identity intact" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="retrying a prepared turn reuses its identity without re-preparing" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="a turn with a current episode keeps its saved reference history" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.016"/>
-  <testcase name="a stated zero delta stays put instead of applying the interval" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
-  <testcase name="an action still executes while the player is on the episode the turn is about" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
-  <testcase name="an ordinary position seek reports its TYPED outcome to the caller, not None" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.012"/>
-  <testcase name="an ordinary position_seconds seek uses sink time directly, with no mapping" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.015"/>
-  <testcase name="a turn that inherits a paused host does not resume it after privacy closed mid-turn" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="a whitespace-only template is not spoken" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
-  <testcase name="an UNKNOWN outcome keeps the pre-action provenance while recording NO target" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="builds route context enriched from sink state" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.014"/>
-  <testcase name="a discovery turn after saved reference state carries no playback positions at all" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.022"/>
-  <testcase name="an UNBOUND reference position is refused rather than applied to whatever is playing" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="local missing-token produces localized unauthorized feedback without transport exchange" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="refusal before Connected fires connection failure, no server terminal, and localized feedback" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.012"/>
-  <testcase name="a server-supplied message is never spoken, only a template or the generic line" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="a turn-owned pause delivered after the closure still releases its own hold" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="error with empty message speaks the client generic line" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="a REFUSED reference seek does not record history, and a refused quote does not either" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
-  <testcase name="a user pause during an answer hold survives a FAILED termination" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
-  <testcase name="unknown tool and action are ignored, so a blank done still reports the turn" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="capabilities are advertised only when a renderer is present" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="failure and cancellation release duplicate waiters and explicit retry keeps identity" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.012"/>
-  <testcase name="cancellation during the initial pause still restores audio" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="stop_quote restores pre-quote playback position" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="a turn that neither speaks nor acts says the request could not be completed" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="failed mixed stream keeps executed actions and reports the client error" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.008"/>
-  <testcase name="neither target refuses" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="an UNKNOWN action is carried as Unknown, not as nothing and not as confirmed" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="a superseded turn's action cannot resume the player under the new turn" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
-  <testcase name="error restores auto pause and speaks the client line" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="an action planned for episode A does not seek episode B after the selection changes" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="a turn does not override playback the user resumed while it ran" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="a wake-free request in the same live window resumes, and a stale origin is refused" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="both reference and ordinary targets refuse rather than preferring one" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="history uses the OWNER'S pre-action snapshot, not a later provider read" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
-  <testcase name="cancellation during collect still restores auto pause" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
-  <testcase name="a refused answer traces through the sink to error feedback with the server outcome preserved" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.078"/>
-  <testcase name="a budget refusal speaks its own line rather than the generic one" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="a fresh wake begins a new conversation even though an earlier handle exists" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="a frame for another turn does not confirm this one" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="a client code with a template is spoken in the localized wording" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="a newer turn cannot pause while an older turn's restore is suspended" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="a REFUSED seek does not record its pre-action position against the other episode" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="without the frame the reservation is released unsent" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="a later turn outside the grace window begins a new conversation" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="empty base url returns coming soon without calling route" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.007"/>
-  <testcase name="a reference seek with no usable mapping is refused, not approximated" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
-  <testcase name="an ordinary request is retryable while its window lives and retired once it is superseded" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.008"/>
-  <testcase name="error does not roll back seeks" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.012"/>
-  <testcase name="a user command during the pause suspension blocks the restore" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
-  <testcase name="a whitespace-only server message is treated as absent" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="turn aggregation still promotes a confirmed action past an unknown sibling" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.006"/>
-  <testcase name="a successor failing after hand-off still restores the predecessor's pause" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="a quote resume does not resume a replacement episode" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="free text turns carry no route hint and typed entry supplies one" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="play_quote records previous position on the reference timeline" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.008"/>
-  <testcase name="the delivery-commitment frame confirms this turn's reservation" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.008"/>
-  <testcase name="the no-gateway message follows the utterance language, not the device locale" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="retrieval_unavailable renders once and is not also spoken" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.009"/>
-  <testcase name="saved episode A positions cannot follow episode B" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
-  <testcase name="unmapped referenceTime clears previous instead of resending a stale value" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
+  <testcase name="a window ending by TIMEOUT or PRIVACY retires what it was holding, not only replacement" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.014"/>
+  <testcase name="a throwing pause does not leave a stale obligation to resume" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.025"/>
+  <testcase name="newer turn cancels the superseded in-flight turn" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.021"/>
+  <testcase name="a no-answer error from the service is spoken rather than left silent" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.014"/>
+  <testcase name="a superseded turn never restores audio owned by the newer turn" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.017"/>
+  <testcase name="distinct utterances send their own admitted identities unchanged" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.014"/>
+  <testcase name="an unstated amount with an unknown direction is refused instead of defaulted" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.018"/>
+  <testcase name="a bound skip keeps the CALLER'S expectation rather than adopting the current episode" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.016"/>
+  <testcase name="dialog-completed cloud route dispatches the completing utterance identity through CloudTurnRoute" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.027"/>
+  <testcase name="both forms present refuses even when only one value parses" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
+  <testcase name="a privacy closure invalidates the turn before any successor registers" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.016"/>
+  <testcase name="a later turn is not blocked by an old closure flag once privacy reopens" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.018"/>
+  <testcase name="a closure WITH an observed playback stop still withholds the resume" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.018"/>
+  <testcase name="an explicit English utterance on a Chinese UI speaks English with an English voice" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.013"/>
+  <testcase name="composite steps stay unknown when one step was not established" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
+  <testcase name="play_quote captures position seeks and resumes" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.016"/>
+  <testcase name="an unstated amount applies the interval in the stated direction" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.017"/>
+  <testcase name="concurrent callbacks prepare exactly one retained wire identity" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.025"/>
+  <testcase name="a refusal with no detected language speaks the default line whatever the device locale" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.017"/>
+  <testcase name="a retry under a still-live window is dispatched with its identity intact" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.017"/>
+  <testcase name="retrying a prepared turn reuses its identity without re-preparing" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.019"/>
+  <testcase name="a turn with a current episode keeps its saved reference history" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.02"/>
+  <testcase name="a stated zero delta stays put instead of applying the interval" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.017"/>
+  <testcase name="an action still executes while the player is on the episode the turn is about" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.012"/>
+  <testcase name="an ordinary position seek reports its TYPED outcome to the caller, not None" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.014"/>
+  <testcase name="an ordinary position_seconds seek uses sink time directly, with no mapping" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.1"/>
+  <testcase name="a turn that inherits a paused host does not resume it after privacy closed mid-turn" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.033"/>
+  <testcase name="a whitespace-only template is not spoken" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.119"/>
+  <testcase name="an UNKNOWN outcome keeps the pre-action provenance while recording NO target" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.042"/>
+  <testcase name="builds route context enriched from sink state" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.022"/>
+  <testcase name="a discovery turn after saved reference state carries no playback positions at all" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.021"/>
+  <testcase name="an UNBOUND reference position is refused rather than applied to whatever is playing" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.076"/>
+  <testcase name="local missing-token produces localized unauthorized feedback without transport exchange" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.027"/>
+  <testcase name="refusal before Connected fires connection failure, no server terminal, and localized feedback" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.032"/>
+  <testcase name="a server-supplied message is never spoken, only a template or the generic line" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.023"/>
+  <testcase name="a turn-owned pause delivered after the closure still releases its own hold" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.017"/>
+  <testcase name="error with empty message speaks the client generic line" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.019"/>
+  <testcase name="a REFUSED reference seek does not record history, and a refused quote does not either" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.02"/>
+  <testcase name="a user pause during an answer hold survives a FAILED termination" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.015"/>
+  <testcase name="unknown tool and action are ignored, so a blank done still reports the turn" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.015"/>
+  <testcase name="capabilities are advertised only when a renderer is present" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.016"/>
+  <testcase name="failure and cancellation release duplicate waiters and explicit retry keeps identity" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.039"/>
+  <testcase name="cancellation during the initial pause still restores audio" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.024"/>
+  <testcase name="stop_quote restores pre-quote playback position" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.024"/>
+  <testcase name="a turn that neither speaks nor acts says the request could not be completed" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.024"/>
+  <testcase name="failed mixed stream keeps executed actions and reports the client error" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.023"/>
+  <testcase name="neither target refuses" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.019"/>
+  <testcase name="an UNKNOWN action is carried as Unknown, not as nothing and not as confirmed" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.01"/>
+  <testcase name="a superseded turn's action cannot resume the player under the new turn" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.03"/>
+  <testcase name="error restores auto pause and speaks the client line" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.017"/>
+  <testcase name="an action planned for episode A does not seek episode B after the selection changes" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.015"/>
+  <testcase name="a turn does not override playback the user resumed while it ran" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.037"/>
+  <testcase name="a wake-free request in the same live window resumes, and a stale origin is refused" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.025"/>
+  <testcase name="both reference and ordinary targets refuse rather than preferring one" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.039"/>
+  <testcase name="history uses the OWNER'S pre-action snapshot, not a later provider read" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.03"/>
+  <testcase name="cancellation during collect still restores auto pause" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.028"/>
+  <testcase name="a refused answer traces through the sink to error feedback with the server outcome preserved" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.269"/>
+  <testcase name="a budget refusal speaks its own line rather than the generic one" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.039"/>
+  <testcase name="a fresh wake begins a new conversation even though an earlier handle exists" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.021"/>
+  <testcase name="a frame for another turn does not confirm this one" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.042"/>
+  <testcase name="a client code with a template is spoken in the localized wording" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.035"/>
+  <testcase name="a newer turn cannot pause while an older turn's restore is suspended" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.042"/>
+  <testcase name="a REFUSED seek does not record its pre-action position against the other episode" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.033"/>
+  <testcase name="without the frame the reservation is released unsent" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.038"/>
+  <testcase name="a later turn outside the grace window begins a new conversation" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.024"/>
+  <testcase name="empty base url returns coming soon without calling route" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.015"/>
+  <testcase name="a reference seek with no usable mapping is refused, not approximated" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.032"/>
+  <testcase name="an ordinary request is retryable while its window lives and retired once it is superseded" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.012"/>
+  <testcase name="error does not roll back seeks" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.018"/>
+  <testcase name="a user command during the pause suspension blocks the restore" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.015"/>
+  <testcase name="a whitespace-only server message is treated as absent" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.015"/>
+  <testcase name="turn aggregation still promotes a confirmed action past an unknown sibling" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.016"/>
+  <testcase name="a successor failing after hand-off still restores the predecessor's pause" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.02"/>
+  <testcase name="a quote resume does not resume a replacement episode" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.043"/>
+  <testcase name="free text turns carry no route hint and typed entry supplies one" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.023"/>
+  <testcase name="play_quote records previous position on the reference timeline" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.011"/>
+  <testcase name="the delivery-commitment frame confirms this turn's reservation" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.021"/>
+  <testcase name="the no-gateway message follows the utterance language, not the device locale" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.015"/>
+  <testcase name="retrieval_unavailable renders once and is not also spoken" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.074"/>
+  <testcase name="saved episode A positions cannot follow episode B" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.032"/>
+  <testcase name="unmapped referenceTime clears previous instead of resending a stale value" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.playback.CloudRouteSinkTest" time="0.038"/>
   <system-out><![CDATA[]]></system-out>
   <system-err><![CDATA[Mockito is currently self-attaching to enable the inline-mock-maker. This will no longer work in future releases of the JDK. Please add Mockito as an agent to your build as described in Mockito's documentation: https://javadoc.io/doc/org.mockito/mockito-core/latest/org.mockito/org/mockito/Mockito.html#0.3
-WARNING: A Java agent has been loaded dynamically (/var/folders/v3/wk_148693jd3sk8490hmflxm0000gn/T/byteBuddyAgent6989878683967245253.jar)
+WARNING: A Java agent has been loaded dynamically (/var/folders/v3/wk_148693jd3sk8490hmflxm0000gn/T/byteBuddyAgent13946225873425159425.jar)
 WARNING: If a serviceability tool is in use, please run with -XX:+EnableDynamicAgentLoading to hide this warning
 WARNING: If a serviceability tool is not in use, please run with -Djdk.instrument.traceUsage for more information
 WARNING: Dynamic loading of agents will be disallowed by default in a future release

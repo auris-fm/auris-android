@@ -3866,30 +3866,89 @@ class CloudRouteSinkTest {
             isRetry = false,
             sourceLanguage = "zh",
         )!!
-        val feedback = sink.dispatchPrepared(prepared, isRetry = false).feedback
-        assertEquals("你已达到 Auris 的每日免费额度，请明天再试。", (feedback as VoiceResponse.Spoken).text)
+        val result = sink.dispatchPrepared(prepared, isRetry = false)
+        assertEquals("你已达到 Auris 的每日免费额度，请明天再试。", (result.feedback as VoiceResponse.Spoken).text)
+        // The reported feedback language must MATCH the text that was spoken.
+        assertEquals("zh", result.feedbackLanguage)
     }
+
+    @Test
+    fun `a refusal for an unsupported language speaks English text with an English voice`() = kotlinx.coroutines.runBlocking {
+        // REAL RESOURCE CONTROL (reviewer 8004f444): the resolver is built from the module's
+        // actual locale resources, on a KOREAN UI context — so a UI-locale leak or an
+        // unsupported-language voice mismatch fails here, not behind custom maps.
+        val deps = TestDeps(
+            templateResolver = SpokenTemplateResolver(org.robolectric.RuntimeEnvironment.getApplication()),
+            locale = java.util.Locale.KOREAN,
+            routeInvoker = { _ ->
+                kotlinx.coroutines.flow.flowOf(
+                    CloudRouteEvent.Error(code = CloudRouteErrorCodes.LIMIT_EXCEEDED, message = ""),
+                )
+            },
+        )
+        val sink = deps.sink()
+        val prepared = sink.prepareTurn(
+            request = "something unclassifiable",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = playbackContext,
+            isLiveGraceTurn = false,
+            capturedOrigin = 1,
+            isWakeOriginated = true,
+            hint = null,
+            logicalRequestId = testWireId,
+            isRetry = false,
+            sourceLanguage = "xx",
+        )!!
+        val result = sink.dispatchPrepared(prepared, isRetry = false)
+        assertEquals(
+            "You have reached your Auris free daily limit. Please try again tomorrow.",
+            (result.feedback as VoiceResponse.Spoken).text,
+        )
+        assertEquals("en", result.feedbackLanguage)
+    }
+
+    @Test
+    fun `an explicit English utterance on a Chinese UI speaks English with an English voice`() = kotlinx.coroutines.runBlocking {
+        val deps = TestDeps(
+            templateResolver = SpokenTemplateResolver(org.robolectric.RuntimeEnvironment.getApplication()),
+            locale = java.util.Locale.CHINESE,
+            routeInvoker = { _ ->
+                kotlinx.coroutines.flow.flowOf(
+                    CloudRouteEvent.Error(code = CloudRouteErrorCodes.LIMIT_EXCEEDED, message = ""),
+                )
+            },
+        )
+        val sink = deps.sink()
+        val prepared = sink.prepareTurn(
+            request = "play something",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = playbackContext,
+            isLiveGraceTurn = false,
+            capturedOrigin = 1,
+            isWakeOriginated = true,
+            hint = null,
+            logicalRequestId = testWireId,
+            isRetry = false,
+            sourceLanguage = "en",
+        )!!
+        val result = sink.dispatchPrepared(prepared, isRetry = false)
+        assertEquals(
+            "You have reached your Auris free daily limit. Please try again tomorrow.",
+            (result.feedback as VoiceResponse.Spoken).text,
+        )
+        assertEquals("en", result.feedbackLanguage)
+    }
+
 
     fun `pre-Connected refusal joins request ID across transport, persisted log, service and renderer`() = kotlinx.coroutines.runBlocking {
         val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
         try {
             val wireClient = CapturingWebSocketClient()
+            // REAL RESOURCE CONTROL (reviewer 8004f444 / spec ruling 7c7575f6): the resolver is
+            // built from the module's actual locale resources — no custom language maps — so the
+            // zh line below must come from values-zh through the real lookup.
             val deps = TestDeps(
-                templateResolver = SpokenTemplateResolver(
-                    templates = mapOf(
-                        "cloud_error_limit_exceeded" to "You have reached your Auris free daily limit. Please try again tomorrow.",
-                        "general.cloud_coming_soon" to "Cloud processing is coming soon",
-                        "general.cloud_incomplete_turn" to "Sorry, I couldn't complete that request.",
-                        "cloud_error_generic" to "Sorry, I couldn't complete that request.",
-                    ),
-                    // The utterance's OWN language table: ASR detected Chinese, routing stayed
-                    // English, and the refusal must come back spoken in Chinese (spec 54287f13).
-                    languageTemplates = mapOf(
-                        "zh" to mapOf(
-                            "cloud_error_limit_exceeded" to "你已达到 Auris 的每日免费额度，请明天再试。",
-                        ),
-                    ),
-                ),
+                templateResolver = SpokenTemplateResolver(org.robolectric.RuntimeEnvironment.getApplication()),
                 transportFactory = { _, _, observer ->
                     au.com.shiftyjelly.pocketcasts.repositories.cloud.WebSocketCloudTurnTransport(
                         "https://example.invalid",

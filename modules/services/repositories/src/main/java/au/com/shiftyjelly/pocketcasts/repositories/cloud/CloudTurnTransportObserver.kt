@@ -28,6 +28,6 @@ interface CloudTurnTransportObserver {
     /** Server terminal received (Done or Error from server). Carries the bounded error code if any. */
     fun onTerminalReceived(requestId: String, origin: TerminalOrigin, errorCode: String?)
 
-    /** Connection failed before any server response. */
+    /** WebSocket onFailure fired — connection lost or upgrade refused. May occur after partial response. */
     fun onConnectionFailed(requestId: String)
 }

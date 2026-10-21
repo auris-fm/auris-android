@@ -48,7 +48,9 @@ class WebSocketCloudTurnTransport(
                 val requestId = frame.requestId
                 if (response.code != 101) {
                     Timber.w("Cloud route WebSocket rejected: %d %s", response.code, response.message)
-                    observer?.onSendResult(requestId, CloudTurnTransportObserver.SendOutcome.REJECTED)
+                    // Handshake rejected — socket opened but upgrade refused. Not a send rejection
+                    // because send was never attempted.
+                    observer?.onConnectionFailed(requestId)
                     emitTerminal(
                         channel,
                         CloudRouteEvent.Error(
@@ -93,6 +95,21 @@ class WebSocketCloudTurnTransport(
                 } else if (negotiatedCodec.get() == null && event !is CloudRouteEvent.Error) {
                     emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""))
                 } else {
+                    // Server-originated terminal: record at actual decode point.
+                    if (event is CloudRouteEvent.Done) {
+                        val outcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted"
+                        observer?.onTerminalReceived(
+                            frame.requestId,
+                            CloudTurnTransportObserver.TerminalOrigin.SERVER_DONE,
+                            outcome,
+                        )
+                    } else if (event is CloudRouteEvent.Error) {
+                        observer?.onTerminalReceived(
+                            frame.requestId,
+                            CloudTurnTransportObserver.TerminalOrigin.SERVER_ERROR,
+                            event.code,
+                        )
+                    }
                     emitOrFail(channel, event)
                 }
             }

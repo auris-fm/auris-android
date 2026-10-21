@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.playback
 
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteCapabilities
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.ResolvedSpokenLine
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteContext
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteErrorCodes
 import au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteEvent
@@ -397,6 +398,9 @@ class CloudRouteSink internal constructor(
             )
         }
 
+        // The language the spoken feedback is actually resolved in; set at the error/incomplete
+        // arms and reported on the result so TTS always matches the text.
+        var spokenLanguage: String? = null
         val myJob = currentCoroutineContext()[Job]
         val myId = turnCounter.incrementAndGet()
         // AUTHORITY IS RESOLVED BEFORE ANY SUCCESSOR-OWNED STATE CHANGES. Registration replaces the
@@ -731,8 +735,9 @@ class CloudRouteSink internal constructor(
                                 // unreachable; malformed empty turns fail explicitly. Same
                                 // localized-or-earcon rule as the other spoken fallbacks: never
                                 // speak base-language prose on a device set to another language.
-                                val line = localizedTemplate(KEY_CLOUD_INCOMPLETE_TURN, turn.sourceLanguage)
-                                if (line.isBlank()) VoiceResponse.Earcon(EarconId.ERROR) else VoiceResponse.Spoken(line)
+                                val resolved = resolveLocalizedLine(KEY_CLOUD_INCOMPLETE_TURN, turn.sourceLanguage)
+                                spokenLanguage = resolved.languageTag
+                                if (resolved.text.isBlank()) VoiceResponse.Earcon(EarconId.ERROR) else VoiceResponse.Spoken(resolved.text)
                             }
                         }
                         // Transport boundary: feedback/render decision made for this turn.
@@ -803,12 +808,15 @@ class CloudRouteSink internal constructor(
                         // THE UTTERANCE'S LANGUAGE, not the device locale: the refusal is spoken
                         // in the language the user spoke (spec 54287f13). Falls back to the default
                         // line when the language is missing or unsupported.
-                        val spoken = if (handledResult) {
-                            ""
+                        val resolvedError = if (handledResult) {
+                            ResolvedSpokenLine("", "en")
                         } else {
-                            localizedTemplate(KEY_CLOUD_ERROR_PREFIX + event.code, turn.sourceLanguage)
-                                .ifBlank { localizedTemplate(KEY_CLOUD_ERROR_GENERIC, turn.sourceLanguage) }
+                            resolveLocalizedLine(KEY_CLOUD_ERROR_PREFIX + event.code, turn.sourceLanguage)
+                                .takeIf { it.text.isNotBlank() }
+                                ?: resolveLocalizedLine(KEY_CLOUD_ERROR_GENERIC, turn.sourceLanguage)
                         }
+                        spokenLanguage = resolvedError.languageTag
+                        val spoken = resolvedError.text
                         // Rendered already means the user was told; adding a sound would say it again.
                         outcome = when {
                             handledResult -> VoiceResponse.Silent
@@ -900,6 +908,10 @@ class CloudRouteSink internal constructor(
         }
         return CloudTurnResult(
             feedback = finalFeedback,
+            // THE LANGUAGE THE LINE WAS ACTUALLY RESOLVED IN: an utterance-language line carries
+            // that language; any fallback (unknown/unsupported/missing resources) carries "en" so
+            // English text is never paired with another language's voice.
+            feedbackLanguage = spokenLanguage,
             // THE TURN'S OWN ACCUMULATED OUTCOME, not a fresh None. Hardcoding None here DISCARDED
             // everything `noteOutcome` accumulated: the request-owned result reported "no action" for a
             // turn whose action was confirmed, and -- worse -- reported the same for one whose outcome
@@ -1014,6 +1026,14 @@ class CloudRouteSink internal constructor(
     /** A client-owned line for [key], or empty when this locale must not be spoken to: [SpokenLine]. */
     private fun localizedTemplate(key: String, language: String? = null): String =
         SpokenLine.forKey(key, templateResolver, language)
+
+    /**
+     * A line AND the language it was resolved in, so fallbacks stay COHERENT: unknown/unsupported
+     * language or missing resources yield the default line with "en" — never one language's text
+     * paired with another's voice (spec ruling 7c7575f6).
+     */
+    private fun resolveLocalizedLine(key: String, language: String?): ResolvedSpokenLine =
+        templateResolver.resolveLocalized(key, language)
 
     /**
      * Whether a privacy closure happened after the turn took its pause obligation. A live flag cannot

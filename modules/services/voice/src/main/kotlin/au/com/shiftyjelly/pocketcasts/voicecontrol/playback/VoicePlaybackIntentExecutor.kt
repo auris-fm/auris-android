@@ -113,6 +113,11 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         @Volatile
         var action: CloudRouteActionOutcome = CloudRouteActionOutcome.None
             internal set
+
+        /** The language the spoken feedback was resolved in; null when nothing was spoken. */
+        @Volatile
+        var feedbackLanguage: String? = null
+            internal set
     }
 
     suspend fun execute(intent: VoiceIntent, outcome: TurnOutcome = TurnOutcome()): VoiceResponse {
@@ -191,6 +196,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                     // on exactly the path where the caller most needs to know whether it ran.
                     val retried = cloudRouteSink.dispatchPrepared(alreadyPrepared, isRetry = intent.isRetry)
                     outcome.action = retried.action
+                    outcome.feedbackLanguage = retried.feedbackLanguage
                     return retried.feedback
                 }
                 val context = playbackContextProvider.current()
@@ -595,6 +601,12 @@ interface VoiceBookmarkSink {
 data class CloudTurnResult(
     val feedback: VoiceResponse,
     val action: CloudRouteActionOutcome,
+    /**
+     * The language tag the SPOKEN feedback must be rendered in — the language the line was
+     * actually resolved in, not the raw detected language. Null when nothing was spoken, so
+     * a renderer falls back to English rather than guessing the utterance language.
+     */
+    val feedbackLanguage: String? = null,
 )
 
 /**

@@ -1631,9 +1631,10 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `an empty turn on a non-English device falls back to the error earcon`() = runTest {
-        // Templates are English-only by design: base-language prose is never spoken on a device
-        // set to another language, so the earcon carries the same message.
+    fun `an empty turn speaks the default line whatever the device locale`() = runTest {
+        // The utterance's language decides (spec 54287f13); with none detected the default
+        // (English) line is spoken on any device locale — the earcon is no longer the
+        // language fallback.
         val deps = TestDeps(
             events = flowOf(CloudRouteEvent.Done(inputTokens = 1, outputTokens = 0)),
             locale = java.util.Locale.FRENCH,
@@ -1641,13 +1642,9 @@ class CloudRouteSinkTest {
 
         val response = deps.sink().routeToCloud("quoi?", VoiceIntent.CloudTier.Free, playbackContext, admitted = testWireId).feedback
 
-        // Deliberately changed: the earcon was the fallback when the client had nothing to say.
-        // It now has its own words for a code it doesn't know, so the user hears which happened
-        // rather than guessing from a tone.
-        // Templates are English-only, so another locale keeps the earcon: base-language prose is
-        // never spoken on a device set to another language.
-        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
+        assertEquals(VoiceResponse.Spoken("Sorry, I couldn't complete that request."), response)
     }
+
 
     @Test
     fun `action-only stream returns silent on done`() = runTest {
@@ -2547,10 +2544,10 @@ class CloudRouteSinkTest {
     }
 
     @Test
-    fun `a translated template is not spoken under a locale that has no translation`() = runTest {
-        // The English template is present as the default resource, and Android
-        // falls back to it for every locale — so the guard, not the resource
-        // lookup, is what stops English being spoken to a Korean user.
+    fun `a refusal with no detected language speaks the default line whatever the device locale`() = runTest {
+        // The UI locale no longer decides (spec 54287f13): the line follows the UTTERANCE's
+        // language. With no detected language the default (English) line is spoken — never an
+        // earcon for a language reason, and never the device locale's wording.
         val deps = TestDeps(
             locale = java.util.Locale.KOREAN,
             events = flowOf(CloudRouteEvent.Error(code = "connection_lost", message = "")),
@@ -2558,16 +2555,16 @@ class CloudRouteSinkTest {
 
         val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId).feedback
 
-        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
+        assertEquals(VoiceResponse.Spoken("Connection lost. Please try again."), response)
     }
 
     @Test
-    fun `the no-gateway message is an earcon where no translation exists`() = runTest {
+    fun `the no-gateway message follows the utterance language, not the device locale`() = runTest {
         val deps = TestDeps(baseUrl = "", locale = java.util.Locale.JAPANESE)
 
         val response = deps.sink().routeToCloud("x", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId).feedback
 
-        assertEquals(VoiceResponse.Earcon(EarconId.ERROR), response)
+        assertEquals(VoiceResponse.Spoken("Cloud processing is coming soon"), response)
     }
 
     @Test
@@ -3837,17 +3834,60 @@ class CloudRouteSinkTest {
      * service drops the ID or never invokes the renderer.
      */
     @Test
+    fun `a refusal speaks the utterance language, not the device locale`() = kotlinx.coroutines.runBlocking {
+        val deps = TestDeps(
+            templateResolver = SpokenTemplateResolver(
+                templates = mapOf(
+                    "cloud_error_limit_exceeded" to "You have reached your Auris free daily limit. Please try again tomorrow.",
+                    "cloud_error_generic" to "Sorry, I couldn't complete that request.",
+                ),
+                languageTemplates = mapOf(
+                    "zh" to mapOf("cloud_error_limit_exceeded" to "你已达到 Auris 的每日免费额度，请明天再试。"),
+                ),
+            ),
+            routeInvoker = { _ ->
+                kotlinx.coroutines.flow.flowOf(
+                    CloudRouteEvent.Error(code = CloudRouteErrorCodes.LIMIT_EXCEEDED, message = ""),
+                )
+            },
+        )
+        val sink = deps.sink()
+        // Production shape: ASR detected Chinese; the ROUTING transcript is English; the turn
+        // carries the detected language. The refusal must be spoken in Chinese.
+        val prepared = sink.prepareTurn(
+            request = "播放一些东西",
+            tier = VoiceIntent.CloudTier.Premium,
+            context = playbackContext,
+            isLiveGraceTurn = false,
+            capturedOrigin = 1,
+            isWakeOriginated = true,
+            hint = null,
+            logicalRequestId = testWireId,
+            isRetry = false,
+            sourceLanguage = "zh",
+        )!!
+        val feedback = sink.dispatchPrepared(prepared, isRetry = false).feedback
+        assertEquals("你已达到 Auris 的每日免费额度，请明天再试。", (feedback as VoiceResponse.Spoken).text)
+    }
+
     fun `pre-Connected refusal joins request ID across transport, persisted log, service and renderer`() = kotlinx.coroutines.runBlocking {
         val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
         try {
             val wireClient = CapturingWebSocketClient()
             val deps = TestDeps(
                 templateResolver = SpokenTemplateResolver(
-                    mapOf(
+                    templates = mapOf(
                         "cloud_error_limit_exceeded" to "You have reached your Auris free daily limit. Please try again tomorrow.",
                         "general.cloud_coming_soon" to "Cloud processing is coming soon",
                         "general.cloud_incomplete_turn" to "Sorry, I couldn't complete that request.",
                         "cloud_error_generic" to "Sorry, I couldn't complete that request.",
+                    ),
+                    // The utterance's OWN language table: ASR detected Chinese, routing stayed
+                    // English, and the refusal must come back spoken in Chinese (spec 54287f13).
+                    languageTemplates = mapOf(
+                        "zh" to mapOf(
+                            "cloud_error_limit_exceeded" to "你已达到 Auris 的每日免费额度，请明天再试。",
+                        ),
                     ),
                 ),
                 transportFactory = { _, _, observer ->
@@ -3924,6 +3964,10 @@ class CloudRouteSinkTest {
                                 request = "question",
                                 tier = VoiceIntent.CloudTier.Premium,
                                 logicalRequestId = testWireId,
+                                // NON-ENGLISH ASR: the detected utterance language rides the intent
+                                // while the routing transcript stays English — the production shape
+                                // for "user spoke Chinese, pipeline routed in English".
+                                sourceLanguage = "zh",
                             ),
                         )
                     }
@@ -3948,10 +3992,11 @@ class CloudRouteSinkTest {
             // drops the ID or the service never invokes the renderer, neither line appears.
             awaitCaptureLine(capture, "reason=TurnFeedbackSelected", testWireId, alsoContains = "entry_spoken")
             awaitCaptureLine(capture, "reason=TurnFeedbackRendered", testWireId, alsoContains = "spoken_submitted")
-            // The SUBSTANCE must be the localized Auris daily-limit explanation — not just any
-            // generic spoken error — delivered EXACTLY ONCE through the real TTS.
-            val limitLine = "You have reached your Auris free daily limit. Please try again tomorrow."
-            assertEquals(limitLine, tts.lastSpokenText)
+            // The SUBSTANCE must be the UTTERANCE-LANGUAGE Auris daily-limit explanation — not any
+            // generic spoken error, not the English default — delivered EXACTLY ONCE, in the
+            // language the user spoke, through the real TTS.
+            assertEquals("你已达到 Auris 的每日免费额度，请明天再试。", tts.lastSpokenText)
+            assertEquals("zh", tts.lastSpokenLanguage)
             val submissions = capture.lines().count {
                 it.contains("reason=TurnFeedbackRendered") && it.contains("spoken_submitted") && it.contains("request_id=$testWireId")
             }

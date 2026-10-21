@@ -191,8 +191,13 @@ class VoiceControlService : Service() {
             VoiceResponse.Earcon(EarconId.ERROR)
         }
         // Carry the cloud turn's request ID into the renderer for diagnostic join.
-        val renderRequestId = (intent as? au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent.CloudRoute)?.logicalRequestId
-        audioFeedbackRenderer.render(response, requestId = renderRequestId)
+        val cloudIntent = intent as? au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent.CloudRoute
+        val renderRequestId = cloudIntent?.logicalRequestId
+        // THE UTTERANCE'S LANGUAGE drives TTS (spec 54287f13): the reply — including a localized
+        // refusal — is spoken in the language the user spoke, not the device locale. Falls back
+        // to English when the ASR detected nothing this build understands.
+        val renderLanguage = cloudIntent?.sourceLanguage?.takeIf { it.isNotBlank() } ?: "en"
+        audioFeedbackRenderer.render(response, language = renderLanguage, requestId = renderRequestId)
     }
 
     private fun startVoiceControl() {

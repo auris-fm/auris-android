@@ -1,29 +1,45 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.feedback
 
-import java.util.Locale
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * The rule both the cloud sink and the pipeline rely on: a client-owned line is spoken only in the
- * language it is written in, and everywhere else the caller falls back to the error earcon.
+ * The rule the cloud sink and the pipeline rely on (spec 54287f13): a line is spoken in the
+ * UTTERANCE's language when this build carries a translation for it, and falls back to the
+ * default (English) line otherwise — never to silence, and never to the device UI locale.
  */
 class SpokenLineTest {
 
-    private val resolver = SpokenTemplateResolver(mapOf("some.line" to "A spoken line"))
+    private val resolver = SpokenTemplateResolver(
+        templates = mapOf("some.line" to "A spoken line"),
+        languageTemplates = mapOf(
+            "ko" to mapOf("some.line" to "외국어 라인"),
+            "zh" to mapOf("some.line" to "中文台词"),
+        ),
+    )
 
     @Test
-    fun `the source locale gets the line`() {
-        assertEquals("A spoken line", SpokenLine.forKey("some.line", resolver, Locale.ENGLISH))
+    fun `the utterance language gets its line`() {
+        assertEquals("외국어 라인", SpokenLine.forKey("some.line", resolver, "ko"))
     }
 
     @Test
-    fun `another locale gets nothing rather than English`() {
-        assertEquals("", SpokenLine.forKey("some.line", resolver, Locale.KOREAN))
+    fun `an unsupported language falls back to the default line rather than silence`() {
+        assertEquals("A spoken line", SpokenLine.forKey("some.line", resolver, "fr"))
+    }
+
+    @Test
+    fun `a null language gets the default line`() {
+        assertEquals("A spoken line", SpokenLine.forKey("some.line", resolver, null))
+    }
+
+    @Test
+    fun `a language tag with region uses its language part`() {
+        assertEquals("中文台词", SpokenLine.forKey("some.line", resolver, "zh-CN"))
     }
 
     @Test
     fun `a key with no template is empty`() {
-        assertEquals("", SpokenLine.forKey("not.a.key", resolver, Locale.ENGLISH))
+        assertEquals("", SpokenLine.forKey("not.a.key", resolver, "ko"))
     }
 }

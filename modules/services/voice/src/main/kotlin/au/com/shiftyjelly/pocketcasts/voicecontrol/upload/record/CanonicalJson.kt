@@ -305,102 +305,22 @@ object CanonicalJson {
     }
 
     /**
-     * Render [value] exactly as ECMA-262 `Number::toString` does (RFC 8785 §4.1 mandates ES output;
-     * Java's `Double.toString` is only shortest-round-trip — its digits and chosen form can differ,
-     * e.g. MIN_VALUE prints "4.9E-324" where ES6 requires "5e-324").
-     *
-     * The spec builds the printed value as `m * 10^(n - k)`: an integer m of exactly k significant
-     * digits and an integer n that places m's most-significant digit at decimal place n-1. It then
-     * searches digit counts w = 1, 2, 3 … and for each one every placement whose span can carry the
-     * value, taking the first pair whose decimal parses back to the identical double. Sweeping the
-     * digit count upward is what makes the result the shortest round-tripping representation. All
-     * digit arithmetic is BigInteger over the double's exact binary expansion — no float log or pow
-     * ever decides a digit.
+     * RFC 8785 §4.1 mandates ES6 Number::toString output. Digit selection is delegated to the
+     * vendored Ryu core (see RyuShortest.kt for Apache-2.0 provenance): its ROUND_EVEN boundary
+     * acceptance IS the ECMA-262 shortest-selection rule, by construction rather than by search.
+     * This layer only applies the ECMAScript presentation rules (fixed vs exponential form) to the
+     * core's digits, via renderEs. A candidate's value is digits * 10^(leadingExp - olength + 1);
+     * leadingExp is already the place of the most significant digit.
      */
-    @Suppress("MagicNumber")
     internal fun formatNumber(value: Double): String {
+        if (!value.isFinite()) throw CanonicalException("non-finite number")
         if (value == 0.0) return "0" // covers +0 and -0 (ES6 renders -0 as "0")
         val negative = value < 0.0
-        val x = if (negative) -value else value
-
-        // Exact binary decomposition: x = w * 2^twos with w a non-negative integer significand.
-        val bits = java.lang.Double.doubleToRawLongBits(x)
-        val biased = ((bits shr 52).toInt()) and 0x7FF
-        var mantissa = bits and ((1L shl 52) - 1)
-        if (biased != 0) mantissa = mantissa or (1L shl 52) // implicit leading bit for normals
-        val twos = if (biased == 0) -1074 else biased - 1075
-        val w = BigInteger.valueOf(mantissa)
-
-        // Exact decimal expansion of the double: intDigits * 10^-scale, always finite.
-        val intDigits: BigInteger
-        val scale: Int
-        if (twos >= 0) {
-            intDigits = w.shiftLeft(twos)
-            scale = 0
-        } else {
-            intDigits = w.multiply(FIVE.pow(-twos))
-            scale = -twos
-        }
-
-        // Trailing zeros to the right of the decimal point carry no information; removing them keeps
-        // the digit count the rounding search works from honest. Zeros left of the point are integer
-        // magnitude and must stay, or the leading-digit place would be understated.
-        val ds = intDigits.toString()
-        val len = ds.length
-        var nz = 0
-        while (nz < scale && ds[len - 1 - nz] == '0') nz++
-        val compact = if (nz == 0) intDigits else BigInteger(ds.substring(0, len - nz))
-        val compactScale = scale - nz
-        val n = compact.toString().length
-        // Decimal place of the leading significant digit: the expansion has n - compactScale
-        // integer digits, so its first digit holds 10^(n - compactScale - 1). Negative below one.
-        val eTop = n - compactScale - 1
-
-        // Shortest-representation search, stated the way ECMA-262 Number::toString states it. The value is
-        // exactly `compact * 10^-compactScale`. A candidate is an integer m of k digits with a decimal
-        // exponent, denoting m * 10^exp; matching the value means keeping the leading k digits of the exact
-        // expansion. A k-digit significand spans k places ending at `exp`, so its leading digit holds place
-        // exp + k - 1 and must land on the expansion's own lead:
-        //     exp = eTop - k + 1,   m = round(compact * 10^(k - n)).
-        // Sweeping k upward from 1 therefore tests representations by increasing brevity, and the first one
-        // that round-trips to x is the shortest ES6 requires. Half-up rounding on a discarded tail is safe
-        // because any representation that round-trips is a valid ES6 choice.
-        for (digits in 1..MAX_SIGNIFICANT_DIGITS) {
-            val shift = digits - n // exact digits dropped when negative, zero-padded when positive
-            val m = if (shift >= 0) {
-                compact.multiply(TEN.pow(shift))
-            } else {
-                val divisor = TEN.pow(-shift)
-                val q = compact.divide(divisor)
-                val r = compact.mod(divisor)
-                // ECMA-262 Number::toString step 5: when two k-digit candidates are equidistant from the
-                // value (an exact tie, twice-r == divisor), choose the even one. Half-up rounding picks
-                // the odd neighbor and misprints every tie value (1424953923781206.25 must render
-                // "1424953923781206.2", not ".3"); RFC 8785 Appendix B pins the same behaviour.
-                val twice = r.shiftLeft(1)
-                val up = twice.compareTo(divisor) > 0 || (twice.compareTo(divisor) == 0 && q.testBit(0))
-                if (up) q.add(BigInteger.ONE) else q
-            }
-            if (m.signum() == 0) continue
-            val head = m.toString()
-            // A rounding carry (999 -> 1000, 9 -> 10) widens the significand by one digit. That is not a
-            // defect to repair by dropping the leading '1' — 1e-7's double rounds at one digit to m = 10,
-            // and "10" stripped of trailing zeros is the k-digit-ish significand "1" one place higher.
-            // Strip first, then derive the leading digit's place from the unstripped width.
-            val stripped = trimTrailing(head)
-            if (stripped.isEmpty()) continue
-            // Place of the last digit of this width's span: whole numbers end at place 0 (1e23 -> "1E23"),
-            // fractional magnitudes keep the expansion's own alignment.
-            val alignedExp = if (compactScale == 0) maxOf(0, eTop - digits + 1) else eTop - digits + 1
-            // The candidate's value is `stripped * 10^(alignedExp + zeroShift)`: stripping trailing zeros
-            // moves that part of the width into the exponent, which is what lets a rounding carry
-            // (1e-7's single digit rounds 9.99… up to 10) express the shortest form "1e-7" at one digit.
-            val zeroShift = head.length - stripped.length
-            if (java.lang.Double.parseDouble(stripped + "E" + (alignedExp + zeroShift)) != x) continue
-            val body = renderEs(stripped, alignedExp + zeroShift + stripped.length - 1)
-            return if (negative) "-$body" else body
-        }
-        error("ES6 number rendering failed for $value")
+        val core = RyuShortest.doubleToShortest(if (negative) -value else value)
+        val digits = core.digits.toString()
+        check(digits.length == core.olength) { "ryu digit count mismatch: $digits vs ${core.olength}" }
+        val body = renderEs(digits, core.leadingExp)
+        return if (negative) "-$body" else body
     }
 
     /**

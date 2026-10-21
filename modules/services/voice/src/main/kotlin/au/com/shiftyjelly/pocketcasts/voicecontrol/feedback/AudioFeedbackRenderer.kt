@@ -2,6 +2,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.feedback
 
 import android.os.SystemClock
 import au.com.shiftyjelly.pocketcasts.voicecontrol.BuildConfig
+import au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.VoiceLifecycleDiagnostics
 import au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceResponse
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsEngine
 import au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsPlaybackIncompleteException
@@ -99,7 +100,7 @@ class AudioFeedbackRenderer(
         Timber.e(error, "[VoiceResponse] spoken reply did not finish playing")
     }
 
-    fun render(response: VoiceResponse, language: String = "en") {
+    fun render(response: VoiceResponse, language: String = "en", requestId: String? = null) {
         if (disposed) return
         // Debug-only diagnostic: what the app is about to say, before TTS. This is the one
         // place every spoken response passes through, so it is where a response that is
@@ -114,6 +115,25 @@ class AudioFeedbackRenderer(
         // above, any child suspend calls (like TtsEngine.speak) will be cancelled.
         currentJob = scope.launch {
             try {
+                // Renderer submit boundary: record what was actually submitted to TTS/earcon.
+                // This is the real render entry point, not the sink's selection/return.
+                if (requestId != null) {
+                    val kind = when (response) {
+                        is VoiceResponse.Silent -> "silent"
+                        is VoiceResponse.Earcon -> "earcon_submitted"
+                        is VoiceResponse.Spoken -> "spoken_submitted"
+                        is VoiceResponse.Combined -> "combined_submitted"
+                    }
+                    VoiceLifecycleDiagnostics.record(
+                        VoiceLifecycleDiagnostics.Event(
+                            kind = VoiceLifecycleDiagnostics.Kind.Turn,
+                            reason = VoiceLifecycleDiagnostics.Reason.TurnFeedbackRendered,
+                            source = VoiceLifecycleDiagnostics.Source.Cloud,
+                            requestId = requestId,
+                            feedbackKind = kind,
+                        ),
+                    )
+                }
                 when (response) {
                     is VoiceResponse.Silent -> { /* no-op */ }
 

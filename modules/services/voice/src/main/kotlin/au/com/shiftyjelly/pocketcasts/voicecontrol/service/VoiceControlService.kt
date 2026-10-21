@@ -190,7 +190,9 @@ class VoiceControlService : Service() {
             Timber.w(failure, "[VoicePipeline] command failed")
             VoiceResponse.Earcon(EarconId.ERROR)
         }
-        audioFeedbackRenderer.render(response)
+        // Carry the cloud turn's request ID into the renderer for diagnostic join.
+        val renderRequestId = (intent as? au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent.CloudRoute)?.logicalRequestId
+        audioFeedbackRenderer.render(response, requestId = renderRequestId)
     }
 
     private fun startVoiceControl() {

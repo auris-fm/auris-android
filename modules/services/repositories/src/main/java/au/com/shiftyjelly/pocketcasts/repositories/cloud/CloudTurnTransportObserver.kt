@@ -10,8 +10,8 @@ interface CloudTurnTransportObserver {
     /** Bounded auth outcome. */
     enum class AuthOutcome { RESOLVED, MISSING_TOKEN }
 
-    /** Bounded send outcome. */
-    enum class SendOutcome { ACCEPTED, REJECTED }
+    /** Bounded send outcome. Distinguishes encode failure from send rejection from throw. */
+    enum class SendOutcome { ACCEPTED, REJECTED, ENCODE_FAILED, SEND_THREW }
 
     /** Bounded terminal origin. */
     enum class TerminalOrigin { SERVER_DONE, SERVER_ERROR, LOCAL_CONNECTION_FAILED, LOCAL_PARSE_ERROR }

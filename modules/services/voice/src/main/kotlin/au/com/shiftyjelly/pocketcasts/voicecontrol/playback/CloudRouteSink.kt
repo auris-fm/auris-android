@@ -646,13 +646,14 @@ class CloudRouteSink internal constructor(
                         }
                         audioPlayer?.submitFrame(event.bytes)
                         audioPlayer?.play()
+                        // Render boundary: audio playback actually started.
+                        Trace.record(Event(Kind.Turn, Reason.TurnFeedbackRendered, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = "audio"))
                     }
 
                     is CloudRouteEvent.Done -> {
-                        // Transport boundary: terminal done received from server.
-                        // onTerminalReceived is fired at the actual decode point in WebSocketCloudTurnTransport.
+                        // Terminal diagnostics are recorded at the actual decode point in
+                        // WebSocketCloudTurnTransport.onMessage — not here at sink consumption.
                         val doneOutcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted"
-                        Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, errorCode = doneOutcome))
                         analytics.recordTurn(
                             outcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted",
                             inputTokens = event.inputTokens,
@@ -760,11 +761,9 @@ class CloudRouteSink internal constructor(
                     }
 
                     is CloudRouteEvent.Error -> {
-                        // Transport boundary: terminal error received. Carries the actual
-                        // error code so limit_exceeded vs connection_lost are distinguishable.
-                        // onTerminalReceived is fired at the actual decode point in WebSocketCloudTurnTransport.
-                        val boundedErrorCode = if (event.code in ALLOWED_ERROR_CODES) event.code else "unknown"
-                        Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, errorCode = boundedErrorCode))
+                        // Terminal diagnostics are recorded at the actual decode point in
+                        // WebSocketCloudTurnTransport.onMessage — not here at sink consumption.
+                        // Local Error events (missing-token, parse) do NOT fire server terminal.
                         endReason = Reason.TurnFailed
                         // Genuinely unavailable evidence is a state the results
                         // renderer owns whenever it is present AND this turn had a
@@ -931,10 +930,12 @@ class CloudRouteSink internal constructor(
                 errorCode: String?,
             ) {
                 val boundedCode = errorCode?.let { if (it in ALLOWED_ERROR_CODES) it else "unknown" }
-                Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, requestId = requestId, errorCode = boundedCode ?: origin.name))
+                Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, requestId = requestId, errorCode = boundedCode, terminalOrigin = origin.name))
             }
             override fun onConnectionFailed(requestId: String) {
-                Trace.record(Event(Kind.Turn, Reason.TurnRetired, Source.Cloud, requestId = requestId, errorCode = "connection_failed"))
+                // Connection failure is a transport fact, not lifecycle retirement.
+                // Retirement is recorded separately when the turn actually ends.
+                Trace.record(Event(Kind.Turn, Reason.TurnRetired, Source.Cloud, requestId = requestId, errorCode = "connection_failed", terminalOrigin = "LOCAL_CONNECTION_FAILED"))
             }
         }
         val transport = transportFactory?.invoke(resolveBaseUrl(), CloudTurnRoute.defaultOkHttpClient(), transportObserver)

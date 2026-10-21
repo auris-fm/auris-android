@@ -213,6 +213,65 @@ class VoicePlaybackIntentExecutorTest {
     }
 
     @Test
+    fun `a refused cloud turn does not renew the grace window`() = runTest {
+        // Reviewer9489ae5a / spec f02f8dae: a limit REFUSAL reaches DONE-with-error — the turn did
+        // nothing for the user, so it must NOT earn the recognition renewal. The old code read only
+        // the ACTION outcome (None) and treated it as recognized, extending the window on a refusal.
+        val sinks = FakeSinks()
+        val signal = GracePeriodSignal(timeoutMs = 5_000L)
+        val executor = sinks.executor(signal)
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+        sinks.cloudRoute.firstDispatchResult = CloudTurnResult(
+            feedback = VoiceResponse.Spoken("You have reached your Auris free daily limit."),
+            action = CloudRouteActionOutcome.None,
+            succeeded = false,
+        )
+
+        // Advance INTO the window, then execute: a renewal would re-anchor the deadline at execute
+        // time, so past wake+5s only a NON-renewed window expires.
+        kotlinx.coroutines.delay(3_000L)
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "question",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = window,
+            ),
+        )
+        kotlinx.coroutines.delay(3_000L)
+        assertFalse("a refusal must not extend the grace window", signal.isActive.value)
+        assertEquals(window, signal.capturedGeneration())
+    }
+
+    @Test
+    fun `a successful no-action answer still renews the grace window`() = runTest {
+        // The control for the refusal rule: a turn that REACHED DONE with spoken feedback and no
+        // playback action is a recognized turn — its renewal must survive the refusal fix.
+        val sinks = FakeSinks()
+        val signal = GracePeriodSignal(timeoutMs = 5_000L)
+        val executor = sinks.executor(signal)
+        signal.onWakeWordDetected()
+        val window = signal.capturedGeneration()
+        sinks.cloudRoute.firstDispatchResult = CloudTurnResult(
+            feedback = VoiceResponse.Spoken("Here is your answer."),
+            action = CloudRouteActionOutcome.None,
+            succeeded = true,
+        )
+
+        kotlinx.coroutines.delay(3_000L)
+        executor.execute(
+            VoiceIntent.CloudRoute(
+                request = "question",
+                tier = VoiceIntent.CloudTier.Premium,
+                windowGeneration = window,
+            ),
+        )
+        // 6s since the wake but only ~3s since execute: only a renewal explains a live window.
+        kotlinx.coroutines.delay(3_000L)
+        assertTrue("a successful answer renews the window", signal.isActive.value)
+    }
+
+    @Test
     fun `a dispatched turn carries its own window stamp, so a fresh wake creates`() = runTest {
         // @reviewer's bound-path case: the STAMP ON THE INTENT is the captured origin. A fresh wake
         // must create even while the previous conversation is still live, and a follow-up stamped with
@@ -1292,6 +1351,12 @@ class VoicePlaybackIntentExecutorTest {
          */
         var actionOutcome: CloudRouteActionOutcome = CloudRouteActionOutcome.Confirmed
 
+        /**
+         * The result the first dispatch returns, settable so a case can present a REAL refusal
+         * (spoken error feedback, no action, failed terminal) exactly as the production sink does.
+         */
+        var firstDispatchResult: CloudTurnResult? = null
+
         /** The prepared turns a retry dispatched, so a case can assert identity was reused. */
         val preparedDispatches = mutableListOf<au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudRouteTurn>()
 
@@ -1398,6 +1463,7 @@ class VoicePlaybackIntentExecutorTest {
             // that landed an event "while in flight" through the old call site would silently land it
             // nowhere, and the case would pass or fail for the wrong reason.
             whileInFlight?.invoke()
+            firstDispatchResult?.let { return it }
             // The fake reports a CONFIRMED action, so a case exercising the executor's consumption sees
             // a settled outcome rather than an accidental Unknown.
             return CloudTurnResult(

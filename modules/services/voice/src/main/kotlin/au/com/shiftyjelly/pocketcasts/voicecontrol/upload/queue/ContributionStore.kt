@@ -1,7 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
-import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordValidator
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
@@ -717,34 +717,28 @@ class ContributionStore(
             val metaBytes = readBoundedBytes(meta, limits.maxMetadataBytes) ?: return null
             val metaText = metaBytes.toString(Charsets.UTF_8)
             if (sha256Hex(metaBytes) != recordedDigest) return null
-            val record = CanonicalJson.parse(metaText) as? RecordNode.Obj ?: return null
-            // --- Canonical record authority: the immutable record must describe THIS entry. ---
-            if ((record.fields["schema_version"] as? RecordNode.Num)?.value != 1.0) return null
-            if ((record.fields["capture_id"] as? RecordNode.Str)?.value != id) return null
-            val epoch = (record.fields["enrollment_epoch"] as? RecordNode.Str)?.value ?: return null
-            val audio = record.fields["audio"] as? RecordNode.Obj ?: return null
-            // Audio binding: the record declares the exact WAV identity (digest, byte count, format,
-            // rate, channels). A RIFF header sniff cannot establish this; the bytes must match.
-            if (((audio.fields["encoding"] as? RecordNode.Str)?.value) != "pcm_s16le") return null
-            if (((audio.fields["sample_rate_hz"] as? RecordNode.Num)?.value) != 16_000.0) return null
-            if (((audio.fields["channels"] as? RecordNode.Num)?.value) != 1.0) return null
-            val declaredByteCount = (audio.fields["byte_count"] as? RecordNode.Num)?.value?.toLong() ?: return null
-            if (declaredByteCount != declared) return null
-            val declaredAudioSha = (audio.fields["sha256"] as? RecordNode.Str)?.value ?: return null
-            if (!HEX_SHA256.matches(declaredAudioSha)) return null
+            // --- Canonical record authority: delegate to the SHARED decode-side validator. ---
+            // Never re-derive schema rules here: a hand-rolled reader is a second, weaker authority
+            // that silently accepts what the builder refuses (unknown fields, fractional integers,
+            // empty epochs, inconsistent audio blocks).
+            val parsed = CanonicalJson.parse(metaText)
+            val valid = when (val result = RecordValidator.validate(parsed)) {
+                is RecordValidator.Result.Rejected -> return null
+                is RecordValidator.Result.Ok -> result.record
+            }
+            if (valid.captureId != id) return null
+            val audio = valid.audio
+            if (audio.byteCount != declared) return null
+            // Audio digest binds the EXACT bytes: a digest authenticates whatever was written,
+            // including a malformed WAV, so the header is validated separately below.
             val actualAudioSha = sha256FileBounded(wav, declared) ?: return null
-            if (actualAudioSha != declaredAudioSha) return null
-            // WAV container consistency (the canonical writer's fixed 44-byte layout).
-            val sizeHeader = ByteArray(WavWriter.HEADER_BYTES)
-            if (!readFully(wav, sizeHeader)) return null
-            if (String(sizeHeader, 0, 4, Charsets.US_ASCII) != "RIFF") return null
-            if (String(sizeHeader, 8, 4, Charsets.US_ASCII) != "WAVE") return null
-            if (le16(sizeHeader, 20) != 1) return null // PCM
-            if (le16(sizeHeader, 22) != 1) return null // mono
-            if (le32(sizeHeader, 24) != 16_000L) return null // sample rate
-            if (le16(sizeHeader, 34) != 16) return null // bits per sample
-            if (WavWriter.HEADER_BYTES.toLong() + le32(sizeHeader, 40) != declared) return null
-            Entry(id, epoch, recordedDigest, declared, metaBytes.size, attempts, createdAtMs = created)
+            if (actualAudioSha != audio.sha256) return null
+            // --- Structural WAV validation (cannot be established by the digest) ---
+            val header = ByteArray(WavWriter.HEADER_BYTES)
+            if (!readFully(wav, header)) return null
+            val wavValid = WavHeaderValidator.validate(header, declared) ?: return null
+            if (wavValid.sampleCount != audio.retainedSamples) return null
+            Entry(id, valid.enrollmentEpoch, recordedDigest, declared, metaBytes.size, attempts, createdAtMs = created)
         } catch (_: Exception) {
             null
         }

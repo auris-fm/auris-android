@@ -3,6 +3,11 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.AudioBlock
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ContributionRecordBuilder
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordValidator
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
 import java.io.File
 import java.nio.file.Files
 import java.util.UUID
@@ -54,6 +59,19 @@ class ContributionStoreTest {
     }
 
     /** The exact WAV bytes the store writes for [sampleCount] samples (16 kHz mono pcm_s16le). */
+    private fun audioBlockFor(sampleCount: Int): AudioBlock {
+        val audio = wavBytes(sampleCount)
+        return AudioBlock(
+            sha256 = sha256HexForTest(audio),
+            byteCount = audio.size.toLong(),
+            retainedSamples = sampleCount.toLong(),
+            originalFormat = "pcm_s16le",
+            conversionVersion = "1",
+            truncated = false,
+            droppedSpans = emptyList(),
+        )
+    }
+
     private fun wavBytes(sampleCount: Int): ByteArray {
         val out = java.io.ByteArrayOutputStream()
         WavWriter.writeHeader(out, sampleCount)
@@ -1089,5 +1107,172 @@ class ContributionStoreTest {
         File(root, "contributions/$id.metadata.json").writeBytes(badBytes)
         File(root, "contributions/$id.sha256").writeText(sha256HexForTest(badBytes))
         assertTrue("record with a wrong byte_count admitted", ContributionStore(root, QueueLimits.defaults()).recover().isEmpty())
+    }
+
+    // --- Reviewer round: schema authority, exact integers, WAV structure ---
+
+    /** Replace the retained metadata with [text] and keep the digest sidecar consistent. */
+    private fun tamperMetadata(root: File, id: String, text: String) {
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        File(root, "contributions/$id.metadata.json").writeBytes(bytes)
+        File(root, "contributions/$id.sha256").writeText(sha256HexForTest(bytes))
+    }
+
+    @Test
+    fun `a fractional byte_count is refused rather than truncated to an integer`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val id = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        val valid = meta(id).toString(Charsets.UTF_8)
+        // 60 == actual file length; 60.9 would truncate to 60 under Double.toLong().
+        val tampered = valid.replace("\"byte_count\":60", "\"byte_count\":60.9")
+        assertNotEquals("fixture did not contain the expected byte_count", valid, tampered)
+        tamperMetadata(root, id, tampered)
+        assertTrue("fractional byte_count was truncated and admitted", ContributionStore(root, QueueLimits.defaults()).recover().isEmpty())
+    }
+
+    @Test
+    fun `an empty enrollment_epoch is refused`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val id = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        val valid = meta(id).toString(Charsets.UTF_8)
+        val tampered = valid.replace("\"epoch-1\"", "\"\"")
+        assertNotEquals("fixture did not contain the expected epoch", valid, tampered)
+        tamperMetadata(root, id, tampered)
+        assertTrue("empty epoch admitted", ContributionStore(root, QueueLimits.defaults()).recover().isEmpty())
+    }
+
+    @Test
+    fun `unknown fields at root and inside stages are refused`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        // Unknown ROOT field.
+        val id1 = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id1, "epoch-1", chunks(8), meta(id1)))
+        val valid1 = meta(id1).toString(Charsets.UTF_8)
+        tamperMetadata(root, id1, valid1.replaceFirst("{", "{\"surprise_field\":1,"))
+        assertTrue("unknown root field admitted", ContributionStore(root, QueueLimits.defaults()).recover().none { it.captureId == id1 })
+        // Unknown STAGE field (nested): only the stage allowlist can refuse this.
+        val id2 = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id2, "epoch-1", chunks(8), meta(id2)))
+        val valid2 = meta(id2).toString(Charsets.UTF_8)
+        val withObservation = valid2.replace("\"observations\":{", "\"observations\":{\"wake\":{\"state\":\"completed\",\"not_allowed_here\":1},")
+        assertNotEquals("fixture lacked observations", valid2, withObservation)
+        tamperMetadata(root, id2, withObservation)
+        assertTrue("unknown stage field admitted", ContributionStore(root, QueueLimits.defaults()).recover().none { it.captureId == id2 })
+    }
+
+    @Test
+    fun `the record validator is the single schema authority - direct stage allowlist refusal`() {
+        // Store-level tests can mask a missing stage allowlist (the store also compares capture_id
+        // and audio identity). This asserts the VALIDATOR alone, on a record built legally then
+        // given one unknown stage field, so only the allowlist can refuse it.
+        val builder = ContributionRecordBuilder(UUID.randomUUID().toString(), "epoch-1", 7L)
+            .stage(StageName.Wake, StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("rejected"))))
+            .stage(StageName.Asr, StageEntry(StageState.Completed, mapOf("text" to RecordNode.Str("x"))))
+        val record = builder.build("android", "8.20", "test", audioBlockFor(8))
+        assertTrue(
+            "a legitimately built record must validate",
+            RecordValidator.validate(record) is RecordValidator.Result.Ok,
+        )
+        // Inject an unknown field into an existing stage: allowlist-only refusal.
+        val observations = record.fields["observations"] as RecordNode.Obj
+        val wake = observations.fields["wake"] as RecordNode.Obj
+        val poisonedWake = RecordNode.Obj(wake.fields + ("smuggled" to RecordNode.Str("value")))
+        val poisoned = RecordNode.Obj(record.fields + ("observations" to RecordNode.Obj(observations.fields + ("wake" to poisonedWake))))
+        assertTrue(
+            "unknown stage field accepted without the allowlist",
+            RecordValidator.validate(poisoned) is RecordValidator.Result.Rejected,
+        )
+    }
+
+    @Test
+    fun `the WAV validator refuses headers whose derived fields disagree with the format`() {
+        // Prompt for this control: a digest authenticates malformed bytes as faithfully as valid
+        // ones, so each structural field must be checked in its own right. Each case below is a
+        // header that is internally CONSISTENT in length but describes a file this writer cannot
+        // produce, or that a decoder may read differently from us.
+        fun header(
+            dataBytes: Long = 20,
+            byteRateDrift: Long = 0,
+            blockAlign: Int = 2,
+            riffSizeDrift: Long = 0,
+            byteRateFromBlockAlign: Boolean = true,
+        ): ByteArray {
+            val header = ByteArray(WavWriter.HEADER_BYTES)
+            val out = java.io.ByteArrayOutputStream()
+            WavWriter.writeHeader(out, (dataBytes / 2).toInt())
+            out.toByteArray().copyInto(header)
+            fun put32(at: Int, v: Long) {
+                header[at] = (v and 0xFF).toByte()
+                header[at + 1] = ((v shr 8) and 0xFF).toByte()
+                header[at + 2] = ((v shr 16) and 0xFF).toByte()
+                header[at + 3] = ((v shr 24) and 0xFF).toByte()
+            }
+            fun put16(at: Int, v: Int) {
+                header[at] = (v and 0xFF).toByte()
+                header[at + 1] = ((v shr 8) and 0xFF).toByte()
+            }
+            put32(4, WavWriter.HEADER_BYTES + dataBytes + riffSizeDrift - 8)
+            put32(40, dataBytes)
+            // When byteRateFromBlockAlign is true the byte rate FOLLOWS the (possibly wrong) block
+            // alignment, so block alignment is the only field that can disagree.
+            put32(28, if (byteRateFromBlockAlign) 16_000L * blockAlign + byteRateDrift else 16_000L * 2 + byteRateDrift)
+            put16(32, blockAlign)
+            return header
+        }
+        val fileBytes = WavWriter.HEADER_BYTES + 20L
+        assertNotNull("baseline header rejected", WavHeaderValidator.validate(header(), fileBytes))
+        assertNull("odd data length accepted", WavHeaderValidator.validate(header(dataBytes = 21), WavWriter.HEADER_BYTES + 21L))
+        assertNull("wrong byte rate accepted", WavHeaderValidator.validate(header(byteRateDrift = 2), fileBytes))
+        assertNull("wrong block alignment accepted", WavHeaderValidator.validate(header(blockAlign = 4), fileBytes))
+        // Byte rate consistent with the wrong block alignment: ONLY the block-align rule can refuse.
+        assertNull(
+            "wrong block alignment with a consistent byte rate accepted",
+            WavHeaderValidator.validate(header(blockAlign = 4), fileBytes),
+        )
+        // Four-byte block alignment also changes the implied sample width; keep the data even.
+        assertNull(
+            "block alignment 4 with even data accepted",
+            WavHeaderValidator.validate(header(dataBytes = 20, blockAlign = 4), fileBytes),
+        )
+        assertNull("inconsistent RIFF size accepted", WavHeaderValidator.validate(header(riffSizeDrift = 2), fileBytes))
+    }
+
+    @Test
+    fun `a malformed WAV header is refused even though its digest matches`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val id = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        val wav = File(root, "contributions/$id.recording.wav")
+        val bytes = wav.readBytes()
+        // Corrupt the fmt chunk LENGTH (offset 16) and re-record the audio digest so the digest
+        // check passes: only the structural validator can refuse this file.
+        bytes[16] = 20
+        wav.writeBytes(bytes)
+        val newSha = sha256HexForTest(bytes)
+        val valid = meta(id).toString(Charsets.UTF_8)
+        val oldSha = sha256HexForTest(meta(id).let { wavBytes(8) })
+        tamperMetadata(root, id, valid.replace(oldSha, newSha))
+        assertTrue("malformed fmt chunk length admitted", ContributionStore(root, QueueLimits.defaults()).recover().isEmpty())
+    }
+
+    @Test
+    fun `a WAV with an odd data length is refused`() {
+        val root = tempRoot()
+        val store = ContributionStore(root, QueueLimits.defaults())
+        val id = UUID.randomUUID().toString()
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        val wav = File(root, "contributions/$id.recording.wav")
+        val bytes = wav.readBytes().copyOf(wav.readBytes().size - 1) // truncated mid-sample
+        wav.writeBytes(bytes)
+        val newSha = sha256HexForTest(bytes)
+        val oldSha = sha256HexForTest(wavBytes(8))
+        tamperMetadata(root, id, meta(id).toString(Charsets.UTF_8).replace(oldSha, newSha))
+        assertTrue("odd-length data admitted", ContributionStore(root, QueueLimits.defaults()).recover().isEmpty())
     }
 }

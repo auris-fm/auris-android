@@ -646,9 +646,10 @@ class CloudRouteSink internal constructor(
                         }
                         audioPlayer?.submitFrame(event.bytes)
                         audioPlayer?.play()
-                        // Render boundary: cloud audio playback requested (not confirmed audible).
+                        // Audio submission boundary: play() called on the cloud audio player.
+                        // This is a submission/request, not confirmed audible output.
                         if (audioPlayer != null) {
-                            Trace.record(Event(Kind.Turn, Reason.TurnFeedbackRendered, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = "cloud_audio"))
+                            Trace.record(Event(Kind.Turn, Reason.TurnFeedbackRendered, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = "cloud_audio_submitted"))
                         }
                     }
 
@@ -881,17 +882,18 @@ class CloudRouteSink internal constructor(
                 graceHold?.let { gracePeriodSignal.finishCloudTurn(it, cancelled = endReason == Reason.TurnCancelled || myJob?.isCancelled == true) }
             }
         }
-        // Render/drop boundary for local feedback (spoken refusal, earcon, silent).
-        // Cloud audio render is observed at play() above; this covers the non-audio paths.
+        // Feedback selection/return boundary: the sink's chosen feedback is about to be
+        // returned to the caller. This is NOT the renderer's submit/start/drop observation —
+        // that lives in the actual TTS/earcon player that receives this result.
         val finalFeedback = outcome ?: VoiceResponse.Silent
-        val localRenderKind = when (finalFeedback) {
-            is VoiceResponse.Spoken -> "spoken"
-            is VoiceResponse.Earcon -> "earcon"
-            is VoiceResponse.Silent -> "silent"
+        val selectedKind = when (finalFeedback) {
+            is VoiceResponse.Spoken -> "spoken_selected"
+            is VoiceResponse.Earcon -> "earcon_selected"
+            is VoiceResponse.Silent -> "silent_selected"
             else -> null
         }
-        if (localRenderKind != null) {
-            Trace.record(Event(Kind.Turn, Reason.TurnFeedbackRendered, Source.Cloud, generation = diagnosticOrigin, owner = myId, requestId = diagnosticRequestId, feedbackKind = localRenderKind))
+        if (selectedKind != null) {
+            Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = diagnosticOrigin, owner = myId, requestId = diagnosticRequestId, feedbackKind = selectedKind))
         }
         return CloudTurnResult(
             feedback = finalFeedback,

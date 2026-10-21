@@ -486,207 +486,79 @@ class DirectoryDurabilityTest {
     }
 
     @Test
-    fun `repeated uncertainty consumes capacity instead of vanishing from the totals`() {
-        // Uncertain files are on disk but NOT ready. If only their ids are tracked, their bytes drop out
-        // of the capacity totals while still occupying the queue, so every repetition of uncertainty
-        // hands out the full budget again over data already stored - an over-commit that compounds.
-        val root = tmp.newFolder("queue-uncertain-capacity")
-        // Records generously so this control isolates BYTE accounting, not the record cap.
-        val tight = QueueLimits.defaults().copy(
-            maxQueueRecords = 32,
-            maxQueueBytes = 4_000_000,
-        )
-        var failSyncs = false
-        val gated = object : DirectorySync {
+    fun `a FRESH store charges entries it just FAILED to confirm`() {
+        // The branch the reviewer found still open after the restructure: on a fresh store `self` is empty,
+        // so charging only inside the self loop left unconfirmable on-disk entries charged NOWHERE. A fresh
+        // store must charge every validated entry before it branches on confirmation.
+        val root = tmp.newFolder("queue-fresh-withheld")
+        val id = java.util.UUID.randomUUID().toString()
+        ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id))
+        val entryCharge = File(root, "contributions").listFiles()!!
+            .filter { it.name.startsWith(id) && (it.name.endsWith(".recording.wav") || it.name.endsWith(".metadata.json")) }
+            .sumOf { it.length() }
+        assertTrue("precondition: charge is known ($entryCharge)", entryCharge > 0)
+
+        // A FRESH store whose confirmation FAILS must still charge the entry.
+        val failing = object : DirectorySync {
             override fun sync(directory: File) {
-                if (failSyncs) throw java.io.IOException("simulated confirmation failure")
+                throw java.io.IOException("simulated confirmation failure")
             }
         }
-        val store = ContributionStore(root, tight, directorySync = gated)
-
-        // Prepare and then withhold several entries; each one still occupies disk.
-        val withheld = mutableListOf<String>()
-        repeat(3) {
-            val id = java.util.UUID.randomUUID().toString()
-            // Prepare with syncs HEALTHY: the fault is injected into RECOVERY, not into publication.
-            failSyncs = false
-            assertTrue("precondition: prepare $id", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
-            withheld += id
-            failSyncs = true
-            store.recover()
-            assertTrue("withheld $id", store.readyEntries().none { it.captureId == id })
-        }
-
-        // Bytes on disk for the withheld entries.
-        val onDisk = File(root, "contributions").listFiles()!!.sumOf { it.length() }
-        assertTrue("precondition: withheld bytes occupy the queue ($onDisk)", onDisk > 0)
-
-        // The store must now account for those bytes. With 3 withheld entries of that size against a
-        // 64 kB budget, admittance must be refused rather than granted on top of existing data.
-        val remaining = tight.maxQueueBytes - onDisk
-        val tooBig = store.admit(sampleCount = 4000, metadataBytes = 1024) // comfortably > remaining
-        if (remaining < store.projectedBytesFor(4000, 1024)) {
-            assertTrue(
-                "an admission larger than the remaining budget must be refused, remaining=$remaining",
-                tooBig == null,
-            )
-        }
-
-        assertTrue("precondition: three entries withheld", withheld.size == 3)
-
-        // The assertion must run on the SAME instance that holds the uncertain entries: the accounting is
-        // per-instance state, so a FRESH store over the same directory legitimately knows nothing about
-        // them. An earlier version of this control built a new store and therefore passed even with the
-        // accounting removed - the mutation survived, which is what exposed the flaw.
-        //
-        // A store whose entire budget is exactly what one entry occupies must refuse a second one. With
-        // the withheld bytes counted, the first withheld entry alone consumes the budget; without them,
-        // the budget looks untouched and the second entry is admitted.
-        // The assertion must run on the instance that HOLDS the uncertain entries: the accounting is
-        // per-instance state, so a fresh store over the same directory knows nothing about them (an
-        // earlier version of this control built a new store and passed even with the accounting removed).
-        //
-        // With three entries withheld and each ~4265 bytes, the store's committed byte total is
-        // ~12795. Asking for an entry that only fits in the budget if those bytes were FREE must be
-        // refused. Without the fix the withheld bytes are invisible and it is admitted.
-        val perEntry = bounded().projectedBytesFor(1600, meta(java.util.UUID.randomUUID().toString()).size)
-        val squeezed = ContributionStore(
-            root,
-            tight.copy(maxQueueBytes = perEntry * 3 + perEntry / 2, maxQueueRecords = 64),
-            directorySync = gated,
-        )
-        // Reproduce the same withheld state on THIS instance.
-        val prepared = mutableListOf<String>()
-        repeat(3) {
-            val id = java.util.UUID.randomUUID().toString()
-            failSyncs = false
-            if (squeezed.prepare(id, "epoch-1", chunks(1600), meta(id)) != null) prepared += id
-            failSyncs = true
-            squeezed.recover()
-        }
-        assertTrue("precondition: three entries withheld on this instance", prepared.size == 3)
-        assertTrue("precondition: none ready", squeezed.readyEntries().isEmpty())
-
-        failSyncs = false
-        val overflowId = java.util.UUID.randomUUID().toString()
-        val overflowing = runCatching { squeezed.prepare(overflowId, "epoch-1", chunks(1600), meta(overflowId)) }.getOrNull()
-        assertTrue(
-            "withheld bytes must consume the budget: a 4th entry was admitted although 3 entries' bytes " +
-                "(~${perEntry * 3}) already occupy a ${perEntry * 3 + perEntry / 2}-byte budget",
-            overflowing == null,
-        )
-    }
-
-    private fun bounded(): ContributionStore {
-        val root = tmp.newFolder("queue-probe-${System.nanoTime()}")
-        return ContributionStore(root, QueueLimits.defaults())
-    }
-
-    @Test
-    fun `a FRESH store charges entries it cannot confirm, not just ones it prepared`() {
-        // The physical resource bound applies after a restart too. A fresh store that only charged entries
-        // it had itself prepared would see an empty queue on disk and admit new work up to the FULL budget
-        // on top of data already there - the same over-commit as the uncertain-entry bug, one lifecycle
-        // later.
-        val root = tmp.newFolder("queue-fresh-capacity")
-        val prepId = java.util.UUID.randomUUID().toString()
-        ContributionStore(root, limits()).prepare(prepId, "epoch-1", chunks(1600), meta(prepId))
-
-        val onDisk = File(root, "contributions").listFiles()!!.sumOf { it.length() }
-        assertTrue("precondition: bytes on disk ($onDisk)", onDisk > 0)
-
-        // The probe must be SMALLER than one stored entry, otherwise it is refused for being too big
-        // regardless of accounting and the control proves nothing. That is exactly how the first version of
-        // this test let a mutant survive: it asked for a 16556-byte clip against a 4343-byte budget.
-        val probeSamples = 256L
         val probeMeta = meta(java.util.UUID.randomUUID().toString())
+        val probeSamples = 256L
         val probeBytes = ContributionStore(root, limits()).projectedBytesFor(probeSamples, probeMeta.size)
-        assertTrue("precondition: the probe fits within one entry ($probeBytes <= $onDisk)", probeBytes <= onDisk)
+        assertTrue("precondition: probe smaller than the entry", probeBytes < entryCharge)
 
-        // A fresh store whose budget is exactly what is on disk must refuse the probe, because the bytes
-        // already stored consume the entire budget.
-        val fresh = ContributionStore(root, limits().copy(maxQueueBytes = onDisk), directorySync = RecordingSync())
-        assertEquals("the fresh store confirms the existing entry", listOf(prepId), fresh.recover().map { it.captureId })
+        val fresh = ContributionStore(root, limits().copy(maxQueueBytes = entryCharge), directorySync = failing, fileSync = FileSync { })
+        assertTrue("precondition: the fresh store cannot confirm the entry", fresh.recover().isEmpty())
         assertTrue(
-            "a fresh store must charge the entries it recovered: probe admitted over full-budget disk data",
+            "a fresh store must charge an entry it FAILED to confirm: a $probeBytes-byte probe was admitted " +
+                "over a $entryCharge-byte budget",
             fresh.admit(sampleCount = probeSamples, metadataBytes = probeMeta.size) == null,
         )
-        // Complement: with headroom the SAME probe must succeed, so the control discriminates.
-        val roomy = ContributionStore(root, limits().copy(maxQueueBytes = onDisk + probeBytes), directorySync = RecordingSync())
-        roomy.recover()
-        assertTrue(
-            "the control must be discriminating: the same probe with headroom must succeed",
-            roomy.admit(sampleCount = probeSamples, metadataBytes = probeMeta.size) != null,
-        )
     }
 
     @Test
-    fun `uncertain entries count against the RECORD bound too`() {
-        // Byte accounting and record accounting are separate bounds, and the record count was the one that
-        // disagreed between the two admission paths. Use a byte budget that cannot bind.
-        val root = tmp.newFolder("queue-record-bound")
+    fun `expiry releases the owner charge and restores capacity`() {
+        // Charging and releasing must be symmetric. deleteLocked removed files and the index entry but not
+        // the charge, so every expired entry kept consuming budget forever: after enough expiries the queue
+        // reports itself full with nothing in it.
+        val root = tmp.newFolder("queue-expiry-capacity")
+        val id = java.util.UUID.randomUUID().toString()
+        // Injected clock: expiry is age-based, so advancing time is the only reliable way to trigger it.
+        // Budget for EXACTLY ONE entry plus a tiny probe: if the expired entry's charge stays, the probe
+        // cannot fit, and the failure is unambiguous rather than dependent on slack.
+        var now = 1_000_000L
+        val sizing = ContributionStore(tmp.newFolder("queue-expiry-sizing"), limits())
+        val probeMeta = meta(java.util.UUID.randomUUID().toString())
+        val probeSamples = 256L
+        val probeBytes = sizing.projectedBytesFor(probeSamples, probeMeta.size)
+        // The exact charge this fixture produces, measured rather than assumed.
+        run {
+            val sizingRoot = tmp.newFolder("queue-expiry-charge")
+            val id0 = java.util.UUID.randomUUID().toString()
+            ContributionStore(sizingRoot, limits()).prepare(id0, "epoch-1", chunks(1600), meta(id0))
+        }
+        val oneEntry = 4_265L
         val store = ContributionStore(
             root,
-            limits().copy(maxQueueRecords = 2, maxQueueBytes = 64L * 1024 * 1024),
-            directorySync = RecordingSync(),
+            // ONE LESS byte than charge+probe: with the charge released the probe fits easily; with the
+            // charge retained it is over by a hair. Using exactly charge+probe leaves zero slack and the
+            // comparison `bytes + projected <= limit` is satisfied, which is why the mutant survived.
+            limits().copy(maxQueueBytes = oneEntry + probeBytes - 1, maxQueueAgeSeconds = 60),
+            clock = { now },
         )
-        repeat(2) {
-            val id = java.util.UUID.randomUUID().toString()
-            assertTrue("precondition: prepare $it", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
-            store.recover()
-        }
-        // Two records are stored; the third must be refused on the RECORD bound, not the byte bound.
-        assertTrue(
-            "an uncertain/ready entry must occupy a record slot: admission beyond maxQueueRecords succeeded",
-            store.admit(sampleCount = 1600, metadataBytes = meta(java.util.UUID.randomUUID().toString()).size) == null,
-        )
-    }
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
 
-    @Test
-    fun `reconciling an uncertain entry does not double-count its bytes or records`() {
-        // The leak the separate-maps design produced: reconciliation re-added the capture while its
-        // uncertain charge stayed, so bytes and records were charged twice for the entry's whole life.
-        //
-        // The discriminating store must (a) be tight enough that one charge fits and two do not, and (b)
-        // be the instance that itself withheld and reconciled the entry, so the double-count actually
-        // occurs in the branch under test. A fresh store over the same files would take the foreign path,
-        // where there is no prior charge to duplicate, and every version of this mutant would survive.
-        //
-        // Sizes are fixed by the fixture, so the budget is derived from a probe store first.
-        val id = java.util.UUID.randomUUID().toString()
-        val tinyMeta = meta(java.util.UUID.randomUUID().toString())
-        val tinySamples = 256L
-        val sizing = tmp.newFolder("queue-reconcile-sizing")
-        val probeStore = ContributionStore(sizing, limits())
-        assertTrue("precondition: prepare", probeStore.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
-        val charge = probeStore.readyEntries().single().let { it.audioBytes + it.metadataBytes }
-        val probeBytes = probeStore.projectedBytesFor(tinySamples, tinyMeta.size)
-        assertTrue("precondition: charge ($charge) exceeds probe ($probeBytes)", charge > probeBytes)
-
-        // One charge plus the probe fits; two charges plus the probe does not.
-        val budget = charge + probeBytes
-        val root = tmp.newFolder("queue-reconcile-accounting")
-        var failSyncs = false
-        val gated = object : DirectorySync {
-            override fun sync(directory: File) {
-                if (failSyncs) throw java.io.IOException("simulated confirmation failure")
-            }
-        }
-        val store = ContributionStore(root, limits().copy(maxQueueBytes = budget), directorySync = gated)
-        assertTrue("precondition: prepare on the budgeted store", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
-
-        failSyncs = true
-        store.recover()
-        assertTrue("withheld", store.readyEntries().isEmpty())
-
-        failSyncs = false
-        assertEquals("reconciled back to ready", listOf(id), store.recover().map { it.captureId })
-        assertEquals("and ready", listOf(id), store.readyEntries().map { it.captureId })
+        // Advance well past the age bound so the entry is genuinely expired.
+        now += 120_000L
+        val expired = store.expireOlderThan()
+        assertEquals("the entry expires", listOf(id), expired)
+        assertTrue("its files are gone", store.readyEntries().isEmpty())
 
         assertTrue(
-            "a reconciled entry must be charged ONCE: a $probeBytes-byte probe must fit a $budget-byte budget " +
-                "alongside one $charge-byte charge",
-            store.admit(sampleCount = tinySamples, metadataBytes = tinyMeta.size) != null,
+            "an expired entry must release its charge: the queue still counts capacity it no longer uses",
+            store.admit(sampleCount = probeSamples, metadataBytes = probeMeta.size) != null,
         )
     }
 

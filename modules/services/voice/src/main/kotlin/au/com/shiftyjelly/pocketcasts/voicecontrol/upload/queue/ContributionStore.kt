@@ -775,16 +775,19 @@ class ContributionStore(
                     syncDirectoryOrFail(dir)
                     dir.parentFile?.let { parent -> syncDirectoryOrFail(parent) }
                 }.isSuccess
-                if (confirmed) {
-                    keep += entry
-                    // Charged ONCE as ready. Applies to foreign entries too: a fresh store over an
-                    // existing queue owns what is on disk and must account for it, otherwise it admits
-                    // new work up to the full budget on top of it.
+                // ONE charge for every validated entry, assigned BEFORE branching on confirmation.
+                // Charging only the confirmed branch left a gap: a fresh store has an empty `self` set,
+                // so its unconfirmable on-disk entries were never charged anywhere and new work was
+                // admitted over them. Ownership does not depend on being able to hand the entry back.
+                synchronized(lock) {
                     ownedCharges[id] = OwnedCharge(
                         entry.audioBytes,
                         entry.metadataBytes,
-                        ready = true,
+                        ready = confirmed,
                     )
+                }
+                if (confirmed) {
+                    keep += entry
                 } else {
                     // Not exposed this run. The files are LEFT IN PLACE rather than deleted: the entry is
                     // an uncertain publication, and the spec forbids assuming cleanup succeeded or
@@ -807,13 +810,8 @@ class ContributionStore(
                 val wavEntry = File(dir, "$id$SUFFIX_WAV")
                 val metaEntry = File(dir, "$id$SUFFIX_META")
                 if (id in uncertainIds) {
-                    // Charged once, as uncertain. This instance owns these bytes whether or not it can
-                    // hand them back, so they must count after a restart exactly as they did before it.
-                    ownedCharges[id] = OwnedCharge(
-                        wavEntry.length().coerceAtLeast(0),
-                        metaEntry.length().coerceAtLeast(0).toInt(),
-                        ready = false,
-                    )
+                    // Already charged once above; keep it uncertain. Nothing is added here.
+                    ownedCharges[id]?.ready = false
                     continue
                 }
                 val wav = wavEntry
@@ -954,6 +952,10 @@ class ContributionStore(
         File(dir, "$id$SUFFIX_CREATED").delete()
         File(dir, "$id$SUFFIX_DIGEST").delete()
         memoryEntries.remove(id)
+        // The bytes are GONE, so the charge must go with them. Leaving it behind makes a deleted entry
+        // consume capacity forever: after enough expiries the queue reports itself full with nothing in
+        // it. Charging and releasing must be symmetric, or the bound drifts permanently upward.
+        ownedCharges.remove(id)
     }
 
     private fun dropCounterOnly(reason: TerminalReason) {

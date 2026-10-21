@@ -42,7 +42,7 @@ class WorkerWireParityTest {
      * different servers. Advancing this value is a deliberate, reviewable edit made when a new
      * revision is cleared.
      */
-    private val approvedWorkerRevision = "5bba6716988e35c8c003c982dd088c369833f87c"
+    private val approvedWorkerRevision = "d8fe823cbe43ebb310d632b482312c7b282ef018"
 
     private fun requireAuthority(root: File) {
         assertTrue(

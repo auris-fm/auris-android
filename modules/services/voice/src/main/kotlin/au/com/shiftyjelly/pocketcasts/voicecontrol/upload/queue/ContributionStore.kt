@@ -43,6 +43,12 @@ class ContributionStore(
     val fence: QueueFence = QueueFence(ownership),
     /** Deterministic interleaving seams for tests; production uses [StoreHooks.NONE]. */
     private val hooks: StoreHooks = StoreHooks.NONE,
+    /**
+     * Directory-entry durability. Injected so tests can OBSERVE that it runs and that a failure is not
+     * swallowed; production uses the real fsync. This replaced a no-op stub that left the ready
+     * marker's durability unsubstantiated (review f003b49f finding 2).
+     */
+    private val directorySync: DirectorySync = DirectorySync.REAL,
 ) {
 
     data class Entry(
@@ -438,7 +444,7 @@ class ContributionStore(
                 } else {
                     // Adopt the reservation into the durable index (removes it from the live set).
                     admission.adopt()
-                    fsyncDir(dir)
+                    syncDirectoryOrFail(dir)
                     // Age + attempt authorities are written BEFORE the marker; failing either is a failed
                     // preparation, not an invented fallback, and must hand the slot back.
                     val sidecarsOk = runCatching {
@@ -454,7 +460,7 @@ class ContributionStore(
                     } else {
                         // READY MARKER LAST: presence of this file is the ONLY readiness authority.
                         FileOutputStream(readyFile).use { it.fd.sync() }
-                        fsyncDir(dir)
+                        syncDirectoryOrFail(dir)
                         committed = true
                         memoryEntries[captureId] = entry
                         preparedIds.add(captureId)
@@ -862,6 +868,16 @@ class ContributionStore(
     private val countersFile get() = File(root, COUNTERS_NAME)
     private val dir get() = File(root, DIR_NAME)
 
+    /**
+     * Directory-entry durability, never swallowed.
+     *
+     * This was a no-op stub because opening a stream on a directory is not portable.
+     * [DirectorySync.REAL] uses FileChannel.force, which is verified to work on the target
+     * platform. A failure means the entry is not known durable, so it propagates rather than
+     * being reported as a successful publication.
+     */
+    private fun syncDirectoryOrFail(directory: File) = directorySync.sync(directory)
+
     companion object {
         private const val DIR_NAME = "contributions"
         private const val COUNTERS_NAME = "terminal-counters.txt"
@@ -890,9 +906,5 @@ class ContributionStore(
         private fun le16(b: ByteArray, at: Int): Int = (b[at].toInt() and 0xFF) or ((b[at + 1].toInt() and 0xFF) shl 8)
 
         private fun le32(b: ByteArray, at: Int): Long = (b[at].toLong() and 0xFF) or ((b[at + 1].toLong() and 0xFF) shl 8) or ((b[at + 2].toLong() and 0xFF) shl 16) or ((b[at + 3].toLong() and 0xFF) shl 24)
-
-        // Directory durability is approximated by syncing the committed files themselves before
-        // and after the rename/marker sequence; opening a stream on a directory is not portable.
-        private fun fsyncDir(d: File) = Unit
     }
 }

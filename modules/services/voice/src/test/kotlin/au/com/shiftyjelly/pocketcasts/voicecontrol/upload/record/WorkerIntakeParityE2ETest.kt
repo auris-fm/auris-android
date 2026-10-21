@@ -60,7 +60,7 @@ class WorkerIntakeParityE2ETest {
      * Advancing it is a deliberate edit made when a new revision is cleared, which is exactly the
      * reviewable event this should be.
      */
-    private val approvedWorkerRevision = "5bba6716988e35c8c003c982dd088c369833f87c"
+    private val approvedWorkerRevision = "d8fe823cbe43ebb310d632b482312c7b282ef018"
 
     /** Reads the probe's provenance line and returns the revision it actually loaded. */
     private fun assertApprovedRevision(output: String) {

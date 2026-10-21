@@ -1463,6 +1463,9 @@ class ContributionStore(
     // merely the accounting mutations.
     fun ownerLockForTest(): Any = lock
 
+    // Test seam: total bytes currently charged to this owner.
+    fun ownedBytesForTest(): Long = synchronized(lock) { ownerBytesLocked() }
+
     // Test seam: the exact bytes currently charged for a capture, so a control can assert the MEASURED
     // charge directly instead of inferring it through an admission probe whose budget has to straddle an
     // (often tiny) sidecar band.

@@ -1060,6 +1060,36 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `staging residue from a crashed attempt is swept by the unmarked-debris pass`() {
+        // I suspected staging orphans were charged nowhere. They are not: a staging file is named
+        // gen$<attempt>.<generation>.<capture>.<suffix> with no matching .ready, so recovery's
+        // unmarked-debris pass sees it and deletes it. This control PINS that, and would fail if the sweep
+        // ever stopped treating staging names as unmarked.
+        val root = tmp.newFolder("queue-staging-residue")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+
+        val attempt = "abc"
+        val capture = "11111111-2222-3333-4444-555555555555"
+        val staging = contributions.listFiles() ?: emptyArray()
+        val orphanWav = File(contributions, "gen\$attempt.7.$capture.recording.wav.part")
+        val orphanMeta = File(contributions, "gen\$attempt.7.$capture.metadata.json")
+        val orphanDigest = File(contributions, "gen\$attempt.7.$capture.sha256")
+        orphanWav.writeBytes(ByteArray(1024))
+        orphanMeta.writeBytes(ByteArray(512))
+        orphanDigest.writeBytes(ByteArray(64))
+
+        val store = ContributionStore(root, limits())
+        store.recover()
+
+        val survivors = contributions.listFiles()!!.filter { it.name.startsWith("gen\$") }
+        assertTrue("orphaned staging must not survive recovery: ${survivors.map { it.name }}", survivors.isEmpty())
+        // Nothing should remain charged either - swept bytes are gone, so they occupy nothing.
+        assertEquals("swept staging must leave nothing charged", 0L, store.ownedBytesForTest())
+        assertTrue("and the sweep must not have left accounting unknown", !store.unknownFootprintForTest())
+    }
+
+    @Test
     fun `an oversized sidecar sum is unknown accounting, not a clamp`() {
         // reviewer e4c9a80d: clamping an oversized sum UNDERSTATES the charge - a residue larger than the
         // metadata channel would be reported as Int.MAX_VALUE and look measurable. It must become unknown.

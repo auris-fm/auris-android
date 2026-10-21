@@ -83,6 +83,34 @@ class AudioFeedbackRenderer(
     }
     private var currentJob: Job? = null
 
+    /** The request ID of the in-flight render, so supersession names whose turn was dropped. */
+    @Volatile private var currentRequestId: String? = null
+
+    private fun recordSubmitted(requestId: String, feedbackKind: String) {
+        VoiceLifecycleDiagnostics.record(
+            VoiceLifecycleDiagnostics.Event(
+                kind = VoiceLifecycleDiagnostics.Kind.Turn,
+                reason = VoiceLifecycleDiagnostics.Reason.TurnFeedbackRendered,
+                source = VoiceLifecycleDiagnostics.Source.Cloud,
+                requestId = requestId,
+                feedbackKind = feedbackKind,
+            ),
+        )
+    }
+
+    private fun recordDrop(requestId: String, feedbackKind: String, errorCode: String) {
+        VoiceLifecycleDiagnostics.record(
+            VoiceLifecycleDiagnostics.Event(
+                kind = VoiceLifecycleDiagnostics.Kind.Turn,
+                reason = VoiceLifecycleDiagnostics.Reason.TurnFeedbackDropped,
+                source = VoiceLifecycleDiagnostics.Source.Cloud,
+                requestId = requestId,
+                feedbackKind = feedbackKind,
+                errorCode = errorCode,
+            ),
+        )
+    }
+
     /**
      * Whether this renderer is DISPOSED for good, as opposed to between service sessions.
      *
@@ -101,7 +129,11 @@ class AudioFeedbackRenderer(
     }
 
     fun render(response: VoiceResponse, language: String = "en", requestId: String? = null) {
-        if (disposed) return
+        if (disposed) {
+            // DROP boundary: the renderer can never play this. Observed, not silent.
+            if (requestId != null) recordDrop(requestId, "disposed", "renderer_disposed")
+            return
+        }
         // Debug-only diagnostic: what the app is about to say, before TTS. This is the one
         // place every spoken response passes through, so it is where a response that is
         // identical regardless of the prompt can be told from one that differs. Debug-gated
@@ -111,6 +143,10 @@ class AudioFeedbackRenderer(
             Timber.d("[VoiceResponse] %s", describeForLog(response, language))
         }
         currentJob?.cancel()
+        // SUPERSESSION drop: the previous render was replaced before it could finish. Observed
+        // against the request it belonged to, so a superseded turn is a drop, not silence.
+        if (requestId != null) currentRequestId?.let { previous -> if (previous != requestId) recordDrop(previous, "superseded", "superseded_by_new_render") }
+        currentRequestId = requestId
         // Launched coroutine inherits the Job cancellation: when we cancel currentJob
         // above, any child suspend calls (like TtsEngine.speak) will be cancelled.
         currentJob = scope.launch {
@@ -134,39 +170,42 @@ class AudioFeedbackRenderer(
                     )
                 }
                 var earconAdmitted: Boolean? = null
-                when (response) {
-                    is VoiceResponse.Silent -> { /* no-op */ }
 
-                    is VoiceResponse.Earcon -> earconAdmitted = playEarcon(response.id)
-
-                    is VoiceResponse.Spoken -> speakWithHeartbeat(response.text, language)
-
-                    is VoiceResponse.Combined -> {
-                        earconAdmitted = playEarcon(response.earcon)
-                        speakWithHeartbeat(response.spokenText, language)
-                    }
-                }
-                // SUBMISSION boundary: the player accepted and drained without throwing. The earcon
-                // admission result is observed, not assumed: a refused cue is a drop, not a submission.
-                if (requestId != null) {
-                    val refusedEarcon = earconAdmitted == false
-                    val submittedKind = when {
-                        refusedEarcon -> "earcon_refused"
-                        earconAdmitted == true && response is VoiceResponse.Earcon -> "earcon_submitted"
-                        earconAdmitted == true -> "combined_submitted"
-                        response is VoiceResponse.Spoken -> "spoken_submitted"
-                        else -> "silent"
-                    }
+                // Records the EARCON COMPONENT outcome on its own: a refused cue is a drop even
+                // when a Combined response's spoken half succeeds afterwards.
+                fun recordEarconOutcome() {
+                    val admitted = earconAdmitted ?: return
+                    if (requestId == null) return
                     VoiceLifecycleDiagnostics.record(
                         VoiceLifecycleDiagnostics.Event(
                             kind = VoiceLifecycleDiagnostics.Kind.Turn,
                             reason = VoiceLifecycleDiagnostics.Reason.TurnFeedbackRendered,
                             source = VoiceLifecycleDiagnostics.Source.Cloud,
                             requestId = requestId,
-                            feedbackKind = submittedKind,
-                            errorCode = if (refusedEarcon) "admission_refused" else null,
+                            feedbackKind = if (admitted) "earcon_submitted" else "earcon_refused",
+                            errorCode = if (admitted) null else "admission_refused",
                         ),
                     )
+                }
+                when (response) {
+                    is VoiceResponse.Silent -> { /* no-op */ }
+
+                    is VoiceResponse.Earcon -> {
+                        earconAdmitted = playEarcon(response.id)
+                        recordEarconOutcome()
+                    }
+
+                    is VoiceResponse.Spoken -> {
+                        speakWithHeartbeat(response.text, language)
+                        if (requestId != null) recordSubmitted(requestId, "spoken_submitted")
+                    }
+
+                    is VoiceResponse.Combined -> {
+                        earconAdmitted = playEarcon(response.earcon)
+                        recordEarconOutcome()
+                        speakWithHeartbeat(response.spokenText, language)
+                        if (requestId != null) recordSubmitted(requestId, "spoken_submitted")
+                    }
                 }
             } catch (e: TtsPlaybackIncompleteException) {
                 // DROP/FAILURE boundary: submission did not complete.

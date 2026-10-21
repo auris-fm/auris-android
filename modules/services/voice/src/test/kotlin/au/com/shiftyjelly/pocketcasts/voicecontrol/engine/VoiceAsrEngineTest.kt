@@ -963,7 +963,7 @@ class VoiceAsrEngineTest {
         )
 
         assertTrue(intents.isEmpty())
-        verify(audioFeedbackRenderer, never()).render(any(), any())
+        verify(audioFeedbackRenderer, never()).render(any(), any(), any())
         // No ERROR tone either: that is what the missing-line fallback would play if this capture
         // had reached the router. The WAKE_WORD cue is expected and not asserted against.
         verify(audioFeedbackRenderer, never()).submitEarcon(EarconId.ERROR)
@@ -1029,7 +1029,7 @@ class VoiceAsrEngineTest {
 
         assertTrue(intents.isEmpty())
         verify(audioFeedbackRenderer).submitEarcon(EarconId.ERROR)
-        verify(audioFeedbackRenderer, never()).render(any(), any())
+        verify(audioFeedbackRenderer, never()).render(any(), any(), any())
 
         engine.stop()
     }

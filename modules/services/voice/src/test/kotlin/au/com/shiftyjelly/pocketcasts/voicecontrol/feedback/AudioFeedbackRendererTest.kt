@@ -1643,6 +1643,43 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `combined response records earcon and spoken component outcomes separately`() {
+        whenever(earconPlayer.play(org.mockito.kotlin.any())).thenReturn(null)
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture().use { capture ->
+            val localRenderer = AudioFeedbackRenderer(earconPlayer, FakeTtsEngine())
+            localRenderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+            localRenderer.render(
+                VoiceResponse.Combined(earcon = EarconId.WAKE_WORD, spokenText = "Here is your answer."),
+                requestId = turnRequestId,
+            )
+
+            val refused = awaitLine(capture, { it.contains("earcon_refused") && it.contains("request_id=$turnRequestId") }, "earcon")
+            assertTrue(refused.contains("admission_refused"))
+            val spoken = awaitLine(capture, { it.contains("spoken_submitted") && it.contains("request_id=$turnRequestId") }, "spoken")
+            assertTrue(
+                "a refused earcon must not hide a successful spoken half: $spoken",
+                spoken.contains("reason=TurnFeedbackRendered"),
+            )
+            localRenderer.release()
+        }
+    }
+
+    @Test
+    fun `superseded render records a drop against the dropped request`() {
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture().use { capture ->
+            val localRenderer = AudioFeedbackRenderer(earconPlayer, FakeTtsEngine())
+            localRenderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+            localRenderer.render(VoiceResponse.Spoken("first answer"), requestId = turnRequestId)
+            val secondId = "22222222-2222-4222-8222-222222222222"
+            localRenderer.render(VoiceResponse.Spoken("second answer"), requestId = secondId)
+
+            val dropped = awaitLine(capture, { it.contains("reason=TurnFeedbackDropped") && it.contains("request_id=$turnRequestId") }, "drop")
+            assertTrue("supersession must be a bounded drop: $dropped", dropped.contains("superseded"))
+            localRenderer.release()
+        }
+    }
+
+    @Test
     fun `incomplete TTS records submission_failed, not spoken_submitted`() {
         val failing = object : TtsEngine {
             override suspend fun warmUp(language: String) {}

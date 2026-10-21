@@ -46,6 +46,7 @@ object VoiceLifecycleDiagnostics {
         TurnRetired,
         TurnFeedbackSelected,
         TurnFeedbackRendered,
+        TurnFeedbackDropped,
         TurnConnectionFailed,
         Observed,
         ContextLost,

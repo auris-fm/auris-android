@@ -3,16 +3,23 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record
 /**
  * Decode-side authority for the immutable schema-version-1 contribution record.
  *
- * [ContributionRecordBuilder] is the ENCODE-side authority: it refuses unknown fields at
- * construction. That guarantees nothing about bytes read back from disk, which may be tampered,
- * truncated, or written by an older build. This validator applies the same schema to a parsed
- * [RecordNode] and returns a typed view, or refuses with a [Rejected] reason. It is the ONLY
- * consumer-side parser for persisted records: callers must not hand-inspect fields themselves
- * (an ad-hoc reader is a second, weaker authority that silently accepts what the builder refuses).
+ * This deliberately mirrors the CONTRACT, not the local writer: the wire shape is pinned by the
+ * spec ("Contribution record") and enforced independently by the Cloud Worker's
+ * `worker/src/contributions/record_schema.ts`. [ContributionRecordBuilder] is the encode side;
+ * a validator that only agreed with the builder would prove nothing about server acceptance, so
+ * every rule below corresponds to a Worker rule. When the two ever disagree, the Worker wins and
+ * this file is wrong.
  *
- * Everything is exact: numbers must be finite integers for integer fields (a JSON `44.9` is
- * refused, never truncated to 44), strings must be non-empty where the builder requires content,
- * and unknown keys at every level are refused rather than ignored.
+ * Rules of note, each a refusal rather than a preference:
+ * - Unknown keys are refused at EVERY depth (root, audio, each stage, each model entry, links).
+ * - Integers must be EXACT finite integers: 44.9 is refused, never truncated to 44.
+ * - Absence is a claim: all five model keys and all six stages must be present.
+ * - A non-completed stage must carry an enumerated reason; a completed stage must not.
+ * - Content-bearing names are refused even under an otherwise allowed parent.
+ * - Strings are bounded in UTF-8 bytes (512 for short fields, 64 KiB for text).
+ *
+ * Refusal reasons are content-free labels: they never interpolate record values, so they are safe
+ * to log or count.
  */
 object RecordValidator {
 
@@ -25,21 +32,19 @@ object RecordValidator {
         val platform: String,
         val appVersion: String,
         val build: String,
-        val captureSessionId: Long,
+        val captureSessionId: String,
         val audio: AudioBlock,
-        val models: Map<String, String>,
+        val models: Map<String, ModelRef>,
         val observations: Map<StageName, StageEntry>,
     )
 
     sealed interface Result {
         data class Ok(val record: Valid) : Result
-
-        /** Refusal with a content-free reason (safe to log/count: never carries record content). */
         data class Rejected(val reason: String) : Result
     }
 
     private val HEX_UUID = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-    private val HEX_SHA256 = Regex("[0-9a-fA-F]{64}")
+    private val LOWERCASE_HEX64 = Regex("[0-9a-f]{64}")
 
     private val ROOT_REQUIRED = listOf(
         "schema_version",
@@ -67,60 +72,61 @@ object RecordValidator {
         "dropped_spans",
     )
     private val AUDIO_OPTIONAL = listOf("original_duration_ms")
-    private val LINK_KEYS = setOf("turn_id", "conversation_id", "operation_id")
-    private val MODEL_KEYS = setOf("vad", "wakeword", "asr", "translation", "router")
+    private val LINK_KEYS = setOf("conversation_id", "request_id", "operation_id", "turn_id")
+    private val MODEL_KEY_LIST = listOf("vad", "wakeword", "asr", "translation", "router")
+
+    /** Content-bearing names refused even where a parent is allowed (Worker FORBIDDEN_NAMES). */
+    private val FORBIDDEN_NAMES = setOf(
+        "access_token",
+        "refresh_token",
+        "token",
+        "cookie",
+        "cookies",
+        "signed_url",
+        "presigned_url",
+        "conversation_context",
+        "exception",
+        "stack",
+        "raw_tool_payload",
+        "payload",
+    )
+
+    private val WAKE_DECISIONS = setOf("detected", "rejected")
+    private val BLEED_DECISIONS = setOf("overlap", "no_overlap", "uncertain")
+    private val ROUTING_VALIDATION = setOf("valid", "invalid", "not_run")
+    private val EXECUTION_DISPOSITIONS = setOf("executed", "refused", "failed", "not_run", "pending")
+    private val EXECUTION_OUTCOMES = setOf("success", "failure", "refused", "cancelled")
 
     fun validate(node: RecordNode): Result {
         val root = node as? RecordNode.Obj ?: return reject("record is not an object")
         val fields = root.fields
-        // Unknown/absent keys at the root are BOTH refusals: an extra key means a producer we do
-        // not understand wrote this file; a missing key means it cannot be reconstructed.
         for (key in fields.keys) {
+            if (isForbidden(key)) return reject("forbidden field")
             if (key !in ROOT_REQUIRED && key !in ROOT_OPTIONAL) return reject("unknown root field")
         }
         for (key in ROOT_REQUIRED) {
             if (key !in fields) return reject("missing required root field")
         }
-        val schemaVersion = intOf(fields["schema_version"]) ?: return reject("schema_version not an integer")
-        if (schemaVersion != SCHEMA_VERSION) return reject("unsupported schema_version")
+        if (intOf(fields["schema_version"]) != SCHEMA_VERSION) return reject("unsupported schema_version")
 
-        val captureId = nonEmptyStr(fields["capture_id"]) ?: return reject("capture_id missing")
+        val captureId = boundedStr(fields["capture_id"], WireBounds.SHORT_FIELD_BYTES) ?: return reject("capture_id invalid")
         if (!HEX_UUID.matches(captureId)) return reject("capture_id not a uuid")
-        val epoch = nonEmptyStr(fields["enrollment_epoch"]) ?: return reject("enrollment_epoch empty or missing")
-        val platform = nonEmptyStr(fields["platform"]) ?: return reject("platform missing")
-        val appVersion = nonEmptyStr(fields["app_version"]) ?: return reject("app_version missing")
-        val build = nonEmptyStr(fields["build"]) ?: return reject("build missing")
-        val sessionId = intOf(fields["capture_session_id"]) ?: return reject("capture_session_id not an integer")
+        val epoch = boundedStr(fields["enrollment_epoch"], WireBounds.SHORT_FIELD_BYTES) ?: return reject("enrollment_epoch invalid")
+        if (epoch.isBlank()) return reject("enrollment_epoch blank")
+        val platform = (fields["platform"] as? RecordNode.Str)?.value ?: return reject("platform missing")
+        if (platform != "ios" && platform != "android") return reject("platform not ios|android")
+        val appVersion = boundedStr(fields["app_version"], WireBounds.SHORT_FIELD_BYTES) ?: return reject("app_version invalid")
+        val build = boundedStr(fields["build"], WireBounds.SHORT_FIELD_BYTES) ?: return reject("build invalid")
+        // The session id is an OPAQUE STRING on the wire: a JSON number here is a durable
+        // incompatibility, not a lenient parse.
+        val sessionId = boundedStr(fields["capture_session_id"], WireBounds.SHORT_FIELD_BYTES)
+            ?: return reject("capture_session_id must be a non-empty string")
 
         val audioNode = fields["audio"] as? RecordNode.Obj ?: return reject("audio missing or not an object")
         val audio = validateAudio(audioNode) ?: return reject("audio block invalid")
-
-        val modelsNode = fields["models"] as? RecordNode.Obj ?: return reject("models missing or not an object")
-        val models = LinkedHashMap<String, String>()
-        for ((key, value) in modelsNode.fields) {
-            if (key !in MODEL_KEYS) return reject("unknown model key")
-            val version = nonEmptyStr(value) ?: return reject("model version missing")
-            models[key] = version
-        }
-
-        val observationsNode = fields["observations"] as? RecordNode.Obj
-            ?: return reject("observations missing or not an object")
-        val observations = LinkedHashMap<StageName, StageEntry>()
-        for ((key, value) in observationsNode.fields) {
-            val stage = StageName.entries.firstOrNull { it.wire == key } ?: return reject("unknown observation stage")
-            val entryNode = value as? RecordNode.Obj ?: return reject("observation stage not an object")
-            val entry = validateStage(stage, entryNode) ?: return reject("observation stage invalid")
-            observations[stage] = entry
-        }
-
-        // links: optional, closed vocabulary, string values only.
-        fields["links"]?.let { linksNode ->
-            val links = linksNode as? RecordNode.Obj ?: return reject("links not an object")
-            for ((key, value) in links.fields) {
-                if (key !in LINK_KEYS) return reject("unknown link key")
-                if (value !is RecordNode.Str) return reject("link value not a string")
-            }
-        }
+        val models = validateModels(fields["models"]) ?: return reject("models invalid")
+        val observations = validateObservations(fields["observations"]) ?: return reject("observations invalid")
+        fields["links"]?.let { if (validateLinks(it) == null) return reject("links invalid") }
 
         return Result.Ok(
             Valid(
@@ -140,49 +146,45 @@ object RecordValidator {
     private fun validateAudio(node: RecordNode.Obj): AudioBlock? {
         val f = node.fields
         for (key in f.keys) {
+            if (isForbidden(key)) return null
             if (key !in AUDIO_REQUIRED && key !in AUDIO_OPTIONAL) return null
         }
-        for (key in AUDIO_REQUIRED) {
-            if (key !in f) return null
-        }
-        val sha = nonEmptyStr(f["sha256"]) ?: return null
-        if (!HEX_SHA256.matches(sha)) return null
-        val byteCount = intOf(f["byte_count"]) ?: return null
-        if (byteCount <= 0) return null
-        val encoding = nonEmptyStr(f["encoding"]) ?: return null
-        val rate = intOf(f["sample_rate_hz"]) ?: return null
-        val channels = intOf(f["channels"]) ?: return null
-        val retained = intOf(f["retained_samples"]) ?: return null
-        if (retained < 0) return null
-        val originalFormat = nonEmptyStr(f["original_format"]) ?: return null
-        val conversionVersion = nonEmptyStr(f["conversion_version"]) ?: return null
+        for (key in AUDIO_REQUIRED) if (key !in f) return null
+        // Digests are LOWERCASE hex on the wire: uppercase is a different string, so it cannot be
+        // normalised away without changing the identity the digest names.
+        val sha = boundedStr(f["sha256"], WireBounds.SHORT_FIELD_BYTES) ?: return null
+        if (!LOWERCASE_HEX64.matches(sha)) return null
+        val byteCount = intOf(f["byte_count"])?.takeIf { it > 0 } ?: return null
+        val encoding = (f["encoding"] as? RecordNode.Str)?.value ?: return null
+        if (encoding != "pcm_s16le") return null
+        if (intOf(f["sample_rate_hz"]) != 16_000L) return null
+        if (intOf(f["channels"]) != 1L) return null
+        val retained = intOf(f["retained_samples"])?.takeIf { it >= 0 } ?: return null
+        val originalFormat = boundedStr(f["original_format"], WireBounds.SHORT_FIELD_BYTES) ?: return null
+        val conversionVersion = boundedStr(f["conversion_version"], WireBounds.SHORT_FIELD_BYTES) ?: return null
         val truncated = (f["truncated"] as? RecordNode.Bool)?.value ?: return null
         val spansNode = f["dropped_spans"] as? RecordNode.Arr ?: return null
         val spans = spansNode.items.map { spanNode ->
             val span = spanNode as? RecordNode.Obj ?: return null
-            val keys = span.fields.keys
-            if (keys.any { it != "start_sample" && it != "end_sample" }) return null
-            if ("start_sample" !in keys || "end_sample" !in keys) return null
+            if (span.fields.keys.any { it != "start_sample" && it != "end_sample" }) return null
+            if ("start_sample" !in span.fields || "end_sample" !in span.fields) return null
             val start = intOf(span.fields["start_sample"]) ?: return null
             val end = intOf(span.fields["end_sample"]) ?: return null
-            if (end < start) return null
+            if (start < 0 || end < start) return null
             DroppedSpan(start, end)
         }
-        val originalDuration: Long? = if ("original_duration_ms" in f) {
-            val v = intOf(f["original_duration_ms"]) ?: return null
-            if (!truncated) return null // present ONLY with truncation
-            v
+        val originalDuration = if ("original_duration_ms" in f) {
+            intOf(f["original_duration_ms"])?.takeIf { it >= 0 } ?: return null
         } else {
             null
         }
-        if (truncated && originalDuration == null) return null
         return runCatching {
             AudioBlock(
                 sha256 = sha,
                 byteCount = byteCount,
                 encoding = encoding,
-                sampleRateHz = rate.toInt(),
-                channels = channels.toInt(),
+                sampleRateHz = 16_000,
+                channels = 1,
                 retainedSamples = retained,
                 originalFormat = originalFormat,
                 conversionVersion = conversionVersion,
@@ -193,31 +195,186 @@ object RecordValidator {
         }.getOrNull()
     }
 
+    /** All five keys required; each `{id,version}` of exactly two bounded strings, or null. */
+    private fun validateModels(node: RecordNode?): Map<String, ModelRef>? {
+        val obj = node as? RecordNode.Obj ?: return null
+        for (key in obj.fields.keys) {
+            if (isForbidden(key)) return null
+            if (key !in MODEL_KEY_LIST) return null
+        }
+        val out = LinkedHashMap<String, ModelRef>()
+        for (key in MODEL_KEY_LIST) {
+            if (key !in obj.fields) return null
+            when (val value = obj.fields.getValue(key)) {
+                is RecordNode.Null -> out[key] = ModelRef.None
+
+                is RecordNode.Obj -> {
+                    for (inner in value.fields.keys) {
+                        if (isForbidden(inner)) return null
+                        if (inner != "id" && inner != "version") return null
+                    }
+                    val id = boundedStr(value.fields["id"], WireBounds.SHORT_FIELD_BYTES) ?: return null
+                    val version = boundedStr(value.fields["version"], WireBounds.SHORT_FIELD_BYTES) ?: return null
+                    out[key] = ModelRef.Named(id, version)
+                }
+
+                else -> return null
+            }
+        }
+        return out
+    }
+
+    /** All six stages required, each with a state and only its allowlisted fields. */
+    private fun validateObservations(node: RecordNode?): Map<StageName, StageEntry>? {
+        val obj = node as? RecordNode.Obj ?: return null
+        for (key in obj.fields.keys) {
+            if (isForbidden(key)) return null
+            if (StageName.entries.none { it.wire == key }) return null
+        }
+        val out = LinkedHashMap<StageName, StageEntry>()
+        for (stage in StageName.entries) {
+            val entryNode = obj.fields[stage.wire] as? RecordNode.Obj ?: return null
+            val entry = validateStage(stage, entryNode) ?: return null
+            out[stage] = entry
+        }
+        return out
+    }
+
     private fun validateStage(stage: StageName, node: RecordNode.Obj): StageEntry? {
         val f = node.fields
-        val stateStr = nonEmptyStr(f["state"]) ?: return null
+        for (key in f.keys) {
+            if (isForbidden(key)) return null
+            if (!StageFieldAllowlist.isAllowed(stage, key)) return null
+        }
+        val stateStr = (f["state"] as? RecordNode.Str)?.value ?: return null
         val state = StageState.entries.firstOrNull { it.wire == stateStr } ?: return null
+        // Reason rules: present-and-enumerated when not completed, absent when completed.
+        val reasonNode = f["reason"]
+        if (state == StageState.Completed) {
+            if (reasonNode != null) return null
+        } else {
+            val reason = (reasonNode as? RecordNode.Str)?.value ?: return null
+            if (!StageReasons.isAllowed(stage, reason)) return null
+        }
+        // Per-stage value rules that the enum/scalar typing cannot express on its own.
+        when (stage) {
+            StageName.Wake -> {
+                enumIfPresent(f["decision"], WAKE_DECISIONS) ?: return null
+                for (key in listOf("score", "threshold", "speech_offset_ms", "wake_offset_ms")) {
+                    f[key]?.let { if (numOf(it) == null) return null }
+                }
+                // No fabricated confidence: a score needs the threshold it was judged against.
+                if ("score" in f && "threshold" !in f) return null
+            }
+
+            StageName.Bleed -> {
+                enumIfPresent(f["decision"], BLEED_DECISIONS) ?: return null
+                f["overlap_ratio"]?.let { if (numOf(it) == null) return null }
+            }
+
+            StageName.Asr -> {
+                textIfPresent(f["text"]) ?: return null
+                textIfPresent(f["source_language"]) ?: return null
+                textIfPresent(f["router_input"]) ?: return null
+                // Missing text stays ABSENT with a state/reason: an empty transcript claiming
+                // success is the exact defect the spec names, and text present on a
+                // non-completed stage contradicts the state.
+                val textPresent = "text" in f
+                if (state == StageState.Completed && !textPresent) return null
+                if (state != StageState.Completed && textPresent) return null
+                if ((f["text"] as? RecordNode.Str)?.value?.isBlank() == true) return null
+                if ((f["router_input"] as? RecordNode.Str)?.value?.isBlank() == true) return null
+            }
+
+            StageName.Translation -> {
+                textIfPresent(f["translated_text"]) ?: return null
+                textIfPresent(f["target_language"]) ?: return null
+            }
+
+            StageName.Routing -> {
+                textIfPresent(f["predicted_intent"]) ?: return null
+                textIfPresent(f["predicted_tool"]) ?: return null
+                enumIfPresent(f["validation"], ROUTING_VALIDATION) ?: return null
+                enumIfPresent(f["execution_disposition"], EXECUTION_DISPOSITIONS) ?: return null
+                // failure_reason is the field a client would fill with an exception string.
+                when (val failure = f["failure_reason"]) {
+                    null, is RecordNode.Null -> Unit
+
+                    is RecordNode.Str -> {
+                        if (!ROUTING_FAILURE_REASONS.contains(failure.value)) return null
+                    }
+
+                    else -> return null
+                }
+                f["arguments"]?.let { if (it !is RecordNode.Obj) return null }
+            }
+
+            StageName.Execution -> enumIfPresent(f["outcome"], EXECUTION_OUTCOMES) ?: return null
+        }
         val payload = LinkedHashMap<String, RecordNode>()
         for ((key, value) in f) {
             if (key == "state") continue
-            if (!StageFieldAllowlist.isAllowed(stage, key)) return null
-            if (value === RecordNode.Null) return null
+            if (value === RecordNode.Null) {
+                // `failure_reason: null` is the declared "no failure"; nothing else may be null.
+                if (key != "failure_reason") return null
+            }
             payload[key] = value
         }
         return StageEntry(state, payload)
     }
 
+    private val ROUTING_FAILURE_REASONS = setOf(
+        "no_matching_intent",
+        "validation_failed",
+        "client_refused",
+        "precondition_failed",
+        "action_failed",
+        "cancelled_by_user",
+    )
+
+    private fun validateLinks(node: RecordNode): RecordNode.Obj? {
+        val obj = node as? RecordNode.Obj ?: return null
+        for ((key, value) in obj.fields) {
+            if (isForbidden(key)) return null
+            if (key !in LINK_KEYS) return null
+            if (boundedStr(value, WireBounds.SHORT_FIELD_BYTES) == null) return null
+        }
+        return obj
+    }
+
+    /** Optional enumerated string: absent is fine, present must be in [allowed]. */
+    private fun enumIfPresent(node: RecordNode?, allowed: Set<String>): Boolean? = when (node) {
+        null -> true
+        is RecordNode.Str -> allowed.contains(node.value)
+        else -> false
+    }
+
+    /** Optional text field: absent is fine, present must be a non-empty bounded string. */
+    private fun textIfPresent(node: RecordNode?): Boolean? = when (node) {
+        null -> true
+        is RecordNode.Str -> node.value.isNotEmpty() && WireBounds.utf8Length(node.value) <= WireBounds.TEXT_FIELD_BYTES
+        else -> false
+    }
+
+    private fun numOf(node: RecordNode): Double? = (node as? RecordNode.Num)?.value?.takeIf { it.isFinite() }
+
+    private fun isForbidden(key: String): Boolean = FORBIDDEN_NAMES.contains(key.lowercase())
+
     /** Exact integer accessor: a fractional or non-finite number is REFUSED, never truncated. */
     private fun intOf(node: RecordNode?): Long? {
-        val num = node as? RecordNode.Num ?: return null
-        val v = num.value
+        val v = (node as? RecordNode.Num)?.value ?: return null
         if (!v.isFinite()) return null
         if (v != Math.floor(v)) return null
         if (v < Long.MIN_VALUE.toDouble() || v > Long.MAX_VALUE.toDouble()) return null
         return v.toLong()
     }
 
-    private fun nonEmptyStr(node: RecordNode?): String? = (node as? RecordNode.Str)?.value?.takeIf { it.isNotEmpty() }
+    private fun boundedStr(node: RecordNode?, maxBytes: Int): String? {
+        val s = (node as? RecordNode.Str)?.value ?: return null
+        if (s.isEmpty()) return null
+        if (WireBounds.utf8Length(s) > maxBytes) return null
+        return s
+    }
 
     private fun reject(reason: String): Result = Result.Rejected(reason)
 }

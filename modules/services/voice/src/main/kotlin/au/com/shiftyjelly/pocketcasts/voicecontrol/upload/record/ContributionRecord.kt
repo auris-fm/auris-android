@@ -29,18 +29,49 @@ enum class StageState(val wire: String) {
     Unknown("unknown"),
 }
 
-/** Deny-by-default field names per stage: anything outside these sets is REFUSED. */
+/**
+ * Deny-by-default field names per stage: anything outside these sets is REFUSED.
+ *
+ * These names are the WIRE contract pinned by the spec (voice-recording-uploads.md,
+ * "Contribution record") and enforced by the Cloud Worker's record_schema.ts. They are
+ * deliberately NOT a locally invented shape: `state` and `reason` are common to every
+ * stage, and the additional fields below are the only members each stage may carry.
+ * Millisecond wake offsets are used on the wire; sample-offset aliases and
+ * `offset_units` are refused (the producer converts before encoding).
+ */
 object StageFieldAllowlist {
+    val COMMON: Set<String> = setOf("state", "reason")
+
     private val fields: Map<StageName, Set<String>> = mapOf(
-        StageName.Wake to setOf("decision", "score", "threshold", "speech_offset_samples", "wake_offset_samples", "offset_units", "reason"),
-        StageName.Bleed to setOf("decision", "score", "threshold", "reason"),
-        StageName.Asr to setOf("text", "source_language", "reason"),
-        StageName.Translation to setOf("translated_text", "target_language", "transform", "reason"),
-        StageName.Routing to setOf("intent", "validation", "disposition", "failure_reason", "args"),
-        StageName.Execution to setOf("disposition", "failure_reason"),
+        StageName.Wake to setOf("decision", "score", "threshold", "speech_offset_ms", "wake_offset_ms"),
+        StageName.Bleed to setOf("decision", "overlap_ratio"),
+        StageName.Asr to setOf("text", "source_language", "router_input"),
+        StageName.Translation to setOf("translated_text", "target_language"),
+        StageName.Routing to setOf("predicted_intent", "predicted_tool", "validation", "execution_disposition", "failure_reason", "arguments"),
+        StageName.Execution to setOf("outcome"),
     )
 
-    fun isAllowed(stage: StageName, key: String): Boolean = fields.getValue(stage).contains(key)
+    /** True when [key] may appear on [stage] (state/reason plus that stage's own fields). */
+    fun isAllowed(stage: StageName, key: String): Boolean = key in COMMON || fields.getValue(stage).contains(key)
+
+    /** The stage-specific (non-common) field names, for refusal messages and tests. */
+    fun fieldsFor(stage: StageName): Set<String> = fields.getValue(stage)
+}
+
+/** Enumerated per-stage reasons: an arbitrary sentence is refused (spec: enumerated reason). */
+object StageReasons {
+    private val reasons: Map<StageName, Set<String>> = mapOf(
+        StageName.Wake to setOf("no_wake_detected", "below_threshold", "detector_disabled", "outcome_wait_expired"),
+        StageName.Bleed to setOf("no_playback_reference", "reference_unavailable", "bleed_detector_disabled", "outcome_wait_expired"),
+        StageName.Asr to setOf("local_only_action", "rejected_by_wake", "provider_error", "outcome_wait_expired", "cancelled_by_user"),
+        StageName.Translation to setOf("source_language_target_language", "no_text", "provider_error", "outcome_wait_expired"),
+        StageName.Routing to setOf("no_candidates", "low_confidence", "validation_failed", "outcome_wait_expired"),
+        StageName.Execution to setOf("client_refused", "precondition_failed", "action_failed", "cancelled_by_user", "outcome_wait_expired"),
+    )
+
+    fun isAllowed(stage: StageName, reason: String): Boolean = reasons.getValue(stage).contains(reason)
+
+    fun forStage(stage: StageName): Set<String> = reasons.getValue(stage)
 }
 
 /** One stage entry: state plus ONLY allowlisted fields for that stage. */
@@ -76,6 +107,37 @@ data class DroppedSpan(val startSample: Long, val endSample: Long) {
     fun toNode(): RecordNode = RecordNode.Obj(mapOf("start_sample" to RecordNode.ofInt(startSample), "end_sample" to RecordNode.ofInt(endSample)))
 }
 
+/**
+ * Wire-format bounds pinned by the spec. These are RESOURCE bounds on the record envelope, not
+ * collection budgets: exceeding them means a malformed upload, never a policy decision.
+ * Measured in UTF-8 BYTES (the unit the transport and `max_metadata_bytes` use), not UTF-16
+ * code units, which would understate multibyte content by up to 3x.
+ */
+object WireBounds {
+    const val TEXT_FIELD_BYTES = 64 * 1024
+    const val SHORT_FIELD_BYTES = 512
+
+    fun utf8Length(value: String): Int = value.toByteArray(Charsets.UTF_8).size
+
+    fun requireShort(value: String, what: String) {
+        require(utf8Length(value) <= SHORT_FIELD_BYTES) { "$what exceeds $SHORT_FIELD_BYTES UTF-8 bytes" }
+    }
+
+    fun requireText(value: String, what: String) {
+        require(utf8Length(value) <= TEXT_FIELD_BYTES) { "$what exceeds $TEXT_FIELD_BYTES UTF-8 bytes" }
+    }
+}
+
+/**
+ * A model declaration on the wire: either the concrete `{id, version}` actually used, or an
+ * explicit `null` meaning "not run, or its identity is unknown". A bare version string is NOT
+ * representable, because the spec requires the id alongside it.
+ */
+sealed interface ModelRef {
+    data class Named(val id: String, val version: String) : ModelRef
+    object None : ModelRef
+}
+
 /** Model/frontend versions ACTUALLY used; absent means not run/unknown (never fabricated). */
 data class ModelVersions(
     val vad: String?,
@@ -85,13 +147,36 @@ data class ModelVersions(
     val router: String?,
 )
 
-class ContributionRecordBuilder(private val captureId: String, private val enrollmentEpoch: String, private val captureSessionId: Long) {
+class ContributionRecordBuilder(
+    private val captureId: String,
+    private val enrollmentEpoch: String,
+    /**
+     * Capture-session incarnation as an OPAQUE WIRE STRING. The spec pins this explicitly:
+     * a local numeric counter must be encoded as a string before finalization, never a JSON
+     * number. Callers with a numeric counter pass `counter.toString()`.
+     */
+    private val captureSessionId: String,
+) {
     private val stages = LinkedHashMap<StageName, StageEntry>()
     private val modelEntries = LinkedHashMap<String, RecordNode>()
 
     init {
         require(HEX_UUID.matches(captureId)) { "capture_id must be a UUID string" }
         require(enrollmentEpoch.isNotBlank()) { "enrollment_epoch required (server-issued opaque)" }
+        require(captureSessionId.isNotEmpty()) { "capture_session_id required (opaque wire string)" }
+        require(WireBounds.utf8Length(captureSessionId) <= WireBounds.SHORT_FIELD_BYTES) {
+            "capture_session_id exceeds ${WireBounds.SHORT_FIELD_BYTES} UTF-8 bytes"
+        }
+    }
+
+    /**
+     * Replace a stage already declared. Production callers declare each stage once (a duplicate is
+     * a programming error); refiner flows legitimately supersede an earlier provisional entry, and
+     * this keeps that explicit rather than forcing a fresh builder.
+     */
+    fun replaceStage(stage: StageName, entry: StageEntry): ContributionRecordBuilder {
+        stages.remove(stage)
+        return stage(stage, entry)
     }
 
     fun stage(stage: StageName, entry: StageEntry): ContributionRecordBuilder {
@@ -99,19 +184,46 @@ class ContributionRecordBuilder(private val captureId: String, private val enrol
         for (key in entry.fields.keys) {
             require(StageFieldAllowlist.isAllowed(stage, key)) { "unknown field '$key' for stage ${stage.wire}" }
         }
+        // A non-completed stage MUST carry an enumerated reason; a completed stage does not
+        // carry one (an arbitrary sentence is exactly what the reason enum exists to exclude).
+        if (entry.state != StageState.Completed) {
+            val reason = (entry.fields["reason"] as? RecordNode.Str)?.value
+            require(reason != null) { "stage ${stage.wire} is ${entry.state.wire}: an enumerated reason is required" }
+            require(StageReasons.isAllowed(stage, reason)) { "reason '$reason' is not enumerated for ${stage.wire}" }
+        } else {
+            require(!entry.fields.containsKey("reason")) { "stage ${stage.wire} is completed: reason must be absent" }
+        }
         stages[stage] = entry
         return this
     }
 
-    /** Names the model/frontend actually used for [key]; null means NOT recorded (absent). */
-    fun model(key: String, version: String?): ContributionRecordBuilder {
+    /**
+     * Names the model/frontend actually used for [key] as `{id, version}`, or declares it
+     * NOT RUN/UNKNOWN with [ModelRef.None] (wire `null`). A bare version string is invalid on
+     * the wire, and leaving a key out is invalid too: `build()` requires all five keys.
+     */
+    fun model(key: String, ref: ModelRef): ContributionRecordBuilder {
         require(key in MODEL_KEYS) { "unknown model key '$key'" }
         require(!modelEntries.containsKey(key)) { "duplicate model '$key'" }
-        if (version != null) modelEntries[key] = RecordNode.Str(version)
+        modelEntries[key] = when (ref) {
+            is ModelRef.None -> RecordNode.Null
+
+            is ModelRef.Named -> {
+                require(ref.id.isNotEmpty() && ref.version.isNotEmpty()) { "model id/version must be non-empty" }
+                require(WireBounds.utf8Length(ref.id) <= WireBounds.SHORT_FIELD_BYTES) { "model id too long" }
+                require(WireBounds.utf8Length(ref.version) <= WireBounds.SHORT_FIELD_BYTES) { "model version too long" }
+                RecordNode.Obj(mapOf("id" to RecordNode.Str(ref.id), "version" to RecordNode.Str(ref.version)))
+            }
+        }
         return this
     }
 
     fun build(platform: String, appVersion: String, build: String, audio: AudioBlock, links: Map<String, RecordNode>? = null): RecordNode.Obj {
+        require(platform == "ios" || platform == "android") { "platform must be ios|android" }
+        // Absence is a CLAIM: every model key and every stage must be present, declaring
+        // not-run/unknown explicitly rather than being omitted.
+        for (key in MODEL_KEYS) require(modelEntries.containsKey(key)) { "models.$key must be present (use ModelRef.None when not run)" }
+        for (stage in StageName.entries) require(stages.containsKey(stage)) { "observations.${stage.wire} must be present" }
         val root = RecordNode.ObjBuilder()
             .put("schema_version", RecordNode.ofInt(SCHEMA_VERSION))
             .put("capture_id", RecordNode.Str(captureId))
@@ -119,7 +231,7 @@ class ContributionRecordBuilder(private val captureId: String, private val enrol
             .put("platform", RecordNode.Str(platform))
             .put("app_version", RecordNode.Str(appVersion))
             .put("build", RecordNode.Str(build))
-            .put("capture_session_id", RecordNode.ofInt(captureSessionId))
+            .put("capture_session_id", RecordNode.Str(captureSessionId))
             .put("audio", audio.toNode())
             .put("models", RecordNode.Obj(modelEntries.toMap()))
             .put("observations", observationsNode())
@@ -146,7 +258,10 @@ class ContributionRecordBuilder(private val captureId: String, private val enrol
         const val SCHEMA_VERSION = 1L
         private val HEX_UUID = Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
         private val MODEL_KEYS = setOf("vad", "wakeword", "asr", "translation", "router")
-        private val LINK_KEYS = setOf("turn_id", "conversation_id", "operation_id")
+
+        // Wire vocabulary includes request_id (spec "links allows only conversation_id,
+        // request_id, operation_id and turn_id").
+        private val LINK_KEYS = setOf("conversation_id", "request_id", "operation_id", "turn_id")
     }
 }
 

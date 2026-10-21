@@ -3,6 +3,7 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.AudioBlock
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ContributionRecordBuilder
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordValidator
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry
@@ -53,9 +54,29 @@ class ContributionStoreTest {
             truncated = false,
             droppedSpans = emptyList(),
         )
-        val record = ContributionRecordBuilder(captureId, epoch, 7L)
-            .build(platform = "android", appVersion = "8.20", build = "test", audio = block)
+        // A record that satisfies the pinned WIRE contract: all five model keys and all six
+        // stages present, declared absences explicit.
+        val builder = ContributionRecordBuilder(captureId, epoch, "7")
+            .model("vad", ModelRef.None)
+            .model("wakeword", ModelRef.None)
+            .model("asr", ModelRef.None)
+            .model("translation", ModelRef.None)
+            .model("router", ModelRef.None)
+        for (stage in StageName.entries) {
+            builder.stage(stage, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str(stageReasonFor(stage)))))
+        }
+        val record = builder.build(platform = "android", appVersion = "8.20", build = "test", audio = block)
         return CanonicalJson.canonicalBytes(record)
+    }
+
+    /** A legal enumerated reason for each stage, for declared-absence fixtures. */
+    private fun stageReasonFor(stage: StageName): String = when (stage) {
+        StageName.Wake -> "no_wake_detected"
+        StageName.Bleed -> "no_playback_reference"
+        StageName.Asr -> "local_only_action"
+        StageName.Translation -> "no_text"
+        StageName.Routing -> "no_candidates"
+        StageName.Execution -> "client_refused"
     }
 
     /** The exact WAV bytes the store writes for [sampleCount] samples (16 kHz mono pcm_s16le). */
@@ -970,12 +991,14 @@ class ContributionStoreTest {
     @Test
     fun `recovery refuses an oversized metadata file without reading it whole`() {
         val root = tempRoot()
-        val limits = QueueLimits.defaults().copy(maxMetadataBytes = 512)
+        // The bound must FIT a conforming record (all six stages + five model keys), otherwise
+        // prepare() would refuse before the oversized case ever arises.
+        val limits = QueueLimits.defaults().copy(maxMetadataBytes = 4096)
         val store = ContributionStore(root, limits)
         val id = UUID.randomUUID().toString()
         assertNotNull(store.prepare(id, "epoch-1", chunks(64), meta(id)))
         // Inflate the metadata far past the bound: recovery must refuse it, not allocate it.
-        val oversized = ByteArray(8 * 1024 * 1024) { ' '.code.toByte() }
+        val oversized = ByteArray(1 * 1024 * 1024) { ' '.code.toByte() }
         File(root, "contributions/$id.metadata.json").writeBytes(oversized)
         // Record the digest of the oversized bytes so the DIGEST binding cannot be what refuses
         // it: the ONLY remaining reason to refuse is the size bound itself.
@@ -1170,9 +1193,18 @@ class ContributionStoreTest {
         // Store-level tests can mask a missing stage allowlist (the store also compares capture_id
         // and audio identity). This asserts the VALIDATOR alone, on a record built legally then
         // given one unknown stage field, so only the allowlist can refuse it.
-        val builder = ContributionRecordBuilder(UUID.randomUUID().toString(), "epoch-1", 7L)
+        val builder = ContributionRecordBuilder(UUID.randomUUID().toString(), "epoch-1", "7")
+            .model("vad", ModelRef.None)
+            .model("wakeword", ModelRef.None)
+            .model("asr", ModelRef.None)
+            .model("translation", ModelRef.None)
+            .model("router", ModelRef.None)
             .stage(StageName.Wake, StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("rejected"))))
             .stage(StageName.Asr, StageEntry(StageState.Completed, mapOf("text" to RecordNode.Str("x"))))
+            .stage(StageName.Bleed, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_playback_reference"))))
+            .stage(StageName.Translation, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text"))))
+            .stage(StageName.Routing, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates"))))
+            .stage(StageName.Execution, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("client_refused"))))
         val record = builder.build("android", "8.20", "test", audioBlockFor(8))
         assertTrue(
             "a legitimately built record must validate",

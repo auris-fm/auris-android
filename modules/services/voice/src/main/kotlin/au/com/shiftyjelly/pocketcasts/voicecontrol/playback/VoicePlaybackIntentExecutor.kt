@@ -254,6 +254,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                 // confirmed action from one that was dispatched without a knowable outcome. Reading only
                 // the feedback would treat an unknowable execution as if nothing had happened.
                 outcome.action = dispatched.action
+                outcome.feedbackLanguage = dispatched.feedbackLanguage
                 // Noted after the dispatch: this window now has a request, so a LATER one continues
                 // rather than beginning.
                 captured?.let { gracePeriodSignal.notePreparedRequest(it) }

@@ -23,6 +23,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
@@ -3827,6 +3828,149 @@ class CloudRouteSinkTest {
             admittedA,
             authFrame.requestId,
         )
+    }
+
+    /**
+     * COMPOSITION CONTROL (spec e452d3b7): a pre-Connected limit refusal must carry the SAME
+     * request ID through the real transport's open/send/decode wiring, the persisted diagnostics
+     * flush, the service's feedback dispatch, and the renderer's own observation. Fails if the
+     * service drops the ID or never invokes the renderer.
+     */
+    @Test
+    fun `pre-Connected refusal joins request ID across transport, persisted log, service and renderer`() = kotlinx.coroutines.runBlocking {
+        val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
+        try {
+            val wireClient = CapturingWebSocketClient()
+            val deps = TestDeps(
+                templateResolver = SpokenTemplateResolver(
+                    mapOf(
+                        "cloud_error_limit_exceeded" to "You have reached your Auris free daily limit. Please try again tomorrow.",
+                        "general.cloud_coming_soon" to "Cloud processing is coming soon",
+                        "general.cloud_incomplete_turn" to "Sorry, I couldn't complete that request.",
+                        "cloud_error_generic" to "Sorry, I couldn't complete that request.",
+                    ),
+                ),
+                transportFactory = { _, _, observer ->
+                    au.com.shiftyjelly.pocketcasts.repositories.cloud.WebSocketCloudTurnTransport(
+                        "https://example.invalid",
+                        wireClient,
+                        observer,
+                    )
+                },
+            )
+            val sink = deps.sink()
+
+            // Scheduling (spec 7b9f3228): the turn runs on this event loop; a REAL driver THREAD
+            // fires the transport's own listener callbacks, so main never blocks waiting for
+            // main-bound work.
+            val feedback = CompletableDeferred<VoiceResponse>()
+            val driver = Thread {
+                try {
+                    val deadline = System.currentTimeMillis() + 5_000
+                    while (wireClient.listener == null && System.currentTimeMillis() < deadline) Thread.sleep(10)
+                    val upgrading = mock<okhttp3.Response>().also { whenever(it.code).thenReturn(101) }
+                    wireClient.listener!!.onOpen(wireClient.socket, upgrading)
+                    while (wireClient.sendCalls.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(10)
+                    wireClient.listener!!.onMessage(
+                        wireClient.socket,
+                        """{"type":"error","code":"limit_exceeded","message":""}""",
+                    )
+                } catch (t: Throwable) {
+                    t.printStackTrace()
+                }
+            }
+            // Detached scope: the turn's job topology (the sink treats its caller's Job as the
+            // turn's) is not the fact under test — the ID join is.
+            val turnScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+            val turn = turnScope.launch {
+                try {
+                    feedback.complete(
+                        kotlinx.coroutines.withTimeout(8_000) {
+                            sink.routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId).feedback
+                        },
+                    )
+                } catch (t: Throwable) {
+                    feedback.completeExceptionally(t)
+                }
+            }
+            driver.start()
+            val rawFeedback = runCatching { kotlinx.coroutines.withTimeout(10_000) { feedback.await() } }.getOrNull()
+            capture.lines().takeLast(6).forEach { println("COMPOSITION-LOG " + it.take(220)) }
+            val localized = rawFeedback as? VoiceResponse.Spoken
+            assertNotNull("sink must return localized refusal feedback", localized)
+            turn.join()
+            turnScope.cancel()
+            driver.join()
+
+            // PERSISTED transport events, joined to the request ID, observed through the real flush.
+            awaitCaptureLine(capture, "reason=TurnSocketOpened", testWireId)
+            awaitCaptureLine(capture, "SEND_ATTEMPTED", testWireId)
+            awaitCaptureLine(capture, "reason=TurnTerminalReceived", testWireId, alsoContains = "limit_exceeded")
+
+            // SERVICE dispatch: the localized refusal goes through the service's render path with
+            // the SAME request ID, into a REAL renderer.
+            val earconPlayer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer>()
+            val renderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
+                earconPlayer = earconPlayer,
+                ttsEngine = au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine(),
+            )
+            renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+            val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
+                audioFeedbackRenderer = renderer
+                voicePlaybackIntentExecutor = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoicePlaybackIntentExecutor>().also { executor ->
+                    whenever(executor.execute(org.mockito.kotlin.any(), org.mockito.kotlin.any())).thenReturn(localized)
+                }
+            }
+            val intent = VoiceIntent.CloudRoute(
+                request = "question",
+                tier = VoiceIntent.CloudTier.Premium,
+                logicalRequestId = testWireId,
+            )
+            service.renderWithFailureHandling(intent)
+
+            // RENDERER observation: entry AND accepted submission, SAME request ID. If the service
+            // drops the ID or never invokes the renderer, neither line appears.
+            awaitCaptureLine(capture, "reason=TurnFeedbackSelected", testWireId, alsoContains = "entry_spoken")
+            awaitCaptureLine(capture, "reason=TurnFeedbackRendered", testWireId, alsoContains = "spoken_submitted")
+            renderer.release()
+        } finally {
+            capture.close()
+        }
+    }
+
+    /** Deadline-bounded persisted-line lookup by reason and request ID, with an optional extra token. */
+    private suspend fun awaitCaptureLine(
+        capture: au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture,
+        reasonToken: String,
+        requestId: String,
+        alsoContains: String? = null,
+    ): String = kotlinx.coroutines.withTimeout(5_000) {
+        var found: String? = null
+        while (found == null) {
+            found = capture.lines().firstOrNull {
+                it.contains(reasonToken) && it.contains("request_id=$requestId") && (alsoContains == null || it.contains(alsoContains))
+            }
+            if (found == null) delay(10)
+        }
+        found
+    }
+
+    /** okhttp client whose newWebSocket captures the listener the REAL transport installs. */
+    private class CapturingWebSocketClient : okhttp3.OkHttpClient() {
+        var listener: okhttp3.WebSocketListener? = null
+            private set
+        val socket: okhttp3.WebSocket = mock<okhttp3.WebSocket>().also { s ->
+            whenever(s.send(org.mockito.kotlin.any<String>())).thenAnswer { inv ->
+                sendCalls += inv.getArgument<String>(0)
+                true
+            }
+        }
+        val sendCalls = java.util.concurrent.CopyOnWriteArrayList<String>()
+
+        override fun newWebSocket(request: okhttp3.Request, listener: okhttp3.WebSocketListener): okhttp3.WebSocket {
+            this.listener = listener
+            return socket
+        }
     }
 
     /** Records transport observer invocations for test assertions. */

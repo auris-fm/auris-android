@@ -294,4 +294,24 @@ class WebSocketCloudTurnTransportRefusalTest {
             events.any { it is CloudRouteEvent.Error && it.code == CloudRouteErrorCodes.CONNECTION_LOST },
         )
     }
+
+    @Test
+    fun `flow completes after terminal event`() = runBlocking {
+        val client = CapturingOkHttpClient()
+        val transport = WebSocketCloudTurnTransport("https://example.invalid", client, RecordingObserver())
+        var completed = false
+        val job = launch {
+            transport.exchange(frame()).collect { }
+            completed = true
+        }
+        withTimeout(5_000) { while (client.listener == null) delay(10) }
+        val upgrading = mock<Response>().also { org.mockito.kotlin.whenever(it.code).thenReturn(101) }
+        client.listener!!.onOpen(client.socket!!, upgrading)
+        withTimeout(5_000) { while (client.sendCalls.isEmpty()) delay(10) }
+        client.listener!!.onMessage(client.socket!!, """{"type":"error","code":"limit_exceeded","message":""}""")
+        withTimeout(5_000) {
+            while (!completed) delay(10)
+        }
+        job.cancel()
+    }
 }

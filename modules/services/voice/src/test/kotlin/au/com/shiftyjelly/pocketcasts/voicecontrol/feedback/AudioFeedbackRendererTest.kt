@@ -1680,6 +1680,70 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `settled render followed by a new render records no false supersession drop`() {
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture().use { capture ->
+            val localRenderer = AudioFeedbackRenderer(earconPlayer, FakeTtsEngine())
+            localRenderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+            localRenderer.render(VoiceResponse.Spoken("first answer"), requestId = turnRequestId)
+            // Let A SETTLE (submission observed) before B arrives.
+            awaitLine(capture, { it.contains("spoken_submitted") && it.contains("request_id=$turnRequestId") }, "settle")
+            val secondId = "22222222-2222-4222-8222-222222222222"
+            localRenderer.render(VoiceResponse.Spoken("second answer"), requestId = secondId)
+
+            // Bounded absence check: give any (wrong) drop record time to appear, then assert none.
+            kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.delay(300)
+            }
+            val falseDrop = capture.lines().firstOrNull {
+                it.contains("reason=TurnFeedbackDropped") && it.contains("request_id=$turnRequestId")
+            }
+            assertNull("a settled render must not be recorded as superseded: $falseDrop", falseDrop)
+            localRenderer.release()
+        }
+    }
+
+    @Test
+    fun `unbound local render cancels a cloud render and still records the cloud drop`() {
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture().use { capture ->
+            val localRenderer = AudioFeedbackRenderer(earconPlayer, FakeTtsEngine())
+            localRenderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+            localRenderer.render(VoiceResponse.Spoken("cloud answer"), requestId = turnRequestId)
+            // The replacement carries NO cloud request ID: the drop still belongs to A.
+            localRenderer.render(VoiceResponse.Spoken("local answer"))
+
+            val dropped = awaitLine(capture, { it.contains("reason=TurnFeedbackDropped") && it.contains("request_id=$turnRequestId") }, "drop")
+            assertTrue("supersession by an unbound render must still be observed: $dropped", dropped.contains("superseded"))
+            localRenderer.release()
+        }
+    }
+
+    @Test
+    fun `session release mid-render records the in-flight render as cancelled`() {
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture().use { capture ->
+            val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val blockingTts = object : TtsEngine {
+                override suspend fun warmUp(language: String) {}
+                override suspend fun speak(text: String, language: String) {
+                    gate.await()
+                }
+                override fun release() {}
+            }
+            val localRenderer = AudioFeedbackRenderer(earconPlayer, blockingTts)
+            localRenderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+            localRenderer.render(VoiceResponse.Spoken("long answer"), requestId = turnRequestId)
+            // Let the render reach the suspended TTS, then release the session out from under it.
+            kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.delay(200)
+            }
+            localRenderer.release()
+
+            val dropped = awaitLine(capture, { it.contains("reason=TurnFeedbackDropped") && it.contains("request_id=$turnRequestId") }, "drop")
+            assertTrue("a released mid-render must be a cancellation drop: $dropped", dropped.contains("render_cancelled"))
+            gate.complete(Unit)
+        }
+    }
+
+    @Test
     fun `incomplete TTS records submission_failed, not spoken_submitted`() {
         val failing = object : TtsEngine {
             override suspend fun warmUp(language: String) {}

@@ -957,6 +957,62 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `retained residue charges the FULL footprint, not just audio and metadata`() {
+        // measuredAudioBytes/measuredMetadataBytes cover only the two primary files. Everything else a
+        // capture leaves on disk - attempts, created, sha256, ready - is real retained storage that the
+        // queue does not count, so an owner can hold unbounded debris while reporting itself empty.
+        val root = tmp.newFolder("queue-full-footprint")
+        val id = java.util.UUID.randomUUID().toString()
+        val store = ContributionStore(root, limits())
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+
+        // Disqualify, then make EVERY file undeletable by turning it into a non-empty directory, so the
+        // whole residue survives the sweep and must all be charged.
+        File(root, "disqualified").mkdirs()
+        File(root, "disqualified/$id").writeText("disqualified\n")
+        val contributions = File(root, "contributions")
+        val ownFiles = contributions.listFiles()!!.filter { it.name.startsWith(id) }
+        assertTrue("precondition: several files exist: ${ownFiles.map { it.name }}", ownFiles.size >= 4)
+        ownFiles.forEach { file ->
+            val bytes = file.readBytes()
+            file.delete()
+            file.mkdirs()
+            File(file, "held").writeBytes(bytes)
+        }
+        val totalFootprint = contributions.listFiles()!!.filter { it.name.startsWith(id) }
+            .sumOf { dir -> dir.walkTopDown().filter { it.isFile }.sumOf { it.length() } }
+
+        // AUDIO-ONLY footprint, which is what a charge covering just the primary file would amount to.
+        val audioOnly = File(contributions, "$id.recording.wav").walkTopDown().filter { it.isFile }.sumOf { it.length() }
+        assertTrue(
+            "precondition: the extra files are a real part of the footprint ($audioOnly of $totalFootprint)",
+            totalFootprint > audioOnly + 64,
+        )
+
+        // The discriminator: a budget between audio-only and the full footprint, admitting a probe that
+        // fills the gap. Charged fully the probe does not fit; charged audio-only it does. A probe larger
+        // than the whole footprint (my first version) is refused either way and proves nothing.
+        val probeMeta = meta(java.util.UUID.randomUUID().toString())
+        val gapBytes = totalFootprint - audioOnly
+        // Find a sample count whose projection lands just under the gap.
+        var samples = 1L
+        while (ContributionStore(root, limits()).projectedBytesFor(samples + 1, probeMeta.size) < gapBytes) samples++
+        val probeBytes = ContributionStore(root, limits()).projectedBytesFor(samples, probeMeta.size)
+        assertTrue("precondition: the probe sits inside the gap ($probeBytes of $gapBytes)", probeBytes < gapBytes)
+
+        // Do NOT call recover() first: recovery adopts and charges before the sweep, which masks whatever
+        // the sweep itself would charge. The sweep must be the FIRST and ONLY accounting that touches it.
+        val fresh = ContributionStore(root, limits().copy(maxQueueBytes = audioOnly + probeBytes))
+        fresh.expireOlderThan()
+
+        assertTrue(
+            "residue must charge its FULL $totalFootprint-byte footprint: a $probeBytes-byte probe fit in a " +
+                "budget that only covers the $audioOnly-byte audio file",
+            fresh.admit(sampleCount = samples, metadataBytes = probeMeta.size) == null,
+        )
+    }
+
+    @Test
     fun `late cleanup is serialized against a successor publication on the same id`() {
         // retryDisqualifiedCleanupLocked deleted files OUTSIDE the ownership monitor, so a successor
         // publishing the same id could be racing the sweep. The whole retry transaction is now under the

@@ -314,4 +314,76 @@ class WebSocketCloudTurnTransportRefusalTest {
         }
         job.cancel()
     }
+
+    @Test
+    fun `connected then multiple nonterminal frames then done streams without truncation and completes`() = runBlocking {
+        val client = CapturingOkHttpClient()
+        val transport = WebSocketCloudTurnTransport("https://example.invalid", client, RecordingObserver())
+        val events = CopyOnWriteArrayList<CloudRouteEvent>()
+        var completed = false
+        val job = launch {
+            transport.exchange(frame()).collect { events.add(it) }
+            completed = true
+        }
+        withTimeout(5_000) { while (client.listener == null) delay(10) }
+        val upgrading = mock<Response>().also { org.mockito.kotlin.whenever(it.code).thenReturn(101) }
+        client.listener!!.onOpen(client.socket!!, upgrading)
+        withTimeout(5_000) { while (client.sendCalls.isEmpty()) delay(10) }
+        val l = client.listener!!
+        val s = client.socket!!
+        // Handshake, then a HEALTHY stream: nonterminal frames must not close the flow.
+        l.onMessage(s, """{"type":"connected","codec":"opus@48k","request_id":"rid","reservation_id":"res"}""")
+        l.onMessage(s, """{"type":"action","tool":"playback","action":"pause","params":{},"turn_id":"rid"}""")
+        l.onMessage(s, """{"type":"action","tool":"playback","action":"pause","params":{},"turn_id":"rid"}""")
+        try {
+            withTimeout(2_000) { while (events.size < 3) delay(10) }
+        } catch (t: Throwable) {
+            throw AssertionError("nonterminal frames did not arrive: " + events.map { it::class.simpleName }, t)
+        }
+        l.onMessage(
+            s,
+            """{"type":"done","outcome":"completed","usage":{"input_tokens":1,"output_tokens":2,"speech":{"amount":1.5,"unit":"seconds"}}}""",
+        )
+        try {
+            withTimeout(5_000) { while (!completed) delay(10) }
+        } catch (t: Throwable) {
+            throw AssertionError("flow did not complete after done: " + events.map { it::class.simpleName }, t)
+        }
+        assertEquals(4, events.size)
+        assertTrue(events[3] is CloudRouteEvent.Done)
+        job.cancel()
+    }
+
+    @Test
+    fun `server error after nonterminal frames completes the flow with the error`() = runBlocking {
+        val client = CapturingOkHttpClient()
+        val transport = WebSocketCloudTurnTransport("https://example.invalid", client, RecordingObserver())
+        val events = CopyOnWriteArrayList<CloudRouteEvent>()
+        var completed = false
+        val job = launch {
+            transport.exchange(frame()).collect { events.add(it) }
+            completed = true
+        }
+        withTimeout(5_000) { while (client.listener == null) delay(10) }
+        val upgrading = mock<Response>().also { org.mockito.kotlin.whenever(it.code).thenReturn(101) }
+        client.listener!!.onOpen(client.socket!!, upgrading)
+        withTimeout(5_000) { while (client.sendCalls.isEmpty()) delay(10) }
+        val l = client.listener!!
+        val s = client.socket!!
+        l.onMessage(s, """{"type":"connected","codec":"opus@48k","request_id":"rid","reservation_id":"res"}""")
+        l.onMessage(s, """{"type":"action","tool":"playback","action":"pause","params":{},"turn_id":"rid"}""")
+        try {
+            withTimeout(2_000) { while (events.size < 2) delay(10) }
+        } catch (t: Throwable) {
+            throw AssertionError("nonterminal frames did not arrive: " + events.map { it::class.simpleName }, t)
+        }
+        l.onMessage(s, """{"type":"error","code":"limit_exceeded","message":""}""")
+        try {
+            withTimeout(5_000) { while (!completed) delay(10) }
+        } catch (t: Throwable) {
+            throw AssertionError("flow did not complete after error: " + events.map { it::class.simpleName }, t)
+        }
+        assertTrue(events.last() is CloudRouteEvent.Error)
+        job.cancel()
+    }
 }

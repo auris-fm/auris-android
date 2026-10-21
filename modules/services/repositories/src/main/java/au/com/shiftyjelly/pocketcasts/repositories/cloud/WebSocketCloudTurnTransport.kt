@@ -136,7 +136,11 @@ class WebSocketCloudTurnTransport(
                             event.code,
                         )
                     }
-                    emitOrFail(channel, event)
+                    // A SERVER terminal ends the turn: finish the channel after enqueuing so the
+                    // consumer drains in order and the flow completes. emitOrFail alone would leave
+                    // the channel open and the collector suspended forever (the sink hangs after
+                    // selection); emitTerminal gives both ordering and completion.
+                    emitTerminal(channel, event)
                 }
             }
 

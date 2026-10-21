@@ -142,14 +142,21 @@ class AudioFeedbackRenderer(
         if (BuildConfig.DEBUG) {
             Timber.d("[VoiceResponse] %s", describeForLog(response, language))
         }
-        currentJob?.cancel()
-        // SUPERSESSION drop: the previous render was replaced before it could finish. Observed
-        // against the request it belonged to, so a superseded turn is a drop, not silence.
-        if (requestId != null) currentRequestId?.let { previous -> if (previous != requestId) recordDrop(previous, "superseded", "superseded_by_new_render") }
+        // SUPERSESSION / cancellation drop: cancelling a still-active render is an observed drop
+        // belonging to the PRIOR invocation, regardless of what replaces it (cloud, local, or a
+        // same-ID retry). Completed renders cleared their own ID, so a stale ID cannot fire.
+        val supersededObserved = java.util.concurrent.atomic.AtomicBoolean(false)
+        currentJob?.takeIf { it.isActive }?.let { prior ->
+            currentRequestId?.let {
+                recordDrop(it, "superseded", "superseded_by_new_render")
+                supersededObserved.set(true)
+            }
+            prior.cancel()
+        }
         currentRequestId = requestId
         // Launched coroutine inherits the Job cancellation: when we cancel currentJob
         // above, any child suspend calls (like TtsEngine.speak) will be cancelled.
-        currentJob = scope.launch {
+        val thisJob = scope.launch {
             try {
                 // Renderer ENTRY boundary (request received, not yet submitted).
                 if (requestId != null) {
@@ -230,8 +237,19 @@ class AudioFeedbackRenderer(
                     e.framesWritten,
                 )
                 onPlaybackFailure(e)
+            } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                // Observed active cancellation (e.g. session release mid-render): the render did
+                // not complete and must not pass as delivered. Supersession was already observed
+                // at the cancel site. Rethrown so structured concurrency still unwinds.
+                if (requestId != null && !supersededObserved.get()) recordDrop(requestId, "cancelled", "render_cancelled")
+                throw cancellation
+            } finally {
+                // Clear the invocation context ONLY if it is still this render's: a successor that
+                // already replaced it must not be erased by this job's tail.
+                if (currentRequestId == requestId) currentRequestId = null
             }
         }
+        currentJob = thisJob
     }
 
     /**

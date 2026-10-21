@@ -89,6 +89,8 @@ class CloudRouteSink internal constructor(
     /** Test seam: inject a transport factory to bypass WebSocket in unit tests. */
     private val transportFactory: ((String, okhttp3.OkHttpClient, au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver?) -> au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransport)? = null,
 ) : VoiceCloudRouteSink {
+    /** Transport observer for the current turn; set by openRoute, read by event handlers. */
+    private var activeTransportObserver: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver? = null
 
     @Inject constructor(
         cloudConfig: CloudConfig,
@@ -462,6 +464,8 @@ class CloudRouteSink internal constructor(
         }
 
         var endReason = Reason.TurnEnded
+        // Transport observer for server terminal diagnostics; set by openRoute when not using routeInvoker.
+        var activeTransportObserver: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver? = null
         // Hoisted for catch-block diagnostics: the request ID is needed even if setup throws.
         val diagnosticRequestId: String? = prepared?.requestId ?: admittedId
         val diagnosticOrigin: Long? = prepared?.capturedOrigin ?: capturedOrigin
@@ -651,6 +655,11 @@ class CloudRouteSink internal constructor(
                     is CloudRouteEvent.Done -> {
                         // Transport boundary: terminal done received from server.
                         val doneOutcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted"
+                        activeTransportObserver?.onTerminalReceived(
+                            turn.requestId,
+                            au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.TerminalOrigin.SERVER_DONE,
+                            doneOutcome,
+                        )
                         Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, errorCode = doneOutcome))
                         analytics.recordTurn(
                             outcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted",
@@ -761,7 +770,13 @@ class CloudRouteSink internal constructor(
                     is CloudRouteEvent.Error -> {
                         // Transport boundary: terminal error received. Carries the actual
                         // error code so limit_exceeded vs connection_lost are distinguishable.
-                        Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, errorCode = event.code))
+                        val boundedErrorCode = if (event.code in ALLOWED_ERROR_CODES) event.code else "unknown"
+                        activeTransportObserver?.onTerminalReceived(
+                            turn.requestId,
+                            au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.TerminalOrigin.SERVER_ERROR,
+                            boundedErrorCode,
+                        )
+                        Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, errorCode = boundedErrorCode))
                         endReason = Reason.TurnFailed
                         // Genuinely unavailable evidence is a state the results
                         // renderer owns whenever it is present AND this turn had a
@@ -907,26 +922,34 @@ class CloudRouteSink internal constructor(
         // the negotiated path served it. The choice lives in one place rather than beside a second
         // path — there is no second path to be beside.
         val transportObserver = object : au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver {
-            override fun onAuthResolved(requestId: String, success: Boolean) {
-                Trace.record(Event(Kind.Turn, Reason.TurnAuthResolved, Source.Cloud, requestId = requestId))
+            override fun onAuthResolved(
+                requestId: String,
+                outcome: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.AuthOutcome,
+            ) {
+                Trace.record(Event(Kind.Turn, Reason.TurnAuthResolved, Source.Cloud, requestId = requestId, errorCode = outcome.name))
             }
             override fun onSocketOpened(requestId: String) {
                 Trace.record(Event(Kind.Turn, Reason.TurnSocketOpened, Source.Cloud, requestId = requestId))
             }
-            override fun onSendAccepted(requestId: String) {
-                Trace.record(Event(Kind.Turn, Reason.TurnSocketSendComplete, Source.Cloud, requestId = requestId))
+            override fun onSendResult(
+                requestId: String,
+                outcome: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.SendOutcome,
+            ) {
+                Trace.record(Event(Kind.Turn, Reason.TurnSocketSendComplete, Source.Cloud, requestId = requestId, errorCode = outcome.name))
             }
-            override fun onSendRejected(requestId: String, reason: String) {
-                Trace.record(Event(Kind.Turn, Reason.TurnRetired, Source.Cloud, requestId = requestId))
+            override fun onTerminalReceived(
+                requestId: String,
+                origin: au.com.shiftyjelly.pocketcasts.repositories.cloud.CloudTurnTransportObserver.TerminalOrigin,
+                errorCode: String?,
+            ) {
+                val boundedCode = errorCode?.let { if (it in ALLOWED_ERROR_CODES) it else "unknown" }
+                Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, requestId = requestId, errorCode = boundedCode ?: origin.name))
             }
-            override fun onTerminalReceived(requestId: String, errorCode: String?) {
-                // Server terminal — recorded at the actual callback, not inferred.
-                Trace.record(Event(Kind.Turn, Reason.TurnTerminalReceived, Source.Cloud, requestId = requestId))
-            }
-            override fun onConnectionFailed(requestId: String, reason: String) {
-                Trace.record(Event(Kind.Turn, Reason.TurnRetired, Source.Cloud, requestId = requestId))
+            override fun onConnectionFailed(requestId: String) {
+                Trace.record(Event(Kind.Turn, Reason.TurnRetired, Source.Cloud, requestId = requestId, errorCode = "connection_failed"))
             }
         }
+        activeTransportObserver = transportObserver
         val transport = transportFactory?.invoke(resolveBaseUrl(), CloudTurnRoute.defaultOkHttpClient(), transportObserver)
         return CloudTurnRoute(resolveBaseUrl(), tokenProvider, transport = transport, observer = transportObserver).route(turn)
     }
@@ -1457,6 +1480,20 @@ class CloudRouteSink internal constructor(
     }
 
     companion object {
+        /** Allowlisted error codes for diagnostic persistence. Unmapped codes become "unknown". */
+        private val ALLOWED_ERROR_CODES: Set<String> = setOf(
+            CloudRouteErrorCodes.CONNECTION_LOST,
+            CloudRouteErrorCodes.UNAUTHORIZED,
+            CloudRouteErrorCodes.NO_ANSWER,
+            CloudRouteErrorCodes.PROVIDER_ERROR,
+            CloudRouteErrorCodes.RETRIEVAL_UNAVAILABLE,
+            CloudRouteErrorCodes.INVALID_RESPONSE,
+            "limit_exceeded",
+            "budget_exceeded",
+            "done",
+            "interrupted",
+        )
+
         private const val KEY_CLOUD_COMING_SOON = "general.cloud_coming_soon"
         private const val KEY_CLOUD_ERROR_PREFIX = "cloud_error_"
         private const val KEY_CLOUD_ERROR_GENERIC = "cloud_error_generic"

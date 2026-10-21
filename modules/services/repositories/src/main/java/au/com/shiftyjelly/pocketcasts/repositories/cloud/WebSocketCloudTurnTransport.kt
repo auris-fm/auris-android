@@ -48,7 +48,7 @@ class WebSocketCloudTurnTransport(
                 val requestId = frame.requestId
                 if (response.code != 101) {
                     Timber.w("Cloud route WebSocket rejected: %d %s", response.code, response.message)
-                    observer?.onSendRejected(requestId, "${response.code} ${response.message}")
+                    observer?.onSendResult(requestId, CloudTurnTransportObserver.SendOutcome.REJECTED)
                     emitTerminal(
                         channel,
                         CloudRouteEvent.Error(
@@ -60,11 +60,10 @@ class WebSocketCloudTurnTransport(
                 }
                 observer?.onSocketOpened(requestId)
                 val sent = webSocket.send(frame.toJson())
-                if (sent) {
-                    observer?.onSendAccepted(requestId)
-                } else {
-                    observer?.onSendRejected(requestId, "send_returned_false")
-                }
+                observer?.onSendResult(
+                    requestId,
+                    if (sent) CloudTurnTransportObserver.SendOutcome.ACCEPTED else CloudTurnTransportObserver.SendOutcome.REJECTED,
+                )
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
@@ -101,7 +100,7 @@ class WebSocketCloudTurnTransport(
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 val requestId = frame.requestId
                 Timber.w(t, "Cloud route socket failed")
-                observer?.onConnectionFailed(requestId, t::class.simpleName ?: "unknown")
+                observer?.onConnectionFailed(requestId)
                 emitTerminal(
                     channel,
                     CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),

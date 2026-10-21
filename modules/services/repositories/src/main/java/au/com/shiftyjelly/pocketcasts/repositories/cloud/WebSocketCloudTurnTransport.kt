@@ -61,18 +61,32 @@ class WebSocketCloudTurnTransport(
                     return
                 }
                 observer?.onSocketOpened(requestId)
-                val json = try {
-                    frame.toJson()
+                val json: String
+                try {
+                    json = frame.toJson()
                 } catch (encodeFailure: Exception) {
-                    // Encode failure — send was never attempted. Propagate as terminal.
+                    // Encode failure — send was never attempted. Record bounded outcome and propagate.
                     Timber.w(encodeFailure, "Cloud route auth frame encode failed")
+                    observer?.onSendResult(requestId, CloudTurnTransportObserver.SendOutcome.REJECTED)
                     emitTerminal(
                         channel,
                         CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
                     )
                     return
                 }
-                val sent = webSocket.send(json)
+                val sent: Boolean
+                try {
+                    sent = webSocket.send(json)
+                } catch (sendThrow: Exception) {
+                    // Send threw — record rejection and propagate as terminal.
+                    Timber.w(sendThrow, "Cloud route auth frame send threw")
+                    observer?.onSendResult(requestId, CloudTurnTransportObserver.SendOutcome.REJECTED)
+                    emitTerminal(
+                        channel,
+                        CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
+                    )
+                    return
+                }
                 observer?.onSendResult(
                     requestId,
                     if (sent) CloudTurnTransportObserver.SendOutcome.ACCEPTED else CloudTurnTransportObserver.SendOutcome.REJECTED,

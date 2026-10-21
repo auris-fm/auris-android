@@ -200,7 +200,22 @@ class VoiceControlService : Service() {
         // 7c7575f6): the sink reports the resolved language for cloud turns; anything unspoken or
         // local defaults to English, never the raw detected language nor the device locale.
         val renderLanguage = turnOutcome.feedbackLanguage ?: "en"
-        audioFeedbackRenderer.render(response, language = renderLanguage, requestId = renderRequestId)
+        // ACKNOWLEDGED HANDOFF (reviewer 664f82d0): the renderer accepts ownership of the hold by
+        // returning true. If it cannot (disposed, non-spoken, or a throw before acceptance), the
+        // service releases the transferred hold here at the actual failure boundary — never leaving
+        // it in the map. Cancellation is re-thrown after release so structured concurrency still
+        // unwinds; other failures are logged and the hold is released as cancelled.
+        try {
+            if (!audioFeedbackRenderer.render(response, language = renderLanguage, requestId = renderRequestId)) {
+                gracePeriodSignal.releaseUnhandedOffHold(renderRequestId, cancelled = true)
+            }
+        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+            gracePeriodSignal.releaseUnhandedOffHold(renderRequestId, cancelled = true)
+            throw cancellation
+        } catch (failure: Exception) {
+            Timber.w(failure, "[VoicePipeline] render failed")
+            gracePeriodSignal.releaseUnhandedOffHold(renderRequestId, cancelled = true)
+        }
     }
 
     private fun startVoiceControl() {

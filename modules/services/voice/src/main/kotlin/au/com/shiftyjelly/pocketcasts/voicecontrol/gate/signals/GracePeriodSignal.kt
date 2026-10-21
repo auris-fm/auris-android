@@ -282,6 +282,18 @@ class GracePeriodSignal @Inject constructor() {
     /** Test/diagnostic visibility: is [requestId]'s output hold still pending release? */
     fun hasOutputHold(requestId: String): Boolean = synchronized(windowLock) { outputHolds.containsKey(requestId) }
 
+    /**
+     * EXPLICIT NO-HANDOFF RELEASE (reviewer 664f82d0): the service could not hand off to the renderer
+     * (render threw, was cancelled before render, or the response was non-spoken so no renderer path
+     * exists). The sink already transferred the hold; releasing here closes it at the actual failure
+     * boundary rather than leaving it in the map. Exactly once — a late duplicate finds nothing.
+     */
+    fun releaseUnhandedOffHold(requestId: String?, cancelled: Boolean) {
+        if (requestId == null) return
+        val hold = synchronized(windowLock) { outputHolds.remove(requestId) } ?: return
+        finishCloudTurn(hold, cancelled = cancelled)
+    }
+
     /** Called after turn termination and local playback drain/clear, including failure cleanup. */
     fun finishCloudTurn(hold: CloudTurnHold, cancelled: Boolean = false) {
         val armFor = synchronized(windowLock) {

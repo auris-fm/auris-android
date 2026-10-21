@@ -150,6 +150,9 @@ class AudioFeedbackRenderer(
      */
     private var disposed = false
 
+    /** The admission token of the most recent [playEarcon], for the output-terminal watcher. */
+    private var lastEarconAdmission: EarconPlayer.AdmissionToken? = null
+
     /**
      * Called when a spoken reply did not finish playing. Defaulted to the structured log so an
      * incomplete answer is never silent; a host can replace it to surface the failure upward.
@@ -158,12 +161,18 @@ class AudioFeedbackRenderer(
         Timber.e(error, "[VoiceResponse] spoken reply did not finish playing")
     }
 
-    fun render(response: VoiceResponse, language: String = "en", requestId: String? = null) {
+    /**
+     * Renders one response and returns whether it ACCEPTED OWNERSHIP of any transferred output hold.
+     * True means the renderer will release the hold at its own terminal; false means the caller must
+     * release (the renderer cannot or will not play this response). Reviewer 664f82d0: map insertion
+     * alone is not acknowledgement.
+     */
+    fun render(response: VoiceResponse, language: String = "en", requestId: String? = null): Boolean {
         if (disposed) {
             // DROP boundary: the renderer can never play this. Observed, not silent.
             if (requestId != null) recordDrop(requestId, "disposed", "renderer_disposed")
             releaseOutputHold(requestId, cancelled = true)
-            return
+            return false
         }
         // Debug-only diagnostic: what the app is about to say, before TTS. This is the one
         // place every spoken response passes through, so it is where a response that is
@@ -179,8 +188,12 @@ class AudioFeedbackRenderer(
         // second "cancelled" record, and its finally clears nothing of THIS invocation's.
         val thisCall = RenderInvocation(requestId)
         currentInvocation?.takeIf { it.job.isActive }?.let { prior ->
+            // SUPERSESSION RELEASE ORDER (reviewer 664f82d0): the predecessor's output must reach
+            // its terminal BEFORE the hold releases. Cancelling first risks releasing while cleanup
+            // still suspends (stop/clear), which violates stopped-before-release. The flag is set so
+            // the predecessor's own catch does not double-record; the cancel runs AFTER, and the
+            // predecessor's finally releases the hold at its actual terminal boundary.
             prior.requestId?.let { recordDrop(it, "superseded", "superseded_by_new_render") }
-            releaseOutputHold(prior.requestId, cancelled = true)
             prior.superseded.set(true)
             prior.job.cancel()
         }
@@ -231,15 +244,19 @@ class AudioFeedbackRenderer(
                     is VoiceResponse.Earcon -> {
                         earconAdmitted = playEarcon(response.id)
                         recordEarconOutcome()
-                        // A bundled cue is sub-second and its admission IS its sounding window's
-                        // start; documented limitation: the earcon hold releases at admission, not
-                        // at the coverage observer's consumed note.
-                        releaseOutputHold(requestId, cancelled = !earconAdmitted)
+                        // EARCON TERMINAL IS CONSUMPTION, NOT ADMISSION (reviewer 664f82d0): the hold
+                        // releases when the cue is observed to have played every accepted frame. No
+                        // spoken half, so the earcon terminal alone ends the output.
+                        if (earconAdmitted) {
+                            watchEarconTerminal(thisCall, requestId) { releaseOutputHold(requestId, cancelled = false) }
+                        } else {
+                            releaseOutputHold(requestId, cancelled = true)
+                        }
                     }
 
                     is VoiceResponse.Spoken -> {
                         // The awaited call returns only after playback drained — this IS the
-                        // output terminal, not mere acceptance.
+                        // output terminal, not mere acceptance. No earcon component.
                         speakWithHeartbeat(response.text, language)
                         if (requestId != null) recordSubmitted(requestId, "spoken_submitted")
                         releaseOutputHold(requestId, cancelled = false)
@@ -248,8 +265,16 @@ class AudioFeedbackRenderer(
                     is VoiceResponse.Combined -> {
                         earconAdmitted = playEarcon(response.earcon)
                         recordEarconOutcome()
+                        if (earconAdmitted) {
+                            watchEarconTerminal(thisCall, requestId) { /* joined below */ }
+                        }
                         speakWithHeartbeat(response.spokenText, language)
                         if (requestId != null) recordSubmitted(requestId, "spoken_submitted")
+                        // The combined response's output ends when BOTH halves end: the awaited
+                        // spoken drain here, and the earcon's observed consumption. Join on the
+                        // watcher's completion instead of releasing at whichever comes first.
+                        val earconWatcher = lastEarconAdmission?.let { earconTerminalForJoin(thisCall) }
+                        if (earconWatcher != null) earconWatcher.join()
                         releaseOutputHold(requestId, cancelled = false)
                     }
                 }
@@ -285,6 +310,25 @@ class AudioFeedbackRenderer(
                 if (requestId != null && !thisCall.superseded.get()) recordDrop(requestId, "cancelled", "render_cancelled")
                 releaseOutputHold(requestId, cancelled = true)
                 throw cancellation
+            } catch (failure: Exception) {
+                // ALL TERMINAL FAILURES RELEASE (reviewer 664f82d0): a generic render/TTS exception is
+                // as much an output terminal as an incomplete playback — the held window must not wait
+                // on output that will never sound. Observed as submission_failed, hold released.
+                if (requestId != null) {
+                    VoiceLifecycleDiagnostics.record(
+                        VoiceLifecycleDiagnostics.Event(
+                            kind = VoiceLifecycleDiagnostics.Kind.Turn,
+                            reason = VoiceLifecycleDiagnostics.Reason.TurnFeedbackRendered,
+                            source = VoiceLifecycleDiagnostics.Source.Cloud,
+                            requestId = requestId,
+                            feedbackKind = "submission_failed",
+                            errorCode = "render_failed",
+                        ),
+                    )
+                }
+                releaseOutputHold(requestId, cancelled = true)
+                Timber.e(failure, "[VoiceResponse] render failed")
+                onPlaybackFailure(failure)
             } finally {
                 // Clear the invocation slot ONLY if it is still this invocation's object: a
                 // successor that already replaced it must not be erased by this job's tail.
@@ -293,7 +337,7 @@ class AudioFeedbackRenderer(
         }
         thisCall.job = thisJob
         currentInvocation = thisCall
-        currentJob = thisJob
+        return true
     }
 
     /**
@@ -329,6 +373,9 @@ class AudioFeedbackRenderer(
         // successor could take the track in between, and this would then hold the SUCCESSOR'S token
         // while believing it held its own.
         val admitted = earconPlayer.play(id)
+        // THE TOKEN IDENTIFIES THIS PLAYING OF THE CUE: the terminal watcher below reads its
+        // completion — admission alone is NOT consumption (reviewer 664f82d0 / spec e6cb3052).
+        lastEarconAdmission = admitted
         if (admitted != null) {
             // NO UNCONDITIONAL ATTRIBUTION. `play` reporting true means the sink ACCEPTED the cue, which
             // is not the same as its being audible: the cue may sit queued behind earlier audio, and the
@@ -740,6 +787,42 @@ class AudioFeedbackRenderer(
         }
         // Surfaces TtsPlaybackIncompleteException (or any other failure) to the caller.
         utterance.join()
+    }
+
+    /**
+     * Watches ONE earcon admission until its observed OUTPUT terminal — every accepted frame played
+     * (Consumed) — or until superseded/disposed, and then runs [onTerminal]. Admission is not
+     * consumption; the grace hold must not release while the cue is still queued or sounding.
+     */
+    private fun watchEarconTerminal(
+        invocation: RenderInvocation,
+        requestId: String?,
+        onTerminal: () -> Unit,
+    ) {
+        val token = lastEarconAdmission
+        scope.launch {
+            val deadline = System.currentTimeMillis() + 15_000L
+            var completed = false
+            while (!disposed && !invocation.superseded.get() && System.currentTimeMillis() < deadline) {
+                val completion = earconPlayer.completionFor(token?.raw)
+                if (completion == EarconPlayer.EarconCompletion.Consumed) {
+                    completed = true
+                    break
+                }
+                kotlinx.coroutines.delay(50)
+            }
+            if (completed && !invocation.superseded.get() && !disposed) onTerminal()
+        }
+    }
+
+    /** The join job for a Combined response's earcon terminal (see [watchEarconTerminal]). */
+    private fun earconTerminalForJoin(invocation: RenderInvocation) = scope.launch {
+        val token = lastEarconAdmission
+        val deadline = System.currentTimeMillis() + 15_000L
+        while (!disposed && !invocation.superseded.get() && System.currentTimeMillis() < deadline) {
+            if (earconPlayer.completionFor(token?.raw) == EarconPlayer.EarconCompletion.Consumed) break
+            kotlinx.coroutines.delay(50)
+        }
     }
 
     /**

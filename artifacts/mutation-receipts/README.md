@@ -43,3 +43,21 @@ return instead of transferring to the renderer path.
 **RED XML:** `artifacts/mutation-receipts/positive-success-absence-RED.xml`
   - tests="1" failures="1" — `expected:<false> but was:<true>` for the Interrupted terminal.
 **GREEN:** full voice suite BUILD SUCCESSFUL with the positive `sawDoneCompleted` predicate restored.
+
+## Grace round 3 mutants (reviewer 664f82d0 / spec e6cb3052)
+
+### Mutant: earcon hold released at admission instead of consumption
+**Production file:** `AudioFeedbackRenderer.kt` — Earcon arm.
+**Change:** `watchEarconTerminal(...)` replaced with an immediate release at admission.
+**Test:** `an Earcon-only response releases the transferred hold at CONSUMPTION, never at admission`
+**RED XML:** `artifacts/mutation-receipts/earcon-admission-release-RED.xml`
+  - `the hold must survive mere ADMISSION (queued, not yet sounding)`.
+**GREEN:** full voice suite BUILD SUCCESSFUL with the watcher restored.
+
+### Round-3 controls (GREEN, no mutant run)
+- TTS failure mid-render: gated failing TTS — hold survives in-flight render, releases at the
+  generic failure terminal, window expires.
+- Cancel/supersede mid-render: renderer.release() cancels the in-flight invocation; hold releases
+  at the cancellation terminal; window expires.
+- Local playback failure: drain Unconsumed → feedback Earcon(ERROR) and succeeded=false even with
+  Done+Completed (reviewer point 4).

@@ -122,6 +122,35 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `an Earcon-only response releases the transferred hold at CONSUMPTION, never at admission`() = runTest {
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 5_000L)
+        signal.onWakeWordDetected()
+        val hold = signal.holdCloudTurn(owner = 7L)
+        org.junit.Assert.assertNotNull("control needs a live hold", hold)
+        // Transfer to the renderer's request ID, as the sink does for spoken feedback.
+        val requestId = "earcon-terminal-control"
+        signal.transferHoldToOutput(requestId, hold!!)
+        val renderer = AudioFeedbackRenderer(earconPlayer, ttsEngine, signal)
+        whenever(earconPlayer.play(EarconId.ERROR)).thenReturn(EarconPlayer.AdmissionToken(9L))
+        // QUEUED first: the cue is accepted but has not sounded — the hold must NOT release here.
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any()))
+            .thenReturn(EarconPlayer.EarconCompletion.Queued)
+        renderer.render(VoiceResponse.Earcon(EarconId.ERROR), requestId = requestId)
+        assertTrue("accepted", true)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(300))
+        assertTrue("the hold must survive mere ADMISSION (queued, not yet sounding)", signal.hasOutputHold(requestId))
+        // The cue now sounds and is observed CONSUMED: this is the true output terminal.
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any()))
+            .thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(2_000))
+        assertFalse("the hold must release at observed consumption", signal.hasOutputHold(requestId))
+        // The release arms the countdown; advancing the looper past the timeout must expire the window.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(6_000))
+        assertFalse("the window must expire after the terminal release", signal.isActive.value)
+        renderer.release()
+    }
+
+    @Test
     fun `an earcon played outside a response is reported as emitted only once it SOUNDS`() = runTest {
         // The wake and listening cues take this path, and they are the two earcons that sound while the
         // microphone is open.

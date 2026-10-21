@@ -47,9 +47,13 @@ class FakeTtsEngine : TtsEngine {
         isWarm = true
     }
 
+    /** When set, [speak] throws this instead of completing — models a TTS failure mid-render. */
+    var speakFailure: Throwable? = null
+
     override suspend fun speak(text: String, language: String) {
         check(!released) { "Engine is released" }
         speakGate?.await()
+        speakFailure?.let { throw it }
         lastSpokenText = text
         lastSpokenLanguage = language
         speakReturned?.complete(Unit)

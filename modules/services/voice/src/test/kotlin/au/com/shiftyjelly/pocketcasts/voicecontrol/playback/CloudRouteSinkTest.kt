@@ -4344,9 +4344,15 @@ class CloudRouteSinkTest {
             turn.join()
             turnScope.cancel()
             driver.join()
-            // EXACTLY-ONCE RELEASE (reviewer 7a04a952): count the actual releases for this
-            // request ID, not infer from map absence.
-            assertEquals("exactly one hold release for this request", 1, graceSignal.releaseCountFor(testWireId))
+            // EXACTLY-ONCE RELEASE (reviewer 7a04a952): count request/owner-matched persisted
+            // release events from the diagnostic log. The diagnostics logger lowercases UUIDs.
+            val loweredId = testWireId.lowercase()
+            val releaseEvents = capture.lines().count { line ->
+                line.contains("event=Hold") &&
+                    (line.contains("reason=HoldReleased") || line.contains("reason=HoldCancelled")) &&
+                    line.contains("request_id=$loweredId")
+            }
+            assertEquals("exactly one hold release event for this request", 1, releaseEvents)
             assertFalse("no output hold remains after clear completes", graceSignal.hasOutputHold(testWireId))
             // Window expiry: the release arms the countdown; advancing the looper past the timeout
             // must expire the window.

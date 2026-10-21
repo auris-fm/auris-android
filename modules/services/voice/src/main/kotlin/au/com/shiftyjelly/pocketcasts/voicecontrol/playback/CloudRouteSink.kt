@@ -401,6 +401,9 @@ class CloudRouteSink internal constructor(
         // The language the spoken feedback is actually resolved in; set at the error/incomplete
         // arms and reported on the result so TTS always matches the text.
         var spokenLanguage: String? = null
+        // A server Error terminal (or an empty/unanswerable turn) is a REFUSAL: the turn did
+        // nothing for the user, so it must not earn recognition downstream.
+        var refusedTerminal = false
         val myJob = currentCoroutineContext()[Job]
         val myId = turnCounter.incrementAndGet()
         // AUTHORITY IS RESOLVED BEFORE ANY SUCCESSOR-OWNED STATE CHANGES. Registration replaces the
@@ -736,6 +739,7 @@ class CloudRouteSink internal constructor(
                                 // localized-or-earcon rule as the other spoken fallbacks: never
                                 // speak base-language prose on a device set to another language.
                                 val resolved = resolveLocalizedLine(KEY_CLOUD_INCOMPLETE_TURN, turn.sourceLanguage)
+                                refusedTerminal = true
                                 spokenLanguage = resolved.languageTag
                                 if (resolved.text.isBlank()) VoiceResponse.Earcon(EarconId.ERROR) else VoiceResponse.Spoken(resolved.text)
                             }
@@ -830,6 +834,7 @@ class CloudRouteSink internal constructor(
                             is VoiceResponse.Earcon -> "earcon_${(outcome as? VoiceResponse.Earcon)?.id?.name ?: "unknown"}"
                             else -> outcome.let { it::class.simpleName } ?: "unknown"
                         }
+                        refusedTerminal = true
                         Trace.record(Event(Kind.Turn, Reason.TurnFeedbackSelected, Source.Cloud, generation = origin, owner = myId, requestId = turn.requestId, feedbackKind = errorFeedbackKind))
                     }
                 }
@@ -918,6 +923,7 @@ class CloudRouteSink internal constructor(
             // could not be established, which is exactly the distinction the three-valued type exists to
             // carry out of the sink.
             action = outcomeOfTurn(actionOutcome),
+            succeeded = !refusedTerminal && endReason != Reason.TurnFailed,
         )
     }
 

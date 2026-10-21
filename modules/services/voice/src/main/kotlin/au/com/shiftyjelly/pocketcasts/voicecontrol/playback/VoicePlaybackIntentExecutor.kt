@@ -118,6 +118,11 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         @Volatile
         var feedbackLanguage: String? = null
             internal set
+
+        /** Whether the turn reached DONE; a refused/failed turn must not earn recognition. */
+        @Volatile
+        var turnSucceeded: Boolean = true
+            internal set
     }
 
     suspend fun execute(intent: VoiceIntent, outcome: TurnOutcome = TurnOutcome()): VoiceResponse {
@@ -197,6 +202,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                     val retried = cloudRouteSink.dispatchPrepared(alreadyPrepared, isRetry = intent.isRetry)
                     outcome.action = retried.action
                     outcome.feedbackLanguage = retried.feedbackLanguage
+                    outcome.turnSucceeded = retried.succeeded
                     return retried.feedback
                 }
                 val context = playbackContextProvider.current()
@@ -255,6 +261,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
                 // the feedback would treat an unknowable execution as if nothing had happened.
                 outcome.action = dispatched.action
                 outcome.feedbackLanguage = dispatched.feedbackLanguage
+                outcome.turnSucceeded = dispatched.succeeded
                 // Noted after the dispatch: this window now has a request, so a LATER one continues
                 // rather than beginning.
                 captured?.let { gracePeriodSignal.notePreparedRequest(it) }
@@ -292,7 +299,12 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         outcome: TurnOutcome,
     ): TurnCapability = when {
         intent !is VoiceIntent.CloudRoute -> TurnCapability.Recognized
+        // A REFUSED OR FAILED TURN DID NOTHING FOR THE USER (reviewer9489ae5a / spec f02f8dae): a
+        // limit refusal reaches an error terminal with no action, and the old code read only the
+        // action outcome — None fell into the recognized branch — so a refusal EXTENDED the window.
+        // The sink reports whether the turn reached DONE; anything else is unverified.
         outcome.action == CloudRouteActionOutcome.Unknown -> TurnCapability.Unverified
+        !outcome.turnSucceeded -> TurnCapability.Unverified
         else -> TurnCapability.Recognized
     }
 
@@ -608,6 +620,11 @@ data class CloudTurnResult(
      * a renderer falls back to English rather than guessing the utterance language.
      */
     val feedbackLanguage: String? = null,
+    /**
+     * Whether the turn reached its server DONE terminal without cancellation or a failed/error
+     * terminal. A refused or failed turn did nothing for the user and must not earn recognition.
+     */
+    val succeeded: Boolean = true,
 )
 
 /**

@@ -143,6 +143,12 @@ class AudioFeedbackRendererTest {
         renderer.render(VoiceResponse.Silent, requestId = "successor-B")
         // The supersession site itself must release — the body's catch/finally will never run.
         assertTrue("hold must not be orphaned by a never-started supersession", !signal.hasOutputHold("never-started-A"))
+        // NO-HANDOFF/DISPOSAL ordering (reviewer b4fc46a6): the disposal path must also refuse
+        // ownership rather than accept-then-leak — render on a disposed renderer reports false.
+        renderer.release()
+        val accepted = renderer.render(VoiceResponse.Spoken("after dispose"), requestId = "disposed-c")
+        assertFalse("a disposed renderer must refuse hold ownership (no handoff)", accepted)
+        assertFalse("disposed render must not leave an output hold", signal.hasOutputHold("disposed-c"))
         // A Tiny hold check for B's non-existence is trivial; release for cleanliness.
         renderer.release()
         pausedScope.cancel()

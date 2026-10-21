@@ -4211,6 +4211,12 @@ class CloudRouteSinkTest {
             val releaseDeadline = System.currentTimeMillis() + 8_000
             while (graceSignal.hasOutputHold(testWireId) && System.currentTimeMillis() < releaseDeadline) Thread.sleep(50)
             assertTrue("the failure terminal must have released the hold", !graceSignal.hasOutputHold(testWireId))
+            // STOPPED/CLEARED-BEFORE-RELEASE ORDERING (reviewer b4fc46a6): the failure drop record
+            // must be observable BEFORE the hold's release event in the persisted sequence.
+            val lines = capture.lines()
+            val failureIdx = lines.indexOfFirst { it.contains("submission_failed") && it.contains("render_failed") }
+            val holdReleaseIdx = lines.indexOfFirst { it.contains("event=Hold") && (it.contains("HoldReleased") || it.contains("HoldCancelled")) }
+            assertTrue("failure drop must be recorded before the hold release", failureIdx in 0 until holdReleaseIdx)
             // Wait out the window timeout AFTER the failure terminal: the release must have happened.
             val shadowLooper = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             var expiryTicks = 0
@@ -4322,6 +4328,13 @@ class CloudRouteSinkTest {
             val releaseDeadline = System.currentTimeMillis() + 8_000
             while (graceSignal.hasOutputHold(testWireId) && System.currentTimeMillis() < releaseDeadline) Thread.sleep(50)
             assertFalse("the cancellation terminal must have released the hold", graceSignal.hasOutputHold(testWireId))
+            // STOPPED/CLEARED-BEFORE-RELEASE ORDERING (reviewer b4fc46a6): the cancellation drop
+            // record precedes the hold's release event — output stop/clear happens in the job's
+            // cancellation unwind BEFORE the catch releases the hold.
+            val lines = capture.lines()
+            val cancelIdx = lines.indexOfFirst { it.contains("render_cancelled") }
+            val holdReleaseIdx = lines.indexOfFirst { it.contains("event=Hold") && (it.contains("HoldReleased") || it.contains("HoldCancelled")) }
+            assertTrue("cancellation drop must be recorded before the hold release", cancelIdx in 0 until holdReleaseIdx)
             // After the cancellation release, the window should expire on the looper.
             val shadowLooper = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
             var expiryTicks = 0
@@ -4332,6 +4345,116 @@ class CloudRouteSinkTest {
             assertFalse("the hold must release when render is cancelled before acceptance", graceSignal.isActive.value)
             assertFalse("no output hold remains after cancel-before-accept", graceSignal.hasOutputHold(testWireId))
             renderer.release()
+        } finally {
+            capture.close()
+        }
+    }
+
+    @Test
+    fun `supersession releases the predecessor hold only after its output terminal is recorded`() = kotlinx.coroutines.runBlocking {
+        val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
+        try {
+            val wireClient = CapturingWebSocketClient()
+            val graceSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 30_000L)
+            graceSignal.onWakeWordDetected()
+            val graceWindow = graceSignal.capturedGeneration()
+            val deps = TestDeps(
+                templateResolver = SpokenTemplateResolver(org.robolectric.RuntimeEnvironment.getApplication()),
+                gracePeriodSignal = graceSignal,
+                transportFactory = { _, _, observer ->
+                    au.com.shiftyjelly.pocketcasts.repositories.cloud.WebSocketCloudTurnTransport(
+                        "https://example.invalid",
+                        wireClient,
+                        observer,
+                    )
+                },
+            )
+            val sink = deps.sink()
+            val earconPlayer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer>()
+            val tts = au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine().apply {
+                speakGate = kotlinx.coroutines.CompletableDeferred()
+            }
+            val renderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
+                earconPlayer = earconPlayer,
+                ttsEngine = tts,
+                gracePeriodSignal = graceSignal,
+            )
+            renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+            val executor = VoicePlaybackIntentExecutor(
+                playbackSink = mock(), effectsSink = mock(), volumeSink = mock(), sleepSink = mock(),
+                chapterSink = mock(), bookmarkSink = mock(), cloudRouteSink = sink,
+                playbackContextProvider = object : PlaybackContextProvider {
+                    override fun current() = playbackContext
+                },
+                queueSink = mock(), playbackQuerySink = mock(), statsQuerySink = mock(),
+                gracePeriodSignal = graceSignal, playbackManager = mock(),
+            )
+            val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
+                audioFeedbackRenderer = renderer
+                voicePlaybackIntentExecutor = executor
+            }
+            val dispatched = CompletableDeferred<Unit>()
+            val driver = Thread {
+                try {
+                    val deadline = System.currentTimeMillis() + 5_000
+                    while (wireClient.listener == null && System.currentTimeMillis() < deadline) Thread.sleep(10)
+                    val upgrading = mock<okhttp3.Response>().also { whenever(it.code).thenReturn(101) }
+                    wireClient.listener!!.onOpen(wireClient.socket, upgrading)
+                    while (wireClient.sendCalls.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(10)
+                    wireClient.listener!!.onMessage(
+                        wireClient.socket,
+                        """{"type":"error","code":"limit_exceeded","message":""}""",
+                    )
+                } catch (t: Throwable) {
+                    t.printStackTrace()
+                }
+            }
+            val turnScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+            val turn = turnScope.launch {
+                try {
+                    kotlinx.coroutines.withTimeout(8_000) {
+                        service.renderWithFailureHandling(
+                            VoiceIntent.CloudRoute(
+                                request = "question",
+                                tier = VoiceIntent.CloudTier.Premium,
+                                logicalRequestId = testWireId,
+                                windowGeneration = graceWindow,
+                                sourceLanguage = "zh",
+                            ),
+                        )
+                    }
+                    dispatched.complete(Unit)
+                } catch (t: Throwable) {
+                    dispatched.completeExceptionally(t)
+                }
+            }
+            driver.start()
+            val startedDeadline = System.currentTimeMillis() + 5_000
+            while (!graceSignal.hasOutputHold(testWireId) && System.currentTimeMillis() < startedDeadline) Thread.sleep(20)
+            assertTrue("hold must transfer and stay pending while output is in flight", graceSignal.hasOutputHold(testWireId))
+
+            // A SUCCESSOR render replaces the in-flight predecessor (real renderer supersession).
+            renderer.render(VoiceResponse.Silent, requestId = "successor-supersede")
+            val releasedDeadline = System.currentTimeMillis() + 8_000
+            while (graceSignal.hasOutputHold(testWireId) && System.currentTimeMillis() < releasedDeadline) Thread.sleep(20)
+            assertFalse("supersession must release the predecessor's hold", graceSignal.hasOutputHold(testWireId))
+
+            // STOPPED/CLEARED-BEFORE-RELEASE ORDERING (reviewer b4fc46a6): the predecessor's
+            // superseded/cancelled drop record must appear BEFORE the hold release event.
+            val lines = capture.lines()
+            val supersededIdx = lines.indexOfFirst {
+                it.contains("superseded") || it.contains("render_cancelled")
+            }
+            val holdReleaseIdx = lines.indexOfFirst {
+                it.contains("event=Hold") && (it.contains("HoldReleased") || it.contains("HoldCancelled"))
+            }
+            assertTrue("supersession drop must be recorded before the hold release", supersededIdx in 0 until holdReleaseIdx)
+            // The successor must not be blocked: the gate completes and the window can expire.
+            tts.speakGate?.complete(Unit)
+            renderer.release()
+            turn.join()
+            turnScope.cancel()
+            driver.join()
         } finally {
             capture.close()
         }

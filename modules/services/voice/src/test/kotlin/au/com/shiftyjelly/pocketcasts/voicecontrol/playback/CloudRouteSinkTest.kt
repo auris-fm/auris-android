@@ -4116,6 +4116,248 @@ class CloudRouteSinkTest {
         }
     }
 
+    @Test
+    fun `a TTS failure mid-render releases the transferred hold exactly once`() = kotlinx.coroutines.runBlocking {
+        val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
+        try {
+            val wireClient = CapturingWebSocketClient()
+            val graceSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 5_000L)
+            graceSignal.onWakeWordDetected()
+            val graceWindow = graceSignal.capturedGeneration()
+            val deps = TestDeps(
+                templateResolver = SpokenTemplateResolver(org.robolectric.RuntimeEnvironment.getApplication()),
+                gracePeriodSignal = graceSignal,
+                transportFactory = { _, _, observer ->
+                    au.com.shiftyjelly.pocketcasts.repositories.cloud.WebSocketCloudTurnTransport(
+                        "https://example.invalid",
+                        wireClient,
+                        observer,
+                    )
+                },
+            )
+            val sink = deps.sink()
+            val earconPlayer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer>()
+            // GATED + FAILING backend: speak suspends until the gate completes, then throws — so the
+            // control proves the hold survives in-flight render AND releases at the failure terminal.
+            val tts = au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine().apply {
+                speakGate = kotlinx.coroutines.CompletableDeferred()
+                speakFailure = java.lang.RuntimeException("tts engine fault")
+            }
+            val renderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
+                earconPlayer = earconPlayer,
+                ttsEngine = tts,
+                gracePeriodSignal = graceSignal,
+            )
+            renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+            val executor = VoicePlaybackIntentExecutor(
+                playbackSink = mock(), effectsSink = mock(), volumeSink = mock(), sleepSink = mock(),
+                chapterSink = mock(), bookmarkSink = mock(), cloudRouteSink = sink,
+                playbackContextProvider = object : PlaybackContextProvider {
+                    override fun current() = playbackContext
+                },
+                queueSink = mock(), playbackQuerySink = mock(), statsQuerySink = mock(),
+                gracePeriodSignal = graceSignal, playbackManager = mock(),
+            )
+            val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
+                audioFeedbackRenderer = renderer
+                voicePlaybackIntentExecutor = executor
+            }
+            val dispatched = CompletableDeferred<Unit>()
+            val driver = Thread {
+                try {
+                    val deadline = System.currentTimeMillis() + 5_000
+                    while (wireClient.listener == null && System.currentTimeMillis() < deadline) Thread.sleep(10)
+                    val upgrading = mock<okhttp3.Response>().also { whenever(it.code).thenReturn(101) }
+                    wireClient.listener!!.onOpen(wireClient.socket, upgrading)
+                    while (wireClient.sendCalls.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(10)
+                    wireClient.listener!!.onMessage(
+                        wireClient.socket,
+                        """{"type":"error","code":"limit_exceeded","message":""}""",
+                    )
+                } catch (t: Throwable) {
+                    t.printStackTrace()
+                }
+            }
+            val turnScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+            val turn = turnScope.launch {
+                try {
+                    kotlinx.coroutines.withTimeout(8_000) {
+                        service.renderWithFailureHandling(
+                            VoiceIntent.CloudRoute(
+                                request = "question",
+                                tier = VoiceIntent.CloudTier.Premium,
+                                logicalRequestId = testWireId,
+                                windowGeneration = graceWindow,
+                                sourceLanguage = "zh",
+                            ),
+                        )
+                    }
+                    dispatched.complete(Unit)
+                } catch (t: Throwable) {
+                    dispatched.completeExceptionally(t)
+                }
+            }
+            driver.start()
+            val done = runCatching { kotlinx.coroutines.withTimeout(15_000) { dispatched.await() } }.getOrNull()
+            assertNotNull("service dispatch must complete even when TTS fails", done)
+            turn.join()
+            turnScope.cancel()
+            driver.join()
+
+            // The hold is pending while TTS is suspended (in flight).
+            assertTrue("hold must be pending while render is in flight", graceSignal.hasOutputHold(testWireId))
+            // Let the gated speak proceed into its configured failure.
+            tts.speakGate?.complete(Unit)
+            val releaseDeadline = System.currentTimeMillis() + 8_000
+            while (graceSignal.hasOutputHold(testWireId) && System.currentTimeMillis() < releaseDeadline) Thread.sleep(50)
+            assertTrue("the failure terminal must have released the hold", !graceSignal.hasOutputHold(testWireId))
+            // Wait out the window timeout AFTER the failure terminal: the release must have happened.
+            val shadowLooper = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            var expiryTicks = 0
+            while (graceSignal.isActive.value && expiryTicks < 50) {
+                shadowLooper.runToEndOfTasks()
+                expiryTicks++
+            }
+            assertFalse("the hold must release at the TTS failure terminal", graceSignal.isActive.value)
+            assertFalse("exactly-once: no output hold remains after failure", graceSignal.hasOutputHold(testWireId))
+            renderer.release()
+        } finally {
+            capture.close()
+        }
+    }
+
+    @Test
+    fun `a cancelled render before acceptance releases the transferred hold via the service`() = kotlinx.coroutines.runBlocking {
+        val capture = au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture()
+        try {
+            val wireClient = CapturingWebSocketClient()
+            val graceSignal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 5_000L)
+            graceSignal.onWakeWordDetected()
+            val graceWindow = graceSignal.capturedGeneration()
+            val deps = TestDeps(
+                templateResolver = SpokenTemplateResolver(org.robolectric.RuntimeEnvironment.getApplication()),
+                gracePeriodSignal = graceSignal,
+                transportFactory = { _, _, observer ->
+                    au.com.shiftyjelly.pocketcasts.repositories.cloud.WebSocketCloudTurnTransport(
+                        "https://example.invalid",
+                        wireClient,
+                        observer,
+                    )
+                },
+            )
+            val sink = deps.sink()
+            val earconPlayer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.EarconPlayer>()
+            // PERMANENTLY GATED backend: speak never returns, so cancelling the render scope models
+            // a session-stop or supersession that arrives BEFORE the renderer accepts ownership.
+            val tts = au.com.shiftyjelly.pocketcasts.voicecontrol.tts.FakeTtsEngine().apply {
+                speakGate = kotlinx.coroutines.CompletableDeferred()
+            }
+            val renderer = au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer(
+                earconPlayer = earconPlayer,
+                ttsEngine = tts,
+                gracePeriodSignal = graceSignal,
+            )
+            renderer.scopeDispatcherForTest = kotlinx.coroutines.Dispatchers.Default
+            val executor = VoicePlaybackIntentExecutor(
+                playbackSink = mock(), effectsSink = mock(), volumeSink = mock(), sleepSink = mock(),
+                chapterSink = mock(), bookmarkSink = mock(), cloudRouteSink = sink,
+                playbackContextProvider = object : PlaybackContextProvider {
+                    override fun current() = playbackContext
+                },
+                queueSink = mock(), playbackQuerySink = mock(), statsQuerySink = mock(),
+                gracePeriodSignal = graceSignal, playbackManager = mock(),
+            )
+            val service = au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlService().apply {
+                audioFeedbackRenderer = renderer
+                voicePlaybackIntentExecutor = executor
+            }
+            val dispatched = CompletableDeferred<Unit>()
+            val driver = Thread {
+                try {
+                    val deadline = System.currentTimeMillis() + 5_000
+                    while (wireClient.listener == null && System.currentTimeMillis() < deadline) Thread.sleep(10)
+                    val upgrading = mock<okhttp3.Response>().also { whenever(it.code).thenReturn(101) }
+                    wireClient.listener!!.onOpen(wireClient.socket, upgrading)
+                    while (wireClient.sendCalls.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(10)
+                    wireClient.listener!!.onMessage(
+                        wireClient.socket,
+                        """{"type":"error","code":"limit_exceeded","message":""}""",
+                    )
+                } catch (t: Throwable) {
+                    t.printStackTrace()
+                }
+            }
+            val turnScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+            val turn = turnScope.launch {
+                try {
+                    kotlinx.coroutines.withTimeout(8_000) {
+                        service.renderWithFailureHandling(
+                            VoiceIntent.CloudRoute(
+                                request = "question",
+                                tier = VoiceIntent.CloudTier.Premium,
+                                logicalRequestId = testWireId,
+                                windowGeneration = graceWindow,
+                                sourceLanguage = "zh",
+                            ),
+                        )
+                    }
+                    dispatched.complete(Unit)
+                } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                    // Expected: we cancel below.
+                    dispatched.complete(Unit)
+                } catch (t: Throwable) {
+                    dispatched.completeExceptionally(t)
+                }
+            }
+            driver.start()
+            // Wait for the render to start (hold transferred, TTS suspended).
+            val startedDeadline = System.currentTimeMillis() + 5_000
+            while (!graceSignal.hasOutputHold(testWireId) && System.currentTimeMillis() < startedDeadline) Thread.sleep(20)
+            assertTrue("hold must transfer before cancellation", graceSignal.hasOutputHold(testWireId))
+            // SESSION TEARDOWN mid-render (reviewer 664f82d0's cancel case): release() cancels the
+            // in-flight invocation, whose catch releases the hold at its actual terminal.
+            renderer.release()
+            turn.join()
+            driver.join()
+            val releaseDeadline = System.currentTimeMillis() + 8_000
+            while (graceSignal.hasOutputHold(testWireId) && System.currentTimeMillis() < releaseDeadline) Thread.sleep(50)
+            assertFalse("the cancellation terminal must have released the hold", graceSignal.hasOutputHold(testWireId))
+            // After the cancellation release, the window should expire on the looper.
+            val shadowLooper = org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper())
+            var expiryTicks = 0
+            while (graceSignal.isActive.value && expiryTicks < 50) {
+                shadowLooper.runToEndOfTasks()
+                expiryTicks++
+            }
+            assertFalse("the hold must release when render is cancelled before acceptance", graceSignal.isActive.value)
+            assertFalse("no output hold remains after cancel-before-accept", graceSignal.hasOutputHold(testWireId))
+            renderer.release()
+        } finally {
+            capture.close()
+        }
+    }
+
+    @Test
+    fun `local playback failure derives succeeded false even with Done Completed`() = runTest {
+        // Drain reporting Unconsumed is the sink's PRODUCTION local-failure path (the head never
+        // reached the submitted frames), so localPlaybackFailed is set through real wiring — not a
+        // test hook.
+        val failPlayer = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer>()
+        whenever(failPlayer.audioWritten).thenReturn(true)
+        whenever(failPlayer.drainAndAwaitCompletion()).thenReturn(au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer.Completion.Unconsumed)
+        val deps2 = TestDeps(
+            audioPlayer = failPlayer,
+            events = flowOf(
+                CloudRouteEvent.Connected("pcm_s16le@24k"),
+                CloudRouteEvent.AudioFrame("pcm_s16le@24k", byteArrayOf(1, 2)),
+                CloudRouteEvent.Done(3, 4, CloudRouteEvent.Outcome.Completed),
+            ),
+        )
+        val result2 = deps2.sink().routeToCloud("question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId)
+        assertEquals("local playback failure must be reported as an error earcon", VoiceResponse.Earcon(EarconId.ERROR), result2.feedback)
+        assertFalse("local playback failure must derive succeeded=false", result2.succeeded)
+    }
+
     /** Deadline-bounded persisted-line lookup by reason and request ID, with an optional extra token. */
     private suspend fun awaitCaptureLine(
         capture: au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture,

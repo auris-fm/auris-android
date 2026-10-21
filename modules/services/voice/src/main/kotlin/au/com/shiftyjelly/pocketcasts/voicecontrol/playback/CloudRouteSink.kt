@@ -955,7 +955,10 @@ class CloudRouteSink internal constructor(
             // could not be established, which is exactly the distinction the three-valued type exists to
             // carry out of the sink.
             action = outcomeOfTurn(actionOutcome),
-            succeeded = sawDoneCompleted && !refusedTerminal && endReason == Reason.TurnEnded,
+            // A LOCAL PLAYBACK FAILURE IS NOT SUCCESS (reviewer 664f82d0): the server may have
+            // completed its turn, but the user did not hear it. Recognition must require actual
+            // delivery, not just a server-side terminal.
+            succeeded = sawDoneCompleted && !refusedTerminal && !localPlaybackFailed && endReason == Reason.TurnEnded,
         )
     }
 

@@ -244,8 +244,10 @@ class ContributionStore(
     }
 
     /** Budget test against durable entries PLUS live reservations (both consume the same budget). */
-    private fun roomLocked(projected: Long): Boolean = ownerRecordsLocked() < limits.maxQueueRecords &&
-        ownerBytesLocked() + projected <= limits.maxQueueBytes
+    private fun roomLocked(projected: Long): Boolean {
+        return ownerRecordsLocked() < limits.maxQueueRecords &&
+            ownerBytesLocked() + projected <= limits.maxQueueBytes
+    }
 
     /** Playback duration of [sampleCount] samples at the specced 16 kHz mono capture rate. */
     private fun durationMs(sampleCount: Long): Long = sampleCount * 1000L / SAMPLE_RATE_HZ
@@ -569,7 +571,11 @@ class ContributionStore(
         synchronized(lock) {
             if (!recovered) reloadUnownedFromDisk()
             // Entries whose ready marker vanished (purged elsewhere) leave the index immediately.
-            for ((id, e) in memoryEntries.toMap()) if (id !in preparedIds && !File(dir, "$id$SUFFIX_READY").exists()) deleteLocked(e)
+            for ((id, e) in memoryEntries.toMap()) {
+                if (id !in preparedIds && !File(dir, "$id$SUFFIX_READY").exists()) {
+                    deleteLocked(e)
+                }
+            }
             val expiredIds = memoryEntries.values
                 .filter { (now - it.createdAtMs) / 1000L > limits.maxQueueAgeSeconds }
                 .map { it.captureId }
@@ -732,7 +738,20 @@ class ContributionStore(
         files.filter { f ->
             val suffix = listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST).firstOrNull { f.name.endsWith(it) }
             suffix != null && f.name.removeSuffix(suffix) !in readyIdsBefore
-        }.forEach { it.delete() }
+        }.forEach {
+            // A debris sweep that fails leaves bytes on disk. Swallowing that would make the residue
+            // invisible to the accounting below, so it is charged as an unowned capture instead.
+            if (!it.delete() && it.exists()) {
+                val suffix = listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST).first { sfx -> it.name.endsWith(sfx) }
+                val id = it.name.removeSuffix(suffix)
+                claimOwnedLocked(
+                    id,
+                    if (suffix == SUFFIX_WAV) it.length().coerceAtLeast(0) else 0L,
+                    if (suffix == SUFFIX_META) it.length().coerceAtLeast(0).toInt() else 0,
+                    ready = false,
+                )
+            }
+        }
         val readyIds = readyIdsBefore.toList()
         val keep = mutableListOf<Entry>()
         // Entries whose publication could not be confirmed durable. Kept out of the ready set, but NOT
@@ -744,11 +763,24 @@ class ContributionStore(
             val attemptsFile = File(dir, "$id$SUFFIX_ATTEMPTS")
             val entry = validate(id, wav, meta, attemptsFile)
             if (entry == null) {
-                wav.delete()
-                meta.delete()
-                attemptsFile.delete()
-                File(dir, "$id$SUFFIX_READY").delete()
-                File(dir, "$id$SUFFIX_DIGEST").delete()
+                // Deleting an invalid entry can FAIL. The previous version dropped the files' existence
+                // on the floor and only bumped a counter, so any bytes that survived the delete became
+                // unowned: still on disk, still occupying the user's storage, counted by nothing.
+                val cleaned = listOf(
+                    wav,
+                    meta,
+                    attemptsFile,
+                    File(dir, "$id$SUFFIX_READY"),
+                    File(dir, "$id$SUFFIX_DIGEST"),
+                ).all { !it.exists() || it.delete() || !it.exists() }
+                if (!cleaned) {
+                    claimOwnedLocked(
+                        id,
+                        wav.length().coerceAtLeast(0),
+                        meta.length().coerceAtLeast(0).toInt(),
+                        ready = false,
+                    )
+                }
                 dropCounterOnly(TerminalReason.INVALID_ON_RECOVERY)
             } else {
                 // STRUCTURAL validation is not durability confirmation. An entry may have been left by
@@ -943,19 +975,43 @@ class ContributionStore(
     }
 
     /** Delete an entry's files; MUST be called while holding [lock]. */
+    // THE single owner transition. Every path that makes a capture owned, ready, or gone runs through
+    // here, so a caller cannot silently omit the accounting step (reviewer 4537e0fe). Three earlier
+    // rounds each found a different caller that had: a fresh store's withheld entries, expiry/deletion,
+    // and disk reload. One transition, one place to be correct.
+    private fun claimOwnedLocked(captureId: String, audioBytes: Long, metadataBytes: Int, ready: Boolean) {
+        val existing = ownedCharges[captureId]
+        if (existing == null) {
+            ownedCharges[captureId] = OwnedCharge(audioBytes, metadataBytes, ready)
+        } else {
+            existing.ready = ready
+        }
+    }
+
+    // Discard an owned capture and RELEASE ITS CHARGE ONLY IF THE BYTES ARE ACTUALLY GONE.
     private fun deleteLocked(e: Entry) {
         val id = e.captureId
-        File(dir, "$id$SUFFIX_WAV").delete()
-        File(dir, "$id$SUFFIX_META").delete()
-        File(dir, "$id$SUFFIX_READY").delete()
-        File(dir, "$id$SUFFIX_ATTEMPTS").delete()
-        File(dir, "$id$SUFFIX_CREATED").delete()
-        File(dir, "$id$SUFFIX_DIGEST").delete()
+        // Every delete result is checked. Ignoring them and dropping the charge would leave the files on
+        // disk while accounting forgot them: the user's audio still occupies the queue but no longer
+        // counts against it, which is worse than either failing to delete or failing to release.
+        val gone = listOf(
+            SUFFIX_WAV,
+            SUFFIX_META,
+            SUFFIX_READY,
+            SUFFIX_ATTEMPTS,
+            SUFFIX_CREATED,
+            SUFFIX_DIGEST,
+        ).all { suffix ->
+            val file = File(dir, "$id$suffix")
+            !file.exists() || file.delete() || !file.exists()
+        }
         memoryEntries.remove(id)
-        // The bytes are GONE, so the charge must go with them. Leaving it behind makes a deleted entry
-        // consume capacity forever: after enough expiries the queue reports itself full with nothing in
-        // it. Charging and releasing must be symmetric, or the bound drifts permanently upward.
-        ownedCharges.remove(id)
+        if (gone) {
+            ownedCharges.remove(id)
+        } else {
+            // Residual bytes stay OWNED and CHARGED; the capture is not ready, and a later cleanup retries.
+            ownedCharges[id]?.ready = false
+        }
     }
 
     private fun dropCounterOnly(reason: TerminalReason) {
@@ -970,13 +1026,45 @@ class ContributionStore(
         // Under lock: adopt on-disk entries this instance did not prepare (restart simulation);
         // never resurrect ids it explicitly dropped/purged.
         val files = dir.listFiles() ?: return
-        for (f in files.filter { it.name.endsWith(SUFFIX_READY) }) {
-            val id = f.name.removeSuffix(SUFFIX_READY)
+        // Keyed off AUDIO, not the ready marker. A partially-failed deletion can remove the marker while
+        // leaving the audio behind; keying off the marker made those residual bytes invisible to a
+        // restarted store, so they occupied the queue without being charged anywhere. Anything holding
+        // audio on disk is accounted for, ready or not.
+        for (f in files.filter { it.name.endsWith(SUFFIX_WAV) }) {
+            val id = f.name.removeSuffix(SUFFIX_WAV)
             if (id in preparedIds || memoryEntries.containsKey(id)) continue
+            val ready = File(dir, "$id$SUFFIX_READY").exists()
             val wav = File(dir, "$id$SUFFIX_WAV")
             val meta = File(dir, "$id$SUFFIX_META")
             val attemptsFile = File(dir, "$id$SUFFIX_ATTEMPTS")
-            validate(id, wav, meta, attemptsFile)?.let { memoryEntries[id] = it }
+            if (!ready) {
+                // Residual from an incomplete deletion: charged and NOT ready, so it is never served but
+                // still bounds capacity until a later cleanup removes the bytes.
+                claimOwnedLocked(
+                    id,
+                    wav.length().coerceAtLeast(0),
+                    meta.length().coerceAtLeast(0).toInt(),
+                    ready = false,
+                )
+                continue
+            }
+            val adopted = validate(id, wav, meta, attemptsFile)
+            if (adopted != null) {
+                memoryEntries[id] = adopted
+                // Adopting from disk is a production entry path: these bytes occupy the queue, so they
+                // must be charged here exactly as a publication charges them.
+                claimOwnedLocked(id, adopted.audioBytes, adopted.metadataBytes, ready = true)
+            } else if (wav.exists() || meta.exists()) {
+                // An entry that FAILED validation but still holds bytes on disk. Dropping it silently
+                // (the previous behaviour) left those bytes occupying the queue uncharged, which is how
+                // a failed deletion turned into invisible garbage. Charged, not ready, not served.
+                claimOwnedLocked(
+                    id,
+                    wav.length().coerceAtLeast(0),
+                    meta.length().coerceAtLeast(0).toInt(),
+                    ready = false,
+                )
+            }
         }
     }
 

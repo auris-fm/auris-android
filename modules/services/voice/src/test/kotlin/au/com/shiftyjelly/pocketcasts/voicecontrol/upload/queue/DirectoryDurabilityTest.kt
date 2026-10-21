@@ -563,6 +563,102 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `a store that ADOPTS entries from disk charges them`() {
+        // reloadUnownedFromDisk is a production entry path: an instance that did not prepare an entry can
+        // still adopt it from disk. Adopting without charging means those bytes occupy the queue while
+        // accounting says the queue is empty, so new work is admitted on top of them.
+        val root = tmp.newFolder("queue-reload-charge")
+        val id = java.util.UUID.randomUUID().toString()
+        ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id))
+
+        val probeMeta = meta(java.util.UUID.randomUUID().toString())
+        val probeSamples = 256L
+        val charge = ContributionStore(root, limits()).let { sizing ->
+            sizing.recover().single().let { it.audioBytes + it.metadataBytes }
+        }
+        val probeBytes = ContributionStore(root, limits()).projectedBytesFor(probeSamples, probeMeta.size)
+        assertTrue("precondition: probe is smaller than the stored entry", probeBytes < charge)
+
+        // A store that has NEVER recovered adopts from disk on demand via the expire path.
+        val adopter = ContributionStore(root, limits().copy(maxQueueBytes = charge))
+        adopter.expireOlderThan() // triggers reloadUnownedFromDisk; nothing is old enough to expire
+        assertTrue(
+            "a store that adopted from disk must charge what it adopted: a $probeBytes-byte probe was " +
+                "admitted over a $charge-byte budget",
+            adopter.admit(sampleCount = probeSamples, metadataBytes = probeMeta.size) == null,
+        )
+    }
+
+    @Test
+    fun `a failed deletion keeps the bytes OWNED and CHARGED until cleanup succeeds`() {
+        // deleteLocked ignored every File.delete() result and then dropped the charge, so a deletion that
+        // did not actually remove the bytes made them invisible to accounting: the audio still occupies
+        // the queue but no longer counts against it.
+        val root = tmp.newFolder("queue-failed-delete")
+        val id = java.util.UUID.randomUUID().toString()
+        var now = 1_000_000L
+        val probeMeta = meta(java.util.UUID.randomUUID().toString())
+        val probeSamples = 256L
+        val probeBytes = ContributionStore(root, limits()).projectedBytesFor(probeSamples, probeMeta.size)
+        // TIGHT budget on the instance that will ATTEMPT the deletion, so its own accounting decides.
+        val store = ContributionStore(
+            root,
+            limits().copy(maxQueueAgeSeconds = 60, maxQueueBytes = probeBytes + 4_264L),
+            clock = { now },
+        )
+        val deletingStore = store
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        val charge = store.readyEntries().single().let { it.audioBytes + it.metadataBytes }
+
+        // Make the audio file undeletable by replacing it with a non-empty DIRECTORY of the same name:
+        // File.delete() then fails on every platform without needing permission tricks.
+        val wav = File(root, "contributions/$id.recording.wav")
+        val audio = wav.readBytes()
+        wav.delete()
+        wav.mkdirs()
+        File(wav, "held").writeBytes(audio)
+        assertTrue("precondition: the audio name is now a non-empty directory", wav.isDirectory)
+
+        now += 120_000L
+        val expired = store.expireOlderThan()
+        assertEquals("the entry still expires from the index", listOf(id), expired)
+
+        // Residual bytes exist, so they must remain charged ON THE INSTANCE THAT ATTEMPTED THE DELETE.
+        // A fresh store cannot see another instance's in-memory charge, so asking a new store here would
+        // test nothing (and did, in the first version of this control).
+        assertTrue("precondition: charge ($charge) exceeds probe ($probeBytes)", charge > probeBytes)
+        // BOTH views must refuse. The deleting instance holds the charge in memory; a restarted store
+        // must re-derive it from the bytes still on disk. An earlier version checked only the restarted
+        // store, so removing the in-memory retention entirely went undetected.
+        val tight = ContributionStore(root, limits().copy(maxQueueBytes = probeBytes), clock = { now })
+        tight.recover()
+        assertTrue(
+            "residual bytes from a FAILED deletion must stay charged on a RESTARTED store: a " +
+                "$probeBytes-byte probe was admitted while $charge bytes of audio remained on disk",
+            tight.admit(sampleCount = probeSamples, metadataBytes = probeMeta.size) == null,
+        )
+
+        // The instance that ATTEMPTED the delete holds the residue as an in-memory charge, and a
+        // restarted store re-derives it from disk - so both look identical whether or not the in-memory
+        // retention exists. The only way to observe the in-memory retention is to have THAT instance be
+        // the one under a tight budget, which the construction below arranges.
+        assertTrue(
+            "the deleting instance must keep the charge: bytes that are still on disk became unowned",
+            deletingStore.admit(sampleCount = probeSamples, metadataBytes = probeMeta.size) == null,
+        )
+
+        // Cleanup then succeeds and capacity is released.
+        File(wav, "held").delete()
+        wav.delete()
+        assertTrue("precondition: the audio is finally gone", !wav.exists())
+        val after = ContributionStore(root, limits().copy(maxQueueBytes = probeBytes))
+        assertTrue(
+            "after a successful retry the capacity must be released",
+            after.admit(sampleCount = probeSamples, metadataBytes = probeMeta.size) != null,
+        )
+    }
+
+    @Test
     fun `sidecars are file-synced before the ready marker, not just written`() {
         // Directory fsync does not persist the CONTENTS of created.at/attempts: a force on the
         // directory makes the NAME durable, so after a crash the marker can persist while the sidecar

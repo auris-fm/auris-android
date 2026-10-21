@@ -1115,6 +1115,9 @@ class ContributionStore(
                 if (gone) {
                     disqualificationMarker(id).delete()
                     ownedCharges.remove(id)
+                    // A CONFIRMED removal clears the unknown state too: the capture is gone, so it no
+                    // longer holds accounting admission must refuse over (reviewer c66fda06).
+                    unmeasuredIds -= id
                 } else {
                     chargeRetainedLocked(id, ready = false)
                 }
@@ -1156,6 +1159,7 @@ class ContributionStore(
             // Only now is the disposal itself complete; the marker goes last so intent survives a crash.
             disqualificationMarker(id).delete()
             ownedCharges.remove(id)
+            unmeasuredIds -= id
         } else {
             // Residual bytes stay OWNED and CHARGED; the capture is not ready, and a later cleanup retries.
             chargeRetainedLocked(id, ready = false)
@@ -1178,47 +1182,74 @@ class ContributionStore(
     //
     // Any inability to account - overflow, unreadable directory, an entry that disappears mid-walk, a
     // negative length, or a non-regular file type - THROWS rather than substituting a number.
-    private fun measuredPathBytes(path: File, budget: MeasurementBudget, depth: Int = 0): Long = when {
-        !path.exists() -> 0L
+    // Measured size of one path. The FIRST act is a no-follow stat, never `exists()`: `exists()` swallows
+    // the failure that distinguishes "absent" from "unreadable" and returns false for both, so it would
+    // turn an unreadable path - or a dangling symlink - into a measured zero (reviewer c66fda06).
+    //
+    // [optional] says whether a genuinely missing path means zero. Only a TOP-LEVEL artifact the capture
+    // may simply never have written is optional; a child that was already enumerated by its parent is not,
+    // because it was seen and then could not be read.
+    private fun measuredPathBytes(
+        path: File,
+        budget: MeasurementBudget,
+        depth: Int = 0,
+        optional: Boolean = true,
+    ): Long {
+        val attributes = pathAttributes(path, optional)
+            ?: return 0L // genuinely absent, and absence is allowed to mean zero here
+        return when {
+            attributes.isRegularFile -> attributes.size()
 
-        // genuinely absent: the only case where zero is a measurement
-        else -> {
-            val attributes = pathAttributes(path)
-            when {
-                attributes.isRegularFile -> attributes.size()
+            // Depth is threaded through: passing 0 on every call made the bound unreachable.
+            attributes.isDirectory -> measuredDirectoryBytes(path, depth = depth, budget = budget)
 
-                // DEPTH IS THREADED THROUGH. Passing 0 here reset it on every call, which made the bound
-                // unreachable: the walk descended the whole tree and the "limit" never fired.
-                attributes.isDirectory -> measuredDirectoryBytes(path, depth = depth, budget = budget)
-
-                // Symlinks and devices are rejected, not followed: following them would let a capture's
-                // apparent footprint point anywhere on the filesystem.
-                else -> throw MeasurementError("unsupported entry type: $path")
-            }
+            // Symlinks and devices are rejected, not followed: following them would let one capture's
+            // apparent footprint point anywhere on the filesystem.
+            else -> throw MeasurementError("unsupported entry type: $path")
         }
     }
 
-    private fun pathAttributes(path: File): java.nio.file.attribute.BasicFileAttributes = try {
+    // no-follow stat. Missing is reported as null ONLY when the caller says the path is optional; every
+    // other failure (permissions, I/O, a dangling symlink) is MeasurementError, i.e. unknown accounting.
+    private fun pathAttributes(path: File, optional: Boolean): java.nio.file.attribute.BasicFileAttributes? = try {
         java.nio.file.Files.readAttributes(
             path.toPath(),
             java.nio.file.attribute.BasicFileAttributes::class.java,
             java.nio.file.LinkOption.NOFOLLOW_LINKS,
         )
+    } catch (missing: java.nio.file.NoSuchFileException) {
+        if (optional) {
+            null
+        } else {
+            // The parent listed this name and it is gone now: that is a failure to account, not an absence.
+            throw MeasurementError("enumerated child vanished: $path")
+        }
     } catch (failure: java.io.IOException) {
-        // A vanished file and an unreadable one land here. Neither may be charged as zero.
         throw MeasurementError("unreadable path $path: ${failure.message}")
     }
 
     private fun measuredDirectoryBytes(directory: File, depth: Int, budget: MeasurementBudget): Long {
         if (depth >= MEASURE_MAX_DEPTH) throw MeasurementError("subtree deeper than $MEASURE_MAX_DEPTH")
-        // list() streams names; listFiles() would allocate the array before any bound could apply.
-        val names = directory.list() ?: throw MeasurementError("unreadable directory $directory")
-        var total = 0L
-        for (name in names) {
-            if (!budget.consume()) throw MeasurementError("traversal exceeds $MEASURE_MAX_ENTRIES entries")
-            total += measuredPathBytes(File(directory, name), budget, depth + 1)
+        // A real lazy stream. `list()` and `listFiles()` both allocate the WHOLE directory eagerly, so a
+        // budget checked after either has already paid the cost the bound exists to prevent.
+        val children = try {
+            java.nio.file.Files.newDirectoryStream(directory.toPath())
+        } catch (failure: java.io.IOException) {
+            throw MeasurementError("unreadable directory $directory: ${failure.message}")
         }
-        return total
+        children.use { stream ->
+            var total = 0L
+            for (child in stream) {
+                if (!budget.consume()) throw MeasurementError("traversal exceeds $MEASURE_MAX_ENTRIES entries")
+                total += measuredPathBytes(
+                    child.toFile(),
+                    budget,
+                    depth + 1,
+                    optional = false, // enumerated: it existed a moment ago
+                )
+            }
+            return total
+        }
     }
 
     // ONE shared budget for a whole measurement, so the bound is on the traversal and not on each call.
@@ -1230,9 +1261,11 @@ class ContributionStore(
         // Deliberately not wrapped in runCatching: a failure must reach chargeRetainedLocked, which marks
         // the capture unmeasured and refuses admission. Substituting a guess here would hide the failure.
         val budget = MeasurementBudget(MEASURE_MAX_ENTRIES)
-        val audio = measuredPathBytes(File(dir, "$id$SUFFIX_WAV"), budget)
-        val rest = SIDECAR_SUFFIXES.sumOf { measuredPathBytes(File(dir, "$id$it"), budget) } +
-            measuredPathBytes(disqualificationMarker(id), budget)
+        // Top-level artifacts: a capture may legitimately never have written any one of them, so absence
+        // is a real zero here. Everything below them is enumerated and must account for itself.
+        val audio = measuredPathBytes(File(dir, "$id$SUFFIX_WAV"), budget, optional = true)
+        val rest = SIDECAR_SUFFIXES.sumOf { measuredPathBytes(File(dir, "$id$it"), budget, optional = true) } +
+            measuredPathBytes(disqualificationMarker(id), budget, optional = true)
         return audio to rest.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
     }
 
@@ -1308,11 +1341,15 @@ class ContributionStore(
             }
             val adopted = validate(id, wav, meta, attemptsFile)
             if (adopted != null && confirmDurableLocked(id)) {
-                memoryEntries[id] = adopted
-                // Adopting from disk is a production entry path: these bytes occupy the queue, so they
-                // are charged through the SAME transition as every other one. The validated entry's own
-                // sizes would omit the sidecars this capture also retains.
+                // CHARGE FIRST, then publish to the in-memory index. The reverse order left a servable
+                // entry behind when the measurement failed: `memoryEntries` still held it, so readiness
+                // came from the index rather than from a measurement that succeeded (reviewer c66fda06).
                 chargeRetainedLocked(id, ready = true)
+                if (ownedCharges[id]?.ready == true) {
+                    memoryEntries[id] = adopted
+                } else {
+                    memoryEntries.remove(id)
+                }
             } else if (wav.exists() || meta.exists()) {
                 // An entry that FAILED validation OR durability confirmation still holds bytes on disk.
                 // Dropping it silently left those bytes occupying the queue uncharged. Charged, not

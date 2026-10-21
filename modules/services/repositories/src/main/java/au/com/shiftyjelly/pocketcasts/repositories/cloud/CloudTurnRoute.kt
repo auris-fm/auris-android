@@ -46,11 +46,11 @@ class CloudTurnRoute(
         // Fail closed, and fail loudly: no token means no request is attempted.
         val token = tokenProvider.currentToken()
         if (token.isNullOrBlank()) {
-            observer?.onAuthResolved(turn.requestId, success = false)
+            observer?.onAuthResolved(turn.requestId, CloudTurnTransportObserver.AuthOutcome.MISSING_TOKEN)
             emit(CloudRouteEvent.Error(code = CloudRouteErrorCodes.UNAUTHORIZED, message = ""))
             return@flow
         }
-        observer?.onAuthResolved(turn.requestId, success = true)
+        observer?.onAuthResolved(turn.requestId, CloudTurnTransportObserver.AuthOutcome.RESOLVED)
 
         val frame = CloudTurnFrame.Authenticate(
             accessToken = token,

@@ -76,6 +76,7 @@ class WebSocketCloudTurnTransport(
                 }
                 val sent: Boolean
                 try {
+                    observer?.onSendAttempted(requestId)
                     sent = webSocket.send(json)
                 } catch (sendThrow: Exception) {
                     // Send threw — distinct from encode failure and false-return rejection.

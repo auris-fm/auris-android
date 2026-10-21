@@ -115,22 +115,21 @@ class AudioFeedbackRenderer(
         // above, any child suspend calls (like TtsEngine.speak) will be cancelled.
         currentJob = scope.launch {
             try {
-                // Renderer submit boundary: record what was actually submitted to TTS/earcon.
-                // This is the real render entry point, not the sink's selection/return.
+                // Renderer ENTRY boundary (request received, not yet submitted).
                 if (requestId != null) {
-                    val kind = when (response) {
-                        is VoiceResponse.Silent -> "silent"
-                        is VoiceResponse.Earcon -> "earcon_submitted"
-                        is VoiceResponse.Spoken -> "spoken_submitted"
-                        is VoiceResponse.Combined -> "combined_submitted"
+                    val entryKind = when (response) {
+                        is VoiceResponse.Silent -> "entry_silent"
+                        is VoiceResponse.Earcon -> "entry_earcon"
+                        is VoiceResponse.Spoken -> "entry_spoken"
+                        is VoiceResponse.Combined -> "entry_combined"
                     }
                     VoiceLifecycleDiagnostics.record(
                         VoiceLifecycleDiagnostics.Event(
                             kind = VoiceLifecycleDiagnostics.Kind.Turn,
-                            reason = VoiceLifecycleDiagnostics.Reason.TurnFeedbackRendered,
+                            reason = VoiceLifecycleDiagnostics.Reason.TurnFeedbackSelected,
                             source = VoiceLifecycleDiagnostics.Source.Cloud,
                             requestId = requestId,
-                            feedbackKind = kind,
+                            feedbackKind = entryKind,
                         ),
                     )
                 }
@@ -146,7 +145,38 @@ class AudioFeedbackRenderer(
                         speakWithHeartbeat(response.spokenText, language)
                     }
                 }
+                // SUBMISSION boundary: the player accepted and drained without throwing.
+                if (requestId != null) {
+                    val submittedKind = when (response) {
+                        is VoiceResponse.Silent -> "silent"
+                        is VoiceResponse.Earcon -> "earcon_submitted"
+                        is VoiceResponse.Spoken -> "spoken_submitted"
+                        is VoiceResponse.Combined -> "combined_submitted"
+                    }
+                    VoiceLifecycleDiagnostics.record(
+                        VoiceLifecycleDiagnostics.Event(
+                            kind = VoiceLifecycleDiagnostics.Kind.Turn,
+                            reason = VoiceLifecycleDiagnostics.Reason.TurnFeedbackRendered,
+                            source = VoiceLifecycleDiagnostics.Source.Cloud,
+                            requestId = requestId,
+                            feedbackKind = submittedKind,
+                        ),
+                    )
+                }
             } catch (e: TtsPlaybackIncompleteException) {
+                // DROP/FAILURE boundary: submission did not complete.
+                if (requestId != null) {
+                    VoiceLifecycleDiagnostics.record(
+                        VoiceLifecycleDiagnostics.Event(
+                            kind = VoiceLifecycleDiagnostics.Kind.Turn,
+                            reason = VoiceLifecycleDiagnostics.Reason.TurnFeedbackRendered,
+                            source = VoiceLifecycleDiagnostics.Source.Cloud,
+                            requestId = requestId,
+                            feedbackKind = "submission_failed",
+                            errorCode = "tts_incomplete",
+                        ),
+                    )
+                }
                 // The reply did not finish playing. Report it as a delivery failure rather than a
                 // completed reply, and let the caller own whatever cleanup that implies.
                 Timber.e(

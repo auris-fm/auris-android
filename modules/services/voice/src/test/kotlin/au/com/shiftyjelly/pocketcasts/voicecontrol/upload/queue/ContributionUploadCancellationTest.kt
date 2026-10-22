@@ -85,16 +85,10 @@ class ContributionUploadCancellationTest {
         return file
     }
 
-    private fun transport(
-        totalDeadlineMs: Long = 120_000,
-        readTimeoutMs: Int = 60_000,
-        writeTimeoutMs: Long = 60_000,
-    ) = ContributionUploadTransport(
+    private fun transport(budgetMs: Long = 120_000) = ContributionUploadTransport(
         endpoint = "http://127.0.0.1:$port/v1/contributions",
         authorization = { "Bearer test-token" },
-        readTimeoutMs = readTimeoutMs,
-        totalDeadlineMs = totalDeadlineMs,
-        writeTimeoutMs = writeTimeoutMs,
+        callTimeoutMs = budgetMs,
     )
 
     private fun serve(handler: (HttpExchange) -> Unit) {
@@ -127,7 +121,7 @@ class ContributionUploadCancellationTest {
         val revoked = AtomicBoolean(false)
 
         val result = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }.submit<ContributionUploadTransport.Response> {
-            transport(totalDeadlineMs = 60_000).upload(id, record(id), wavFile(id), isCancelled = { revoked.get() })
+            transport(budgetMs = 60_000).upload(id, record(id), wavFile(id), isCancelled = { revoked.get() })
         }
         assertTrue("the request reached the server", handlerEntered.await(10, TimeUnit.SECONDS))
         // The withdrawal lands HERE, on the test thread, while the upload thread is blocked on the response.
@@ -167,7 +161,7 @@ class ContributionUploadCancellationTest {
         val revoked = AtomicBoolean(false)
 
         val result = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }.submit {
-            transport(totalDeadlineMs = 60_000).upload(id, record(id), wavFile(id), isCancelled = { revoked.get() })
+            transport(budgetMs = 60_000).upload(id, record(id), wavFile(id), isCancelled = { revoked.get() })
         }
         assertTrue("the request reached the server", handlerEntered.await(10, TimeUnit.SECONDS))
         revoked.set(true)
@@ -217,7 +211,7 @@ class ContributionUploadCancellationTest {
         val budgetMs = 2_000L
 
         val startedAt = System.nanoTime()
-        val response = transport(totalDeadlineMs = budgetMs, writeTimeoutMs = budgetMs).upload(id, record(id), wavFile(id))
+        val response = transport(budgetMs = budgetMs).upload(id, record(id), wavFile(id))
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
 
         // The whole point: this returns. Without an enforceable write abort it blocks until the peer
@@ -243,7 +237,7 @@ class ContributionUploadCancellationTest {
         val entered = CountDownLatch(1)
 
         val result = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }.submit<ContributionUploadTransport.Response> {
-            transport(totalDeadlineMs = 60_000, writeTimeoutMs = 60_000).upload(
+            transport(budgetMs = 60_000).upload(
                 id,
                 record(id),
                 wavFile(id),
@@ -279,7 +273,7 @@ class ContributionUploadCancellationTest {
         val budgetMs = 2_000L
 
         val startedAt = System.nanoTime()
-        val response = transport(totalDeadlineMs = budgetMs).upload(id, record(id), wavFile(id))
+        val response = transport(budgetMs = budgetMs).upload(id, record(id), wavFile(id))
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
 
         assertTrue(
@@ -303,7 +297,7 @@ class ContributionUploadCancellationTest {
         }
         val id = UUID.randomUUID().toString()
 
-        val response = transport(totalDeadlineMs = 1_000).upload(id, record(id), wavFile(id))
+        val response = transport(budgetMs = 1_000).upload(id, record(id), wavFile(id))
 
         assertTrue(
             "a body landing after the cutoff must not be classified: $response",

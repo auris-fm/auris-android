@@ -110,11 +110,10 @@ class ContributionDribblingResponseTest {
         return { producing.get() }
     }
 
-    private fun transport(readTimeoutMs: Int, totalDeadlineMs: Long = 120_000) = ContributionUploadTransport(
+    private fun transport(budgetMs: Long) = ContributionUploadTransport(
         endpoint = "http://127.0.0.1:$port/v1/contributions",
         authorization = { "Bearer test-token" },
-        readTimeoutMs = readTimeoutMs,
-        totalDeadlineMs = totalDeadlineMs,
+        callTimeoutMs = budgetMs,
     )
 
     @Test
@@ -125,7 +124,7 @@ class ContributionDribblingResponseTest {
         val budgetMs = 1_500L
 
         val startedAt = System.nanoTime()
-        val result = transport(readTimeoutMs = 60_000, totalDeadlineMs = budgetMs).upload(id, record(id), wavFile(id))
+        val result = transport(budgetMs = budgetMs).upload(id, record(id), wavFile(id))
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
 
         // THE CLAIM UNDER TEST: the client stopped on its OWN budget. The socket inactivity timeout was
@@ -166,7 +165,7 @@ class ContributionDribblingResponseTest {
         server.start()
         port = server.address.port
 
-        val result = transport(readTimeoutMs = 10_000).upload(id, record(id), wavFile(id))
+        val result = transport(budgetMs = 30_000).upload(id, record(id), wavFile(id))
 
         assertEquals(
             "a slow but complete receipt is still a receipt",

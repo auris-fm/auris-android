@@ -131,8 +131,7 @@ class ContributionUploadTransportTest {
     private fun transport(token: String = "test-token") = ContributionUploadTransport(
         endpoint = "http://127.0.0.1:$port/v1/contributions",
         authorization = { "Bearer $token" },
-        connectTimeoutMs = 5_000,
-        readTimeoutMs = 10_000,
+        callTimeoutMs = 10_000,
     )
 
     private fun wavFile(id: String): File {
@@ -349,8 +348,7 @@ class ContributionUploadTransportTest {
         val dead = ContributionUploadTransport(
             endpoint = "http://127.0.0.1:1/v1/contributions",
             authorization = { "Bearer t" },
-            connectTimeoutMs = 500,
-            readTimeoutMs = 500,
+            callTimeoutMs = 5_000,
         )
         val result = dead.upload(id, record(id), file)
         assertTrue("a failed connection is ambiguous", result is ContributionUploadTransport.Response.Ambiguous)

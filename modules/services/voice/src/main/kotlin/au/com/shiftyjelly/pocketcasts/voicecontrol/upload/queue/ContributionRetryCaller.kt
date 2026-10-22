@@ -20,10 +20,13 @@ class ContributionRetryCaller(
     /** Network gate. Rechecked before EVERY attempt, after the policy gate. */
     private val networkAvailable: () -> Boolean,
     /**
-     * The upload attempt seam. Called ONLY under a freshly validated ownership generation, after the
-     * policy and network gates passed, with the in-flight claim held. Returns true on accepted upload.
+     * The upload attempt seam. Called ONLY after the atomic pickup durably consumed the attempt, with
+     * the in-flight claim held. [isRevoked] is bound to the CURRENT authorization epoch and MUST be
+     * consulted before the first network operation (and on continuation boundaries): a revocation that
+     * lands between pickup and transport start ABORTS the upload - it authorizes nothing (reviewer
+     * 279de1d4). Returns true on accepted upload; throws on lost/failed transport.
      */
-    private val attemptUpload: (generation: Long, captureId: String) -> Boolean,
+    private val attemptUpload: (generation: Long, captureId: String, isRevoked: () -> Boolean) -> Boolean,
     /** Upload-completion hook (server ack path); not part of this slice's discipline. */
     private val onSuccess: (generation: Long, captureId: String) -> Unit = { _, _ -> },
 ) {
@@ -87,22 +90,50 @@ class ContributionRetryCaller(
                     pickupRefused++
                     continue
                 }
-                // The attempt count is durably consumed; run the transport. A revocation from here on
-                // cannot be undone locally - the completion resolution validates the epoch again.
-                val accepted = attemptUpload(generation, captureId)
-                attempted++
-                if (accepted) {
-                    onSuccess(generation, captureId)
-                } else {
-                    // Durable re-arm: ONE ownership transaction in the store; a revocation racing the
-                    // schedule surfaces as the store's own refusal and does not fail the poll.
-                    runCatching { store.scheduleRetryAfterFailure(generation, captureId, retryAfterS = null) }
+                // Between pickup and transport start the authorization can still disappear. That is
+                // checked in the SAME atomic decision as the transport launch: the check runs inside the
+                // ownership transaction that would be the first network operation's authorization, so a
+                // revocation that completed before this point cannot be raced past (reviewer 279de1d4).
+                // The transport launch is the authorization boundary: the final validity check runs in
+                // the SAME transaction as the launch, so an epoch bump that completed before it is seen
+                // (a revocation that lands after it is handled by the completion resolution).
+                try {
+                    // The transport launch runs INSIDE the ownership transaction: the validity check and
+                    // the first network operation are one atomic decision, so an epoch bump that
+                    // completed before it aborts the launch (reviewer 279de1d4).
+                    val launched = store.fence.guard(generation) { attemptUpload(generation, captureId) { !store.fence.isValid(generation) } }
+                    if (launched == null) {
+                        // Refused at launch, but the attempt was already durably consumed: an
+                        // unconfirmed attempt must not be retried immediately either (reviewer 279de1d4).
+                        cancelledEpoch++
+                        reArmBoundary(generation, captureId)
+                        continue
+                    }
+                    attempted++
+                    if (launched) {
+                        onSuccess(generation, captureId)
+                    } else {
+                        reArmBoundary(generation, captureId)
+                    }
+                } catch (lost: Throwable) {
+                    // A thrown upload (ordinary network exception / lost response) is an AMBIGUOUS
+                    // outcome: ownership is RETAINED and the durable boundary re-armed - the next poll
+                    // must not retry immediately, and the completion resolution still validates the
+                    // epoch (reviewer 279de1d4).
+                    attempted++
+                    reArmBoundary(generation, captureId)
                 }
             } finally {
                 synchronized(inFlightLock) { inFlight.remove(captureId) }
             }
         }
         return PollResult(attempted, deferredPolicy, deferredNetwork, skippedInFlight, cancelledEpoch, pickupRefused)
+    }
+
+    /** Durable re-arm: ONE ownership transaction in the store; a racing revocation surfaces as the
+     *  store's own refusal and does not fail the poll. */
+    private fun reArmBoundary(generation: Long, captureId: String) {
+        runCatching { store.scheduleRetryAfterFailure(generation, captureId, retryAfterS = null) }
     }
 
     fun close() {

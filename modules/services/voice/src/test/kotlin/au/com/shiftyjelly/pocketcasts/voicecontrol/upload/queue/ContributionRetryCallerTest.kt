@@ -94,7 +94,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { gen, captureId ->
+            attemptUpload = { gen, captureId, _ ->
                 assertTrue("attempt runs under a VALID generation", store.fence.isValid(gen))
                 assertEquals("the pickup durably recorded the attempt BEFORE transport", 1, store.stateAttemptsForTest(captureId))
                 attempted += captureId
@@ -124,7 +124,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { gen, captureId ->
+            attemptUpload = { gen, captureId, _ ->
                 attempts++
                 // Production re-entrancy: a slow upload overlapping the next poll tick. The same entry
                 // is already in flight, so the nested poll must NOT attempt it again.
@@ -159,7 +159,7 @@ class ContributionRetryCallerTest {
                 true
             },
             networkAvailable = { true },
-            attemptUpload = { _, _ ->
+            attemptUpload = { _, _, _ ->
                 attempts++
                 true
             },
@@ -196,7 +196,7 @@ class ContributionRetryCallerTest {
                 }
                 true
             },
-            attemptUpload = { _, _ ->
+            attemptUpload = { _, _, _ ->
                 attempts++
                 true
             },
@@ -226,7 +226,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { _, _ ->
+            attemptUpload = { _, _, _ ->
                 attempts++
                 false // always retryable failure
             },
@@ -256,7 +256,7 @@ class ContributionRetryCallerTest {
 
         var attempts = 0
         var policy = false
-        var caller = ContributionRetryCaller(store, clock = { now }, policyAllows = { policy }, networkAvailable = { true }, attemptUpload = { _, _ ->
+        var caller = ContributionRetryCaller(store, clock = { now }, policyAllows = { policy }, networkAvailable = { true }, attemptUpload = { _, _, _ ->
             attempts++
             true
         })
@@ -266,7 +266,7 @@ class ContributionRetryCallerTest {
 
         policy = true
         var network = false
-        caller = ContributionRetryCaller(store, clock = { now }, policyAllows = { true }, networkAvailable = { network }, attemptUpload = { _, _ ->
+        caller = ContributionRetryCaller(store, clock = { now }, policyAllows = { true }, networkAvailable = { network }, attemptUpload = { _, _, _ ->
             attempts++
             true
         })
@@ -275,7 +275,7 @@ class ContributionRetryCallerTest {
         assertEquals(1, caller.pollOnce().deferredNetwork)
 
         network = true
-        caller = ContributionRetryCaller(store, clock = { now }, policyAllows = { true }, networkAvailable = { true }, attemptUpload = { _, _ ->
+        caller = ContributionRetryCaller(store, clock = { now }, policyAllows = { true }, networkAvailable = { true }, attemptUpload = { _, _, _ ->
             attempts++
             true
         })
@@ -296,7 +296,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { _, _ -> false }, // retryable failure
+            attemptUpload = { _, _, _ -> false }, // retryable failure
         )
         assertEquals(1, caller.pollOnce().attempted)
         // Backoff re-armed from the failure: not eligible immediately, eligible once it elapses.
@@ -304,7 +304,93 @@ class ContributionRetryCallerTest {
         assertTrue(store.retryEligible(now + 3_999L).isNotEmpty())
 
         // And the caller acts on it at the elapsed time.
-        val second = ContributionRetryCaller(store, clock = { now + 3_999L }, policyAllows = { true }, networkAvailable = { true }, attemptUpload = { _, _ -> true })
+        val second = ContributionRetryCaller(store, clock = { now + 3_999L }, policyAllows = { true }, networkAvailable = { true }, attemptUpload = { _, _, _ -> true })
         assertEquals(1, second.pollOnce().attempted)
+    }
+
+    @Test
+    fun `a revocation that lands DURING the first attempt stops the network op and retains ownership`() {
+        var now = 15_000_000L
+        val root = tmp.newFolder("caller-revoke-mid-transport")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root, { now })
+        prepare(store, id)
+        val wav = File(store.dirForTest(), "$id.recording.wav")
+        val bytesBefore = wav.readBytes()
+
+        var networkOperations = 0
+        var abortObserved = false
+        val caller = ContributionRetryCaller(
+            store,
+            clock = { now },
+            policyAllows = { true },
+            networkAvailable = { true },
+            attemptUpload = { _, _, isRevoked ->
+                // The revocation lands AFTER pickup consumed the attempt but BEFORE the first network
+                // operation; the seam must be able to SEE it (its authorization is the live epoch).
+                store.fence.revoke()
+                if (isRevoked()) {
+                    abortObserved = true
+                    return@ContributionRetryCaller false // abort: no request is issued
+                }
+                networkOperations++
+                true
+            },
+        )
+        val first = caller.pollOnce()
+        assertTrue("the seam observed the revocation", abortObserved)
+        assertEquals("no network operation after the revocation", 0, networkOperations)
+        assertTrue("capture bytes untouched", wav.readBytes().contentEquals(bytesBefore))
+        assertTrue("ownership retained", store.readyEntries().any { it.captureId == id })
+        // The attempt WAS durably consumed by the pickup, and the unconfirmed abort re-armed the durable
+        // boundary instead of leaving the entry immediately retryable.
+        assertEquals("the revoked attempt is still accounted", 1, store.stateAttemptsForTest(id))
+        assertEquals(1, first.attempted)
+        assertTrue(
+            "the abort left a durable not-before boundary",
+            store.retryBoundariesForTest().containsKey(id) || store.retryEligible(now + 3_999L).any { it == id },
+        )
+    }
+
+    @Test
+    fun `a THROWN upload retains ownership and durably delays the next attempt, across a restart`() {
+        var now = 16_000_000L
+        val root = tmp.newFolder("caller-throws")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root, { now })
+        prepare(store, id)
+        val wav = File(store.dirForTest(), "$id.recording.wav")
+        val bytesBefore = wav.readBytes()
+
+        val caller = ContributionRetryCaller(
+            store,
+            clock = { now },
+            policyAllows = { true },
+            networkAvailable = { true },
+            attemptUpload = { _, _, _ -> throw java.io.IOException("response lost") },
+        )
+        assertEquals("the thrown attempt counts as an attempt", 1, caller.pollOnce().attempted)
+        assertTrue("ambiguous: capture bytes untouched", wav.readBytes().contentEquals(bytesBefore))
+        assertTrue("ownership retained, entry still queued", store.readyEntries().any { it.captureId == id })
+        assertEquals("durable delay: not immediately eligible", 0, caller.pollOnce().attempted)
+
+        // A fresh owner (process restart) reads the SAME durable boundary: no immediate retry.
+        store.recover()
+        assertEquals(0, caller.pollOnce().attempted)
+
+        // Once the backoff elapses, the very same immutable capture is retried.
+        var retriedBytes: ByteArray? = null
+        val later = ContributionRetryCaller(
+            store,
+            clock = { now + 3_999L },
+            policyAllows = { true },
+            networkAvailable = { true },
+            attemptUpload = { _, captureId, _ ->
+                retriedBytes = File(store.dirForTest(), "$captureId.recording.wav").readBytes()
+                true
+            },
+        )
+        assertEquals(1, later.pollOnce().attempted)
+        assertTrue("retry re-posts the identical immutable capture", retriedBytes!!.contentEquals(bytesBefore))
     }
 }

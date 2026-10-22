@@ -17,10 +17,16 @@ class QueueFence(private val ownership: QueueOwnership) {
      * atomic with respect to publication/drop/attempt mutations — but callers that must also purge state
      * should use `ContributionStore.revokeAndPurge`, which does both in ONE section.
      */
-    fun revoke(): Long = ownership.transaction { revoke() }
+    fun revoke(): Long = ownership.transaction(object : (QueueOwnership.OwnershipTransaction) -> Long {
+        override fun invoke(tx: QueueOwnership.OwnershipTransaction) = tx.revoke()
+    })
 
-    fun isValid(captured: Long): Boolean = ownership.transaction { isValid(captured) }
+    fun isValid(captured: Long): Boolean = ownership.transaction(object : (QueueOwnership.OwnershipTransaction) -> Boolean {
+        override fun invoke(tx: QueueOwnership.OwnershipTransaction) = tx.isValid(captured)
+    })
 
     /** Guarded execution inside the shared transaction; re-entrant when already inside one. */
-    fun <R> guard(captured: Long, block: () -> R): R? = ownership.transaction { if (isValid(captured)) block() else null }
+    fun <R> guard(captured: Long, block: () -> R): R? = ownership.transaction(object : (QueueOwnership.OwnershipTransaction) -> R? {
+        override fun invoke(tx: QueueOwnership.OwnershipTransaction) = if (tx.isValid(captured)) block() else null
+    })
 }

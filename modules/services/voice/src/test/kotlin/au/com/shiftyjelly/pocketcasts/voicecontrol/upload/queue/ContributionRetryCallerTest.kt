@@ -69,6 +69,21 @@ class ContributionRetryCallerTest {
 
     private val hookedRef0 = arrayOfNulls<ContributionStore>(1)
 
+    // The REAL wire receipt (worker upload_route.ts UploadReceipt) for THIS capture and digest.
+    private fun wireReceipt(captureId: String, digest: String? = null, status: String = "accepted"): ByteArray {
+        val d = digest ?: "a".repeat(64)
+        return (
+            "{" +
+                "\"schema_version\":1," +
+                "\"capture_id\":\"$captureId\"," +
+                "\"record_sha256\":\"$d\"," +
+                "\"status\":\"$status\"," +
+                "\"receipt_id\":\"rcpt-1\"," +
+                "\"accepted_at\":\"2026-10-22T00:00:00Z\"," +
+                "\"retention_expires_at\":\"2026-11-21T00:00:00Z\"}"
+            ).toByteArray()
+    }
+
     private fun newStore(root: File, clock: () -> Long, jitter: (Long) -> Long = { it - 1 }): ContributionStore = ContributionStore(
         root,
         QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
@@ -103,6 +118,8 @@ class ContributionRetryCallerTest {
                 attempted += captureId
                 true
             },
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            responseFor = { _, _ -> wireReceipt(id) },
         )
         val result = caller.pollOnce()
         assertEquals(listOf(id), attempted)
@@ -135,6 +152,8 @@ class ContributionRetryCallerTest {
                 assertEquals(0, nested.attempted)
                 true
             },
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            responseFor = { _, _ -> wireReceipt(id) },
         )
         val result = caller.pollOnce()
         assertEquals(1, attempts)
@@ -166,6 +185,8 @@ class ContributionRetryCallerTest {
                 attempts++
                 true
             },
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            responseFor = { _, _ -> wireReceipt(id) },
         )
         val result = caller.pollOnce()
         assertEquals("gate ran", 1, policyCalls)
@@ -203,6 +224,8 @@ class ContributionRetryCallerTest {
                 attempts++
                 true
             },
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            responseFor = { _, _ -> wireReceipt(id) },
         )
         val result = caller.pollOnce()
         assertEquals("gate ran", 1, networkCalls)
@@ -233,6 +256,8 @@ class ContributionRetryCallerTest {
                 attempts++
                 false // always retryable failure
             },
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            responseFor = { _, _ -> wireReceipt(id) },
         )
         // Backoff is re-armed after each failure; every elapsed boundary allows exactly one more
         // recorded attempt, until maxUploadAttempts is exhausted.
@@ -262,7 +287,7 @@ class ContributionRetryCallerTest {
         var caller = ContributionRetryCaller(store, clock = { now }, policyAllows = { policy }, networkAvailable = { true }, attemptUpload = { _, _, _ ->
             attempts++
             true
-        })
+        }, ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)), responseFor = { _, _ -> wireReceipt(id) })
         assertEquals(0, caller.pollOnce().attempted)
         assertEquals("policy gate blocks the attempt", 0, attempts)
         assertEquals(1, caller.pollOnce().deferredPolicy)
@@ -272,7 +297,7 @@ class ContributionRetryCallerTest {
         caller = ContributionRetryCaller(store, clock = { now }, policyAllows = { true }, networkAvailable = { network }, attemptUpload = { _, _, _ ->
             attempts++
             true
-        })
+        }, ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)), responseFor = { _, _ -> wireReceipt(id) })
         assertEquals(0, caller.pollOnce().attempted)
         assertEquals("network gate blocks the attempt", 0, attempts)
         assertEquals(1, caller.pollOnce().deferredNetwork)
@@ -281,7 +306,7 @@ class ContributionRetryCallerTest {
         caller = ContributionRetryCaller(store, clock = { now }, policyAllows = { true }, networkAvailable = { true }, attemptUpload = { _, _, _ ->
             attempts++
             true
-        })
+        }, ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)), responseFor = { _, _ -> wireReceipt(id) })
         assertEquals(1, caller.pollOnce().attempted)
         assertEquals("both gates pass, the attempt runs", 1, attempts)
     }
@@ -300,6 +325,8 @@ class ContributionRetryCallerTest {
             policyAllows = { true },
             networkAvailable = { true },
             attemptUpload = { _, _, _ -> false }, // retryable failure
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            responseFor = { _, _ -> wireReceipt(id) },
         )
         assertEquals(1, caller.pollOnce().attempted)
         // Backoff re-armed from the failure: not eligible immediately, eligible once it elapses.
@@ -307,7 +334,7 @@ class ContributionRetryCallerTest {
         assertTrue(store.retryEligible(now + 3_999L).isNotEmpty())
 
         // And the caller acts on it at the elapsed time.
-        val second = ContributionRetryCaller(store, clock = { now + 3_999L }, policyAllows = { true }, networkAvailable = { true }, attemptUpload = { _, _, _ -> true })
+        val second = ContributionRetryCaller(store, clock = { now + 3_999L }, policyAllows = { true }, networkAvailable = { true }, attemptUpload = { _, _, _ -> true }, ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)), responseFor = { _, _ -> wireReceipt(id) })
         assertEquals(1, second.pollOnce().attempted)
     }
 
@@ -338,6 +365,8 @@ class ContributionRetryCallerTest {
                 cancelledMidFlight = isRevoked()
                 true // the server answers anyway; a revoked response must not count as success
             },
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            responseFor = { _, _ -> wireReceipt(id) },
         )
 
         val poller = java.util.concurrent.Executors.newSingleThreadExecutor()
@@ -390,6 +419,8 @@ class ContributionRetryCallerTest {
                 launched.add(captureId)
                 true
             },
+            ackResolver = ContributionAckResolver(hooked, CaptureReceiptValidator.forStore(hooked)),
+            responseFor = { _, _ -> wireReceipt(id) },
         )
         val result = caller.pollOnce()
         assertTrue("a launch refused under a revoked epoch issues no request", launched.isEmpty())
@@ -439,6 +470,8 @@ class ContributionRetryCallerTest {
                 networkOperations++
                 true
             },
+            ackResolver = ContributionAckResolver(hooked, CaptureReceiptValidator.forStore(hooked)),
+            responseFor = { _, _ -> wireReceipt(id) },
         )
         val refused = caller.pollOnce()
         assertEquals("no network work under the retired epoch", 0, networkOperations)
@@ -466,6 +499,8 @@ class ContributionRetryCallerTest {
                 cancelledMidFlight = isRevoked()
                 true
             },
+            ackResolver = ContributionAckResolver(store2, CaptureReceiptValidator.forStore(store2)),
+            responseFor = { _, _ -> wireReceipt(id) },
         )
         val poller2 = java.util.concurrent.Executors.newSingleThreadExecutor()
         val inflightResult = poller2.submit<ContributionRetryCaller.PollResult> { caller2.pollOnce() }
@@ -533,7 +568,11 @@ class ContributionRetryCallerTest {
         assertTrue("the queue recorded a digest for the capture", digest != null)
         val validator = CaptureReceiptValidator.forStore(store)
 
-        fun receipt(status: String = "stored", echoedId: String = id, echoedDigest: String = digest!!) = """{"capture_id":"$echoedId","sha256":"$echoedDigest","status":"$status"}""".toByteArray()
+        // The REAL wire receipt shape (worker upload_route.ts UploadReceipt), not a private enum.
+        fun receipt(status: String = "accepted", echoedId: String = id, echoedDigest: String = digest!!) = """
+            {"schema_version":1,"capture_id":"$echoedId","record_sha256":"$echoedDigest","status":"$status",
+             "receipt_id":"rcpt-1","accepted_at":"2026-10-22T00:00:00Z","retention_expires_at":"2026-11-21T00:00:00Z"}
+        """.trimIndent().replace("\n", " ").toByteArray()
 
         // Composed the way production does it: the caller posts, the resolver classifies and releases.
         val resolver = ContributionAckResolver(store, validator)
@@ -554,6 +593,8 @@ class ContributionRetryCallerTest {
                 // The caller's own settlement gate sees the attempt already released.
                 !store.readyEntries().any { it.captureId == captureId }
             },
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            responseFor = { _, _ -> wireReceipt(id) },
         )
         val polled = caller.pollOnce()
         assertTrue(
@@ -566,6 +607,79 @@ class ContributionRetryCallerTest {
     }
 
     @Test
+    fun `a Boolean transport success with NO valid receipt retains ownership and delays the next attempt`() {
+        var now = 19_500_000L
+        val root = tmp.newFolder("caller-bool-not-delete")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root, { now })
+        prepare(store, id)
+
+        // The transport reports success, but the body is an ERROR body / malformed 2xx: nothing validates.
+        val caller = ContributionRetryCaller(
+            store,
+            clock = { now },
+            policyAllows = { true },
+            networkAvailable = { true },
+            attemptUpload = { _, _, _ -> true },
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            responseFor = { _, _ -> """{"schema_version":1,"code":"storage_unavailable"}""".toByteArray() },
+        )
+        val polled = caller.pollOnce()
+        assertEquals(1, polled.attempted)
+        assertTrue("a Boolean true MUST NOT delete before receipt validation", store.readyEntries().any { it.captureId == id })
+        assertEquals("no acceptance was counted", 0L, store.terminalCounter(ContributionStore.TerminalReason.UPLOAD_ACCEPTED))
+        val boundary = store.retryBoundariesForTest()[id]
+        assertTrue("the unvalidated success left a durable delay", boundary != null && boundary > now)
+    }
+
+    @Test
+    fun `a LATE old completion reaching the caller leaves a successor-owned entry untouched`() {
+        var now = 20_500_000L
+        val root = tmp.newFolder("caller-late-completion")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root, { now })
+        prepare(store, id)
+
+        var successorAdmitted = false
+        var receiptAfterSuccessor: ContributionAckResolver.Resolution? = null
+        lateinit var caller: ContributionRetryCaller
+        caller = ContributionRetryCaller(
+            store,
+            clock = { now },
+            policyAllows = { true },
+            networkAvailable = { true },
+            attemptUpload = { generation, captureId, _ ->
+                // While this attempt is in flight a SUCCESSOR admits the next attempt on the same entry
+                // (a normal consequence of a backoff elapsing under a still-current epoch).
+                store.scheduleRetryForAdmittedAttempt(store.admittedAttemptForTest(captureId)!!)
+                now += 9_000L
+                successorAdmitted = store.pickupAttempt(generation, captureId, now) != null
+                true
+            },
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            responseFor = { _, captureId ->
+                // The OLD attempt's success now arrives, after the successor took the slot.
+                receiptAfterSuccessor = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store))
+                    .resolveForAttempt(
+                        store.admittedAttemptForTest(captureId)!!.copy(attemptNumber = 1),
+                        ContributionAckResolver.Ack.ACCEPTED,
+                        wireReceipt(captureId),
+                    )
+                wireReceipt(captureId)
+            },
+        )
+        caller.pollOnce()
+        assertTrue("the successor was admitted while the old attempt was in flight", successorAdmitted)
+        assertEquals(
+            "the old completion cannot release a successor-owned entry",
+            ContributionAckResolver.Resolution.StaleEpoch,
+            receiptAfterSuccessor,
+        )
+        assertTrue("the successor still owns the entry", store.readyEntries().any { it.captureId == id })
+        assertEquals("no acceptance counted for the stale completion", 0L, store.terminalCounter(ContributionStore.TerminalReason.UPLOAD_ACCEPTED))
+    }
+
+    @Test
     fun `a receipt naming a DIFFERENT capture never releases or deletes this one`() {
         var now = 17_500_000L
         val root = tmp.newFolder("caller-receipt-foreign")
@@ -574,7 +688,10 @@ class ContributionRetryCallerTest {
         val store = newStore(root, { now })
         prepare(store, id)
         val validator = CaptureReceiptValidator.forStore(store)
-        val foreign = """{"capture_id":"$other","sha256":"${"a".repeat(64)}","status":"stored"}""".toByteArray()
+        val foreign = """
+            {"schema_version":1,"capture_id":"$other","record_sha256":"${"a".repeat(64)}","status":"accepted",
+             "receipt_id":"rcpt-2","accepted_at":"2026-10-22T00:00:00Z","retention_expires_at":"2026-11-21T00:00:00Z"}
+        """.trimIndent().replace("\n", " ").toByteArray()
 
         val resolver = ContributionAckResolver(store, validator)
         val generation = store.fence.currentGeneration()
@@ -601,6 +718,8 @@ class ContributionRetryCallerTest {
             policyAllows = { true },
             networkAvailable = { true },
             attemptUpload = { _, _, _ -> throw java.io.IOException("response lost") },
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            responseFor = { _, _ -> wireReceipt(id) },
         )
         assertEquals("the thrown attempt counts as an attempt", 1, caller.pollOnce().attempted)
         assertTrue("ambiguous: capture bytes untouched", wav.readBytes().contentEquals(bytesBefore))
@@ -622,6 +741,8 @@ class ContributionRetryCallerTest {
                 retriedBytes = File(store.dirForTest(), "$captureId.recording.wav").readBytes()
                 true
             },
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            responseFor = { _, _ -> wireReceipt(id) },
         )
         assertEquals(1, later.pollOnce().attempted)
         assertTrue("retry re-posts the identical immutable capture", retriedBytes!!.contentEquals(bytesBefore))

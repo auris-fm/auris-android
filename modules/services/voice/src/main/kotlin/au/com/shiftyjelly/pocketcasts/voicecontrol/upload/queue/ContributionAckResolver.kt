@@ -88,6 +88,45 @@ class ContributionAckResolver(
         }
     }
 
+    /**
+     * TOKEN-SCOPED resolution (spec 442bfbd7): the completion carries the immutable attempt token from
+     * atomic pickup, and EVERY mutation validates-and-mutates against that token in ONE owner
+     * transaction. A same-generation successor admitted between the response and this call is never
+     * touched. A RETIRED token authorizes RETRY-BOUNDARY disposal only (when no successor owns the
+     * slot); it never authorizes acceptance or release - release additionally requires the attempt's
+     * own epoch to still be valid.
+     */
+    fun resolveForAttempt(
+        token: ContributionStore.AdmittedAttempt,
+        ack: Ack,
+        payload: ByteArray? = null,
+        retryAfterS: Long? = null,
+    ): Resolution = when (ack) {
+        Ack.ACCEPTED ->
+            if (!validator.validate(token.captureId, payload)) {
+                val r = store.scheduleRetryForAdmittedAttempt(token)
+                if (r != null) Resolution.UnvalidatedAccept(r) else Resolution.StaleEpoch
+            } else {
+                if (store.releaseForAdmittedAttempt(token)) {
+                    Resolution.Released
+                } else {
+                    Resolution.StaleEpoch
+                }
+            }
+
+        Ack.AMBIGUOUS, Ack.RETRYABLE -> {
+            val retryAt = store.scheduleRetryForAdmittedAttempt(token)
+            if (retryAt != null) Resolution.Retained(retryAt) else Resolution.StaleEpoch
+        }
+
+        Ack.TERMINAL_DISPOSAL ->
+            if (store.releaseForAdmittedAttempt(token, ContributionStore.TerminalReason.SERVER_TERMINAL)) {
+                Resolution.Released
+            } else {
+                Resolution.StaleEpoch
+            }
+    }
+
     private fun retain(captureId: String, generation: Long, retryAfterS: Long?): Resolution {
         if (!store.fence.isValid(generation)) return Resolution.StaleEpoch
         val retryAt = runCatching { store.scheduleRetryAfterFailure(generation, captureId, retryAfterS) }.getOrNull()

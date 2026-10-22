@@ -29,6 +29,15 @@ class ContributionRetryCaller(
     private val attemptUpload: (generation: Long, captureId: String, isRevoked: () -> Boolean) -> Boolean,
     /** Upload-completion hook (server ack path); not part of this slice's discipline. */
     private val onSuccess: (generation: Long, captureId: String) -> Unit = { _, _ -> },
+    /**
+     * The REAL ack resolver this caller composes with (spec 442bfbd7). A transport `true` NEVER deletes
+     * by itself: the resolver validates the actual response payload against the wire receipt contract
+     * BEFORE any release, and every mutation is token-scoped, so a same-generation successor is never
+     * touched by an old completion.
+     */
+    private val ackResolver: ContributionAckResolver,
+    /** The transport response payload for the attempt just run (null when the response was lost). */
+    private val responseFor: (generation: Long, captureId: String) -> ByteArray? = { _, _ -> null },
 ) {
 
     data class PollResult(
@@ -101,35 +110,41 @@ class ContributionRetryCaller(
                     // unconfirmed outcome. Settlement is token-scoped: it validates AND mutates in one
                     // transaction, so a successor's state can never be touched here.
                     cancelledEpoch++
-                    reArm(token)
+                    resolve(token, ContributionAckResolver.Ack.RETRYABLE, null)
                     continue
                 }
                 try {
                     val accepted = attemptUpload(generation, captureId) { lease.isCancelled() || !store.fence.isValid(generation) }
                     if (lease.isCancelled()) {
                         // A revocation withdrew authorization mid-flight, so the response cannot be trusted
-                        // for this owner. Offer the durable re-arm under THIS token: if the attempt still
-                        // owns the queue it is delayed; if a successor owns it, nothing is mutated.
+                        // for this owner. Token-scoped RETRYABLE: retry-boundary disposal only.
                         cancelledEpoch++
-                        reArm(token)
-                    } else if (accepted) {
-                        // Validate-and-mutate in ONE transaction: a successor admitted between the response
-                        // and this call makes the release refuse without mutating anything.
-                        if (store.releaseForAdmittedAttempt(token)) {
-                            attempted++
-                            onSuccess(token.generation, captureId)
-                        } else {
-                            cancelledEpoch++
+                        resolve(token, ContributionAckResolver.Ack.RETRYABLE, null)
+                    } else {
+                        // The response is classified by the REAL resolver against the wire receipt; a
+                        // Boolean transport success deletes nothing by itself.
+                        val ack = if (accepted) ContributionAckResolver.Ack.ACCEPTED else ContributionAckResolver.Ack.RETRYABLE
+                        val payload = if (accepted) responseFor(generation, captureId) else null
+                        when (resolve(token, ack, payload)) {
+                            is ContributionAckResolver.Resolution.Released -> {
+                                attempted++
+                                onSuccess(token.generation, captureId)
+                            }
+
+                            is ContributionAckResolver.Resolution.UnvalidatedAccept,
+                            is ContributionAckResolver.Resolution.Retained,
+                            -> attempted++
+
+                            ContributionAckResolver.Resolution.StaleEpoch -> cancelledEpoch++
                         }
-                    } else if (reArm(token) != null) {
+                    }
+                } catch (lost: Throwable) {
+                    // A thrown upload is AMBIGUOUS: token-scoped retain, never a release.
+                    if (resolve(token, ContributionAckResolver.Ack.AMBIGUOUS, null) is ContributionAckResolver.Resolution.Retained) {
                         attempted++
                     } else {
                         cancelledEpoch++
                     }
-                } catch (lost: Throwable) {
-                    // A thrown upload is AMBIGUOUS: ownership is retained and the durable boundary is
-                    // re-armed only under THIS attempt's identity, never a stale or borrowed one.
-                    if (reArm(token) != null) attempted++ else cancelledEpoch++
                 } finally {
                     store.releaseLaunchLease(lease)
                 }
@@ -142,7 +157,13 @@ class ContributionRetryCaller(
 
     /** Durable re-arm, token-scoped: ONE ownership transaction validates the attempt AND mutates.
      *  Null means this attempt no longer owns the queue, so nothing was mutated. */
-    private fun reArm(token: ContributionStore.AdmittedAttempt): Long? = runCatching { store.scheduleRetryForAdmittedAttempt(token) }.getOrNull()
+    // Token-scoped resolution through the REAL resolver; an uncertain store surface stays ambiguous.
+    private fun resolve(
+        token: ContributionStore.AdmittedAttempt,
+        ack: ContributionAckResolver.Ack,
+        payload: ByteArray?,
+    ): ContributionAckResolver.Resolution = runCatching { ackResolver.resolveForAttempt(token, ack, payload) }
+        .getOrElse { ContributionAckResolver.Resolution.StaleEpoch }
 
     fun close() {
         closed.set(true)

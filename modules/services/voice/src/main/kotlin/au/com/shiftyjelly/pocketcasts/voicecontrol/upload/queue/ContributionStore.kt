@@ -351,8 +351,13 @@ class ContributionStore(
         memoryEntries[token.captureId]?.attempts == token.attemptNumber &&
         (ownership.isValidUnderLock(token.generation) || !attemptSupersededLocked(token.captureId, token))
 
-    // Same contract for a validated acceptance: drop only if this exact attempt still owns the entry.
-    fun releaseForAdmittedAttempt(token: AdmittedAttempt): Boolean {
+    // Same contract for a validated acceptance or terminal disposal: drop only if this exact attempt
+    // still owns the entry AND its epoch is STILL VALID - a retired token never releases (spec
+    // 442bfbd7); retry-boundary disposal is the only revoked-epoch write.
+    fun releaseForAdmittedAttempt(
+        token: AdmittedAttempt,
+        reason: TerminalReason = TerminalReason.UPLOAD_ACCEPTED,
+    ): Boolean {
         val removed = synchronized(lock) {
             if (!attemptIdentityHoldsLocked(token.generation, token.captureId, token.attemptNumber)) {
                 null
@@ -360,7 +365,7 @@ class ContributionStore(
                 memoryEntries.remove(token.captureId)?.also { deleteLocked(it) }
             }
         } != null
-        if (removed) dropCounterOnly(TerminalReason.UPLOAD_ACCEPTED)
+        if (removed) dropCounterOnly(reason)
         return removed
     }
 

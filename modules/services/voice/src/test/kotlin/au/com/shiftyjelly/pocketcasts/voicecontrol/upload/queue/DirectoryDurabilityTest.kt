@@ -88,6 +88,90 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `retry policy caps INITIAL above MAX and treats nonpositive Retry-After as absent`() {
+        // reviewer e4820963 (2): boundS was initialized to retry_initial_s without the local cap, so
+        // initial=10/max=2 returned 10s at attempt 1. (3): a huge negative Retry-After could wrap positive;
+        // nonpositive means absent.
+        var now = 2_000_000L
+        val root = tmp.newFolder("queue-retry-caps")
+        val id = "bebebebe-1111-4222-8333-444444444444"
+        val store = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 10, retryMaxS = 2),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+        )
+        val admission = store.admitForTest(1600, meta(id).size)
+        val generation = store.fence.currentGeneration()
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertEquals(1, store.recordAttempt(generation, id))
+        assertEquals(
+            "the LOCAL cap applies before growth: initial=10s is capped to retry_max_s=2s",
+            now + 1_999L,
+            store.scheduleRetryAfterFailure(generation, id, retryAfterS = null),
+        )
+        now += 10_000L
+        assertEquals(2, store.recordAttempt(generation, id))
+        assertEquals(
+            "a NONPOSITIVE Retry-After is treated as absent, never wrapped",
+            now + 1_999L,
+            store.scheduleRetryAfterFailure(generation, id, retryAfterS = -5L),
+        )
+        now += 10_000L
+        assertEquals(3, store.recordAttempt(generation, id))
+        assertEquals(
+            "Retry-After of ZERO is also absent",
+            now + 1_999L,
+            store.scheduleRetryAfterFailure(generation, id, retryAfterS = 0L),
+        )
+    }
+
+    @Test
+    fun `a FAILED retry-boundary persistence fails CLOSED until recovery resolves it`() {
+        // reviewer e4820963 (1): writeText replaced content without sync/atomicity, the catch lied about
+        // the original text being untouched, and retryEligible fell back to eligible-now on unknown state.
+        var now = 3_000_000L
+        val root = tmp.newFolder("queue-retry-uncertain")
+        val id = "cfcfcfcf-1111-4222-8333-444444444444"
+        val failingBoundarySync = FileSync { file ->
+            if (file.name.endsWith(".attempts.tmp")) throw java.io.IOException("simulated boundary tmp sync failure")
+        }
+        val store = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+            fileSync = failingBoundarySync,
+        )
+        val admission = store.admitForTest(1600, meta(id).size)
+        val generation = store.fence.currentGeneration()
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertEquals(1, store.recordAttempt(generation, id))
+
+        val outcome = runCatching { store.scheduleRetryAfterFailure(generation, id, retryAfterS = null) }
+        assertTrue(
+            "the failed publication must be reported UNCERTAIN, not silently granted (got ${outcome.exceptionOrNull()} / result=${outcome.getOrNull()})",
+            outcome.exceptionOrNull() is IllegalStateException,
+        )
+        now += 999_999L
+        assertTrue(
+            "while the durable boundary state is UNKNOWN, the entry is NOT retry-eligible (fail closed)",
+            store.retryEligible(now).isEmpty(),
+        )
+
+        // Recovery re-reads the durable sidecar (count-only, the failed write never landed) and resolves
+        // the uncertainty: the entry is eligible again under its recomputed state.
+        val revived = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+        )
+        assertEquals(listOf(id), revived.recover().map { it.captureId })
+        assertEquals("recovery resolves the unknown; the durable count-only sidecar carries no boundary", listOf(id), revived.retryEligible(now))
+    }
+
+    @Test
     fun `retry scheduling survives a RESTART without shortening the boundary`() {
         // reviewer 21176965: nextRetryAtMs was in-memory only and a missing value counted as eligible-now,
         // so a restart bypassed both the local backoff and a received server minimum.

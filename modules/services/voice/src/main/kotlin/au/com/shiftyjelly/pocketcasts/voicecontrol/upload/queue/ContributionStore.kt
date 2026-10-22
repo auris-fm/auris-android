@@ -793,6 +793,35 @@ class ContributionStore(
      * Returns the new count, or null when the entry is unknown, the generation went stale, or the durable
      * sidecar write failed (a swallowed write error would silently reset retry budget on restart).
      */
+    // Entries whose retry-boundary persistence FAILED and whose durable state is therefore UNKNOWN.
+    // While any exist, retryEligible fails CLOSED for them: unknown state must not grant (reviewer
+    // e4820963). Recovery re-reads the sidecars and resolves the uncertainty.
+    private val retryBoundaryUncertain = mutableSetOf<String>()
+
+    private fun publishRetryBoundaryLocked(captureId: String, attempt: Int, boundaryMs: Long) {
+        val sidecar = File(dir, "$captureId$SUFFIX_ATTEMPTS")
+        val tmp = File(dir, "$captureId$SUFFIX_ATTEMPTS.tmp")
+        try {
+            FileOutputStream(tmp).use { out ->
+                out.write("$attempt $boundaryMs".toByteArray(Charsets.UTF_8))
+                out.flush()
+            }
+            fileSync.sync(tmp)
+            if (!tmp.renameTo(sidecar) || !sidecar.exists()) {
+                throw java.io.IOException("retry boundary rename failed")
+            }
+            fileSync.sync(sidecar)
+            syncDirectoryOrFail(dir)
+        } catch (failure: Throwable) {
+            // The durable boundary state is now UNKNOWN (the rename may or may not have happened).
+            // Fail closed: exclude the entry from retry eligibility until recovery re-reads the sidecar.
+            retryBoundaryUncertain += captureId
+            nextRetryAtMs.remove(captureId)
+            tmp.delete()
+            throw IllegalStateException("retry boundary publication uncertain: ${failure.message}")
+        }
+    }
+
     // In-memory retry scheduling. The ATTEMPT COUNT is durable (sidecar); the delay is recomputable from
     // it, so a restart legitimately re-enters the eligible set at the recomputed bound rather than
     // inventing a persisted clock (spec: resume from durable queue state).
@@ -805,7 +834,9 @@ class ContributionStore(
      */
     internal fun backoffBoundMs(attempt: Int): Long {
         require(attempt >= 1) { "backoff needs a FAILED attempt, got $attempt" }
-        var boundS = limits.retryInitialS
+        // The LOCAL cap applies BEFORE growth: initial=10s/max=2s must never exceed 2s at attempt 1
+        // (reviewer e4820963).
+        var boundS = minOf(limits.retryInitialS, limits.retryMaxS)
         repeat((attempt - 1).coerceAtMost(63)) {
             if (boundS < limits.retryMaxS) boundS = minOf(boundS * 2, limits.retryMaxS)
         }
@@ -835,32 +866,29 @@ class ContributionStore(
             val jittered = jitter(bound)
             // Saturating arithmetic: a huge server minimum must mean "never within representable time",
             // not a wrapped earlier/past retry.
+            // Nonpositive Retry-After is ABSENT (a negative value must never wrap positive, reviewer
+            // e4820963); a huge positive one saturates.
             val floorMs = when {
-                retryAfterS == null -> 0L
+                retryAfterS == null || retryAfterS <= 0L -> 0L
                 retryAfterS > Long.MAX_VALUE / 1000L -> Long.MAX_VALUE
                 else -> retryAfterS * 1000L
             }
             val delay = maxOf(jittered, floorMs)
+            val base = clock()
             val eligibleAt =
-                if (delay >= Long.MAX_VALUE - 9_000_000_000_000L) {
+                if (base < 0 || delay >= Long.MAX_VALUE - base) {
                     Long.MAX_VALUE
                 } else {
-                    val sum = clock() + delay
-                    if (sum < 0) Long.MAX_VALUE else sum
+                    base + delay
                 }
             // The not-before boundary is DURABLE: it rides the attempts sidecar so a restart cannot
             // reroll the jitter or bypass a received server minimum (spec requires attempts and their
-            // retry state to survive the process).
-            val sidecar = File(dir, "$captureId$SUFFIX_ATTEMPTS")
-            try {
-                sidecar.writeText("$attempt $eligibleAt")
-                nextRetryAtMs[captureId] = eligibleAt
-                eligibleAt
-            } catch (_: Throwable) {
-                // Roll the in-memory mark back; the sidecar's original text is untouched on failure.
-                nextRetryAtMs.remove(captureId)
-                throw IllegalStateException("retry boundary sidecar write failed")
-            }
+            // retry state to survive the process). Publication is ATOMIC (temp + rename) and synced
+            // (contents + directory): writeText alone could truncate and leave partial bytes, and the
+            // old catch's claim that the original text was untouched was false.
+            publishRetryBoundaryLocked(captureId, attempt, eligibleAt)
+            nextRetryAtMs[captureId] = eligibleAt
+            eligibleAt
         }
     }
 
@@ -878,6 +906,9 @@ class ContributionStore(
                     val charge = ownedCharges[id]
                     if (charge?.ready != true) return@mapNotNull null
                     if (entry.attempts >= limits.maxUploadAttempts) return@mapNotNull null
+                    // Absent means genuinely unscheduled: recovery loaded every durable boundary, and a
+                    // publication failure puts the id in the UNCERTAIN set below instead of defaulting.
+                    if (id in retryBoundaryUncertain) return@mapNotNull null
                     if ((nextRetryAtMs[id] ?: 0L) > nowMs) return@mapNotNull null
                     id
                 }
@@ -1248,6 +1279,7 @@ class ContributionStore(
                 }.ready = true
                 // Restore the durable retry boundary: a restart must not shorten a scheduled backoff
                 // or a received server minimum by "forgetting" them.
+                retryBoundaryUncertain.remove(it.captureId)
                 readRetryBoundaryLocked(it.captureId)?.let { boundary -> nextRetryAtMs[it.captureId] = boundary }
             }
             recovered = true
@@ -1276,10 +1308,13 @@ class ContributionStore(
             // A missing or malformed sidecar is a REFUSAL, never a default: defaulting attempts to 0
             // would hand back a spent retry budget, and defaulting created-at to mtime would let a
             // touched file silently renew its queue age.
-            // Sidecar format "<attempts>[ <nextRetryAtMs>]": the optional retry boundary is parsed
-            // where it is used (readRetryBoundaryLocked); validation reads the count token only.
-            val attempts = readBoundedSidecar(attemptsFile, MAX_ATTEMPTS_SIDECAR_BYTES)
-                ?.trim()?.split(' ')?.firstOrNull()?.toIntOrNull()?.takeIf { it >= 0 } ?: return null
+            // Sidecar format "<attempts>[ <nextRetryAtMs>]". The WHOLE sidecar is parsed strictly and a
+            // malformed/unknown retry state fails the entry closed - never a silent default (reviewer
+            // e4820963). The optional boundary token must be a positive representable long.
+            val sidecarTokens = readBoundedSidecar(attemptsFile, MAX_ATTEMPTS_SIDECAR_BYTES)?.trim()?.split(' ')
+            val attempts = sidecarTokens?.firstOrNull()?.toIntOrNull()?.takeIf { it >= 0 } ?: return null
+            if (sidecarTokens.size > 2) return null
+            if (sidecarTokens.size == 2 && sidecarTokens[1].toLongOrNull()?.takeIf { it > 0 } == null) return null
             val created = readBoundedSidecar(File(dir, "$id$SUFFIX_CREATED"), MAX_CREATED_SIDECAR_BYTES)
                 ?.trim()?.toLongOrNull()?.takeIf { it > 0 } ?: return null
             // --- Mandatory digest identity: this on-disk format is unreleased, so there is NO legacy

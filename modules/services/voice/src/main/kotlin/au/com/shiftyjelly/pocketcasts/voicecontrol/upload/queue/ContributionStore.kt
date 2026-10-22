@@ -266,7 +266,14 @@ class ContributionStore(
                         measurementFailures++
                         unmeasuredIds += id
                         limits.maxQueueBytes
+                        claimOwnedLocked(id, limits.maxQueueBytes, 0, ready = false)
+                        return@synchronized
                     }
+                    // A SUCCESSFUL measurement is itself a clearing event: an id that earlier could not be
+                    // measured is now accounted, so refusing admission over it any longer would be refusing
+                    // over bytes that ARE known (reviewer 7e09c62b - the comment claimed this and the code
+                    // did not do it).
+                    unmeasuredIds -= id
                     claimOwnedLocked(id, survivorBytes, 0, ready = false)
                 }
 
@@ -294,7 +301,15 @@ class ContributionStore(
 
     // Absence that distinguishes "not there" from "could not look", using the same no-follow stat as
     // measurement. Only NoSuchFileException proves absence.
-    private fun absenceOf(file: File): Absence = try {
+    private fun absenceOf(file: File): Absence = hooks.settlementAbsenceOverride?.invoke(file)?.let { code ->
+        when (code) {
+            0 -> Absence.ABSENT
+            1 -> Absence.PRESENT
+            else -> Absence.UNKNOWN
+        }
+    } ?: run { absenceOfReal(file) }
+
+    private fun absenceOfReal(file: File): Absence = try {
         java.nio.file.Files.readAttributes(
             file.toPath(),
             java.nio.file.attribute.BasicFileAttributes::class.java,

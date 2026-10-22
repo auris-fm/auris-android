@@ -26,6 +26,15 @@ class StoreHooks(
      * exactly that.
      */
     val onMeasurementEntry: ((Int) -> Unit)? = null,
+
+    /**
+     * Overrides the deletion-settlement absence verdict for one call, returning one of 0=ABSENT, 1=PRESENT,
+     * 2=UNKNOWN, or null to use the real no-follow stat. Reviewer 7e09c62b/567c0b94 require an
+     * unknown-then-measurable control on the SAME store; filesystem permissions cannot reliably reach the
+     * UNKNOWN verdict on every platform, so the reviewer explicitly authorized this narrow injectable seam.
+     * Production wiring passes [NONE].
+     */
+    val settlementAbsenceOverride: ((java.io.File) -> Int?)? = null,
 ) {
     companion object {
         val NONE = StoreHooks()

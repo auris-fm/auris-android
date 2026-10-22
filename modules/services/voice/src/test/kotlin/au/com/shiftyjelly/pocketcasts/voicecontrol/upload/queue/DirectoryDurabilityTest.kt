@@ -1081,6 +1081,55 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `an unknown survivor that later measures successfully stops refusing admission`() {
+        // reviewer 7e09c62b: the PRESENT branch computed survivorBytes then claimOwnedLocked but never
+        // cleared unmeasuredIds, so an id that once could not be measured kept refusing admission forever
+        // even after it became measurable - while the comment claimed the opposite. Reviewer 7e09c62b
+        // authorized the injectable stat seam because permissions cannot reliably reach UNKNOWN.
+        val root = tmp.newFolder("queue-unknown-then-measurable")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val stuck = File(contributions, "gen\$k.8.someid.recording.wav.part")
+        stuck.mkdirs()
+        File(stuck, "held.bin").writeBytes(ByteArray(1500))
+
+        var forceUnknown = true
+        val store = ContributionStore(
+            root,
+            limits(),
+            hooks = StoreHooks(
+                settlementAbsenceOverride = { file ->
+                    if (forceUnknown && file.name == stuck.name) 2 else null
+                },
+            ),
+        )
+        store.recover()
+        val id = "gen\$k.8.someid.recording"
+        // First encounter under UNKNOWN does not charge bytes it could not see; it marks the id unmeasured,
+        // which is what refuses admission.
+        assertTrue("precondition: accounting is unknown, admission refused", store.unknownFootprintForTest())
+
+        // The verdict becomes real: the path is PRESENT and measurable, but stays UNDELETABLE (non-empty
+        // directory), so the only thing that can clear the unmeasured mark is the successful measurement
+        // itself. My first fixture made the file deletable, and the ABSENT branch cleared the mark instead -
+        // which killed nothing. M49 exposed that.
+        forceUnknown = false
+
+        store.discardCurrentPartials()
+
+        assertTrue("precondition: the survivor remains", stuck.exists())
+        assertTrue(
+            "a successfully measured survivor must stop refusing admission " +
+                "(unknown=${store.unknownFootprintForTest()}, owned=${store.ownedBytesForTest()})",
+            !store.unknownFootprintForTest(),
+        )
+        assertTrue(
+            "and its measured bytes are owned, not invisible (owned=${store.ownedBytesForTest()})",
+            store.ownedBytesForTest() >= 1500,
+        )
+    }
+
+    @Test
     fun `a retry over an already-absent path RELEASES instead of poisoning admission`() {
         // reviewer 567c0b94: two callers can enumerate the same file before either enters the monitor. The
         // first deletes it; the second enters holding the stale entry, delete() returns false, and the stat

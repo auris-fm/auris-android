@@ -585,10 +585,10 @@ class ContributionRetryCallerTest {
                 if (isRevoked()) return@ContributionRetryCaller false
                 // A wrong-digest acceptance must NOT release; a matching one must. Settlement goes
                 // through the resolver exactly as production composition does.
-                val wrong = resolver.resolve(generation, captureId, ContributionAckResolver.Ack.ACCEPTED, receipt(echoedDigest = "0".repeat(64)))
+                val wrong = resolver.resolveForAttempt(store.admittedAttemptForTest(captureId)!!, ContributionAckResolver.Ack.ACCEPTED, receipt(echoedDigest = "0".repeat(64)))
                 assertTrue("forged digest retains ownership", wrong is ContributionAckResolver.Resolution.UnvalidatedAccept)
                 assertTrue("still queued after the forged receipt", store.readyEntries().any { it.captureId == captureId })
-                val ok = resolver.resolve(generation, captureId, ContributionAckResolver.Ack.ACCEPTED, receipt())
+                val ok = resolver.resolveForAttempt(store.admittedAttemptForTest(captureId)!!, ContributionAckResolver.Ack.ACCEPTED, receipt())
                 assertTrue("the matching receipt releases", ok is ContributionAckResolver.Resolution.Released)
                 // The caller's own settlement gate sees the attempt already released.
                 !store.readyEntries().any { it.captureId == captureId }
@@ -729,8 +729,8 @@ class ContributionRetryCallerTest {
 
         val resolver = ContributionAckResolver(store, validator)
         val generation = store.fence.currentGeneration()
-        assertEquals(1, store.recordAttempt(generation, id))
-        val resolution = resolver.resolve(generation, id, ContributionAckResolver.Ack.ACCEPTED, foreign)
+        val token = store.pickupAttemptToken(generation, id)!!
+        val resolution = resolver.resolveForAttempt(token, ContributionAckResolver.Ack.ACCEPTED, foreign)
         assertTrue("a foreign receipt is not an acceptance", resolution is ContributionAckResolver.Resolution.UnvalidatedAccept)
         assertTrue("ownership retained", store.readyEntries().any { it.captureId == id })
         assertEquals(0L, store.terminalCounter(ContributionStore.TerminalReason.UPLOAD_ACCEPTED))

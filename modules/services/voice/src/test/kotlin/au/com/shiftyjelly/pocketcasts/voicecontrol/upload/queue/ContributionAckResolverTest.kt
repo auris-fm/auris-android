@@ -87,11 +87,12 @@ class ContributionAckResolverTest {
         val root = tmp.newFolder("ack-ambiguous")
         val store = newStore(root) { now }
         val (id, generation) = prepared(store)
-        assertEquals(1, store.recordAttempt(generation, id))
+        val token = store.pickupAttemptToken(generation, id)
+        assertEquals(1, token?.attemptNumber)
         val wavBefore = sha256Hex(wavOf(store, id).readBytes())
 
         val resolver = ContributionAckResolver(store) { captureId, _ -> captureId.isNotEmpty() }
-        val resolution = resolver.resolve(generation, id, ContributionAckResolver.Ack.AMBIGUOUS)
+        val resolution = resolver.resolveForAttempt(token!!, ContributionAckResolver.Ack.AMBIGUOUS)
         assertTrue(resolution is ContributionAckResolver.Resolution.Retained)
         assertTrue((resolution as ContributionAckResolver.Resolution.Retained).retryAtMs != null)
         assertTrue("ambiguous: entry RETAINED", store.readyEntries().any { it.captureId == id })
@@ -106,12 +107,13 @@ class ContributionAckResolverTest {
         val root = tmp.newFolder("ack-retry-immutable")
         val store = newStore(root) { now }
         val (id, generation) = prepared(store)
-        assertEquals(1, store.recordAttempt(generation, id))
+        val token = store.pickupAttemptToken(generation, id)
+        assertEquals(1, token?.attemptNumber)
         val bytesBefore = wavOf(store, id).readBytes()
         val digestBefore = sha256Hex(bytesBefore)
 
         val resolver = ContributionAckResolver(store) { _, _ -> true }
-        resolver.resolve(generation, id, ContributionAckResolver.Ack.AMBIGUOUS)
+        resolver.resolveForAttempt(token!!, ContributionAckResolver.Ack.AMBIGUOUS)
         now += 10_000L
 
         // The next attempt reads the same immutable capture: identical bytes, identical digest.
@@ -126,16 +128,17 @@ class ContributionAckResolverTest {
         val root = tmp.newFolder("ack-accept")
         val store = newStore(root) { now }
         val (id, generation) = prepared(store)
-        assertEquals(1, store.recordAttempt(generation, id))
+        val token = store.pickupAttemptToken(generation, id)!!
+        assertEquals(1, token.attemptNumber)
 
         // Unvalidated ACCEPTED (wrong payload): treated as ambiguous, ownership retained.
         val strict = ContributionAckResolver(store) { _, payload -> payload != null && payload.size == 4 }
-        val unvalidated = strict.resolve(generation, id, ContributionAckResolver.Ack.ACCEPTED, payload = "no".toByteArray())
+        val unvalidated = strict.resolveForAttempt(token, ContributionAckResolver.Ack.ACCEPTED, payload = "no".toByteArray())
         assertTrue(unvalidated is ContributionAckResolver.Resolution.UnvalidatedAccept)
         assertTrue("unvalidated accept retains the entry", store.readyEntries().any { it.captureId == id })
 
         // Validated ACCEPTED: ownership released under the still-valid generation.
-        val validated = strict.resolve(generation, id, ContributionAckResolver.Ack.ACCEPTED, payload = "abcd".toByteArray())
+        val validated = strict.resolveForAttempt(token, ContributionAckResolver.Ack.ACCEPTED, payload = "abcd".toByteArray())
         assertEquals(ContributionAckResolver.Resolution.Released, validated)
         assertTrue("accepted: entry gone from the queue", store.readyEntries().none { it.captureId == id })
         assertFalse(wavOf(store, id).exists())
@@ -148,7 +151,8 @@ class ContributionAckResolverTest {
         val root = tmp.newFolder("ack-stale")
         val store = newStore(root) { now }
         val (id, generation) = prepared(store)
-        assertEquals(1, store.recordAttempt(generation, id))
+        val token = store.pickupAttemptToken(generation, id)
+        assertEquals(1, token?.attemptNumber)
         val wavBefore = sha256Hex(wavOf(store, id).readBytes())
 
         // An epoch bump (enrollment/account change) invalidates the attempt's generation while the
@@ -158,14 +162,19 @@ class ContributionAckResolverTest {
         assertEquals(
             "stale ACCEPTED must not release (or delete) anything",
             ContributionAckResolver.Resolution.StaleEpoch,
-            resolver.resolve(generation, id, ContributionAckResolver.Ack.ACCEPTED),
+            resolver.resolveForAttempt(token!!, ContributionAckResolver.Ack.ACCEPTED),
         )
         assertEquals(
             "stale TERMINAL_DISPOSAL must not release anything either",
             ContributionAckResolver.Resolution.StaleEpoch,
-            resolver.resolve(generation, id, ContributionAckResolver.Ack.TERMINAL_DISPOSAL),
+            resolver.resolveForAttempt(token, ContributionAckResolver.Ack.TERMINAL_DISPOSAL),
         )
-        assertEquals("stale AMBIGUOUS must not re-arm anything", ContributionAckResolver.Resolution.StaleEpoch, resolver.resolve(generation, id, ContributionAckResolver.Ack.AMBIGUOUS))
+        // REVOCATION DISPOSAL (spec f6a8f380, reviewer 98bdb908): a stale epoch does not re-arm via
+        // currentGeneration any more, but the retained capture's retry boundary IS written, token-scoped,
+        // when no successor owns the slot. The entry stays; only the durable delay appears.
+        val staleAmbiguous = resolver.resolveForAttempt(token, ContributionAckResolver.Ack.AMBIGUOUS)
+        assertTrue("stale AMBIGUOUS retains", staleAmbiguous is ContributionAckResolver.Resolution.Retained)
+        assertTrue("the disposal boundary is durable and future", (staleAmbiguous as ContributionAckResolver.Resolution.Retained).retryAtMs != null)
         assertEquals("capture bytes intact", wavBefore, sha256Hex(wavOf(store, id).readBytes()))
         assertEquals(0L, store.terminalCounter(ContributionStore.TerminalReason.UPLOAD_ACCEPTED))
     }
@@ -176,12 +185,13 @@ class ContributionAckResolverTest {
         val root = tmp.newFolder("ack-terminal")
         val store = newStore(root) { now }
         val (id, generation) = prepared(store)
-        assertEquals(1, store.recordAttempt(generation, id))
+        val token = store.pickupAttemptToken(generation, id)!!
+        assertEquals(1, token.attemptNumber)
 
         val resolver = ContributionAckResolver(store) { _, _ -> true }
         assertEquals(
             ContributionAckResolver.Resolution.Released,
-            resolver.resolve(generation, id, ContributionAckResolver.Ack.TERMINAL_DISPOSAL),
+            resolver.resolveForAttempt(token, ContributionAckResolver.Ack.TERMINAL_DISPOSAL),
         )
         assertTrue(store.readyEntries().none { it.captureId == id })
         assertEquals(1L, store.terminalCounter(ContributionStore.TerminalReason.SERVER_TERMINAL))
@@ -189,11 +199,11 @@ class ContributionAckResolverTest {
         // Second capture, but the epoch changes before the terminal response lands: the stale ack must
         // NOT be the thing that removes it - the entry (and its bytes) remain owned and served.
         val (id2, generation2) = prepared(store)
-        assertEquals(1, store.recordAttempt(generation2, id2))
+        val staleToken = store.pickupAttemptToken(generation2, id2)!!
         store.fence.revoke()
         assertEquals(
             ContributionAckResolver.Resolution.StaleEpoch,
-            resolver.resolve(generation2, id2, ContributionAckResolver.Ack.TERMINAL_DISPOSAL),
+            resolver.resolveForAttempt(staleToken, ContributionAckResolver.Ack.TERMINAL_DISPOSAL),
         )
         assertTrue("stale terminal ack retains the entry", store.readyEntries().any { it.captureId == id2 })
         assertTrue(wavOf(store, id2).exists())

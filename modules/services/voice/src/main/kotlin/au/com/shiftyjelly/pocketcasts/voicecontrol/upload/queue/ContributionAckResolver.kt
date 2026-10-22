@@ -54,40 +54,6 @@ class ContributionAckResolver(
         fun validate(captureId: String, payload: ByteArray?): Boolean
     }
 
-    fun resolve(
-        generation: Long,
-        captureId: String,
-        ack: Ack,
-        payload: ByteArray? = null,
-        retryAfterS: Long? = null,
-    ): Resolution = when (ack) {
-        Ack.ACCEPTED ->
-            if (!validator.validate(captureId, payload)) {
-                // An acceptance we cannot VALIDATE is not an acceptance: treat as ambiguous.
-                retain(captureId, generation, retryAfterS).let { r ->
-                    if (r is Resolution.Retained) Resolution.UnvalidatedAccept(r.retryAtMs) else r
-                }
-            } else {
-                release(generation, captureId, ContributionStore.TerminalReason.UPLOAD_ACCEPTED)
-            }
-
-        Ack.AMBIGUOUS, Ack.RETRYABLE -> retain(captureId, generation, retryAfterS)
-
-        Ack.TERMINAL_DISPOSAL -> release(generation, captureId, ContributionStore.TerminalReason.SERVER_TERMINAL)
-    }
-
-    private fun release(generation: Long, captureId: String, reason: ContributionStore.TerminalReason): Resolution = if (!store.fence.isValid(generation)) {
-        // Stale completion (epoch/account changed since the attempt): the local queue is the
-        // successor's or a revoked one - neither authorizes THIS completion to mutate it.
-        Resolution.StaleEpoch
-    } else {
-        if (store.dropEntry(generation, captureId, reason)) {
-            Resolution.Released
-        } else {
-            Resolution.StaleEpoch
-        }
-    }
-
     /**
      * TOKEN-SCOPED resolution (spec 442bfbd7): the completion carries the immutable attempt token from
      * atomic pickup, and EVERY mutation validates-and-mutates against that token in ONE owner

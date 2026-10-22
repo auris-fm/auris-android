@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
+import com.squareup.moshi.JsonReader
 import java.io.File
 import java.io.InputStream
 import java.util.concurrent.TimeUnit
@@ -11,6 +12,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okio.Buffer
 import okio.BufferedSink
 
 /**
@@ -39,6 +41,12 @@ class ContributionUploadTransport(
     private val callTimeoutMs: Long = 120_000,
     /** Ceiling on calls in flight; attempts beyond it are refused locally and retried later. */
     private val maxConcurrentCalls: Int = MAX_CONCURRENT_CALLS_DEFAULT,
+    /**
+     * Test seam only: runs after the request is fully built and BEFORE the call is registered. It is the
+     * one point where a control can deterministically land a revocation in the admission-to-send window
+     * instead of hoping to hit it by timing. No-op in production.
+     */
+    private val onBeforeRegistrationForTest: (() -> Unit)? = null,
 ) {
 
     sealed class Response {
@@ -81,46 +89,83 @@ class ContributionUploadTransport(
         audio: File,
         isCancelled: () -> Boolean = { false },
         remainingMs: Long? = null,
+        /** Receives the handle of the registered call, so the revoker can cancel THAT call directly. */
+        onRegistered: (Long) -> Unit = {},
     ): Response {
         // BEFORE THE FIRST BYTE. Admission and this call are not atomic, so a withdrawal that landed
         // between them must not put a request on the network.
         if (isCancelled()) return Response.Cancelled
-        val credentials = authorization() ?: return Response.Unauthorized(-1)
-        val metadata = metadataPart(record) ?: return Response.Ambiguous(null)
-        if (isCancelled()) return Response.Cancelled
         // BACKPRESSURE ON CALLS, not on threads: a transport that accepted unbounded attempts would let
         // abandoned writers accumulate after their leases were released.
         if (!inFlight.tryAcquire()) return Response.Ambiguous(null)
-        // The per-call budget is the caller's REMAINING deadline when it has one, so this exchange can
-        // never outlive the total the caller promised. OkHttp's callTimeout bounds connect, request body,
-        // headers and response together.
-        val budget = (remainingMs ?: callTimeoutMs).coerceAtMost(callTimeoutMs).coerceAtLeast(1)
-        val callClient = client.newBuilder().callTimeout(budget, TimeUnit.MILLISECONDS).build()
-        val call = callClient.newCall(buildRequest(credentials, metadata, audio, isCancelled, remainingMs))
-        // Registered BEFORE transmission can begin, so a revocation that lands now still cancels it.
-        registered.set(call)
+        // EVERYTHING after the permit is under release cleanup, so a missing file, a malformed URL or any
+        // construction failure cannot leak a permit (reviewer d53d9c68 finding 3).
         try {
-            if (isCancelled()) {
-                call.cancel()
-                return Response.Cancelled
-            }
-            return call.execute().use { response ->
-                // The withdrawal is authoritative over whatever arrived.
-                if (isCancelled()) return Response.Cancelled
-                // BOUNDED, cap enforced DURING the read: an oversize answer is unknown, never a verdict.
-                val payload = readBounded(response.body.byteStream())
-                    ?: return Response.Ambiguous(response.code)
-                classify(response.code, payload)
+            val credentials = authorization() ?: return Response.Unauthorized(-1)
+            val metadata = metadataPart(record) ?: return Response.Ambiguous(null)
+            if (isCancelled()) return Response.Cancelled
+            // The per-call budget is the caller's REMAINING deadline when it has one, so this exchange can
+            // never outlive the total the caller promised.
+            val budget = (remainingMs ?: callTimeoutMs).coerceAtMost(callTimeoutMs).coerceAtLeast(1)
+            val callClient = client.newBuilder().callTimeout(budget, TimeUnit.MILLISECONDS).build()
+            val call = callClient.newCall(buildRequest(credentials, metadata, audio, isCancelled, remainingMs))
+            // The admission-to-send window: everything up to here has already decided to upload, and the
+            // request below is the first thing that touches the network. A withdrawal landing here must
+            // still prevent transmission.
+            onBeforeRegistrationForTest?.invoke()
+            if (isCancelled()) return Response.Cancelled
+            // REGISTERED BEFORE EXECUTION, and the withdrawal is WIRED TO cancel() - not merely polled.
+            // A blocked write cannot re-read a Boolean, so the registration is what makes live revocation
+            // actually stop the call (reviewer d53d9c68 finding 1).
+            val handle = register(call)
+            onRegistered(handle)
+            try {
+                if (isCancelled()) {
+                    call.cancel()
+                    return Response.Cancelled
+                }
+                return call.execute().use { response ->
+                    // The withdrawal is authoritative over whatever arrived.
+                    if (isCancelled()) return Response.Cancelled
+                    // BOUNDED, cap enforced DURING the read: an oversize answer is unknown, never a verdict.
+                    val payload = readBounded(response.body.byteStream())
+                        ?: return Response.Ambiguous(response.code)
+                    classify(response.code, payload)
+                }
+            } catch (io: Throwable) {
+                // OkHttp reports BOTH a withdrawal and a spent callTimeout as a cancelled call, so the
+                // withdrawal signal is the only thing that may turn this into [Cancelled]. A timeout is an
+                // unknown outcome: the upload may have landed, so ownership is retained.
+                return if (isCancelled()) Response.Cancelled else Response.Ambiguous(null)
+            } finally {
+                release(handle)
             }
         } catch (io: Throwable) {
-            // OkHttp reports BOTH a withdrawal and a spent callTimeout as a cancelled call, so the
-            // withdrawal signal is the only thing that may turn this into [Cancelled]. A timeout is an
-            // unknown outcome: the upload may have landed, so ownership is retained.
-            return if (isCancelled()) Response.Cancelled else Response.Ambiguous(null)
+            return Response.Ambiguous(null)
         } finally {
-            registered.set(null)
             inFlight.release()
         }
+    }
+
+    /**
+     * Withdraw the call registered WITH THIS HANDLE. Called by whoever revokes, so that a revocation
+     * interrupts a blocked write immediately instead of waiting for the exchange to finish.
+     */
+    fun cancelRegistered(handle: Long) {
+        registered[handle]?.cancel()
+    }
+
+    /** The handle this attempt is registered under, for a revoker to hold. */
+    fun currentHandleForTest(): Long? = registered.entries.maxByOrNull { it.key }?.key
+
+    private fun register(call: Call): Long {
+        val handle = handleSeq.incrementAndGet()
+        registered[handle] = call
+        return handle
+    }
+
+    private fun release(handle: Long) {
+        registered.remove(handle)
     }
 
     /** The exact request body this transport emits, for a parity harness to feed the real intake. */
@@ -288,10 +333,15 @@ class ContributionUploadTransport(
     /** Test seam: how many calls this transport currently has outstanding. */
     fun inFlightForTest(): Int = inFlight.used()
 
-    /** Test seam: the call registered for the attempt in flight, when there is one. */
-    fun registeredCallForTest(): Call? = registered.get()
+    /** Test seam: a call registered for an attempt in flight, when there is one. */
+    fun registeredCallForTest(): Call? = registered.entries.minByOrNull { it.key }?.value
 
-    private val registered = java.util.concurrent.atomic.AtomicReference<Call?>(null)
+    /**
+     * Registered calls, keyed by attempt handle. A single reference could not represent more than one
+     * permitted call and would let one attempt clear another's registration (reviewer d53d9c68).
+     */
+    private val registered = java.util.concurrent.ConcurrentHashMap<Long, Call>()
+    private val handleSeq = java.util.concurrent.atomic.AtomicLong(0)
     private val inFlight = CountingSemaphore(maxConcurrentCalls)
 
     /** A bounded gate: at most [permits] calls outstanding, no queue of waiting attempts. */
@@ -329,35 +379,54 @@ class ContributionUploadTransport(
     }
 }
 
-/** The Worker's `UploadErrorBody`, read strictly: one pass, duplicate members refused, strings only. */
+/** The Worker's `UploadErrorBody`, read strictly: one pass, duplicate members refused, typed tokens.
+ */
 internal object ErrorBody {
-    fun parse(body: ByteArray): Map<String, String>? = runCatching {
-        val reader = com.squareup.moshi.JsonReader.of(okio.Buffer().write(body))
-        val fields = mutableMapOf<String, String>()
-        reader.beginObject()
-        while (reader.hasNext()) {
-            val name = reader.nextName()
-            if (name in fields) return null
-            when (name) {
-                // A QUOTED version is a TYPE MISMATCH, not a string that happens to equal 1: peeking the
-                // token type is what enforces that (reviewer 576fab08).
-                "schema_version" -> {
-                    if (reader.peek() != com.squareup.moshi.JsonReader.Token.NUMBER) return null
-                    if (reader.nextInt() != 1) return null
+    private val ALLOWED_KEYS = setOf("schema_version", "code", "retry_after_s")
+
+    /** schema_version and retry_after_s are NUMBERS; a quoted number is a type error. */
+    private val NUMERIC_KEYS = setOf("schema_version", "retry_after_s")
+
+    fun parse(body: ByteArray): Map<String, String>? {
+        val reader = JsonReader.of(Buffer().write(body))
+        val fields = LinkedHashMap<String, String>()
+        val numeric = HashSet<String>()
+        return try {
+            reader.beginObject()
+            while (reader.hasNext()) {
+                val key = reader.nextName()
+                if (key in fields) return null // decoded-key duplicate detection
+                when {
+                    reader.peek() == JsonReader.Token.NUMBER && key in NUMERIC_KEYS -> {
+                        fields[key] = reader.nextString()
+                        numeric += key
+                    }
+
+                    // Everything else is a non-empty, control-character-free string.
+                    reader.peek() == JsonReader.Token.STRING && key !in NUMERIC_KEYS -> {
+                        val value = reader.nextString()
+                        if (value.isEmpty() || value.any { it.isISOControl() }) return null
+                        fields[key] = value
+                    }
+
+                    else -> return null // wrong token type for the key, or bool/null/object/array
                 }
-
-                "code" -> fields[name] = reader.nextString()
-
-                "retry_after_s" -> {
-                    // Same discipline: a quoted hint is a type mismatch and yields NO hint at all.
-                    if (reader.peek() != com.squareup.moshi.JsonReader.Token.NUMBER) return null
-                    fields[name] = reader.nextLong().toString()
-                }
-
-                else -> return null
             }
+            reader.endObject()
+            if (reader.peek() != JsonReader.Token.END_DOCUMENT) return null // trailing junk
+            // Exactly the Worker's envelope: no member this client does not understand.
+            if (fields.keys.any { it !in ALLOWED_KEYS }) return null
+            if ("code" !in fields) return null
+            if ("schema_version" !in numeric || fields["schema_version"] != "1") return null
+            val hint = fields["retry_after_s"]
+            if (hint != null) {
+                if ("retry_after_s" !in numeric) return null
+                val value = hint.toLongOrNull() ?: return null
+                if (value < 0) return null
+            }
+            fields
+        } catch (malformed: Throwable) {
+            null
         }
-        reader.endObject()
-        if (fields["code"] == null) null else fields
-    }.getOrElse { null }
+    }
 }

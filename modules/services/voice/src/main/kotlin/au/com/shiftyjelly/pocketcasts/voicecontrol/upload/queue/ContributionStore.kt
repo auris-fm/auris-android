@@ -1193,11 +1193,33 @@ class ContributionStore(
     class LaunchLease internal constructor(val generation: Long, val captureId: String) {
         private val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
 
+        /**
+         * The transport hook for THIS lease. A blocked write cannot re-read a Boolean, so the lease also
+         * carries an action that reaches into the live call and cancels it (reviewer d53d9c68 finding 1:
+         * registered-but-never-cancelled is not cancellation).
+         */
+        @Volatile
+        private var abort: (() -> Unit)? = null
+
         /** True once a revocation (or a newer owner) withdrew this launch's authorization. */
         fun isCancelled(): Boolean = cancelled.get()
 
+        /** Binds the live call's cancellation to this lease; it fires on every later revocation. */
+        internal fun bindAbort(action: () -> Unit) {
+            abort = action
+            // A revocation that landed between registration and binding must not be missed.
+            if (cancelled.get()) runCatching { action() }
+        }
+
         internal fun cancel() {
             cancelled.set(true)
+            // Reach the CALL, not just the flag: this is what interrupts a blocked write.
+            abort?.let { runCatching { it() } }
+        }
+
+        /** Re-runs the bound abort so a revocation path outside the lease still reaches the call. */
+        internal fun cancelIfLiveForTest() {
+            abort?.let { runCatching { it() } }
         }
     }
 

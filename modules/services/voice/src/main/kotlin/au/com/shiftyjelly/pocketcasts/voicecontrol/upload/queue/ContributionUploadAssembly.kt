@@ -33,6 +33,11 @@ class ContributionUploadAssembly(
     networkAvailable: () -> Boolean,
     /** Called after a VALIDATED acceptance releases the entry; never on an unvalidated one. */
     private val onAccepted: (generation: Long, captureId: String) -> Unit = { _, _ -> },
+    /**
+     * Binds a live call's cancellation to the owner of this attempt's authorization (the launch lease).
+     * Without this the transport only has a Boolean to poll, and a blocked write never polls.
+     */
+    private val bindCancel: ((() -> Unit) -> Unit)? = null,
 ) {
     /** A durable capture plus the record that claims it. */
     data class Capture(val record: RecordNode.Obj, val audio: File)
@@ -71,7 +76,15 @@ class ContributionUploadAssembly(
             // The revocation signal now reaches INSIDE the upload: the transport checks it before the
             // first byte, per request-body chunk, and around the response read, so a withdrawal stops a
             // transfer already in flight instead of only being noticed after it finishes.
-            val response = transport.upload(captureId, capture.record, capture.audio, isCancelled = isRevoked)
+            // The lease owns this attempt's authorization, so the live call is bound to it: a revocation
+            // then cancels the CALL rather than only flipping a flag the blocked writer cannot read.
+            val response = transport.upload(
+                captureId,
+                capture.record,
+                capture.audio,
+                isCancelled = isRevoked,
+                onRegistered = { handle -> bindCancel?.invoke { transport.cancelRegistered(handle) } },
+            )
             lastResponse[captureId] = response
             // A cancelled attempt has NO answer to settle from, whatever the socket happened to return.
             if (response is ContributionUploadTransport.Response.Cancelled) throw AttemptCancelled(captureId)

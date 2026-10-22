@@ -27,6 +27,12 @@ class ContributionRetryCaller(
      * 279de1d4). Returns true on accepted upload; throws on lost/failed transport.
      */
     private val attemptUpload: (generation: Long, captureId: String, isRevoked: () -> Boolean) -> Boolean,
+    /**
+     * Binds the live network call's cancellation to the lease that owns this attempt, so a revocation
+     * reaches the CALL rather than only a flag. The caller is the only component that holds the lease,
+     * which is why the binding is supplied here and not by the transport.
+     */
+    private val bindCancellation: ((action: () -> Unit) -> Unit)? = null,
     /** Upload-completion hook (server ack path); not part of this slice's discipline. */
     private val onSuccess: (generation: Long, captureId: String) -> Unit = { _, _ -> },
     /**
@@ -123,6 +129,9 @@ class ContributionRetryCaller(
                     continue
                 }
                 try {
+                    // The lease's own cancel action is handed to the transport, so revokeAndCancelLaunches
+                    // reaches this call directly.
+                    bindCancellation?.invoke { lease.cancelIfLiveForTest() }
                     val accepted = attemptUpload(generation, captureId) { lease.isCancelled() || !store.fence.isValid(generation) }
                     if (lease.isCancelled()) {
                         // A revocation withdrew authorization mid-flight, so the response cannot be trusted

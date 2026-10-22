@@ -39,6 +39,12 @@ class ContributionUploadTransport(
      * inactivity timeout - so without this a trickling response can hold the attempt open indefinitely.
      */
     private val totalDeadlineMs: Long = 120_000,
+    /**
+     * Bound for ONE transmission attempt: connect plus the whole request body. `readTimeout` governs input
+     * reads and `connectTimeout` only connection establishment, so neither bounds a blocked write; this is
+     * the anchor the write watchdog aborts the socket against.
+     */
+    private val writeTimeoutMs: Long = 60_000,
 ) {
 
     sealed class Response {
@@ -221,6 +227,9 @@ class ContributionUploadTransport(
         // inactivity timeout cannot bound a trickle, and cancelling the connection from another thread was
         // measured to be unreliable.
         val deadlineAt = System.nanoTime() + totalDeadlineMs * 1_000_000
+        // The WRITE phase gets its own anchored bound derived from the same start, so a transfer that is
+        // still being sent cannot consume the whole budget and then leave the response unbounded.
+        val writeDeadlineAt = System.nanoTime() + writeTimeoutMs * 1_000_000
         val expired = java.util.concurrent.atomic.AtomicBoolean(false)
         // Every blocking socket call is bounded by a slice shorter than the budget, so none can outlive the
         // deadline by more than one slice.
@@ -236,8 +245,15 @@ class ContributionUploadTransport(
             connection.setRequestProperty("Content-Type", envelope.contentType)
             connection.setRequestProperty("Authorization", credentials)
             connection.setFixedLengthStreamingMode(envelope.contentLength)
-            // THE REQUEST BODY, under the same deadline and the same withdrawal check.
-            writeWithinDeadline(connection, envelope, deadlineAt, isCancelled)?.let { return it }
+            // THE REQUEST BODY. The write runs on a worker with a watchdog (reviewer 88b0aa2b): split the
+            // work across a call thread and a watchdog so a write that blocks on backpressure is actually
+            // INTERRUPTED when its budget is spent or the attempt is withdrawn, rather than merely
+            // observed between chunks.
+            writeWithinDeadline(connection, envelope, writeDeadlineAt, isCancelled)?.let { written ->
+                // The write phase's verdict, unless the attempt was withdrawn - in which case the
+                // withdrawal is the reason and the only thing the caller may act on.
+                return if (isCancelled()) Response.Cancelled else written
+            }
             val status = connection.responseCode
             if (isCancelled()) return Response.Cancelled
             if (System.nanoTime() >= deadlineAt) {
@@ -282,21 +298,54 @@ class ContributionUploadTransport(
         deadlineAt: Long,
         isCancelled: () -> Boolean,
     ): Response? {
-        while (true) {
-            if (isCancelled()) return Response.Cancelled
-            if (System.nanoTime() >= deadlineAt) return Response.Ambiguous(null)
-            try {
-                connection.outputStream.use { sink -> writeChunks(sink, envelope, deadlineAt, isCancelled)?.let { return it } }
-                return null
-            } catch (slice: java.net.SocketTimeoutException) {
-                // One slice expired. Loop: the budget check above decides whether to try again.
-                continue
-            } catch (io: java.io.IOException) {
-                return if (isCancelled()) Response.Cancelled else Response.Ambiguous(null)
+        // If the attempt is already withdrawn, nothing needs to be written or aborted.
+        if (isCancelled()) return Response.Cancelled
+        // NO RETRY FROM BYTE ZERO (reviewer 9b328eb9). A failed write can have transmitted a prefix, and
+        // this request has a FIXED Content-Length: rewriting the envelope would duplicate that prefix or
+        // desynchronise the body. An uncertain partial write is an UNKNOWN outcome, and the identical
+        // bytes are re-posted later under a new bounded attempt.
+        val work = WRITE_POOL.submit<Response?> { writeChunksBlocking(connection, envelope) }
+        try {
+            while (true) {
+                // A write that is not blocked returns here; a blocked one is only escaped by the abort.
+                val done = runCatching { work.get(WRITE_POLL_SLICE_MS, java.util.concurrent.TimeUnit.MILLISECONDS) }
+                if (done.isSuccess) {
+                    val completed = done.getOrNull()
+                    // The write ended by itself. Report the withdrawal if that is why it ended.
+                    if (completed == null && isCancelled()) return Response.Cancelled
+                    return completed
+                }
+                if (done.exceptionOrNull() !is java.util.concurrent.TimeoutException) {
+                    // The write failed on its own. A withdrawal explains it better than "unknown".
+                    return if (isCancelled()) Response.Cancelled else Response.Ambiguous(null)
+                }
+                // Still writing. Withdrawn or out of budget: abort the socket so the blocked write fails.
+                if (isCancelled()) {
+                    abortUnderlyingSocket(connection)
+                    runCatching { work.get(2_000, java.util.concurrent.TimeUnit.MILLISECONDS) }
+                    return Response.Cancelled
+                }
+                if (System.nanoTime() >= deadlineAt) {
+                    abortUnderlyingSocket(connection)
+                    runCatching { work.get(2_000, java.util.concurrent.TimeUnit.MILLISECONDS) }
+                    return Response.Ambiguous(null)
+                }
             }
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            abortUnderlyingSocket(connection)
+            return if (isCancelled()) Response.Cancelled else Response.Ambiguous(null)
         }
-        @Suppress("UNREACHABLE_CODE")
-        return null
+    }
+
+    /** The actual write, run where a blocked call can be abandoned once the socket has been aborted. */
+    private fun writeChunksBlocking(connection: HttpURLConnection, envelope: Envelope): Response? = try {
+        connection.outputStream.use { sink -> writeChunks(sink, envelope, Long.MAX_VALUE) { false } }
+        null
+    } catch (io: java.io.IOException) {
+        // The enclosing writeWithinDeadline decides whether this failure is a withdrawal or unknown;
+        // it re-reads the signal, so an abort caused by revocation is still reported as one.
+        Response.Ambiguous(null)
     }
 
     /** @return null when the whole envelope was written, or the [Response] that ends the attempt. */
@@ -383,6 +432,25 @@ class ContributionUploadTransport(
         }
     }
 
+    /**
+     * Abort the connection underneath a BLOCKED write. `readTimeout` never governed writes and a deadline
+     * checked between chunks cannot interrupt one, so shutting the socket down is what actually makes a
+     * blocked `write`/`flush` return. Degrades to a no-op if a platform's internals differ, in which case
+     * the attempt is still bounded by the enclosing response-read deadline.
+     */
+    @Suppress("SwallowedException", "TooGenericExceptionCaught")
+    private fun abortUnderlyingSocket(connection: HttpURLConnection) {
+        val socket = runCatching {
+            val delegate = connection.javaClass.getDeclaredField("delegate").apply { isAccessible = true }.get(connection)
+            val http = delegate.javaClass.getDeclaredField("http").apply { isAccessible = true }.get(delegate) ?: return
+            val stream = http.javaClass.getDeclaredField("str").apply { isAccessible = true }.get(http) ?: return
+            stream.javaClass.getDeclaredField("socket").apply { isAccessible = true }.get(stream) as? java.net.Socket
+        }.getOrNull() ?: return
+        runCatching { socket.shutdownInput() }
+        runCatching { socket.shutdownOutput() }
+        runCatching { socket.close() }
+    }
+
     private fun cutOff(deadlineAt: Long, isCancelled: () -> Boolean): Boolean = isCancelled() || System.nanoTime() >= deadlineAt
 
     private companion object {
@@ -390,6 +458,18 @@ class ContributionUploadTransport(
 
         /** The only capture-sized buffer a send allocates; the audio itself stays on disk. */
         const val COPY_BUFFER_BYTES = 16 * 1024
+
+        /** How long the watchdog waits for a write slice before checking the budget again. */
+        const val WRITE_POLL_SLICE_MS = 100L
+
+        /**
+         * The write runs here so a blocked call can be abandoned after its socket is aborted. Daemon
+         * threads: an abandoned writer must never keep the process alive.
+         */
+        val WRITE_POOL: java.util.concurrent.ExecutorService =
+            java.util.concurrent.Executors.newCachedThreadPool { runnable ->
+                Thread(runnable, "contribution-upload-writer").apply { isDaemon = true }
+            }
     }
 
     // The OWNING envelope pairs    }

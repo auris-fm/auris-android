@@ -85,11 +85,16 @@ class ContributionUploadCancellationTest {
         return file
     }
 
-    private fun transport(totalDeadlineMs: Long = 120_000, readTimeoutMs: Int = 60_000) = ContributionUploadTransport(
+    private fun transport(
+        totalDeadlineMs: Long = 120_000,
+        readTimeoutMs: Int = 60_000,
+        writeTimeoutMs: Long = 60_000,
+    ) = ContributionUploadTransport(
         endpoint = "http://127.0.0.1:$port/v1/contributions",
         authorization = { "Bearer test-token" },
         readTimeoutMs = readTimeoutMs,
         totalDeadlineMs = totalDeadlineMs,
+        writeTimeoutMs = writeTimeoutMs,
     )
 
     private fun serve(handler: (HttpExchange) -> Unit) {
@@ -197,12 +202,14 @@ class ContributionUploadCancellationTest {
     }
 
     @Test
-    fun `a stalled request-body write is bounded by the total deadline, not left unbounded`() {
-        // The server accepts the CONNECTION but never drains the request body, so the client's write
-        // blocks. Before the deadline covered the write, this had no bound at all.
+    fun `a blocked write under real backpressure is ABORTED, not merely observed between chunks`() {
+        // REAL BACKPRESSURE (reviewer 88b0aa2b). The server accepts, reads NOTHING, and keeps the socket
+        // buffer full, so the client's write genuinely blocks in the kernel. readTimeout governs input
+        // reads only, and a deadline check between chunks can never fire while a chunk is stuck - so only
+        // an actual abort of the socket can end this. The body is large enough to overrun any socket
+        // buffer, which is what makes the write block rather than complete instantly.
         serve { exchange ->
-            // Hold the exchange without reading AND without responding: the client's write eventually
-            // stalls once the socket buffers fill.
+            // Accept the exchange and never read the request body.
             Thread.sleep(30_000)
             runCatching { exchange.close() }
         }
@@ -210,17 +217,53 @@ class ContributionUploadCancellationTest {
         val budgetMs = 2_000L
 
         val startedAt = System.nanoTime()
-        val response = transport(totalDeadlineMs = budgetMs).upload(id, record(id), wavFile(id))
+        val response = transport(totalDeadlineMs = budgetMs, writeTimeoutMs = budgetMs).upload(id, record(id), wavFile(id))
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
 
-        // Invariant under test: the attempt ends and never claims a disposition. Whether a blocked write
-        // proves it exhausted the budget depends on socket buffering, so the budget is reported, not
-        // asserted here - the deadline-spending write control below covers that.
+        // The whole point: this returns. Without an enforceable write abort it blocks until the peer
+        // eventually gives up, which is exactly the unbounded case under test.
         assertTrue(
-            "a stalled write must not hang indefinitely (took ${elapsedMs}ms, budget ${budgetMs}ms)",
+            "a blocked write must end on its own budget (took ${elapsedMs}ms, budget ${budgetMs}ms)",
             elapsedMs < 15_000,
         )
         assertTrue("an undelivered upload is never a disposition: $response", response is ContributionUploadTransport.Response.Ambiguous)
+    }
+
+    @Test
+    fun `a withdrawal is honoured while the client is blocked unproductively`() {
+        // The server accepts and never answers. Whatever slice the client is blocked in, the withdrawal -
+        // which lands from another thread once the client has entered the upload - must dominate the
+        // outcome: not a disposition, and reported as the withdrawal itself.
+        serve { exchange ->
+            Thread.sleep(30_000)
+            runCatching { exchange.close() }
+        }
+        val id = UUID.randomUUID().toString()
+        val revoked = AtomicBoolean(false)
+        val entered = CountDownLatch(1)
+
+        val result = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }.submit<ContributionUploadTransport.Response> {
+            transport(totalDeadlineMs = 60_000, writeTimeoutMs = 60_000).upload(
+                id,
+                record(id),
+                wavFile(id),
+                isCancelled = {
+                    entered.countDown()
+                    revoked.get()
+                },
+            )
+        }
+        // Waits for the upload thread to be INSIDE the attempt (its first cancellation check), then the
+        // withdrawal is set here, on the test thread: a real cross-thread revocation.
+        assertTrue("the attempt started", entered.await(10, TimeUnit.SECONDS))
+        revoked.set(true)
+
+        val response = result.get(30, TimeUnit.SECONDS)
+        assertFalse(
+            "a withdrawn attempt never yields a disposition: $response",
+            response is ContributionUploadTransport.Response.Terminal ||
+                response is ContributionUploadTransport.Response.Accepted,
+        )
     }
 
     @Test

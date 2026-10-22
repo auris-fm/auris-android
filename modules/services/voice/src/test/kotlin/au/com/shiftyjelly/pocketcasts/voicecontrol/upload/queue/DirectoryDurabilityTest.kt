@@ -308,6 +308,10 @@ class DirectoryDurabilityTest {
         assertTrue("malformed retry state withholds the entry from serving", fresh.readyEntries().none { it.captureId == id })
         assertTrue("malformed retry state must not grant a retry", fresh.retryEligible(now).isEmpty())
         assertTrue(fresh.retryEligible(Long.MAX_VALUE / 2).isEmpty())
+        assertTrue(
+            "malformed retry state refuses further attempts (reviewer 199ccdee)",
+            fresh.recordAttempt(fresh.fence.currentGeneration(), id) == null,
+        )
     }
 
     @Test
@@ -360,7 +364,9 @@ class DirectoryDurabilityTest {
             clock = { now },
             jitter = { bound -> bound - 1 },
             fileSync = FileSync { file ->
-                if (file.name.endsWith(".retry.tmp")) throw java.io.IOException("persistent pre-rename failure")
+                // Fault the POST-RENAME record barrier: the .retry record exists (renamed), so the entry
+                // is otherwise confirmed and validated - only the boundary reconciliation fails.
+                if (file.name.endsWith(".retry")) throw java.io.IOException("persistent record-barrier failure")
             },
         )
         val admission = faulted.admitForTest(1600, meta(id).size)

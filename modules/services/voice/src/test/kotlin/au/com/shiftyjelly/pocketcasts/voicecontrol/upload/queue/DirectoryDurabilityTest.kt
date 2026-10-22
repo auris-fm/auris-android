@@ -1081,6 +1081,53 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `a retry over an already-absent path RELEASES instead of poisoning admission`() {
+        // reviewer 567c0b94: two callers can enumerate the same file before either enters the monitor. The
+        // first deletes it; the second enters holding the stale entry, delete() returns false, and the stat
+        // proves absence. Requiring delete()==true AND absence misclassified that as UNKNOWN and marked the
+        // id permanently unmeasured, refusing admission over bytes that are provably gone.
+        val root = tmp.newFolder("queue-stale-retry")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val stuck = File(contributions, "gen\$w.2.someid.recording.wav.part")
+        stuck.mkdirs()
+        File(stuck, "held.bin").writeBytes(ByteArray(1400))
+
+        val store = ContributionStore(root, limits())
+        store.recover()
+        val id = "gen\$w.2.someid.recording"
+        assertTrue("precondition: charged", store.ownedBytesForTest() >= 1400)
+
+        // Pin the race the reviewer described: a caller ENUMERATES the file, then the file is removed by an
+        // earlier/competing sweeper, THEN the caller enters the monitor with its stale entry. Enumeration
+        // happens before the helper takes the lock, so holding the monitor while removing the file pins a
+        // caller with a stale path deterministically.
+        val monitor = store.ownerLockForTest()
+        val done = java.util.concurrent.CountDownLatch(1)
+        val worker = Thread {
+            store.discardCurrentPartials()
+            done.countDown()
+        }
+        synchronized(monitor) {
+            worker.start()
+            // Give the worker time to enumerate and block on the monitor we hold.
+            Thread.sleep(300)
+            File(stuck, "held.bin").delete()
+            stuck.delete()
+        }
+        assertTrue("the retry sweep finished", done.await(5, java.util.concurrent.TimeUnit.SECONDS))
+
+        assertTrue(
+            "a provably absent path must release its charge (owned=${store.ownedBytesForTest()})",
+            store.ownedBytesForTest() == 0L,
+        )
+        assertTrue(
+            "and must not poison admission with a permanent unmeasured mark",
+            !store.unknownFootprintForTest(),
+        )
+    }
+
+    @Test
     fun `an unreadable queue directory charges nothing away`() {
         // SCOPE, stated plainly: this proves that an unreadable queue directory never FREES a charge. It does
         // NOT reach the helper's UNKNOWN branch - with the directory unreadable, listFiles() returns null

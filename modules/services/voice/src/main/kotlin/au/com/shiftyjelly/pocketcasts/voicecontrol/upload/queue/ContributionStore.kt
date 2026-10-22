@@ -249,7 +249,9 @@ class ContributionStore(
         val file = this
         val id = file.name.removeSuffix(SUFFIX_PART)
         synchronized(lock) {
-            val deleted = file.delete()
+            // The boolean result is NOT evidence: identity comes from the stat below. The delete is still
+            // attempted because it is the operation that removes the bytes.
+            file.delete()
             // ABSENCE IS CHECKED THE SAME WAY MEASUREMENT CHECKS IT. `!exists()` returns false for an
             // unreadable or permission-denied path, so a FAILED delete could look like a successful one and
             // free retained bytes. Only a no-follow stat that reports NoSuchFileException proves absence.
@@ -268,25 +270,22 @@ class ContributionStore(
                     claimOwnedLocked(id, survivorBytes, 0, ready = false)
                 }
 
-                absence == Absence.ABSENT && deleted -> {
-                    // REVERSE TRANSITION: the bytes are provably gone, so the charge and any unknown state
-                    // keyed to them must go too, or a transient failure would permanently consume capacity.
+                absence == Absence.ABSENT -> {
+                    // REVERSE TRANSITION. The no-follow stat proves THIS exact path is gone; delete()'s
+                    // boolean adds no identity proof, and false here usually means an earlier or competing
+                    // sweep already removed it. A retry over an already-absent path must RELEASE the charge,
+                    // not poison admission with a permanent unmeasured mark (reviewer 567c0b94).
                     ownedCharges.remove(id)
                     unmeasuredIds -= id
                 }
 
                 else -> {
-                    // UNKNOWN: the outcome cannot be established. That includes "delete() succeeded but the
-                    // path is provably ABSENT yet the file we charged is not the file we removed" - a path
-                    // replaced underneath us. Never free the charge on a failure to look, and never free it
-                    // on a deletion whose target we cannot tie to the charge; that is the whole defect.
+                    // UNKNOWN: inability to stat. Never free the charge on a failure to look. It is
+                    // recoverable: a LATER sweep that can stat the path either proves absence (this branch
+                    // releases) or measures the survivor successfully, both of which clear the mark.
                     measurementFailures++
                     unmeasuredIds += id
                 }
-            }
-            if (deleted && absence == Absence.UNKNOWN) {
-                // Defensive: delete() claimed success but absence cannot be proven.
-                unmeasuredIds += id
             }
         }
     }

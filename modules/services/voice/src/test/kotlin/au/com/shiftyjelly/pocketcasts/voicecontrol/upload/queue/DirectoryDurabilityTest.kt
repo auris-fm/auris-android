@@ -134,7 +134,7 @@ class DirectoryDurabilityTest {
         val root = tmp.newFolder("queue-retry-uncertain")
         val id = "cfcfcfcf-1111-4222-8333-444444444444"
         val failingBoundarySync = FileSync { file ->
-            if (file.name.endsWith(".attempts.tmp")) throw java.io.IOException("simulated boundary tmp sync failure")
+            if (file.name.endsWith(".retry.tmp")) throw java.io.IOException("simulated retry-intent tmp sync failure")
         }
         val store = ContributionStore(
             root,
@@ -169,6 +169,118 @@ class DirectoryDurabilityTest {
         )
         assertEquals(listOf(id), revived.recover().map { it.captureId })
         assertEquals("recovery resolves the unknown; the durable count-only sidecar carries no boundary", listOf(id), revived.retryEligible(now))
+    }
+
+    @Test
+    fun `a PRE-RENAME failure leaves the intent for a fresh owner to reconcile`() {
+        // reviewer 7433e6a9: tmp-sync failure must not forget the just-received server minimum - the
+        // intent file stays visible and a fresh owner finishes its barriers before granting eligibility.
+        var now = 6_000_000L
+        val root = tmp.newFolder("queue-retry-prerename")
+        val id = "e1e1e1e1-1111-4222-8333-444444444444"
+        val faulted = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+            fileSync = FileSync { file ->
+                if (file.name.endsWith(".retry.tmp")) throw java.io.IOException("simulated pre-rename failure")
+            },
+        )
+        val admission = faulted.admitForTest(1600, meta(id).size)
+        val generation = faulted.fence.currentGeneration()
+        assertTrue(faulted.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertEquals(1, faulted.recordAttempt(generation, id))
+        assertTrue(runCatching { faulted.scheduleRetryAfterFailure(generation, id, retryAfterS = null) }.isFailure)
+        now += 10L // still strictly before the 3999ms backoff the failed publication was carrying
+
+        // FRESH owner, working sync: the visible intent is reconciled, and the boundary it carried is
+        // honored - not eligible before it, eligible at it.
+        val fresh = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+        )
+        assertEquals(listOf(id), fresh.recover().map { it.captureId })
+        assertTrue("the reconciled intent forbids an earlier retry", fresh.retryEligible(now).isEmpty())
+        assertTrue(
+            "the retained boundary moves the entry forward, not backward",
+            fresh.retryEligible(now + 3_989L).isNotEmpty(),
+        )
+    }
+
+    @Test
+    fun `a POST-RENAME orphan record is reconciled and its boundary honored`() {
+        // reviewer 7433e6a9: a crash after rename but before the directory barrier leaves a .retry
+        // record whose name may not be durable; a fresh owner must sync and honor it, not ignore it.
+        var now = 7_000_000L
+        val root = tmp.newFolder("queue-retry-postrename")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val id = "f2f2f2f2-1111-4222-8333-444444444444"
+        val store = ContributionStore(root, limits().copy(retryInitialS = 4, retryMaxS = 8), clock = { now }, jitter = { bound -> bound - 1 })
+        val admission = store.admitForTest(1600, meta(id).size)
+        val generation = store.fence.currentGeneration()
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertEquals(1, store.recordAttempt(generation, id))
+        // Simulate the post-rename, pre-dir-sync state: the record exists with the boundary content.
+        val boundaryAt = now + 3_999L
+        File(contributions, "$id.retry").writeText(boundaryAt.toString())
+        now += 999_999L
+
+        val fresh = ContributionStore(root, limits().copy(retryInitialS = 4, retryMaxS = 8), clock = { now }, jitter = { bound -> bound - 1 })
+        assertEquals(listOf(id), fresh.recover().map { it.captureId })
+        assertTrue("orphan record boundary honored after reconciliation", fresh.retryEligible(boundaryAt - 1).isEmpty())
+        assertTrue(fresh.retryEligible(boundaryAt).isNotEmpty())
+    }
+
+    @Test
+    fun `REPEATED reconciliation failure never grants an earlier retry`() {
+        // reviewer 7433e6a9: with the barriers persistently failing, neither the faulted instance nor
+        // repeated fresh-owner recoveries may grant an earlier retry - fail closed every time.
+        var now = 8_500_000L
+        val root = tmp.newFolder("queue-retry-persistent")
+        val id = "a3a3a3a3-1111-4222-8333-444444444444"
+        val faulted = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+            fileSync = FileSync { file ->
+                if (file.name.endsWith(".retry.tmp") || file.name.endsWith(".retry")) {
+                    throw java.io.IOException("persistent barrier failure")
+                }
+            },
+        )
+        val admission = faulted.admitForTest(1600, meta(id).size)
+        val generation = faulted.fence.currentGeneration()
+        assertTrue(faulted.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertEquals(1, faulted.recordAttempt(generation, id))
+        assertTrue(runCatching { faulted.scheduleRetryAfterFailure(generation, id, retryAfterS = null) }.isFailure)
+        now += 999_999L
+
+        assertTrue("faulted instance: no retry past the original deadline", faulted.retryEligible(now).isEmpty())
+
+        // Repeated fresh-owner recoveries under the same persistent fault: each must fail closed.
+        repeat(3) { round ->
+            val fresh = ContributionStore(
+                root,
+                limits().copy(retryInitialS = 4, retryMaxS = 8),
+                clock = { now },
+                jitter = { bound -> bound - 1 },
+                fileSync = FileSync { file ->
+                    if (file.name.endsWith(".retry.tmp") || file.name.endsWith(".retry")) {
+                        throw java.io.IOException("persistent barrier failure")
+                    }
+                },
+            )
+            fresh.recover()
+            assertTrue(
+                "fresh-owner recovery round ${round + 1} must NOT grant a retry while reconciliation fails",
+                fresh.retryEligible(now).isEmpty(),
+            )
+        }
     }
 
     @Test

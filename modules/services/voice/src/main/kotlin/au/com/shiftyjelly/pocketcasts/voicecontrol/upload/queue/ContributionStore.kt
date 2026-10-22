@@ -211,12 +211,12 @@ class ContributionStore(
         // Account every on-disk capture this instance holds no charge for, grouped by derived capture id
         // but measured at the CONCRETE discovered paths. Deriving an id and charging canonical paths only
         // charged zero for raw or staging debris (reviewer 7a47fff8): the bytes live where they live.
-        val suffixes = listOf(SUFFIX_READY, SUFFIX_PART, SUFFIX_ATTEMPTS, SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST)
+        val suffixes = listOf(SUFFIX_READY, SUFFIX_PART, SUFFIX_ATTEMPTS, SUFFIX_RETRY, SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp")
         synchronized(lock) {
             files.groupBy { f ->
                 val hit = suffixes.firstOrNull { f.name.endsWith(it) }
                 if (hit != null) {
-                    f.name.removeSuffix(hit).removePrefix(STAGING_PREFIX).removeSuffix(SUFFIX_WAV)
+                    f.name.removeSuffix(hit).removePrefix(STAGING_PREFIX).removeSuffix(SUFFIX_WAV).removeSuffix(".tmp")
                 } else {
                     f.name
                 }
@@ -794,31 +794,73 @@ class ContributionStore(
      * sidecar write failed (a swallowed write error would silently reset retry budget on restart).
      */
     // Entries whose retry-boundary persistence FAILED and whose durable state is therefore UNKNOWN.
-    // While any exist, retryEligible fails CLOSED for them: unknown state must not grant (reviewer
-    // e4820963). Recovery re-reads the sidecars and resolves the uncertainty.
+    // While any exist, retryEligible fails CLOSED for them. The uncertainty is BACKED BY A DURABLE
+    // INTENT FILE: a failed publication leaves the intent (tmp or renamed) on disk, so a FRESH OWNER
+    // reconciles the barriers before eligibility instead of forgetting the boundary (reviewer 7433e6a9).
     private val retryBoundaryUncertain = mutableSetOf<String>()
 
-    private fun publishRetryBoundaryLocked(captureId: String, attempt: Int, boundaryMs: Long) {
-        val sidecar = File(dir, "$captureId$SUFFIX_ATTEMPTS")
-        val tmp = File(dir, "$captureId$SUFFIX_ATTEMPTS.tmp")
-        try {
-            FileOutputStream(tmp).use { out ->
-                out.write("$attempt $boundaryMs".toByteArray(Charsets.UTF_8))
-                out.flush()
-            }
-            fileSync.sync(tmp)
-            if (!tmp.renameTo(sidecar) || !sidecar.exists()) {
-                throw java.io.IOException("retry boundary rename failed")
-            }
-            fileSync.sync(sidecar)
-            syncDirectoryOrFail(dir)
-        } catch (failure: Throwable) {
-            // The durable boundary state is now UNKNOWN (the rename may or may not have happened).
-            // Fail closed: exclude the entry from retry eligibility until recovery re-reads the sidecar.
+    /**
+     * ONE atomic/durable protocol for every writer of a sidecar record: temp file, contents sync, atomic
+     * rename, record sync, directory sync. writeText alone could truncate a previously good record
+     * (reviewer 7433e6a9). Returns false when ANY barrier fails; the record's durable state is unknown.
+     */
+    private fun publishRecordAtomicallyLocked(record: File, content: String): Boolean = try {
+        val tmp = File(dir, record.name + ".tmp")
+        FileOutputStream(tmp).use { out ->
+            out.write(content.toByteArray(Charsets.UTF_8))
+            out.flush()
+        }
+        fileSync.sync(tmp)
+        if (!tmp.renameTo(record) || !record.exists()) throw java.io.IOException("rename failed")
+        fileSync.sync(record)
+        syncDirectoryOrFail(dir)
+        tmp.delete()
+        true
+    } catch (failure: Throwable) {
+        false
+    }
+
+    /**
+     * Publish the durable retry-not-before boundary. The INTENT is the tmp file: it becomes visible the
+     * moment it is written, and recovery reconciles its barriers (sync/rename/sync/dir) before granting
+     * eligibility, so a failed publication can never shorten a received server minimum - a fresh owner
+     * sees the intent and finishes it or fails closed (reviewer 7433e6a9).
+     */
+    private fun publishRetryBoundaryLocked(captureId: String, boundaryMs: Long) {
+        val record = File(dir, "$captureId$SUFFIX_RETRY")
+        if (!publishRecordAtomicallyLocked(record, boundaryMs.toString())) {
+            // Durable state unknown; the intent (tmp or renamed) stays on disk for reconciliation.
             retryBoundaryUncertain += captureId
             nextRetryAtMs.remove(captureId)
-            tmp.delete()
-            throw IllegalStateException("retry boundary publication uncertain: ${failure.message}")
+            throw IllegalStateException("retry boundary publication uncertain")
+        }
+    }
+
+    /**
+     * Reconcile a visible retry intent for one capture: finish the temp file's barriers, then the renamed
+     * record's. Failure marks the capture UNCERTAIN and throws - eligibility cannot be granted on bytes
+     * that were never confirmed durable. Returns the reconciled boundary, or null when none exists.
+     */
+    private fun reconcileRetryIntentLocked(captureId: String): Long? {
+        val record = File(dir, "$captureId$SUFFIX_RETRY")
+        val tmp = File(dir, "$captureId$SUFFIX_RETRY.tmp")
+        if (!tmp.exists() && !record.exists()) {
+            retryBoundaryUncertain.remove(captureId)
+            return null
+        }
+        return try {
+            if (tmp.exists()) {
+                fileSync.sync(tmp)
+                if (!tmp.renameTo(record) || !record.exists()) throw java.io.IOException("intent rename failed")
+                tmp.delete()
+            }
+            fileSync.sync(record)
+            syncDirectoryOrFail(dir)
+            retryBoundaryUncertain.remove(captureId)
+            record.readText().trim().toLongOrNull()?.takeIf { it > 0 }
+        } catch (failure: Throwable) {
+            retryBoundaryUncertain += captureId
+            throw IllegalStateException("retry intent reconciliation failed: ${failure.message}")
         }
     }
 
@@ -881,12 +923,10 @@ class ContributionStore(
                 } else {
                     base + delay
                 }
-            // The not-before boundary is DURABLE: it rides the attempts sidecar so a restart cannot
-            // reroll the jitter or bypass a received server minimum (spec requires attempts and their
-            // retry state to survive the process). Publication is ATOMIC (temp + rename) and synced
-            // (contents + directory): writeText alone could truncate and leave partial bytes, and the
-            // old catch's claim that the original text was untouched was false.
-            publishRetryBoundaryLocked(captureId, attempt, eligibleAt)
+            // The not-before boundary is DURABLE in its own .retry record: a restart cannot reroll the
+            // jitter or bypass a received server minimum, and a fresh owner reconciles the intent's
+            // barriers before eligibility (reviewers 7433e6a9, 21176965).
+            publishRetryBoundaryLocked(captureId, eligibleAt)
             nextRetryAtMs[captureId] = eligibleAt
             eligibleAt
         }
@@ -917,13 +957,11 @@ class ContributionStore(
     }
 
     /**
-     * Durable not-before retry boundary from the attempts sidecar ("<attempts>[ <nextRetryAtMs>]");
-     * absent when the sidecar predates scheduling or the field is malformed. Missing is NOT eligible-now:
-     * only a DURABLY RECORDED boundary moves an entry earlier, so a restart can never reroll the jitter
-     * or bypass a server minimum (reviewer 21176965).
+     * Reconcile and read the durable not-before retry boundary from the .retry record. A visible but
+     * unreconciled intent is finished here (temp sync, rename, record sync, directory sync); failure
+     * marks the capture UNCERTAIN and throws, so eligibility cannot be granted on unconfirmed bytes.
      */
-    private fun readRetryBoundaryLocked(id: String): Long? = readBoundedSidecar(File(dir, "$id$SUFFIX_ATTEMPTS"), MAX_ATTEMPTS_SIDECAR_BYTES)
-        ?.trim()?.split(' ')?.getOrNull(1)?.toLongOrNull()?.takeIf { it > 0 }
+    private fun readRetryBoundaryLocked(id: String): Long? = reconcileRetryIntentLocked(id)
 
     fun recordAttempt(generation: Long, captureId: String): Int? {
         // ONE ownership transaction: validate, advance the index, and write the durable attempts sidecar all
@@ -949,12 +987,13 @@ class ContributionStore(
                     memoryEntries[captureId] = updated
                     hooks.beforeAttemptWrite?.invoke(generation)
                     try {
-                        // Preserve any durably scheduled retry boundary: the attempts sidecar carries
-                        // "<attempts>[ <nextRetryAtMs>]" and the count alone must not erase the deadline.
-                        val boundary = nextRetryAtMs[captureId]
-                        File(dir, "$captureId$SUFFIX_ATTEMPTS").writeText(
-                            if (boundary == null) updated.attempts.toString() else updated.attempts.toString() + " " + boundary,
-                        )
+                        // The count record is written through the SAME atomic/durable protocol as the
+                        // retry boundary - writeText could truncate a previously published record
+                        // (reviewer 7433e6a9). The boundary lives in its own .retry record, so the
+                        // count write can no longer erase a deadline.
+                        if (!publishRecordAtomicallyLocked(File(dir, "$captureId$SUFFIX_ATTEMPTS"), updated.attempts.toString())) {
+                            throw java.io.IOException("attempts record publication failed")
+                        }
                         updated.attempts
                     } catch (_: Throwable) {
                         // Roll back only while this generation still owns the queue; after a revoke the whole
@@ -1040,7 +1079,7 @@ class ContributionStore(
                 }
                 val gone = deleteAll(
                     id,
-                    listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST),
+                    listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST, SUFFIX_RETRY, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp"),
                 )
                 if (!gone) residueIds += id
             }
@@ -1279,8 +1318,15 @@ class ContributionStore(
                 }.ready = true
                 // Restore the durable retry boundary: a restart must not shorten a scheduled backoff
                 // or a received server minimum by "forgetting" them.
-                retryBoundaryUncertain.remove(it.captureId)
-                readRetryBoundaryLocked(it.captureId)?.let { boundary -> nextRetryAtMs[it.captureId] = boundary }
+                val boundary = try {
+                    readRetryBoundaryLocked(it.captureId)
+                } catch (uncertain: IllegalStateException) {
+                    // The retry intent could not be reconciled: the capture stays out of the ready set
+                    // this run (already charged owned-but-not-ready above), and the uncertainty persists
+                    // so retryEligible keeps failing closed.
+                    null
+                }
+                boundary?.let { b -> nextRetryAtMs[it.captureId] = b }
             }
             recovered = true
         }
@@ -1308,13 +1354,11 @@ class ContributionStore(
             // A missing or malformed sidecar is a REFUSAL, never a default: defaulting attempts to 0
             // would hand back a spent retry budget, and defaulting created-at to mtime would let a
             // touched file silently renew its queue age.
-            // Sidecar format "<attempts>[ <nextRetryAtMs>]". The WHOLE sidecar is parsed strictly and a
-            // malformed/unknown retry state fails the entry closed - never a silent default (reviewer
-            // e4820963). The optional boundary token must be a positive representable long.
-            val sidecarTokens = readBoundedSidecar(attemptsFile, MAX_ATTEMPTS_SIDECAR_BYTES)?.trim()?.split(' ')
-            val attempts = sidecarTokens?.firstOrNull()?.toIntOrNull()?.takeIf { it >= 0 } ?: return null
-            if (sidecarTokens.size > 2) return null
-            if (sidecarTokens.size == 2 && sidecarTokens[1].toLongOrNull()?.takeIf { it > 0 } == null) return null
+            // The attempts sidecar is STRICTLY the count: the retry boundary lives in its own .retry
+            // record with its own reconciliation. Any multi-token or malformed sidecar fails the entry
+            // closed - never a silent default (reviewers e4820963, 7433e6a9).
+            val attempts = readBoundedSidecar(attemptsFile, MAX_ATTEMPTS_SIDECAR_BYTES)
+                ?.trim()?.toIntOrNull()?.takeIf { it >= 0 } ?: return null
             val created = readBoundedSidecar(File(dir, "$id$SUFFIX_CREATED"), MAX_CREATED_SIDECAR_BYTES)
                 ?.trim()?.toLongOrNull()?.takeIf { it > 0 } ?: return null
             // --- Mandatory digest identity: this on-disk format is unreleased, so there is NO legacy
@@ -1416,7 +1460,7 @@ class ContributionStore(
     // Reviewed 805f0828: reloadUnownedFromDisk used to promote marker+validate directly, a SECOND and
     // weaker load path than recovery. Both now call this one transition, so they cannot diverge.
     private fun confirmDurableLocked(id: String): Boolean = runCatching {
-        listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_READY)
+        listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_READY, SUFFIX_RETRY, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp")
             .map { File(dir, "$id$it") }
             .filter { it.isFile }
             .forEach { fileSync.sync(it) }
@@ -1573,7 +1617,7 @@ class ContributionStore(
                 }
                 val gone = deleteAll(
                     id,
-                    listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST),
+                    listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST, SUFFIX_RETRY, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp"),
                 )
                 if (gone) {
                     disqualificationMarker(id).delete()
@@ -1618,7 +1662,7 @@ class ContributionStore(
         // 2) Attempt every delete, regardless of earlier failures.
         val gone = deleteAll(
             id,
-            listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST),
+            listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST, SUFFIX_RETRY, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp"),
         )
         memoryEntries.remove(id)
         if (gone) {
@@ -1977,6 +2021,10 @@ class ContributionStore(
         private const val ADMISSION_ADOPTED = 2
         private const val ADMISSION_WRITING = 3
         private const val SUFFIX_ATTEMPTS = ".attempts"
+
+        // Durable retry-not-before boundary: its own file, published atomically, so the boundary survives
+        // failed publications and restarts independently of the attempt count (reviewer 7433e6a9).
+        private const val SUFFIX_RETRY = ".retry"
         private const val SAMPLE_RATE_HZ = 16_000L
         private const val SUFFIX_CREATED = ".created"
         private const val SUFFIX_DIGEST = ".sha256"
@@ -1986,7 +2034,7 @@ class ContributionStore(
         // Measurement bounds. Hitting either is an ERROR, never a silent truncation.
         private const val MEASURE_MAX_DEPTH = 4
         private const val MEASURE_MAX_ENTRIES = 512
-        private val SIDECAR_SUFFIXES = listOf(SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST)
+        private val SIDECAR_SUFFIXES = listOf(SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST, SUFFIX_RETRY)
         private const val DISQUALIFIED_DIR = "disqualified"
 
         // The marker's content is its confirmation token: presence alone is not durable intent.

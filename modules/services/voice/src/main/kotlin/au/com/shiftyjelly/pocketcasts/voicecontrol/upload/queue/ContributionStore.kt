@@ -281,12 +281,12 @@ class ContributionStore(
     // attemptNumber - i.e. this completion belongs to the attempt the queue actually admitted. An old
     // completion after an epoch change, or a late response for a superseded attempt, settles nothing
     // (reviewer d1484829 finding 3).
-    fun attemptIdentityHolds(generation: Long, captureId: String, attemptNumber: Int): Boolean = synchronized(lock) {
-        ownership.isValidUnderLock(generation) &&
-            memoryEntries.containsKey(captureId) &&
-            admittedGeneration[captureId] == generation &&
-            memoryEntries[captureId]?.attempts == attemptNumber
-    }
+    fun attemptIdentityHolds(generation: Long, captureId: String, attemptNumber: Int): Boolean = synchronized(lock) { attemptIdentityHoldsLocked(generation, captureId, attemptNumber) }
+
+    private fun attemptIdentityHoldsLocked(generation: Long, captureId: String, attemptNumber: Int): Boolean = ownership.isValidUnderLock(generation) &&
+        memoryEntries.containsKey(captureId) &&
+        admittedGeneration[captureId] == generation &&
+        memoryEntries[captureId]?.attempts == attemptNumber
 
     // The digest this queue recorded for captureId when it durably published the entry. Read from the
     // LIVE index, not from the caller's snapshot: a receipt validator must compare against what the queue
@@ -304,6 +304,65 @@ class ContributionStore(
     }
 
     data class AdmittedAttempt(val generation: Long, val captureId: String, val attemptNumber: Int)
+
+    // The IMMUTABLE token for the attempt pickup just admitted (reviewer 20a5440b): the count is never
+    // re-read afterwards, so a caller cannot capture a successor's identity.
+    fun pickupAttemptToken(generation: Long, captureId: String, nowMs: Long = clock()): AdmittedAttempt? = synchronized(lock) {
+        if (unknownFootprintLocked() || !ownership.isValidUnderLock(generation)) {
+            null
+        } else {
+            val entry = memoryEntries[captureId]
+            if (entry == null || !retryEligibleLocked(captureId, entry, nowMs)) {
+                null
+            } else {
+                recordAttempt(generation, captureId)?.let { count ->
+                    admittedGeneration[captureId] = generation
+                    AdmittedAttempt(generation, captureId, count)
+                }
+            }
+        }
+    }
+
+    // Settlement is VALIDATE AND MUTATE TOGETHER in ONE ownership transaction, keyed on that token. A
+    // generation-only write would let a same-generation successor admitted between validation and
+    // mutation receive an OLD attempt's delay (reviewer 20a5440b). Null = token no longer owns the
+    // queue; NOTHING was mutated.
+    fun scheduleRetryForAdmittedAttempt(token: AdmittedAttempt): Long? = synchronized(lock) {
+        // (spec f6a8f380) ONE owner transaction validates and mutates; no currentGeneration fallback.
+        // A REVOKED epoch still allows disposal when the token still owns the attempt slot: the capture
+        // was retained, no successor attempt was admitted, and only ownership retired. A successor
+        // admission flips the admitted generation/count and blocks the old token permanently.
+        if (!tokenStillOwnsAttemptLocked(token)) {
+            null
+        } else {
+            scheduleRetryAfterFailureLocked(token.generation, token.captureId, retryAfterS = null, allowRevokedDisposal = true)
+        }
+    }
+
+    // True when this token is still THE admitted attempt for the capture: either under a current epoch
+    // (normal settlement) or after a revocation with no successor admitted (revocation disposal).
+    // A successor was admitted for this capture after the token's attempt: any attempt number ABOVE
+    // the token's (or a different admitting generation) means the token is dead for good.
+    private fun attemptSupersededLocked(captureId: String, token: AdmittedAttempt): Boolean = (memoryEntries[captureId]?.attempts ?: -1) > token.attemptNumber ||
+        admittedGeneration[captureId] != token.generation
+
+    private fun tokenStillOwnsAttemptLocked(token: AdmittedAttempt): Boolean = memoryEntries.containsKey(token.captureId) &&
+        admittedGeneration[token.captureId] == token.generation &&
+        memoryEntries[token.captureId]?.attempts == token.attemptNumber &&
+        (ownership.isValidUnderLock(token.generation) || !attemptSupersededLocked(token.captureId, token))
+
+    // Same contract for a validated acceptance: drop only if this exact attempt still owns the entry.
+    fun releaseForAdmittedAttempt(token: AdmittedAttempt): Boolean {
+        val removed = synchronized(lock) {
+            if (!attemptIdentityHoldsLocked(token.generation, token.captureId, token.attemptNumber)) {
+                null
+            } else {
+                memoryEntries.remove(token.captureId)?.also { deleteLocked(it) }
+            }
+        } != null
+        if (removed) dropCounterOnly(TerminalReason.UPLOAD_ACCEPTED)
+        return removed
+    }
 
     private val admittedGeneration = mutableMapOf<String, Long>()
 
@@ -1001,8 +1060,17 @@ class ContributionStore(
         generation: Long,
         captureId: String,
         retryAfterS: Long? = null,
-    ): Long? = synchronized(lock) {
-        if (unknownFootprintLocked() || !ownership.isValidUnderLock(generation)) {
+    ): Long? = synchronized(lock) { scheduleRetryAfterFailureLocked(generation, captureId, retryAfterS) }
+
+    // Requires the caller to already hold the lock: validate-and-mutate must be indivisible (reviewer
+    // 20a5440b) so a successor attempt cannot be admitted between the identity check and the write.
+    private fun scheduleRetryAfterFailureLocked(
+        generation: Long,
+        captureId: String,
+        retryAfterS: Long? = null,
+        allowRevokedDisposal: Boolean = false,
+    ): Long? {
+        return if (unknownFootprintLocked() || (!ownership.isValidUnderLock(generation) && !allowRevokedDisposal)) {
             null
         } else if (captureId !in memoryEntries) {
             null
@@ -1013,7 +1081,7 @@ class ContributionStore(
                 throw IllegalStateException("retry state uncertain for $captureId")
             }
             val attempt = memoryEntries[captureId]!!.attempts
-            if (attempt < 1) return@synchronized null // no FAILED attempt to back off
+            if (attempt < 1) return null // no FAILED attempt to back off
             val bound = backoffBoundMs(attempt)
             val jittered = jitter(bound)
             // Saturating arithmetic: a huge server minimum must mean "never within representable time",

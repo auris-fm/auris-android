@@ -85,64 +85,51 @@ class ContributionRetryCaller(
                 // and durably records/consumes the attempt BEFORE any transport runs (reviewer
                 // 1b926fa0, spec 8aa20001). A gate callback that revoked the epoch, re-armed the backoff
                 // or changed coverage is caught HERE - generation validity alone is not enough.
-                val recordedAttempt = store.pickupAttempt(generation, captureId, clock())
-                if (recordedAttempt == null) {
+                // The token is this attempt's identity for its WHOLE lifetime: never re-read from the
+                // store, never borrowed from currentGeneration (reviewer 20a5440b, spec d6213403).
+                val token = store.pickupAttemptToken(generation, captureId, clock())
+                if (token == null) {
                     pickupRefused++
                     continue
                 }
-                // The admitted attempt's identity: completions settle ONLY against this, never against
-                // a re-read currentGeneration (reviewer d1484829 finding 3).
-                val admitted = store.admittedAttemptForTest(captureId)
-                if (admitted == null) {
-                    pickupRefused++
-                    continue
-                }
-                // Between pickup and transport start the authorization can still disappear. That is
-                // checked in the SAME atomic decision as the transport launch: the check runs inside the
-                // ownership transaction that would be the first network operation's authorization, so a
-                // revocation that completed before this point cannot be raced past (reviewer 279de1d4).
-                // The transport launch is the authorization boundary: the final validity check runs in
-                // the SAME transaction as the launch, so an epoch bump that completed before it is seen
-                // (a revocation that lands after it is handled by the completion resolution).
-                // LEASE, don't hold the monitor (reviewer 4d72e463): the launch authorization is taken in
-                // ONE ownership transaction that is RELEASED before any network work, so an external
-                // revocation is never blocked and can cancel this attempt while it is in flight.
+                // LEASE, never hold the monitor (reviewer 4d72e463): authorization is taken in ONE
+                // ownership transaction and RELEASED before any network work, so an external revocation
+                // is never blocked and can cancel this attempt while it is in flight.
                 val lease = store.leaseTransportLaunch(generation, captureId)
                 if (lease == null) {
                     // Refused before the first request: the attempt was already consumed, so this is an
-                    // unconfirmed outcome. Durable boundary under a CURRENT generation - never a stale
-                    // one, so a fresh owner recovers the same wait (reviewer 4d72e463).
+                    // unconfirmed outcome. Settlement is token-scoped: it validates AND mutates in one
+                    // transaction, so a successor's state can never be touched here.
                     cancelledEpoch++
-                    reArmBoundary(store.fence.currentGeneration(), captureId)
+                    reArm(token)
                     continue
                 }
                 try {
                     val accepted = attemptUpload(generation, captureId) { lease.isCancelled() || !store.fence.isValid(generation) }
-                    if (!store.attemptIdentityHolds(generation, captureId, admitted.attemptNumber)) {
-                        // This attempt is superseded (epoch changed or another attempt was admitted):
-                        // neither success nor failure may touch the queue for it.
+                    if (lease.isCancelled()) {
+                        // A revocation withdrew authorization mid-flight, so the response cannot be trusted
+                        // for this owner. Offer the durable re-arm under THIS token: if the attempt still
+                        // owns the queue it is delayed; if a successor owns it, nothing is mutated.
                         cancelledEpoch++
-                    } else if (lease.isCancelled()) {
-                        // A revocation withdrew authorization while the upload ran. The response cannot be
-                        // trusted for THIS owner: retain and leave a durable boundary under a CURRENT
-                        // generation so the next poll cannot retry immediately (reviewer d1484829 - this
-                        // branch is an unconfirmed outcome just like a throw).
-                        cancelledEpoch++
-                        reArmBoundary(store.fence.currentGeneration(), captureId)
+                        reArm(token)
                     } else if (accepted) {
+                        // Validate-and-mutate in ONE transaction: a successor admitted between the response
+                        // and this call makes the release refuse without mutating anything.
+                        if (store.releaseForAdmittedAttempt(token)) {
+                            attempted++
+                            onSuccess(token.generation, captureId)
+                        } else {
+                            cancelledEpoch++
+                        }
+                    } else if (reArm(token) != null) {
                         attempted++
-                        onSuccess(generation, captureId) // reached only under a still-valid attempt identity
                     } else {
-                        attempted++
-                        reArmBoundary(generation, captureId)
+                        cancelledEpoch++
                     }
                 } catch (lost: Throwable) {
-                    // A thrown upload (ordinary network exception / lost response) is an AMBIGUOUS
-                    // outcome: ownership is RETAINED and the durable boundary re-armed under a CURRENT
-                    // generation - never written through a stale one (reviewer 4d72e463). The next poll
-                    // must not retry immediately.
-                    attempted++
-                    reArmBoundary(store.fence.currentGeneration(), captureId)
+                    // A thrown upload is AMBIGUOUS: ownership is retained and the durable boundary is
+                    // re-armed only under THIS attempt's identity, never a stale or borrowed one.
+                    if (reArm(token) != null) attempted++ else cancelledEpoch++
                 } finally {
                     store.releaseLaunchLease(lease)
                 }
@@ -153,11 +140,9 @@ class ContributionRetryCaller(
         return PollResult(attempted, deferredPolicy, deferredNetwork, skippedInFlight, cancelledEpoch, pickupRefused)
     }
 
-    /** Durable re-arm: ONE ownership transaction in the store; a racing revocation surfaces as the
-     *  store's own refusal and does not fail the poll. */
-    private fun reArmBoundary(generation: Long, captureId: String) {
-        runCatching { store.scheduleRetryAfterFailure(generation, captureId, retryAfterS = null) }
-    }
+    /** Durable re-arm, token-scoped: ONE ownership transaction validates the attempt AND mutates.
+     *  Null means this attempt no longer owns the queue, so nothing was mutated. */
+    private fun reArm(token: ContributionStore.AdmittedAttempt): Long? = runCatching { store.scheduleRetryForAdmittedAttempt(token) }.getOrNull()
 
     fun close() {
         closed.set(true)

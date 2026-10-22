@@ -275,12 +275,105 @@ class DirectoryDurabilityTest {
                     }
                 },
             )
-            fresh.recover()
+            assertTrue("round ${round + 1}: recover withholds the unreconciled capture", fresh.recover().none { it.captureId == id })
+            assertTrue("round ${round + 1}: readyEntries withholds the unreconciled capture", fresh.readyEntries().none { it.captureId == id })
             assertTrue(
                 "fresh-owner recovery round ${round + 1} must NOT grant a retry while reconciliation fails",
                 fresh.retryEligible(now).isEmpty(),
             )
         }
+    }
+
+    @Test
+    fun `a MALFORMED retry record RETAINS the hold instead of defaulting to eligible-now`() {
+        // reviewer 199ccdee: unreadable/malformed EXISTING retry state is UNKNOWN, never absent - the
+        // entry must be withheld from recovery, serving and attempts, not defaulted to eligible-now.
+        var now = 9_000_000L
+        val root = tmp.newFolder("queue-retry-malformed")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val id = "b4b4b4b4-1111-4222-8333-444444444444"
+        val store = ContributionStore(root, limits().copy(retryInitialS = 4, retryMaxS = 8), clock = { now }, jitter = { bound -> bound - 1 })
+        val admission = store.admitForTest(1600, meta(id).size)
+        val generation = store.fence.currentGeneration()
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertEquals(1, store.recordAttempt(generation, id))
+        assertTrue(store.scheduleRetryAfterFailure(generation, id, retryAfterS = null) != null)
+        now += 10L
+        // Simulate corrupted durable retry state: the record exists but its content is not a boundary.
+        File(contributions, "$id.retry").writeText("not-a-boundary")
+
+        val fresh = ContributionStore(root, limits().copy(retryInitialS = 4, retryMaxS = 8), clock = { now }, jitter = { bound -> bound - 1 })
+        assertTrue("malformed retry state withholds the entry from recovery", fresh.recover().none { it.captureId == id })
+        assertTrue("malformed retry state withholds the entry from serving", fresh.readyEntries().none { it.captureId == id })
+        assertTrue("malformed retry state must not grant a retry", fresh.retryEligible(now).isEmpty())
+        assertTrue(fresh.retryEligible(Long.MAX_VALUE / 2).isEmpty())
+    }
+
+    @Test
+    fun `a PENDING attempt-count intent is finished before the count is trusted`() {
+        // reviewer 199ccdee: a pre-rename failure leaves .attempts.tmp visible; reading the OLDER count
+        // record would restore a smaller count and hand back spent retry budget. A fresh owner finishes
+        // the intent, and the advanced count is what further attempts build on.
+        var now = 9_500_000L
+        val root = tmp.newFolder("queue-attempts-intent")
+        val id = "c5c5c5c5-1111-4222-8333-444444444444"
+        var attemptsTmpSyncs = 0
+        val store = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+            fileSync = FileSync { file ->
+                if (file.name.endsWith(".attempts.tmp")) {
+                    attemptsTmpSyncs++
+                    if (attemptsTmpSyncs >= 2) throw java.io.IOException("pre-rename count failure")
+                }
+            },
+        )
+        val admission = store.admitForTest(1600, meta(id).size)
+        val generation = store.fence.currentGeneration()
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertEquals(1, store.recordAttempt(generation, id))
+        assertTrue("second count publication fails pre-rename", runCatching { store.recordAttempt(generation, id) }.isFailure)
+        now += 10L
+
+        val fresh = ContributionStore(root, limits().copy(retryInitialS = 4, retryMaxS = 8), clock = { now }, jitter = { bound -> bound - 1 })
+        assertTrue("the entry survives its pending count intent", fresh.recover().any { it.captureId == id })
+        assertEquals(
+            "the reconciled count is the ADVANCED one - no spent budget handed back",
+            3,
+            fresh.recordAttempt(fresh.fence.currentGeneration(), id),
+        )
+    }
+
+    @Test
+    fun `an UNRECONCILED retry intent holds EVERY production entry point, not only retryEligible`() {
+        // reviewer 199ccdee: recover() and readyEntries() exposed an entry whose boundary could not be
+        // reconciled even though retryEligible excluded it. The readiness hold applies everywhere.
+        var now = 9_900_000L
+        val root = tmp.newFolder("queue-retry-hold-everywhere")
+        val id = "d6d6d6d6-1111-4222-8333-444444444444"
+        val faulted = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+            fileSync = FileSync { file ->
+                if (file.name.endsWith(".retry.tmp")) throw java.io.IOException("persistent pre-rename failure")
+            },
+        )
+        val admission = faulted.admitForTest(1600, meta(id).size)
+        val generation = faulted.fence.currentGeneration()
+        assertTrue(faulted.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertEquals(1, faulted.recordAttempt(generation, id))
+        assertTrue(runCatching { faulted.scheduleRetryAfterFailure(generation, id, retryAfterS = null) }.isFailure)
+        now += 999_999L
+
+        assertTrue("recover() withholds the unreconciled capture", faulted.recover().none { it.captureId == id })
+        assertTrue("readyEntries() withholds the unreconciled capture", faulted.readyEntries().none { it.captureId == id })
+        assertTrue(faulted.retryEligible(now).isEmpty())
+        assertTrue("recordAttempt refuses the unreconciled capture", faulted.recordAttempt(generation, id) == null)
     }
 
     @Test

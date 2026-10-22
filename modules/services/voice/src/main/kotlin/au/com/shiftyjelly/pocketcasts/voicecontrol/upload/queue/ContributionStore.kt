@@ -744,7 +744,11 @@ class ContributionStore(
         if (rootEnumerationUnknown || markerCoverageUnknown) {
             emptyList()
         } else {
-            memoryEntries.values.sortedBy { it.createdAtMs }
+            // A capture with an unresolved record (retry boundary or attempt count) is NOT servable,
+            // even though it is charged and indexed (reviewer 199ccdee).
+            memoryEntries.values
+                .filter { !heldUncertainLocked(it.captureId) }
+                .sortedBy { it.createdAtMs }
         }
     }
 
@@ -799,6 +803,13 @@ class ContributionStore(
     // reconciles the barriers before eligibility instead of forgetting the boundary (reviewer 7433e6a9).
     private val retryBoundaryUncertain = mutableSetOf<String>()
 
+    // Captures whose ATTEMPT-COUNT record is in an unresolved pending-intent state. While set, the count
+    // is untrusted: no further attempt is recorded and the entry is not served (reviewer 199ccdee).
+    private val attemptsRecordUncertain = mutableSetOf<String>()
+
+    /** The capture is held when ANY of its durable records is in an unresolved state. */
+    private fun heldUncertainLocked(captureId: String): Boolean = captureId in retryBoundaryUncertain || captureId in attemptsRecordUncertain
+
     /**
      * ONE atomic/durable protocol for every writer of a sidecar record: temp file, contents sync, atomic
      * rename, record sync, directory sync. writeText alone could truncate a previously good record
@@ -837,30 +848,87 @@ class ContributionStore(
     }
 
     /**
-     * Reconcile a visible retry intent for one capture: finish the temp file's barriers, then the renamed
-     * record's. Failure marks the capture UNCERTAIN and throws - eligibility cannot be granted on bytes
-     * that were never confirmed durable. Returns the reconciled boundary, or null when none exists.
+     * Presence is read from one bounded directory listing, NOT from exists(): a stat failure must look
+     * UNKNOWN, never absent (reviewer 199ccdee). Returns null when the directory cannot be enumerated.
+     */
+    private fun visibleNamesLocked(): Set<String>? = try {
+        dir.list()?.toSet()
+    } catch (unknown: Throwable) {
+        null
+    }
+
+    /**
+     * Three-outcome reconciliation of a retry intent (reviewer 199ccdee): ABSENT (no intent visible ->
+     * null, hold released), VALID (barriers reconciled, bounded read, strict positive parse -> boundary),
+     * UNKNOWN (barrier failure, unreadable, oversized or malformed record -> hold RETAINED, throws).
+     * Invalid EXISTING retry state must keep the hold - an unreadable boundary never defaults to
+     * eligible-now.
      */
     private fun reconcileRetryIntentLocked(captureId: String): Long? {
-        val record = File(dir, "$captureId$SUFFIX_RETRY")
-        val tmp = File(dir, "$captureId$SUFFIX_RETRY.tmp")
-        if (!tmp.exists() && !record.exists()) {
+        val names = visibleNamesLocked()
+        if (names == null) {
+            retryBoundaryUncertain += captureId
+            throw IllegalStateException("retry intent presence unknown")
+        }
+        val tmpVisible = "$captureId$SUFFIX_RETRY.tmp" in names
+        val recordVisible = "$captureId$SUFFIX_RETRY" in names
+        if (!tmpVisible && !recordVisible) {
             retryBoundaryUncertain.remove(captureId)
             return null
         }
+        val record = File(dir, "$captureId$SUFFIX_RETRY")
+        val tmp = File(dir, "$captureId$SUFFIX_RETRY.tmp")
         return try {
-            if (tmp.exists()) {
+            if (tmpVisible) {
                 fileSync.sync(tmp)
                 if (!tmp.renameTo(record) || !record.exists()) throw java.io.IOException("intent rename failed")
                 tmp.delete()
             }
             fileSync.sync(record)
             syncDirectoryOrFail(dir)
+            val text = readBoundedSidecar(record, MAX_ATTEMPTS_SIDECAR_BYTES)
+                ?: throw java.io.IOException("retry record unreadable or oversized")
+            val boundary = text.trim().toLongOrNull()?.takeIf { it > 0 }
+                ?: throw java.io.IOException("retry record malformed")
             retryBoundaryUncertain.remove(captureId)
-            record.readText().trim().toLongOrNull()?.takeIf { it > 0 }
+            boundary
         } catch (failure: Throwable) {
             retryBoundaryUncertain += captureId
+            nextRetryAtMs.remove(captureId)
             throw IllegalStateException("retry intent reconciliation failed: ${failure.message}")
+        }
+    }
+
+    /**
+     * Same three-outcome protocol for a PENDING ATTEMPT-COUNT intent (reviewer 199ccdee): a pre-rename
+     * failure leaves `.attempts.tmp` visible, and reading the OLDER count record would restore a smaller
+     * attempt count and hand back spent retry budget. The intent is finished before the count is trusted;
+     * failure retains the hold and throws. Returns the reconciled count, or null when no intent exists.
+     */
+    private fun reconcileAttemptsIntentLocked(captureId: String): Int? {
+        val names = visibleNamesLocked()
+        if (names == null) {
+            attemptsRecordUncertain += captureId
+            throw IllegalStateException("attempts intent presence unknown")
+        }
+        if ("$captureId$SUFFIX_ATTEMPTS.tmp" !in names) return null
+        val record = File(dir, "$captureId$SUFFIX_ATTEMPTS")
+        val tmp = File(dir, "$captureId$SUFFIX_ATTEMPTS.tmp")
+        return try {
+            fileSync.sync(tmp)
+            if (!tmp.renameTo(record) || !record.exists()) throw java.io.IOException("intent rename failed")
+            tmp.delete()
+            fileSync.sync(record)
+            syncDirectoryOrFail(dir)
+            val text = readBoundedSidecar(record, MAX_ATTEMPTS_SIDECAR_BYTES)
+                ?: throw java.io.IOException("attempts record unreadable or oversized")
+            val count = text.trim().toIntOrNull()?.takeIf { it >= 0 }
+                ?: throw java.io.IOException("attempts record malformed")
+            attemptsRecordUncertain.remove(captureId)
+            count
+        } catch (failure: Throwable) {
+            attemptsRecordUncertain += captureId
+            throw IllegalStateException("attempts intent reconciliation failed: ${failure.message}")
         }
     }
 
@@ -902,6 +970,11 @@ class ContributionStore(
         } else if (captureId !in memoryEntries) {
             null
         } else {
+            if (heldUncertainLocked(captureId)) {
+                // A pending/failed boundary or count publication must be resolved before new retry state
+                // is written over it (reviewer 199ccdee).
+                throw IllegalStateException("retry state uncertain for $captureId")
+            }
             val attempt = memoryEntries[captureId]!!.attempts
             if (attempt < 1) return@synchronized null // no FAILED attempt to back off
             val bound = backoffBoundMs(attempt)
@@ -948,7 +1021,7 @@ class ContributionStore(
                     if (entry.attempts >= limits.maxUploadAttempts) return@mapNotNull null
                     // Absent means genuinely unscheduled: recovery loaded every durable boundary, and a
                     // publication failure puts the id in the UNCERTAIN set below instead of defaulting.
-                    if (id in retryBoundaryUncertain) return@mapNotNull null
+                    if (heldUncertainLocked(id)) return@mapNotNull null
                     if ((nextRetryAtMs[id] ?: 0L) > nowMs) return@mapNotNull null
                     id
                 }
@@ -979,7 +1052,16 @@ class ContributionStore(
             } else if (!ownership.isValidUnderLock(generation)) {
                 null
             } else {
-                val current = memoryEntries[captureId]
+                val countResolved = try {
+                    reconcileAttemptsIntentLocked(captureId)
+                    true
+                } catch (uncertain: IllegalStateException) {
+                    // The pending count intent could not be finished: no further attempt may be recorded
+                    // from the older record (reviewer 199ccdee). The hold persists until recovery resolves.
+                    sidecarFailure = uncertain
+                    false
+                }
+                val current = if (countResolved) memoryEntries[captureId] else null
                 if (current == null) {
                     null
                 } else {
@@ -1237,6 +1319,16 @@ class ContributionStore(
             val wav = File(dir, "$id$SUFFIX_WAV")
             val meta = File(dir, "$id$SUFFIX_META")
             val attemptsFile = File(dir, "$id$SUFFIX_ATTEMPTS")
+            // Finish a PENDING attempt-count intent BEFORE validating: validate must read the record the
+            // intent resolves to, not the pre-failure one (reviewer 199ccdee).
+            try {
+                reconcileAttemptsIntentLocked(id)
+            } catch (uncertain: IllegalStateException) {
+                // Unresolved count record: withheld this run exactly like an unconfirmed publication.
+                uncertainIds += id
+                chargeRetainedLocked(id, ready = false)
+                continue
+            }
             val entry = validate(id, wav, meta, attemptsFile)
             if (entry == null) {
                 // Deleting an invalid entry can FAIL. The previous version dropped the files' existence
@@ -1310,24 +1402,33 @@ class ContributionStore(
                     File(dir, "$id$SUFFIX_READY").delete()
                 }
             }
+            val boundaryHeld = mutableListOf<String>()
             keep.forEach {
-                memoryEntries[it.captureId] = it
                 // Readiness on the SINGLE existing charge; a missing charge is created once, never added to.
-                ownedCharges.getOrPut(it.captureId) {
+                val charge = ownedCharges.getOrPut(it.captureId) {
                     OwnedCharge(it.audioBytes, it.metadataBytes, ready = false)
-                }.ready = true
+                }
                 // Restore the durable retry boundary: a restart must not shorten a scheduled backoff
                 // or a received server minimum by "forgetting" them.
                 val boundary = try {
                     readRetryBoundaryLocked(it.captureId)
                 } catch (uncertain: IllegalStateException) {
-                    // The retry intent could not be reconciled: the capture stays out of the ready set
-                    // this run (already charged owned-but-not-ready above), and the uncertainty persists
-                    // so retryEligible keeps failing closed.
+                    // The retry intent could not be reconciled: the capture is NOT ready and NOT exposed
+                    // by recover() or readyEntries() this run (reviewer 199ccdee). The uncertainty
+                    // persists so every serving/attempt entry point keeps failing closed.
+                    boundaryHeld += it.captureId
                     null
                 }
                 boundary?.let { b -> nextRetryAtMs[it.captureId] = b }
+                if (it.captureId !in boundaryHeld) {
+                    memoryEntries[it.captureId] = it
+                    charge.ready = true
+                } else {
+                    memoryEntries.remove(it.captureId)
+                    charge.ready = false
+                }
             }
+            keep.removeAll { it.captureId in boundaryHeld }
             recovered = true
         }
         // Marker coverage is established in the COMMON eligibility path, not only at expiry: a fresh owner

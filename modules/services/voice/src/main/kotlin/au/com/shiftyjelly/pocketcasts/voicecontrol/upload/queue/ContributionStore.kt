@@ -277,12 +277,35 @@ class ContributionStore(
     /** Test seam: the in-memory attempt count for one capture. */
     fun stateAttemptsForTest(captureId: String): Int = synchronized(lock) { memoryEntries[captureId]?.attempts ?: -1 }
 
-    /**
-     * The digest this queue recorded for [captureId] when it durably published the entry. Read from the
-     * LIVE index, not from the caller's snapshot: a receipt validator must compare against what the queue
-     * actually holds. Null when the queue holds no such entry.
-     */
+    // True when generation is still the CURRENT owner AND the admitted attempt for captureId is still
+    // attemptNumber - i.e. this completion belongs to the attempt the queue actually admitted. An old
+    // completion after an epoch change, or a late response for a superseded attempt, settles nothing
+    // (reviewer d1484829 finding 3).
+    fun attemptIdentityHolds(generation: Long, captureId: String, attemptNumber: Int): Boolean = synchronized(lock) {
+        ownership.isValidUnderLock(generation) &&
+            memoryEntries.containsKey(captureId) &&
+            admittedGeneration[captureId] == generation &&
+            memoryEntries[captureId]?.attempts == attemptNumber
+    }
+
+    // The digest this queue recorded for captureId when it durably published the entry. Read from the
+    // LIVE index, not from the caller's snapshot: a receipt validator must compare against what the queue
+    // actually holds. Null when the queue holds no such entry.
     fun recordedDigest(captureId: String): String? = synchronized(lock) { memoryEntries[captureId]?.recordSha256 }
+
+    // The identity of the attempt most recently ADMITTED for captureId: the generation it was admitted
+    // under plus the durable attempt count recorded for it. A completion (accept, failure, cancellation)
+    // may only settle state for the attempt it actually belongs to - an OLD completion must never borrow
+    // the successor's authority via currentGeneration (reviewer d1484829). Null when no attempt is
+    // currently admitted, or when its admission could not be durably recorded.
+    fun admittedAttemptForTest(captureId: String): AdmittedAttempt? = synchronized(lock) {
+        val entry = memoryEntries[captureId] ?: return null
+        AdmittedAttempt(admittedGeneration[captureId] ?: return null, captureId, entry.attempts)
+    }
+
+    data class AdmittedAttempt(val generation: Long, val captureId: String, val attemptNumber: Int)
+
+    private val admittedGeneration = mutableMapOf<String, Long>()
 
     /** Test seam: how many records' worth of budget live reservations currently occupy. */
     fun reservedRecordsForTest(): Int = synchronized(lock) { reservations.size }
@@ -1137,11 +1160,14 @@ class ContributionStore(
 
     init {
         // A fence-level revocation must also cancel in-flight launches (reviewer 4d72e463).
-        fence.pendingLaunchCancellation = {
-            synchronized(launchLeasesLock) {
-                launchLeases.forEach { it.cancel() }
-                launchLeases.clear()
-            }
+        fence.pendingLaunchCancellation = { cancelLiveLaunchesLocked() }
+    }
+
+    /** Cancel every live launch lease. Called with the queue lock held from purge paths. */
+    private fun cancelLiveLaunchesLocked() {
+        synchronized(launchLeasesLock) {
+            launchLeases.forEach { it.cancel() }
+            launchLeases.clear()
         }
     }
 
@@ -1156,7 +1182,10 @@ class ContributionStore(
             if (entry == null || !retryEligibleLocked(captureId, entry, nowMs)) {
                 null
             } else {
-                recordAttempt(generation, captureId)
+                recordAttempt(generation, captureId)?.let { count ->
+                    admittedGeneration[captureId] = generation
+                    count
+                }
             }
         }
     }
@@ -1279,6 +1308,7 @@ class ContributionStore(
     fun revokeAndPurge(reason: String) {
         synchronized(lock) {
             ownership.revokeUnderLock()
+            cancelLiveLaunchesLocked() // ONE authoritative transition: a purge also withdraws launches
             // OWNERSHIP IS INDEPENDENT OF READINESS. An uncertain entry was removed from memoryEntries so
             // it could not be exposed as ready, but that must not drop it from the owner's accounting: an
             // account purge that skipped it would leave the user's audio on disk after they asked for

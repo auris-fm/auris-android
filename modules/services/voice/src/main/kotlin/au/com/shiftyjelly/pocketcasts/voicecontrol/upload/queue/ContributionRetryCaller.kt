@@ -90,6 +90,13 @@ class ContributionRetryCaller(
                     pickupRefused++
                     continue
                 }
+                // The admitted attempt's identity: completions settle ONLY against this, never against
+                // a re-read currentGeneration (reviewer d1484829 finding 3).
+                val admitted = store.admittedAttemptForTest(captureId)
+                if (admitted == null) {
+                    pickupRefused++
+                    continue
+                }
                 // Between pickup and transport start the authorization can still disappear. That is
                 // checked in the SAME atomic decision as the transport launch: the check runs inside the
                 // ownership transaction that would be the first network operation's authorization, so a
@@ -111,14 +118,20 @@ class ContributionRetryCaller(
                 }
                 try {
                     val accepted = attemptUpload(generation, captureId) { lease.isCancelled() || !store.fence.isValid(generation) }
-                    if (lease.isCancelled()) {
-                        // A revocation withdrew authorization while the upload ran. The response cannot be
-                        // trusted for THIS owner: retain and let a newer owner decide (completion
-                        // resolution revalidates the epoch).
+                    if (!store.attemptIdentityHolds(generation, captureId, admitted.attemptNumber)) {
+                        // This attempt is superseded (epoch changed or another attempt was admitted):
+                        // neither success nor failure may touch the queue for it.
                         cancelledEpoch++
+                    } else if (lease.isCancelled()) {
+                        // A revocation withdrew authorization while the upload ran. The response cannot be
+                        // trusted for THIS owner: retain and leave a durable boundary under a CURRENT
+                        // generation so the next poll cannot retry immediately (reviewer d1484829 - this
+                        // branch is an unconfirmed outcome just like a throw).
+                        cancelledEpoch++
+                        reArmBoundary(store.fence.currentGeneration(), captureId)
                     } else if (accepted) {
                         attempted++
-                        onSuccess(generation, captureId)
+                        onSuccess(generation, captureId) // reached only under a still-valid attempt identity
                     } else {
                         attempted++
                         reArmBoundary(generation, captureId)

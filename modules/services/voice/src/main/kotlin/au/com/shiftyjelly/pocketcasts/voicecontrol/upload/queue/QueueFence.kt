@@ -17,20 +17,10 @@ class QueueFence(private val ownership: QueueOwnership) {
      * atomic with respect to publication/drop/attempt mutations — but callers that must also purge state
      * should use `ContributionStore.revokeAndPurge`, which does both in ONE section.
      */
-    fun revoke(): Long = ownership.transaction(object : (QueueOwnership.OwnershipTransaction) -> Long {
-        override fun invoke(tx: QueueOwnership.OwnershipTransaction) = tx.revoke()
-    })
-
-    /**
-     * Revocation that ALSO withdraws in-flight launch authorization. An epoch bump alone invalidates
-     * future checks, but a transport already running would only notice it on its next probe, so every
-     * live [ContributionStore.LaunchLease] is cancelled here (reviewer 4d72e463).
-     */
-    fun revokeAndCancelLaunches(reason: String): Long {
-        // ONE ownership section for both effects: bump the epoch, then withdraw every live launch. Doing
-        // it in two transactions would leave a window where the epoch moved but running uploads still
-        // believed they were authorized (reviewer 4d72e463). The cancellation callback only touches the
-        // store's lease registry (its own lock), never the queue state, so it stays lock-order safe.
+    // Revocation ALWAYS withdraws in-flight launch authorization in the same ownership section: ONE
+    // authoritative transition (reviewer d1484829 - plain revoke used to bypass lease cancellation).
+    // pendingLaunchCancellation is installed by the owning store; null only for a bare fence.
+    fun revoke(): Long {
         val cancel = pendingLaunchCancellation
         return ownership.transaction(object : (QueueOwnership.OwnershipTransaction) -> Long {
             override fun invoke(tx: QueueOwnership.OwnershipTransaction): Long {
@@ -40,6 +30,9 @@ class QueueFence(private val ownership: QueueOwnership) {
             }
         })
     }
+
+    /** Retained name for existing callers; now identical to [revoke]. */
+    fun revokeAndCancelLaunches(reason: String): Long = revoke()
 
     /** Set by [ContributionStore] so a fence-level revocation also cancels its live leases. */
     internal var pendingLaunchCancellation: (() -> Unit)? = null

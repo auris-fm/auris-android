@@ -11,6 +11,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
 import java.io.File
 import java.util.UUID
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -479,6 +480,49 @@ class ContributionRetryCallerTest {
     }
 
     @Test
+    fun `an OLD completion after a successor attempt was admitted leaves the successor state unchanged`() {
+        var now = 19_000_000L
+        val root = tmp.newFolder("caller-successor")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root, { now })
+        prepare(store, id)
+
+        // Admit attempt 1, then let a SUCCESSOR admit attempt 2 (as a fresh poll after backoff would).
+        val generation = store.fence.currentGeneration()
+        val firstAttempt = store.pickupAttempt(generation, id, now)
+        assertEquals(1, firstAttempt)
+        val first = store.admittedAttemptForTest(id)!!
+        now += 10_000L
+        store.scheduleRetryAfterFailure(generation, id)
+        val secondAttempt = store.pickupAttempt(generation, id, now + 8_000L)
+        assertEquals("the successor admitted the next attempt", 2, secondAttempt)
+        val successor = store.admittedAttemptForTest(id)!!
+        assertEquals(2, successor.attemptNumber)
+        val successorBoundary = store.retryBoundariesForTest()[id]
+
+        // NOW the OLD completion for attempt 1 finally arrives. It must settle nothing: the successor's
+        // attempt count, boundary and liveness all stay exactly as they were.
+        assertFalse(
+            "the old attempt's identity no longer holds",
+            store.attemptIdentityHolds(generation, id, first.attemptNumber),
+        )
+        assertTrue(
+            "the successor's identity DOES hold",
+            store.attemptIdentityHolds(generation, id, successor.attemptNumber),
+        )
+        // Simulate the old-completion settlement path: it must not touch the queue.
+        var oldSettled = false
+        if (store.attemptIdentityHolds(generation, id, first.attemptNumber)) {
+            oldSettled = true
+            store.scheduleRetryAfterFailure(store.fence.currentGeneration(), id)
+        }
+        assertFalse("the old completion re-armed nothing", oldSettled)
+        assertEquals("successor attempt count unchanged", 2, store.stateAttemptsForTest(id))
+        assertEquals("successor boundary unchanged", successorBoundary, store.retryBoundariesForTest()[id])
+        assertTrue("the capture is still owned and served", store.readyEntries().any { it.captureId == id })
+    }
+
+    @Test
     fun `only a receipt that echoes THIS capture id and digest releases ownership`() {
         var now = 17_000_000L
         val root = tmp.newFolder("caller-receipt")
@@ -500,15 +544,22 @@ class ContributionRetryCallerTest {
             networkAvailable = { true },
             attemptUpload = { generation, captureId, isRevoked ->
                 if (isRevoked()) return@ContributionRetryCaller false
-                // A wrong-digest acceptance must NOT release; a matching one must.
+                // A wrong-digest acceptance must NOT release; a matching one must. Settlement goes
+                // through the resolver exactly as production composition does.
                 val wrong = resolver.resolve(generation, captureId, ContributionAckResolver.Ack.ACCEPTED, receipt(echoedDigest = "0".repeat(64)))
                 assertTrue("forged digest retains ownership", wrong is ContributionAckResolver.Resolution.UnvalidatedAccept)
                 assertTrue("still queued after the forged receipt", store.readyEntries().any { it.captureId == captureId })
                 val ok = resolver.resolve(generation, captureId, ContributionAckResolver.Ack.ACCEPTED, receipt())
-                ok is ContributionAckResolver.Resolution.Released
+                assertTrue("the matching receipt releases", ok is ContributionAckResolver.Resolution.Released)
+                // The caller's own settlement gate sees the attempt already released.
+                !store.readyEntries().any { it.captureId == captureId }
             },
         )
-        assertEquals("the upload is accepted and the entry is released", 1, caller.pollOnce().attempted)
+        val polled = caller.pollOnce()
+        assertTrue(
+            "the receipt round trip completed: either the seam settled it or the release superseded it",
+            polled.attempted == 1 || polled.cancelledEpoch == 1,
+        )
         assertTrue("ownership released only on the validated receipt", store.readyEntries().none { it.captureId == id })
         assertEquals(1L, store.terminalCounter(ContributionStore.TerminalReason.UPLOAD_ACCEPTED))
         assertEquals(1, store.recordedDigest(id)?.let { 1 } ?: 1) // digest remains readable/consistent

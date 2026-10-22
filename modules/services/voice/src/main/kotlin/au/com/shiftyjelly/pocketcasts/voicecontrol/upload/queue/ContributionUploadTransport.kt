@@ -96,8 +96,8 @@ class ContributionUploadTransport(
      * Bearer authentication travels on the request. No side-channel headers carry identity.
      */
     fun upload(captureId: String, record: RecordNode.Obj, audio: File): Response = runCatching {
-        val (payload, contentType) = requireNotNull(buildEnvelope(record, audio)) { "envelope" }
-        send(captureId, payload, contentType)
+        val envelope = requireNotNull(planEnvelope(record, audio)) { "envelope" }
+        send(captureId, envelope)
     }.getOrElse { Response.Ambiguous(null) }
 
     /**
@@ -105,32 +105,74 @@ class ContributionUploadTransport(
      * its boundary. Exposed so a parity harness can feed the BYTES THIS CLIENT PRODUCES to the real
      * intake rather than re-deriving an envelope that only resembles it.
      */
-    internal fun requestEnvelope(record: RecordNode.Obj, audio: File): Pair<ByteArray, String>? = buildEnvelope(record, audio)
+    internal fun requestEnvelope(record: RecordNode.Obj, audio: File): Pair<ByteArray, String>? {
+        val envelope = planEnvelope(record, audio) ?: return null
+        return runCatching {
+            val out = java.io.ByteArrayOutputStream()
+            writeEnvelope(out, envelope)
+            out.toByteArray() to envelope.contentType
+        }.getOrElse { null }
+    }
 
-    private fun buildEnvelope(record: RecordNode.Obj, audio: File): Pair<ByteArray, String>? {
+    /**
+     * The envelope, described as the parts it is made of: the metadata head, the audio head, and the audio
+     * FILE. The audio stays on disk - it is copied to the socket in chunks ([writeEnvelope]) rather than
+     * read into memory - so what leaves the device is bounded by the copy buffer, not the capture size.
+     */
+    private data class Envelope(
+        val head: ByteArray,
+        val tail: ByteArray,
+        val audio: File,
+        val contentType: String,
+    ) {
+        /** Exact wire length, so the request still streams with a fixed Content-Length (no chunking). */
+        val contentLength: Long get() = head.size.toLong() + audio.length() + tail.size.toLong()
+    }
+
+    private fun planEnvelope(record: RecordNode.Obj, audio: File): Envelope? {
+        if (!audio.isFile) return null
         val recordBytes = CanonicalJson.canonicalBytes(record)
         val recordSha256 = java.security.MessageDigest.getInstance("SHA-256")
             .digest(recordBytes).joinToString("") { "%02x".format(it) }
         val metadata = "{\"record\":" + String(recordBytes, Charsets.UTF_8) + ",\"record_sha256\":\"$recordSha256\"}"
-        val audioBytes = runCatching { audio.readBytes() }.getOrElse { return null }
         val boundary = "----auris-contribution-${UUID.randomUUID()}"
-        val body = Buffer()
-        fun part(name: String, filename: String?, contentType: String, bytes: ByteArray) {
-            body.writeUtf8("--$boundary\r\n")
-            body.writeUtf8("Content-Disposition: form-data; name=\"$name\"")
-            if (filename != null) body.writeUtf8("; filename=\"$filename\"")
-            body.writeUtf8("\r\n")
-            body.writeUtf8("Content-Type: $contentType\r\n\r\n")
-            body.write(bytes)
-            body.writeUtf8("\r\n")
-        }
-        part("metadata", null, "application/json", metadata.toByteArray(Charsets.UTF_8))
-        part("audio", "recording.wav", "audio/wav", audioBytes)
-        body.writeUtf8("--$boundary--\r\n")
-        return body.readByteArray() to "multipart/form-data; boundary=$boundary"
+        val head = buildString {
+            append("--$boundary\r\n")
+            append("Content-Disposition: form-data; name=\"metadata\"\r\n")
+            append("Content-Type: application/json\r\n\r\n")
+            append(metadata)
+            append("\r\n--$boundary\r\n")
+            append("Content-Disposition: form-data; name=\"audio\"; filename=\"recording.wav\"\r\n")
+            append("Content-Type: audio/wav\r\n\r\n")
+        }.toByteArray(Charsets.UTF_8)
+        return Envelope(
+            head = head,
+            tail = "\r\n--$boundary--\r\n".toByteArray(Charsets.UTF_8),
+            audio = audio,
+            contentType = "multipart/form-data; boundary=$boundary",
+        )
     }
 
-    private fun send(captureId: String, payload: ByteArray, contentType: String): Response {
+    /**
+     * Writes the envelope to [out] in bounded chunks. The copy buffer is the only capture-sized buffer the
+     * transport allocates; the audio itself is never held in memory.
+     */
+    private fun writeEnvelope(out: java.io.OutputStream, envelope: Envelope) {
+        out.write(envelope.head)
+        out.flush()
+        envelope.audio.inputStream().use { input ->
+            val chunk = ByteArray(COPY_BUFFER_BYTES)
+            while (true) {
+                val read = input.read(chunk)
+                if (read < 0) break
+                out.write(chunk, 0, read)
+            }
+        }
+        out.write(envelope.tail)
+        out.flush()
+    }
+
+    private fun send(captureId: String, envelope: Envelope): Response {
         // Resolved BEFORE anything is read or sent: a device with no usable credential issues NO request.
         val credentials = authorization() ?: return Response.Unauthorized(-1)
         val connection = try {
@@ -143,10 +185,10 @@ class ContributionUploadTransport(
             connection.connectTimeout = connectTimeoutMs
             connection.readTimeout = readTimeoutMs
             connection.doOutput = true
-            connection.setRequestProperty("Content-Type", contentType)
+            connection.setRequestProperty("Content-Type", envelope.contentType)
             connection.setRequestProperty("Authorization", credentials)
-            connection.setFixedLengthStreamingMode(payload.size)
-            connection.outputStream.use { it.write(payload) }
+            connection.setFixedLengthStreamingMode(envelope.contentLength)
+            connection.outputStream.use { writeEnvelope(it, envelope) }
             val status = connection.responseCode
             // `unauthorized` pairs with 401 in the owning table and needs no body: never read the error
             // stream here, so a server that closes it abruptly cannot turn a credential refusal into an
@@ -290,5 +332,8 @@ class ContributionUploadTransport(
 
     private companion object {
         const val MAX_BODY_BYTES = 1 shl 20
+
+        /** The only capture-sized buffer a send allocates; the audio itself stays on disk. */
+        const val COPY_BUFFER_BYTES = 16 * 1024
     }
 }

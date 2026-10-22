@@ -111,6 +111,8 @@ class TransportBytesParityTest {
 
     private data class Case(val id: String, val record: RecordNode, val audio: ByteArray)
 
+    private val metadataMutationId = "transport-metadata-mutated"
+
     @Test
     fun `the bytes the transport emits are accepted by the clean pinned Worker intake`() {
         val workerRoot = cloudWorkerRoot()
@@ -133,13 +135,21 @@ class TransportBytesParityTest {
         val tamperedAudio = wav.copyOf().also { it[WavWriter.HEADER_BYTES + 2] = (it[WavWriter.HEADER_BYTES + 2].toInt() xor 0x01).toByte() }
         val audioTampered = accepted.copy(id = "transport-audio-tampered", audio = tamperedAudio)
 
-        // Record tamper: the audio is original but the record claims a different digest for it, so the
-        // record the client signs is not the record the audio belongs to.
-        val recordTampered = Case(
-            id = "transport-record-tampered",
+        // AUDIO-BINDING negative (renamed to say what it is): the audio is original but the record
+        // declares a different audio digest, so the record the client signs does not belong to the audio
+        // it ships. This is NOT metadata-digest proof - the record and its claim are still consistent.
+        val audioBindingMismatch = Case(
+            id = "transport-audio-binding-mismatch",
             record = recordFor(audioSha = "11".repeat(32), audioBytes = wav.size.toLong(), retainedSamples = 1600L),
             audio = wav,
         )
+
+        // TRUE metadata mutation: the record TEXT is altered in flight (one stage value changed) while the
+        // client's original `record_sha256` is still the one claimed. The bytes here are built by ANDROID -
+        // the transport's own metadata head is rewritten - so the claim can stay the original digest while
+        // the record no longer canonicalizes to it. This is the case that only a server recomputing the
+        // digest can catch.
+        val metadataMutated = accepted.copy(id = metadataMutationId)
 
         val casesFile = Files.createTempFile("transport-envelope-cases", ".jsonl").toFile()
         val probe = File(casesFile.parentFile, "probe_worker_envelope.mjs")
@@ -150,10 +160,21 @@ class TransportBytesParityTest {
         val transport = transport()
         val emitted = mutableMapOf<String, Pair<ByteArray, String>>()
         casesFile.writeText(
-            listOf(accepted, audioTampered, recordTampered).joinToString("\n") { case ->
+            listOf(accepted, audioTampered, audioBindingMismatch, metadataMutated).joinToString("\n") { case ->
                 val record = case.record as RecordNode.Obj
-                val (body, contentType) = requireNotNull(transport.requestEnvelope(record, file("${case.id}.wav", case.audio))) {
+                val built = requireNotNull(transport.requestEnvelope(record, file("${case.id}.wav", case.audio))) {
                     "the transport refused to build an envelope for ${case.id}"
+                }
+                // For the true metadata mutation, rewrite ONE value inside the record the transport already
+                // embedded, leaving the claimed `record_sha256` untouched. Done on the client's own bytes,
+                // so this is the wire state a mangling proxy or a faulty record writer would produce.
+                val (body, contentType) = if (case.id == metadataMutationId) {
+                    val text = String(built.first, Charsets.ISO_8859_1)
+                    val mutated = text.replace("\"skip_ad\"", "\"skip_all_ads\"")
+                    require(mutated != text) { "metadata mutation did not apply; the fixture changed" }
+                    mutated.toByteArray(Charsets.ISO_8859_1) to built.second
+                } else {
+                    built
                 }
                 emitted[case.id] = body to contentType
                 val b64 = Base64.getEncoder().encodeToString(body)
@@ -192,8 +213,14 @@ class TransportBytesParityTest {
         assertEquals("a tampered audio part must be refused", "REJECT", audioReject[0])
         assertEquals("the audio tamper was refused for the wrong reason", "integrity_mismatch", audioReject[1])
 
-        val recordReject = verdicts[recordTampered.id] ?: error("no verdict for the record tamper")
-        assertEquals("a tampered record must be refused", "REJECT", recordReject[0])
-        assertEquals("the record tamper was refused for the wrong reason", "integrity_mismatch", recordReject[1])
+        val bindingReject = verdicts[audioBindingMismatch.id] ?: error("no verdict for the audio-binding mismatch")
+        assertEquals("a record declaring a different audio digest must be refused", "REJECT", bindingReject[0])
+        assertEquals("the audio-binding mismatch was refused for the wrong reason", "integrity_mismatch", bindingReject[1])
+
+        // The distinguishing case: same audio, same claim, DIFFERENT record text. Only a server that
+        // recomputes the digest over the received record can refuse this.
+        val metadataReject = verdicts[metadataMutated.id] ?: error("no verdict for the metadata mutation")
+        assertEquals("a record altered in flight must be refused", "REJECT", metadataReject[0])
+        assertEquals("the metadata mutation was refused for the wrong reason", "integrity_mismatch", metadataReject[1])
     }
 }

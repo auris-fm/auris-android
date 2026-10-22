@@ -1056,40 +1056,45 @@ class ContributionStore(
                 val reconciledCount: Int? = try {
                     reconcileAttemptsIntentLocked(captureId)
                 } catch (uncertain: IllegalStateException) {
-                    // The pending count intent could not be finished: no further attempt may be recorded
-                    // from the older record (reviewer 199ccdee). The hold persists until recovery resolves.
+                    // ABSENCE and reconciliation FAILURE are distinct: failure must return from the
+                    // ownership transaction BEFORE any increment or disk mutation - a later throw cannot
+                    // undo the write (reviewer 1d29fa1e). The hold persists until recovery resolves.
                     sidecarFailure = uncertain
                     null
                 }
-                var current = memoryEntries[captureId]
-                if (reconciledCount != null && current != null) {
-                    // The RECONCILED record is the trusted count: the in-memory copy may predate the
-                    // pending increment, and re-deriving from it would republish the same count instead
-                    // of advancing (reviewer 45b9d4de).
-                    current = current.copy(attempts = reconciledCount)
-                    memoryEntries[captureId] = current
-                }
-                if (current == null) {
+                if (reconciledCount == null && sidecarFailure != null) {
                     null
                 } else {
-                    val updated = current.copy(attempts = current.attempts + 1)
-                    memoryEntries[captureId] = updated
-                    hooks.beforeAttemptWrite?.invoke(generation)
-                    try {
-                        // The count record is written through the SAME atomic/durable protocol as the
-                        // retry boundary - writeText could truncate a previously published record
-                        // (reviewer 7433e6a9). The boundary lives in its own .retry record, so the
-                        // count write can no longer erase a deadline.
-                        if (!publishRecordAtomicallyLocked(File(dir, "$captureId$SUFFIX_ATTEMPTS"), updated.attempts.toString())) {
-                            throw java.io.IOException("attempts record publication failed")
-                        }
-                        updated.attempts
-                    } catch (_: Throwable) {
-                        // Roll back only while this generation still owns the queue; after a revoke the whole
-                        // index is gone and inventing a decrement could corrupt a successor's counts.
+                    var current = memoryEntries[captureId]
+                    if (reconciledCount != null && current != null) {
+                        // The RECONCILED record is the trusted count: the in-memory copy may predate the
+                        // pending increment, and re-deriving from it would republish the same count instead
+                        // of advancing (reviewer 45b9d4de).
+                        current = current.copy(attempts = reconciledCount)
                         memoryEntries[captureId] = current
-                        sidecarFailure = IllegalStateException("attempts sidecar write failed")
+                    }
+                    if (current == null) {
                         null
+                    } else {
+                        val updated = current.copy(attempts = current.attempts + 1)
+                        memoryEntries[captureId] = updated
+                        hooks.beforeAttemptWrite?.invoke(generation)
+                        try {
+                            // The count record is written through the SAME atomic/durable protocol as the
+                            // retry boundary - writeText could truncate a previously published record
+                            // (reviewer 7433e6a9). The boundary lives in its own .retry record, so the
+                            // count write can no longer erase a deadline.
+                            if (!publishRecordAtomicallyLocked(File(dir, "$captureId$SUFFIX_ATTEMPTS"), updated.attempts.toString())) {
+                                throw java.io.IOException("attempts record publication failed")
+                            }
+                            updated.attempts
+                        } catch (_: Throwable) {
+                            // Roll back only while this generation still owns the queue; after a revoke the whole
+                            // index is gone and inventing a decrement could corrupt a successor's counts.
+                            memoryEntries[captureId] = current
+                            sidecarFailure = IllegalStateException("attempts sidecar write failed")
+                            null
+                        }
                     }
                 }
             }

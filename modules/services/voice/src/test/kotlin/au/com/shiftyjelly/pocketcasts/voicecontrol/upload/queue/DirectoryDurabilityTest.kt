@@ -441,6 +441,57 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `a FAILED count reconciliation returns BEFORE any increment or write, and restores cleanly`() {
+        // reviewer 1d29fa1e: reconciliation failure must be distinct from absence - the ownership
+        // transaction returns before ANY increment or publication, so the pending intent bytes, the
+        // canonical count record and the in-memory count are unchanged across repeated refusals.
+        var now = 11_000_000L
+        val root = tmp.newFolder("queue-count-refusal")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val id = "a9a9a9a9-1111-4222-8333-444444444444"
+        var attemptsTmpSyncs = 0
+        val store = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+            fileSync = FileSync { file ->
+                if (file.name.endsWith(".attempts.tmp")) {
+                    attemptsTmpSyncs++
+                    if (attemptsTmpSyncs >= 2) throw java.io.IOException("persistent reconciliation failure")
+                }
+            },
+        )
+        val admission = store.admitForTest(1600, meta(id).size)
+        val generation = store.fence.currentGeneration()
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertEquals(1, store.recordAttempt(generation, id))
+        assertTrue(runCatching { store.recordAttempt(generation, id) }.isFailure) // intent pending, syncs now faulted
+        val intentBefore = File(contributions, "$id.attempts.tmp").readText()
+        val canonicalBefore = File(contributions, "$id.attempts").readText()
+
+        repeat(3) { round ->
+            val syncsBeforeCall = attemptsTmpSyncs
+            assertTrue("refusal round ${round + 1}", runCatching { store.recordAttempt(generation, id) }.getOrNull() == null)
+            assertEquals(
+                "round ${round + 1}: exactly ONE barrier attempt (reconciliation), NO publication attempt",
+                syncsBeforeCall + 1,
+                attemptsTmpSyncs,
+            )
+            assertEquals("round ${round + 1}: pending intent bytes unchanged", intentBefore, File(contributions, "$id.attempts.tmp").readText())
+            assertEquals("round ${round + 1}: canonical count unchanged", canonicalBefore, File(contributions, "$id.attempts").readText())
+        }
+        now += 10L
+
+        // Restore: the intent is finished, the reconciled count adopted, and the increment advances.
+        attemptsTmpSyncs = -1_000_000 // disable the fault (counter far below the faulting threshold)
+        assertEquals(3, store.recordAttempt(generation, id))
+        assertEquals("3", File(contributions, "$id.attempts").readText())
+        assertTrue(!File(contributions, "$id.attempts.tmp").exists())
+    }
+
+    @Test
     fun `retry scheduling survives a RESTART without shortening the boundary`() {
         // reviewer 21176965: nextRetryAtMs was in-memory only and a missing value counted as eligible-now,
         // so a restart bypassed both the local backoff and a received server minimum.

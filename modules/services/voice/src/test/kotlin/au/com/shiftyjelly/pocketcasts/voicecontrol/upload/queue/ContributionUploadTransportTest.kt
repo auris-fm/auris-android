@@ -1,11 +1,15 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import java.io.File
 import java.net.InetSocketAddress
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
+import okio.Buffer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -44,6 +48,8 @@ class ContributionUploadTransportTest {
         server.createContext("/v1/contributions") { exchange: HttpExchange ->
             requestCount.incrementAndGet()
             receivedMethods += exchange.requestMethod
+            // Drain the request body: an unanswered POST body races the response on a loopback socket and
+            // would make these controls flaky rather than diagnostic.
             receivedBodies += exchange.requestBody.readBytes()
             if (responseDelayMs > 0) Thread.sleep(responseDelayMs)
             val bytes = responseBody.toByteArray()
@@ -68,6 +74,59 @@ class ContributionUploadTransportTest {
         "\"receipt_id\":\"rcpt-1\"," +
         "\"accepted_at\":\"2026-10-22T00:00:00Z\"," +
         "\"retention_expires_at\":\"2026-11-21T00:00:00Z\"}"
+
+    /**
+     * The expected production envelope for [record] + [file]: metadata part FIRST (the Worker intake reads
+     * the record before any audio byte reaches the sink), then the audio part with the exact capture bytes.
+     */
+    private fun envelope(captureId: String, file: File): ByteArray {
+        val recordBytes = CanonicalJson.canonicalBytes(record(captureId))
+        val digest = MessageDigest.getInstance("SHA-256").digest(recordBytes).joinToString("") { "%02x".format(it) }
+        val metadata = "{\"record\":" + String(recordBytes, Charsets.UTF_8) + ",\"record_sha256\":\"$digest\"}"
+        val body = Buffer()
+        fun part(name: String, filename: String?, contentType: String, bytes: ByteArray) {
+            body.writeUtf8("--BOUNDARY\r\n")
+            body.writeUtf8("Content-Disposition: form-data; name=\"$name\"")
+            if (filename != null) body.writeUtf8("; filename=\"$filename\"")
+            body.writeUtf8("\r\n")
+            body.writeUtf8("Content-Type: $contentType\r\n\r\n")
+            body.write(bytes)
+            body.writeUtf8("\r\n")
+        }
+        part("metadata", null, "application/json", metadata.toByteArray(Charsets.UTF_8))
+        part("audio", "recording.wav", "audio/wav", file.readBytes())
+        body.writeUtf8("--BOUNDARY--\r\n")
+        return body.readByteArray()
+    }
+
+    /** A minimal VALID record so the transport builds its real metadata envelope. */
+    private fun record(captureId: String): RecordNode.Obj = RecordNode.Obj(
+        mapOf(
+            "schema_version" to RecordNode.ofInt(1),
+            "capture_id" to RecordNode.Str(captureId),
+            "enrollment_epoch" to RecordNode.Str("epoch-1"),
+            "platform" to RecordNode.Str("android"),
+            "app_version" to RecordNode.Str("8.9"),
+            "build" to RecordNode.Str("123"),
+            "capture_session_id" to RecordNode.Str("session-$captureId"),
+            "models" to RecordNode.Arr(emptyList()),
+            "observations" to RecordNode.Arr(emptyList()),
+            "audio" to RecordNode.Obj(
+                mapOf(
+                    "sha256" to RecordNode.Str("0".repeat(64)),
+                    "byte_count" to RecordNode.ofInt(44),
+                    "encoding" to RecordNode.Str("pcm_s16le"),
+                    "sample_rate_hz" to RecordNode.ofInt(16000),
+                    "channels" to RecordNode.ofInt(1),
+                    "retained_samples" to RecordNode.ofInt(0),
+                    "original_format" to RecordNode.Str("pcm_s16le"),
+                    "conversion_version" to RecordNode.Str("v1"),
+                    "truncated" to RecordNode.Bool(false),
+                    "dropped_spans" to RecordNode.Arr(emptyList()),
+                ),
+            ),
+        ),
+    )
 
     private fun transport(token: String = "test-token") = ContributionUploadTransport(
         endpoint = "http://127.0.0.1:$port/v1/contributions",
@@ -111,11 +170,19 @@ class ContributionUploadTransportTest {
         responseStatus = 200
         responseBody = receipt(id, digest)
 
-        val result = transport().upload(id, file)
+        val result = transport().upload(id, record(id), file)
 
         assertEquals("exactly one request", 1, requestCount.get())
         assertEquals("POST", receivedMethods.single())
-        assertTrue("the WAV bytes reached the server unchanged", receivedBodies.single().contentEquals(file.readBytes()))
+        // The production envelope is multipart; the audio still reaches the server byte-for-byte.
+        val sent = String(receivedBodies.single(), Charsets.ISO_8859_1)
+            .replace(Regex("----auris-contribution-[0-9a-fA-F-]{36}"), "BOUNDARY")
+        assertEquals(
+            "the metadata-first multipart envelope reached the server intact",
+            String(envelope(id, file), Charsets.ISO_8859_1),
+            sent,
+        )
+        assertTrue("the audio part carries the exact capture bytes", sent.contains(String(file.readBytes(), Charsets.ISO_8859_1)))
         assertEquals(ContributionUploadTransport.Response.Accepted::class, result::class)
         val accepted = result as ContributionUploadTransport.Response.Accepted
         assertEquals(200, accepted.statusCode)
@@ -128,7 +195,7 @@ class ContributionUploadTransportTest {
         val file = wavFile(id)
         responseStatus = 201
         responseBody = receipt(id, sha256(file), status = "duplicate")
-        val result = transport().upload(id, file)
+        val result = transport().upload(id, record(id), file)
         assertEquals(201, (result as ContributionUploadTransport.Response.Accepted).statusCode)
     }
 
@@ -138,7 +205,7 @@ class ContributionUploadTransportTest {
         val file = wavFile(id)
         responseStatus = 503
         responseBody = """{"schema_version":1,"code":"storage_unavailable","retry_after_s":30}"""
-        val result = transport().upload(id, file)
+        val result = transport().upload(id, record(id), file)
         val retryable = result as ContributionUploadTransport.Response.Retryable
         assertEquals(503, retryable.statusCode)
         assertEquals(30L, retryable.retryAfterS)
@@ -150,8 +217,42 @@ class ContributionUploadTransportTest {
         val file = wavFile(id)
         responseStatus = 401
         responseBody = """{"schema_version":1,"code":"unauthorized"}"""
-        val result = transport().upload(id, file)
-        assertTrue("a 401 is a credential problem, not a stored capture", result is ContributionUploadTransport.Response.Unauthorized)
+        val result = transport().upload(id, record(id), file)
+        assertTrue("a 401 is a credential problem, not a stored capture: $result", result is ContributionUploadTransport.Response.Unauthorized)
+    }
+
+    @Test
+    fun `absent credentials refuse locally BEFORE any bytes leave`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        val noAuth = ContributionUploadTransport(
+            endpoint = "http://127.0.0.1:$port/v1/contributions",
+            authorization = { null },
+        )
+        val before = requestCount.get()
+        val result = noAuth.upload(id, record(id), file)
+        assertTrue("a local credential refusal is Unauthorized", result is ContributionUploadTransport.Response.Unauthorized)
+        assertEquals("no bytes left the device", before, requestCount.get())
+    }
+
+    @Test
+    fun `a code whose HTTP status disagrees is RETAINED, never terminal`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 503
+        responseBody = """{"schema_version":1,"code":"invalid_request"}"""
+        val result = transport().upload(id, record(id), file)
+        assertTrue("a mismatched code/status pair is never a terminal delete", result is ContributionUploadTransport.Response.Retryable)
+    }
+
+    @Test
+    fun `a duplicate error member is a malformed answer and retains`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 503
+        responseBody = """{"schema_version":1,"code":"upload_pending","code":"storage_unavailable"}"""
+        val result = transport().upload(id, record(id), file)
+        assertTrue("duplicate members make the answer unknown", result is ContributionUploadTransport.Response.Retryable)
     }
 
     @Test
@@ -177,7 +278,7 @@ class ContributionUploadTransportTest {
         for ((status, code, expected) in cases) {
             responseStatus = status
             responseBody = """{"schema_version":1,"code":"$code"}"""
-            val result = transport().upload(id, file)
+            val result = transport().upload(id, record(id), file)
             assertEquals("$status $code", expected, result::class)
         }
     }
@@ -188,7 +289,7 @@ class ContributionUploadTransportTest {
         val file = wavFile(id)
         responseStatus = 400
         responseBody = """{"schema_version":1,"code":"some_future_code"}"""
-        val result = transport().upload(id, file)
+        val result = transport().upload(id, record(id), file)
         assertTrue(
             "an unknown code retains rather than deletes",
             result !is ContributionUploadTransport.Response.Accepted && result !is ContributionUploadTransport.Response.Terminal,
@@ -206,7 +307,7 @@ class ContributionUploadTransportTest {
             connectTimeoutMs = 500,
             readTimeoutMs = 500,
         )
-        val result = dead.upload(id, file)
+        val result = dead.upload(id, record(id), file)
         assertTrue("a failed connection is ambiguous", result is ContributionUploadTransport.Response.Ambiguous)
         assertNull("no status for a request that never landed", (result as ContributionUploadTransport.Response.Ambiguous).statusCode)
     }
@@ -218,7 +319,7 @@ class ContributionUploadTransportTest {
         responseStatus = 200
         responseBody = """{"schema_version":1,"code":"storage_unavailable"}"""
         val validator = CaptureReceiptValidator { sha256(file) }
-        val result = transport().upload(id, file)
+        val result = transport().upload(id, record(id), file)
         val accepted = result as ContributionUploadTransport.Response.Accepted
         assertFalse("a 2xx error body must not validate", validator.validate(id, accepted.payload))
     }
@@ -230,7 +331,7 @@ class ContributionUploadTransportTest {
         responseStatus = 200
         responseBody = receipt(id, "0".repeat(64))
         val validator = CaptureReceiptValidator { sha256(file) }
-        val accepted = transport().upload(id, file) as ContributionUploadTransport.Response.Accepted
+        val accepted = transport().upload(id, record(id), file) as ContributionUploadTransport.Response.Accepted
         assertFalse("a forged digest must not validate", validator.validate(id, accepted.payload))
     }
 }

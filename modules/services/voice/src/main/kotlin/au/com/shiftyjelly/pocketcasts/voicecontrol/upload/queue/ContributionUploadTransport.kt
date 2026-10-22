@@ -98,6 +98,7 @@ class ContributionUploadTransport(
         val recordSha256 = java.security.MessageDigest.getInstance("SHA-256")
             .digest(recordBytes).joinToString("") { "%02x".format(it) }
         val metadata = "{\"record\":" + String(recordBytes, Charsets.UTF_8) + ",\"record_sha256\":\"$recordSha256\"}"
+        val credentials = authorization() ?: return Response.Unauthorized(-1) // local refusal: nothing leaves
         val audioBytes = runCatching { audio.readBytes() }.getOrElse { return Response.Ambiguous(null) }
         val boundary = "----auris-contribution-${UUID.randomUUID()}"
         val body = Buffer()
@@ -126,7 +127,7 @@ class ContributionUploadTransport(
             connection.readTimeout = readTimeoutMs
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
-            authorization()?.let { connection.setRequestProperty("Authorization", it) }
+            connection.setRequestProperty("Authorization", credentials)
             connection.setFixedLengthStreamingMode(payload.size)
             connection.outputStream.use { it.write(payload) }
             val status = connection.responseCode
@@ -140,84 +141,96 @@ class ContributionUploadTransport(
         }
     }
 
-    fun upload(captureId: String, audio: File): Response {
-        val body = runCatching { audio.readBytes() }.getOrElse { return Response.Ambiguous(null) }
-        val connection = try {
-            URI(endpoint).toURL().openConnection() as HttpURLConnection
-        } catch (invalid: Throwable) {
-            return Response.Ambiguous(null)
-        }
-        return try {
-            connection.requestMethod = "POST"
-            connection.connectTimeout = connectTimeoutMs
-            connection.readTimeout = readTimeoutMs
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "audio/wav")
-            connection.setRequestProperty("X-Capture-Id", captureId)
-            authorization()?.let { connection.setRequestProperty("Authorization", it) }
-            connection.setFixedLengthStreamingMode(body.size)
-
-            connection.outputStream.use { it.write(body) }
-
-            val status = connection.responseCode
-            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-            val responseBody = stream?.use { it.readBytes() } ?: ByteArray(0)
-            classify(status, responseBody)
-        } catch (io: Throwable) {
-            // A failure after the bytes were written is AMBIGUOUS: the server may have taken them.
-            Response.Ambiguous(null)
-        } finally {
-            runCatching { connection.disconnect() }
-        }
-    }
+    // The OWNING envelope pairs each code with ONE status; a body whose code disagrees with the HTTP
+    // status is a malformed answer, not a disposition (reviewer d1dfe1cb).
+    private val statusForCode = mapOf(
+        "invalid_request" to 400,
+        "unauthorized" to 401,
+        "not_enrolled" to 403,
+        "collection_disabled" to 403,
+        "capture_conflict" to 409,
+        "record_gone" to 410,
+        "enrollment_retired" to 410,
+        "payload_too_large" to 413,
+        "unsupported_audio" to 415,
+        "integrity_mismatch" to 422,
+        "rate_limited" to 429,
+        "quota_exceeded" to 429,
+        "upload_pending" to 503,
+        "policy_unavailable" to 503,
+        "storage_unavailable" to 503,
+    )
 
     private fun classify(status: Int, body: ByteArray): Response {
-        if (status in 200..299) return Response.Accepted(status, body)
-        // An error body is NOT a receipt: it carries code/retry_after_s, so read just those strictly.
-        val code = errorField(body, "code")
-        val retryAfterS = errorField(body, "retry_after_s")?.toLongOrNull()
-        // The server's own minimum is a MINIMUM: it wins over any default backoff.
-        val retryHint = retryAfterS?.takeIf { it > 0 }
-        // An UNKNOWN code is not a licence to delete: the capture is retained and retried.
+        if (status in 200..299) return Response.Accepted(status, readBounded(body))
+        // An error body is NOT a receipt: read it strictly and BOUNDED. A malformed error body is an
+        // unknown outcome, which retains.
+        // A credential refusal needs no body to be actionable: it is a 401 by the owning table.
+        if (status == 401) return Response.Unauthorized(status)
+        // A body that is not exactly {schema_version, code, retry_after_s?} is an UNKNOWN outcome.
+        val fields = errorFields(readBounded(body)) ?: return Response.Retryable(status, null)
+        val code = fields["code"]
+        val retryAfterS = fields["retry_after_s"]?.toLongOrNull()
+        // A code whose status disagrees with the HTTP status is not a disposition this client acts on.
+        if (code != null && statusForCode[code] != status) return Response.Retryable(status, retryHint(retryAfterS))
         return when (byCode[code] ?: unknownFor(status)) {
-            Disposition.RETRY -> Response.Retryable(status, retryHint)
+            Disposition.RETRY -> Response.Retryable(status, retryHint(retryAfterS))
             Disposition.UNAUTHORIZED -> Response.Unauthorized(status)
             Disposition.TERMINAL -> Response.Terminal(status, code)
             Disposition.POLICY -> Response.PolicyRefused(status, code)
         }
     }
 
-    // Codes this client does not know yet are RETRIED, never treated as terminal disposal: deleting audio
-    // because a server introduced a code we have not read is not a risk worth taking (spec 76f09c72).
-    // 401 is the one status-class fallback that is safe to act on, since it is a credential problem.
-    private fun unknownFor(status: Int): Disposition = if (status == 401) Disposition.UNAUTHORIZED else Disposition.RETRY
+    /** Receipts and error bodies are small; anything larger is a malformed answer, not data. */
+    private fun readBounded(body: ByteArray): ByteArray = if (body.size > MAX_BODY_BYTES) body.copyOf(MAX_BODY_BYTES) else body
 
-    /** Read ONE optional field from an arbitrary JSON object body (error bodies are not receipts). */
-    private fun errorField(body: ByteArray, name: String): String? {
+    private fun retryHint(retryAfterS: Long?): Long? = retryAfterS?.takeIf { it > 0 }
+
+    /**
+     * Strict error-body read: one pass, duplicate members REFUSED (never last-value-wins), string
+     * members only, no trailing junk. Null on any deviation - a malformed error body is an unknown
+     * outcome, which retains.
+     */
+    private fun errorFields(body: ByteArray): Map<String, String>? {
         val reader = JsonReader.of(Buffer().write(body))
         return try {
-            var value: String? = null
+            val fields = LinkedHashMap<String, String>()
             reader.beginObject()
             while (reader.hasNext()) {
                 val key = reader.nextName()
-                when {
-                    key == name && reader.peek() == JsonReader.Token.STRING -> value = reader.nextString()
-                    key == name && reader.peek() == JsonReader.Token.NUMBER -> value = reader.nextString()
-                    else -> reader.skipValue()
+                if (key in fields) return null
+                when (reader.peek()) {
+                    JsonReader.Token.STRING -> {
+                        val value = reader.nextString()
+                        if (value.isEmpty() || value.any { it.isISOControl() }) return null
+                        fields[key] = value
+                    }
+
+                    JsonReader.Token.NUMBER -> fields[key] = reader.nextString()
+
+                    else -> return null
                 }
             }
             reader.endObject()
-            if (reader.peek() != JsonReader.Token.END_DOCUMENT) null else value
+            if (reader.peek() != JsonReader.Token.END_DOCUMENT) return null
+            // Exactly the Worker's UploadErrorBody: a version, a code, an optional retry hint. Any other
+            // member makes the answer one this client does not understand, so it is retained.
+            if (!fields.containsKey("code")) return null
+            if (fields.keys.any { it !in ERROR_BODY_KEYS }) return null
+            if (fields["schema_version"] != "1") return null
+            fields
         } catch (malformed: Throwable) {
             null
         }
     }
 
-    /** Adapts the transport to the caller's upload seam, so the caller and this class compose directly. */
-    fun asAttemptUpload(): (Long, String, String) -> Boolean = { _, captureId, audioPath ->
-        upload(captureId, File(audioPath)).let { response ->
-            // Only a 2xx is a transport success; the RECEIPT is validated by the resolver, not here.
-            response is Response.Accepted
-        }
+    // Codes this client does not know yet are RETRIED, never terminal disposal: deleting audio because a
+    // server introduced a code we have not read is not a risk worth taking. 401 is the one status-class
+    // fallback safe to act on, since it is a credential problem.
+    private fun unknownFor(status: Int): Disposition = if (status == 401) Disposition.UNAUTHORIZED else Disposition.RETRY
+
+    private companion object {
+        const val MAX_BODY_BYTES = 1 shl 20
+        val ERROR_BODY_KEYS = setOf("schema_version", "code", "retry_after_s")
     }
 }

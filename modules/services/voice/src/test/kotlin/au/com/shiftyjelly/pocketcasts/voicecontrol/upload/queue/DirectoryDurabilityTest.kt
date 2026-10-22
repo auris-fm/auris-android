@@ -1081,6 +1081,50 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `a marker directory beyond its bound defers the disposal retry and refuses admission`() {
+        // reviewer 3eec6e62: the disposal-marker directory still used eager markerDir.listFiles(), and
+        // `?: return` treated ENUMERATION FAILURE as an empty directory - indistinguishable from genuine
+        // absence, so a sweep over a partially-known marker set would silently skip intents it never saw.
+        // Beyond the bound, the retry must defer and refuse admission, not act on partial knowledge.
+        val root = tmp.newFolder("queue-marker-bound")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val id = "5d5d5d5d-1111-2222-3333-444444444444"
+        val store = ContributionStore(root, limits())
+        assertTrue("precondition: prepared", store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id)) != null)
+        store.revokeAndPurge("test-disposal")
+        val markerDir = File(root, "disqualified")
+        assertTrue("precondition: an intent marker exists", markerDir.isDirectory)
+
+        // Push the marker directory past its enumeration bound with inert entries.
+        val extra = (0..512).map { i ->
+            File(markerDir, "infl-%04d".format(i)).apply { writeBytes("disqualified".toByteArray()) }
+        }
+
+        val failuresBefore = store.measurementFailures
+        store.expireOlderThan()
+
+        assertTrue(
+            "the deferred retry must be recorded as a measurement failure, not silent success",
+            store.measurementFailures > failuresBefore,
+        )
+        assertTrue(
+            "the recorded intent must survive a deferred retry (marker=${File(markerDir, "$id.disqualified").exists()})",
+            markerDir.listFiles()!!.any { it.name.startsWith(id) },
+        )
+        // (No charge assertion here: revokeAndPurge already released the audio's charge, so the marker in
+        // this fixture is a pure deletion record. The survival of the MARKER is what a deferred retry owes.)
+
+        // Removing the inflation restores a fully enumerable marker set; the retry proceeds.
+        extra.forEach { it.delete() }
+        store.expireOlderThan()
+        assertTrue(
+            "a fully enumerable marker set lets the retry complete (remaining=${markerDir.listFiles()!!.size})",
+            markerDir.listFiles()!!.none { it.name.startsWith(id) },
+        )
+    }
+
+    @Test
     fun `a failed recovery stops serving entries a successful recovery later restores`() {
         // reviewer d1cce25b: the failure path left memoryEntries intact and readyEntries() served them
         // without checking rootEnumerationUnknown, so a store that already held ready entries kept serving

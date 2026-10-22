@@ -888,11 +888,13 @@ class ContributionStore(
     // entry budget, error-explicit. The eager `dir.listFiles()` materialized the entire directory with no
     // bound, so a pathological queue root allocated without limit at every startup (reviewer c66fda06
     // series; the same defect already fixed inside the measurement walk).
-    private fun boundedRootListing(): List<File> {
+    private fun boundedRootListing(): List<File> = boundedDirectoryListing(dir)
+
+    private fun boundedDirectoryListing(directory: File): List<File> {
         val budget = MeasurementBudget(MEASURE_MAX_ENTRIES)
         val found = mutableListOf<File>()
         try {
-            java.nio.file.Files.newDirectoryStream(dir.toPath()).use { stream ->
+            java.nio.file.Files.newDirectoryStream(directory.toPath()).use { stream ->
                 for (child in stream) {
                     if (!budget.consume()) throw MeasurementError("root exceeds $MEASURE_MAX_ENTRIES entries")
                     found += child.toFile()
@@ -903,7 +905,7 @@ class ContributionStore(
         } catch (failure: java.io.IOException) {
             throw MeasurementError("unreadable root $dir: ${failure.message}")
         } catch (failure: RuntimeException) {
-            throw MeasurementError("root discovery failed after ${found.size} entries: ${failure.message}")
+            throw MeasurementError("directory discovery failed after ${found.size} entries: ${failure.message}")
         }
         return found
     }
@@ -1259,7 +1261,33 @@ class ContributionStore(
         // File work and accounting are one atomic step or they are not serialized at all.
         synchronized(lock) {
             val markerDir = File(root, DISQUALIFIED_DIR)
-            val ids = markerDir.listFiles()?.map { it.name } ?: return
+            // The marker directory is enumerated with the same discipline as the queue root: lazy stream,
+            // shared budget, error-explicit. The eager listFiles() materialized unboundedly, and `?: return`
+            // treated ENUMERATION FAILURE as an empty directory - indistinguishable from genuine absence,
+            // so a sweep over a partially-known marker set would silently skip intents it never saw
+            // (reviewer 3eec6e62). A failure here marks root discovery unknown and defers the retry.
+            // A marker directory that does not exist yet is GENUINE absence - no intents were ever
+            // recorded - and must not be confused with a failure to look (reviewer 3eec6e62).
+            try {
+                java.nio.file.Files.readAttributes(
+                    markerDir.toPath(),
+                    java.nio.file.attribute.BasicFileAttributes::class.java,
+                    java.nio.file.LinkOption.NOFOLLOW_LINKS,
+                )
+            } catch (missing: java.nio.file.NoSuchFileException) {
+                return
+            }
+            val ids = try {
+                boundedDirectoryListing(markerDir).map { it.name }
+            } catch (unknown: MeasurementError) {
+                // FAILURE IS NOT ABSENCE: the retry is deferred - no marker is acted on from partial
+                // knowledge, every recorded intent stays on disk and is retried by a later sweep - and the
+                // degradation is counted. It does not refuse admission: unseen disposal intents are
+                // deletions, not retention, so retention accounting stays exactly what the queue root
+                // enumeration (gated separately) says it is.
+                measurementFailures++
+                return
+            }
             for (id in ids) {
                 // A marker on disk does not prove its barriers succeeded: the record is written BEFORE the
                 // syncs, so a crash or failure leaves content identical to a confirmed record. Every retry

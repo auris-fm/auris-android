@@ -277,6 +277,13 @@ class ContributionStore(
     /** Test seam: the in-memory attempt count for one capture. */
     fun stateAttemptsForTest(captureId: String): Int = synchronized(lock) { memoryEntries[captureId]?.attempts ?: -1 }
 
+    /**
+     * The digest this queue recorded for [captureId] when it durably published the entry. Read from the
+     * LIVE index, not from the caller's snapshot: a receipt validator must compare against what the queue
+     * actually holds. Null when the queue holds no such entry.
+     */
+    fun recordedDigest(captureId: String): String? = synchronized(lock) { memoryEntries[captureId]?.recordSha256 }
+
     /** Test seam: how many records' worth of budget live reservations currently occupy. */
     fun reservedRecordsForTest(): Int = synchronized(lock) { reservations.size }
 
@@ -1060,16 +1067,27 @@ class ContributionStore(
             override fun invoke(tx: QueueOwnership.OwnershipTransaction): LaunchLease? = if (!tx.isValid(generation)) {
                 null
             } else {
-                // Register FIRST so a revocation triggered by the hook can cancel this very lease.
-                val lease = LaunchLease(generation, captureId)
-                synchronized(launchLeasesLock) { launchLeases.add(lease) }
-                hooks.beforeTransportLaunch?.invoke(generation, captureId)
-                // The hook may have revoked: a cancelled lease is NOT a valid launch authorization.
-                if (lease.isCancelled()) {
-                    synchronized(launchLeasesLock) { launchLeases.remove(lease) }
+                // The M77b window: after the revalidation, before registration. Under the correct shape
+                // this block runs in ONE transaction, so a revocation that lands here is caught by the
+                // post-window re-check; a launch that moved the registration outside the transaction
+                // would grant the lease unconditionally and start network work under the dead epoch.
+                hooks.onLeaseWindow?.invoke(generation, captureId)
+                if (!tx.isValid(generation)) {
+                    null
+                } else if (fenceRevokedDuringWindow(generation)) {
                     null
                 } else {
-                    lease
+                    // Register FIRST so a revocation triggered by the hook can cancel this very lease.
+                    val lease = LaunchLease(generation, captureId)
+                    synchronized(launchLeasesLock) { launchLeases.add(lease) }
+                    hooks.beforeTransportLaunch?.invoke(generation, captureId)
+                    // The hook may have revoked: a cancelled lease is NOT a valid launch authorization.
+                    if (lease.isCancelled()) {
+                        synchronized(launchLeasesLock) { launchLeases.remove(lease) }
+                        null
+                    } else {
+                        lease
+                    }
                 }
             }
         },
@@ -1087,7 +1105,12 @@ class ContributionStore(
         }
     }
 
-    private fun currentGenerationForProbe(): Long = ownership.currentGeneration()
+    /**
+     * True when the epoch moved across the lease window. The window is inside the ownership transaction,
+     * so a revocation cannot interleave except via the hook; this re-check is what makes "the launch is
+     * refused when the epoch retired before registration" true rather than merely claimed (M77b).
+     */
+    private fun fenceRevokedDuringWindow(generation: Long): Boolean = !ownership.isValidUnderLock(generation)
 
     private val launchLeases = mutableListOf<LaunchLease>()
     private val launchLeasesLock = Any()

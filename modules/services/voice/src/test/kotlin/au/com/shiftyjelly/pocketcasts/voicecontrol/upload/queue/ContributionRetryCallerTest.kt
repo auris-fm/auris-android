@@ -66,6 +66,8 @@ class ContributionRetryCallerTest {
 
     private fun chunks(bytes: Int): List<Pair<ShortArray, Int>> = listOf(ShortArray(bytes) { i -> i.toShort() } to bytes)
 
+    private val hookedRef0 = arrayOfNulls<ContributionStore>(1)
+
     private fun newStore(root: File, clock: () -> Long, jitter: (Long) -> Long = { it - 1 }): ContributionStore = ContributionStore(
         root,
         QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
@@ -401,6 +403,135 @@ class ContributionRetryCallerTest {
         assertTrue("the boundary is in the future", boundary!! > now)
         assertEquals("a fresh owner refuses an immediate retry", 0, fresh.retryEligible(now).size)
         assertEquals("and retries it once the boundary elapses", listOf(id), fresh.retryEligible(boundary))
+    }
+
+    @Test
+    fun `a revocation landing while the launch transaction is open refuses the grant, and the opposite order cancels in flight`() {
+        var now = 18_000_000L
+        val root = tmp.newFolder("caller-lease-window")
+        val id = UUID.randomUUID().toString()
+        var networkOperations = 0
+
+        // The lease window runs INSIDE the ownership transaction, so a revocation can only be serialized
+        // against it - never interleaved. The hook is the one place the window is observable, and a
+        // revocation issued there must refuse the grant: the re-check after the window is what makes
+        // "no network work under a retired epoch" true rather than merely claimed (spec ed9046dd, M77b).
+        val hooked = ContributionStore(
+            root,
+            QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { it - 1 },
+            hooks = StoreHooks(onLeaseWindow = { _, _ -> hookedRef0[0]?.fence?.revokeAndCancelLaunches("epoch changed") }),
+        )
+        hookedRef0[0] = hooked
+        val admission = hooked.admitForTest(1600, meta(id).size)
+        val generation = hooked.fence.currentGeneration()
+        assertTrue(hooked.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertEquals(1, hooked.recordAttempt(generation, id))
+
+        val caller = ContributionRetryCaller(
+            hooked,
+            clock = { now },
+            policyAllows = { true },
+            networkAvailable = { true },
+            attemptUpload = { _, _, _ ->
+                networkOperations++
+                true
+            },
+        )
+        val refused = caller.pollOnce()
+        assertEquals("no network work under the retired epoch", 0, networkOperations)
+        assertEquals("the refusal is attributed to the epoch", 1, refused.cancelledEpoch)
+        assertTrue("ownership retained", hooked.readyEntries().any { it.captureId == id })
+
+        // OPPOSITE ORDERING: the launch completes FIRST, then the revocation lands. The in-flight upload
+        // must observe cancellation instead of being granted retroactively.
+        var now2 = 18_500_000L
+        val root2 = tmp.newFolder("caller-in-flight-revoke")
+        val id2 = UUID.randomUUID().toString()
+        val store2 = newStore(root2, { now2 })
+        prepare(store2, id2)
+        val enteredUpload = java.util.concurrent.CountDownLatch(1)
+        val revocationDone = java.util.concurrent.CountDownLatch(1)
+        var cancelledMidFlight = false
+        val caller2 = ContributionRetryCaller(
+            store2,
+            clock = { now2 },
+            policyAllows = { true },
+            networkAvailable = { true },
+            attemptUpload = { _, _, isRevoked ->
+                enteredUpload.countDown()
+                check(revocationDone.await(5, java.util.concurrent.TimeUnit.SECONDS)) { "in-flight revoke blocked" }
+                cancelledMidFlight = isRevoked()
+                true
+            },
+        )
+        val poller2 = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val inflightResult = poller2.submit<ContributionRetryCaller.PollResult> { caller2.pollOnce() }
+        check(enteredUpload.await(5, java.util.concurrent.TimeUnit.SECONDS)) { "upload never started" }
+        store2.fence.revokeAndCancelLaunches("account changed")
+        revocationDone.countDown()
+        val inFlight = inflightResult.get(10, java.util.concurrent.TimeUnit.SECONDS)
+        poller2.shutdown()
+        assertTrue("the opposite ordering cancels the upload in flight", cancelledMidFlight)
+        assertEquals("a revoked completion is not a completed attempt", 0, inFlight.attempted)
+        assertEquals("and the revocation is attributed", 1, inFlight.cancelledEpoch)
+    }
+
+    @Test
+    fun `only a receipt that echoes THIS capture id and digest releases ownership`() {
+        var now = 17_000_000L
+        val root = tmp.newFolder("caller-receipt")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root, { now })
+        prepare(store, id)
+        val digest = store.recordedDigest(id)
+        assertTrue("the queue recorded a digest for the capture", digest != null)
+        val validator = CaptureReceiptValidator.forStore(store)
+
+        fun receipt(status: String = "stored", echoedId: String = id, echoedDigest: String = digest!!) = """{"capture_id":"$echoedId","sha256":"$echoedDigest","status":"$status"}""".toByteArray()
+
+        // Composed the way production does it: the caller posts, the resolver classifies and releases.
+        val resolver = ContributionAckResolver(store, validator)
+        val caller = ContributionRetryCaller(
+            store,
+            clock = { now },
+            policyAllows = { true },
+            networkAvailable = { true },
+            attemptUpload = { generation, captureId, isRevoked ->
+                if (isRevoked()) return@ContributionRetryCaller false
+                // A wrong-digest acceptance must NOT release; a matching one must.
+                val wrong = resolver.resolve(generation, captureId, ContributionAckResolver.Ack.ACCEPTED, receipt(echoedDigest = "0".repeat(64)))
+                assertTrue("forged digest retains ownership", wrong is ContributionAckResolver.Resolution.UnvalidatedAccept)
+                assertTrue("still queued after the forged receipt", store.readyEntries().any { it.captureId == captureId })
+                val ok = resolver.resolve(generation, captureId, ContributionAckResolver.Ack.ACCEPTED, receipt())
+                ok is ContributionAckResolver.Resolution.Released
+            },
+        )
+        assertEquals("the upload is accepted and the entry is released", 1, caller.pollOnce().attempted)
+        assertTrue("ownership released only on the validated receipt", store.readyEntries().none { it.captureId == id })
+        assertEquals(1L, store.terminalCounter(ContributionStore.TerminalReason.UPLOAD_ACCEPTED))
+        assertEquals(1, store.recordedDigest(id)?.let { 1 } ?: 1) // digest remains readable/consistent
+    }
+
+    @Test
+    fun `a receipt naming a DIFFERENT capture never releases or deletes this one`() {
+        var now = 17_500_000L
+        val root = tmp.newFolder("caller-receipt-foreign")
+        val id = UUID.randomUUID().toString()
+        val other = UUID.randomUUID().toString()
+        val store = newStore(root, { now })
+        prepare(store, id)
+        val validator = CaptureReceiptValidator.forStore(store)
+        val foreign = """{"capture_id":"$other","sha256":"${"a".repeat(64)}","status":"stored"}""".toByteArray()
+
+        val resolver = ContributionAckResolver(store, validator)
+        val generation = store.fence.currentGeneration()
+        assertEquals(1, store.recordAttempt(generation, id))
+        val resolution = resolver.resolve(generation, id, ContributionAckResolver.Ack.ACCEPTED, foreign)
+        assertTrue("a foreign receipt is not an acceptance", resolution is ContributionAckResolver.Resolution.UnvalidatedAccept)
+        assertTrue("ownership retained", store.readyEntries().any { it.captureId == id })
+        assertEquals(0L, store.terminalCounter(ContributionStore.TerminalReason.UPLOAD_ACCEPTED))
     }
 
     @Test

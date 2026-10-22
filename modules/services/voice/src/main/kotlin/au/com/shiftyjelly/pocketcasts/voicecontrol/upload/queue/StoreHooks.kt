@@ -44,6 +44,16 @@ class StoreHooks(
      * wiring passes [NONE].
      */
     val beforeTransportLaunch: ((generation: Long, captureId: String) -> Unit)? = null,
+
+    /**
+     * Invoked inside the ownership transaction AFTER the epoch revalidation but immediately BEFORE the
+     * lease is registered (spec ed9046dd): this is the M77b window. A test hook that blocks here while a
+     * second thread revokes proves a launch that skips the registration transaction would still be
+     * granted (and start network work) under the retired epoch, whereas the correct shape re-checks
+     * NOTHING after the window - it was INSIDE the transaction, so the grant is refused by the re-check
+     * on resume. Production wiring passes [NONE].
+     */
+    val onLeaseWindow: ((generation: Long, captureId: String) -> Unit)? = null,
 ) {
     companion object {
         val NONE = StoreHooks()

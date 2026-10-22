@@ -87,9 +87,6 @@ class ContributionRetryCallerTest {
         val id = UUID.randomUUID().toString()
         val store = newStore(root, { now })
         val generation = prepare(store, id)
-        assertEquals(1, store.recordAttempt(generation, id))
-        assertTrue(store.scheduleRetryAfterFailure(generation, id, retryAfterS = null) != null)
-        now += 10_000L // backoff elapsed
 
         val attempted = mutableListOf<String>()
         val caller = ContributionRetryCaller(
@@ -99,6 +96,7 @@ class ContributionRetryCallerTest {
             networkAvailable = { true },
             attemptUpload = { gen, captureId ->
                 assertTrue("attempt runs under a VALID generation", store.fence.isValid(gen))
+                assertEquals("the pickup durably recorded the attempt BEFORE transport", 1, store.stateAttemptsForTest(captureId))
                 attempted += captureId
                 true
             },
@@ -108,6 +106,7 @@ class ContributionRetryCallerTest {
         assertEquals(1, result.attempted)
         assertEquals(0, result.deferredPolicy)
         assertEquals(0, result.deferredNetwork)
+        assertEquals(0, result.pickupRefused)
     }
 
     @Test
@@ -117,9 +116,6 @@ class ContributionRetryCallerTest {
         val id = UUID.randomUUID().toString()
         val store = newStore(root, { now })
         val generation = prepare(store, id)
-        assertEquals(1, store.recordAttempt(generation, id))
-        assertTrue(store.scheduleRetryAfterFailure(generation, id, retryAfterS = null) != null)
-        now += 10_000L
 
         var attempts = 0
         lateinit var caller: ContributionRetryCaller
@@ -143,15 +139,86 @@ class ContributionRetryCallerTest {
     }
 
     @Test
-    fun `a REVOKED generation between eligibility and attempt cancels the attempt`() {
+    fun `a REVOCATION inside a gate callback cancels the pickup`() {
+        // reviewer 1b926fa0: the purge must land AFTER eligibility and BEFORE claim/execution - inside
+        // a gate callback, not before pollOnce.
         var now = 13_000_000L
         val root = tmp.newFolder("caller-revoked")
         val id = UUID.randomUUID().toString()
         val store = newStore(root, { now })
+        prepare(store, id)
+
+        var attempts = 0
+        var policyCalls = 0
+        val caller = ContributionRetryCaller(
+            store,
+            clock = { now },
+            policyAllows = {
+                policyCalls++
+                if (policyCalls == 1) store.purgeQueue("account revoked mid-gate")
+                true
+            },
+            networkAvailable = { true },
+            attemptUpload = { _, _ ->
+                attempts++
+                true
+            },
+        )
+        val result = caller.pollOnce()
+        assertEquals("gate ran", 1, policyCalls)
+        assertEquals("a mid-gate revocation cancels the attempt", 0, attempts)
+        assertEquals(0, result.attempted)
+        assertEquals(1, result.pickupRefused)
+    }
+
+    @Test
+    fun `a boundary RE-ARM inside a gate callback makes the pickup refuse`() {
+        // reviewer 1b926fa0: a concurrent poll can re-arm the retry boundary between listing and
+        // pickup; generation validity alone must not wave the attempt through.
+        var now = 13_250_000L
+        val root = tmp.newFolder("caller-rearm-race")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root, { now })
         val generation = prepare(store, id)
         assertEquals(1, store.recordAttempt(generation, id))
-        assertTrue(store.scheduleRetryAfterFailure(generation, id, retryAfterS = null) != null)
-        now += 10_000L
+
+        var attempts = 0
+        var networkCalls = 0
+        val caller = ContributionRetryCaller(
+            store,
+            clock = { now },
+            policyAllows = { true },
+            networkAvailable = {
+                networkCalls++
+                if (networkCalls == 1) {
+                    // The concurrent poll re-arms the durable boundary for the SAME entry.
+                    store.scheduleRetryAfterFailure(generation, id, retryAfterS = null)
+                }
+                true
+            },
+            attemptUpload = { _, _ ->
+                attempts++
+                true
+            },
+        )
+        val result = caller.pollOnce()
+        assertEquals("gate ran", 1, networkCalls)
+        assertEquals("a mid-gate boundary re-arm cancels the attempt", 0, attempts)
+        assertEquals(1, result.pickupRefused)
+    }
+
+    @Test
+    fun `SEQUENTIAL retryable failures exhaust maxUploadAttempts and then refuse pickup`() {
+        var now = 13_400_000L
+        val root = tmp.newFolder("caller-exhaustion")
+        val id = UUID.randomUUID().toString()
+        val store = ContributionStore(
+            root,
+            QueueLimits.defaults().copy(maxQueueRecords = 8, maxUploadAttempts = 2, retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+        )
+        prepare(store, id)
 
         var attempts = 0
         val caller = ContributionRetryCaller(
@@ -161,14 +228,22 @@ class ContributionRetryCallerTest {
             networkAvailable = { true },
             attemptUpload = { _, _ ->
                 attempts++
-                true
+                false // always retryable failure
             },
         )
-        // Account revocation lands AFTER the poll claimed the entry as eligible but BEFORE the attempt.
-        store.purgeQueue("account revoked")
-        val result = caller.pollOnce()
-        assertEquals("a revoked epoch cancels the attempt", 0, attempts)
-        assertEquals(0, result.attempted)
+        // Backoff is re-armed after each failure; every elapsed boundary allows exactly one more
+        // recorded attempt, until maxUploadAttempts is exhausted.
+        var polls = 0
+        while (attempts < 2 && polls < 10) {
+            caller.pollOnce()
+            polls++
+            now += 10_000L // past every backoff this test can arm (initial=4s, doubling)
+        }
+        assertEquals("attempts stop at the budget (maxUploadAttempts=2)", 2, attempts)
+        assertEquals(2, store.stateAttemptsForTest(id))
+        val final = caller.pollOnce()
+        assertEquals("exhausted entry is no longer attempted", 0, final.attempted)
+        assertEquals("exhaustion is enforced at the store: pickup refuses directly", null, store.pickupAttempt(store.fence.currentGeneration(), id))
     }
 
     @Test
@@ -177,10 +252,7 @@ class ContributionRetryCallerTest {
         val root = tmp.newFolder("caller-gates")
         val id = UUID.randomUUID().toString()
         val store = newStore(root, { now })
-        val generation = prepare(store, id)
-        assertEquals(1, store.recordAttempt(generation, id))
-        assertTrue(store.scheduleRetryAfterFailure(generation, id, retryAfterS = null) != null)
-        now += 10_000L
+        prepare(store, id)
 
         var attempts = 0
         var policy = false
@@ -217,10 +289,7 @@ class ContributionRetryCallerTest {
         val root = tmp.newFolder("caller-retryable")
         val id = UUID.randomUUID().toString()
         val store = newStore(root, { now })
-        val generation = prepare(store, id)
-        assertEquals(1, store.recordAttempt(generation, id))
-        assertTrue(store.scheduleRetryAfterFailure(generation, id, retryAfterS = null) != null)
-        now += 10_000L
+        prepare(store, id)
 
         val caller = ContributionRetryCaller(
             store,

@@ -34,6 +34,8 @@ class ContributionRetryCaller(
         val deferredNetwork: Int,
         val skippedInFlight: Int,
         val cancelledEpoch: Int,
+        /** Entries whose ATOMIC PICKUP refused: stale epoch, no longer eligible, or unpersisted count. */
+        val pickupRefused: Int,
     )
 
     private val inFlight = mutableSetOf<String>()
@@ -47,11 +49,15 @@ class ContributionRetryCaller(
         var deferredNetwork = 0
         var skippedInFlight = 0
         var cancelledEpoch = 0
+        var pickupRefused = 0
 
+        // The epoch is captured WITH (before) the eligibility snapshot: a revoke landing between the
+        // two reads leaves a STALE generation, which the pickup refuses - old work is never relabelled
+        // with a new epoch (reviewer 1b926fa0).
+        val generation = store.fence.currentGeneration()
         // Eligibility ALREADY holds every store-level gate: readiness, accounting/coverage, attempt
         // budget, unresolved records and the durable not-before boundary (reviewers 199ccdee, 1d29fa1e).
         val eligible = store.retryEligible(clock())
-        val generation = store.fence.currentGeneration()
         for (captureId in eligible) {
             // ONE attempt in flight per entry: the claim is taken before ANY gate runs, so a slow gate
             // or a re-entrant poll tick cannot start a second attempt on the same capture.
@@ -63,8 +69,7 @@ class ContributionRetryCaller(
                 continue
             }
             try {
-                // Gate order is policy -> network -> epoch: cheapest and most semantic first, and the
-                // EPOCH last so the generation is as fresh as possible when the attempt starts.
+                // Gate order is policy -> network: cheapest and most semantic first.
                 if (!policyAllows()) {
                     deferredPolicy++
                     continue
@@ -73,36 +78,34 @@ class ContributionRetryCaller(
                     deferredNetwork++
                     continue
                 }
-                // The attempt runs INSIDE the fence: if a revocation landed since the poll, the epoch is
-                // invalid and the attempt is cancelled, not started (reviewer 6b236641).
-                val outcome = store.fence.guard(generation) {
-                    if (attemptUpload(generation, captureId)) AttemptOutcome.ACCEPTED else AttemptOutcome.RETRYABLE
+                // ATOMIC PICKUP: the guarded transaction revalidates the COMPLETE current eligibility
+                // and durably records/consumes the attempt BEFORE any transport runs (reviewer
+                // 1b926fa0, spec 8aa20001). A gate callback that revoked the epoch, re-armed the backoff
+                // or changed coverage is caught HERE - generation validity alone is not enough.
+                val recordedAttempt = store.pickupAttempt(generation, captureId, clock())
+                if (recordedAttempt == null) {
+                    pickupRefused++
+                    continue
                 }
-                when (outcome) {
-                    null -> cancelledEpoch++
-
-                    AttemptOutcome.ACCEPTED -> {
-                        attempted++
-                        onSuccess(generation, captureId)
-                    }
-
-                    AttemptOutcome.RETRYABLE -> {
-                        attempted++
-                        // Durable re-arm: ONE ownership transaction in the store; a revocation racing the
-                        // schedule surfaces as the store's own refusal and does not fail the poll.
-                        runCatching { store.scheduleRetryAfterFailure(generation, captureId, retryAfterS = null) }
-                    }
+                // The attempt count is durably consumed; run the transport. A revocation from here on
+                // cannot be undone locally - the completion resolution validates the epoch again.
+                val accepted = attemptUpload(generation, captureId)
+                attempted++
+                if (accepted) {
+                    onSuccess(generation, captureId)
+                } else {
+                    // Durable re-arm: ONE ownership transaction in the store; a revocation racing the
+                    // schedule surfaces as the store's own refusal and does not fail the poll.
+                    runCatching { store.scheduleRetryAfterFailure(generation, captureId, retryAfterS = null) }
                 }
             } finally {
                 synchronized(inFlightLock) { inFlight.remove(captureId) }
             }
         }
-        return PollResult(attempted, deferredPolicy, deferredNetwork, skippedInFlight, cancelledEpoch)
+        return PollResult(attempted, deferredPolicy, deferredNetwork, skippedInFlight, cancelledEpoch, pickupRefused)
     }
 
     fun close() {
         closed.set(true)
     }
-
-    private enum class AttemptOutcome { ACCEPTED, RETRYABLE }
 }

@@ -274,6 +274,9 @@ class ContributionStore(
     /** Test seam: current durable/in-memory retry boundaries. */
     fun retryBoundariesForTest(): Map<String, Long> = synchronized(lock) { nextRetryAtMs.toMap() }
 
+    /** Test seam: the in-memory attempt count for one capture. */
+    fun stateAttemptsForTest(captureId: String): Int = synchronized(lock) { memoryEntries[captureId]?.attempts ?: -1 }
+
     /** Test seam: how many records' worth of budget live reservations currently occupy. */
     fun reservedRecordsForTest(): Int = synchronized(lock) { reservations.size }
 
@@ -1019,17 +1022,42 @@ class ContributionStore(
             emptyList()
         } else {
             memoryEntries
-                .mapNotNull { (id, entry) ->
-                    val charge = ownedCharges[id]
-                    if (charge?.ready != true) return@mapNotNull null
-                    if (entry.attempts >= limits.maxUploadAttempts) return@mapNotNull null
-                    // Absent means genuinely unscheduled: recovery loaded every durable boundary, and a
-                    // publication failure puts the id in the UNCERTAIN set below instead of defaulting.
-                    if (heldUncertainLocked(id)) return@mapNotNull null
-                    if ((nextRetryAtMs[id] ?: 0L) > nowMs) return@mapNotNull null
-                    id
-                }
+                .mapNotNull { (id, entry) -> if (retryEligibleLocked(id, entry, nowMs)) id else null }
                 .sorted()
+        }
+    }
+
+    /** The COMPLETE per-entry retry eligibility predicate, shared by listing and atomic pickup. */
+    private fun retryEligibleLocked(id: String, entry: Entry, nowMs: Long): Boolean {
+        val charge = ownedCharges[id]
+        if (charge?.ready != true) return false
+        if (entry.attempts >= limits.maxUploadAttempts) return false
+        // Absent means genuinely unscheduled: recovery loaded every durable boundary, and a publication
+        // failure puts the id in the UNCERTAIN set instead of defaulting.
+        if (heldUncertainLocked(id)) return false
+        if ((nextRetryAtMs[id] ?: 0L) > nowMs) return false
+        return true
+    }
+
+    /**
+     * ATOMIC PICKUP (reviewer 1b926fa0, spec 8aa20001): inside ONE ownership transaction the caller
+     * revalidates the COMPLETE current eligibility - readiness, coverage, budget, unresolved records and
+     * the durable boundary, i.e. everything that gates [retryEligible] - and CONSUMES the attempt by
+     * recording it durably. A gate callback or a concurrent poll that re-arms a boundary or changes
+     * coverage between listing and pickup is caught HERE, not by the generation check alone. Returns the
+     * durably recorded attempt count, or null when the pickup is refused (stale epoch, no longer
+     * eligible, or the attempt record could not be persisted - never attempt on an unpersisted count).
+     */
+    fun pickupAttempt(generation: Long, captureId: String, nowMs: Long = clock()): Int? = synchronized(lock) {
+        if (unknownFootprintLocked() || !ownership.isValidUnderLock(generation)) {
+            null
+        } else {
+            val entry = memoryEntries[captureId]
+            if (entry == null || !retryEligibleLocked(captureId, entry, nowMs)) {
+                null
+            } else {
+                recordAttempt(generation, captureId)
+            }
         }
     }
 
@@ -1122,7 +1150,7 @@ class ContributionStore(
     /** Convenience for the current owner generation; prefer the fenced overload in callback paths. */
     fun dropEntry(captureId: String, reason: TerminalReason): Boolean = dropEntry(fence.currentGeneration(), captureId, reason)
 
-    enum class TerminalReason { ATTEMPTS_EXHAUSTED, QUEUE_AGE_EXPIRED, SERVER_TERMINAL, INVALID_ON_RECOVERY }
+    enum class TerminalReason { ATTEMPTS_EXHAUSTED, QUEUE_AGE_EXPIRED, SERVER_TERMINAL, INVALID_ON_RECOVERY, UPLOAD_ACCEPTED }
 
     fun terminalCounter(reason: TerminalReason): Long = synchronized(lock) { terminalCounters[reason] ?: 0L }
 

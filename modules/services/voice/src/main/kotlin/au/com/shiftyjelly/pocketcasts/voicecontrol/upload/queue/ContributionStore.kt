@@ -724,9 +724,11 @@ class ContributionStore(
         // stale owner's bump attributed to the successor's entry.
         var sidecarFailure: Throwable? = null
         val result: Int? = synchronized(lock) {
-            // Spec 896632f4: unknown marker coverage holds ATTEMPT accounting too - a bump attributed
-            // while marker coverage is unknown could contradict an intent nobody has seen yet.
-            if (markerCoverageUnknown) {
+            // Spec 896632f4: unknown coverage of ANY kind holds ATTEMPT accounting - a bump attributed
+            // while root discovery or marker coverage is unknown could contradict an intent nobody has
+            // seen yet. The gate is the complete owner-coverage predicate, so a held handle cannot
+            // record an attempt through a root-scan failure either (reviewer 6cbb4efa).
+            if (unknownFootprintLocked()) {
                 null
             } else if (!ownership.isValidUnderLock(generation)) {
                 null
@@ -897,6 +899,9 @@ class ContributionStore(
     // nor full accounting can be established while marker coverage is partially known. Ownership and
     // charges are preserved; the hold lifts only after bounded marker discovery succeeds and the recorded
     // intents are reconciled (the retry pass runs to completion over the fully enumerated set).
+    // Starts false: a fresh INSTALL has no marker directory (genuine absence). The dangerous case - a
+    // store instance over a directory whose markers were never enumerated - is covered by recover(),
+    // which establishes coverage in the common eligibility path before anything is served or admitted.
     @Volatile
     private var markerCoverageUnknown = false
 
@@ -1062,6 +1067,12 @@ class ContributionStore(
             }
             recovered = true
         }
+        // Marker coverage is established in the COMMON eligibility path, not only at expiry: a fresh owner
+        // recovers here, so an overflowing or unreadable marker directory must be discovered before
+        // anything is served or admitted (reviewer 6cbb4efa). Running it LAST so the debris sweep measures
+        // what recovery found BEFORE the reconcile deletes what it can - a sweep finding that later
+        // reconciles away still records its measurement failure. Failure inside leaves the hold set.
+        retryDisqualifiedCleanupLocked()
         return keep.sortedBy { it.createdAtMs }
     }
 
@@ -1297,8 +1308,10 @@ class ContributionStore(
                 // No marker directory at all: coverage is trivially complete.
                 markerCoverageUnknown = false
                 return
-            } catch (failure: java.io.IOException) {
-                // Failure to stat is neither absence nor coverage: hold, count, defer.
+            } catch (failure: Exception) {
+                // ANY other stat failure - IOException, SecurityException, a runtime failure thrown by the
+                // filesystem layer - is neither absence nor coverage: hold, count, defer. Normalized like
+                // the directory iterator rather than escaping uncaught (reviewer 6cbb4efa).
                 markerCoverageUnknown = true
                 measurementFailures++
                 return
@@ -1536,6 +1549,8 @@ class ContributionStore(
     private fun unknownFootprintLocked(): Boolean = unmeasuredIds.isNotEmpty() || rootEnumerationUnknown || markerCoverageUnknown
 
     fun unknownFootprintForTest(): Boolean = synchronized(lock) { unknownFootprintLocked() }
+
+    fun rootUnknownForTest(): Boolean = synchronized(lock) { rootEnumerationUnknown }
 
     fun unknownBreakdownForTest(): String = synchronized(lock) {
         "unmeasured=$unmeasuredIds rootUnknown=$rootEnumerationUnknown markerUnknown=$markerCoverageUnknown"

@@ -1160,6 +1160,65 @@ class DirectoryDurabilityTest {
     private fun java.io.File.writeBytesByteArray() = writeBytes(ByteArray(4))
 
     @Test
+    fun `fresh-owner RECOVERY discovers overflowing markers without any expiry call`() {
+        // reviewer 6cbb4efa: marker coverage was established only by retryDisqualifiedCleanupLocked, called
+        // from expireOlderThan - so a fresh owner could recover, serve and admit with an overflowing marker
+        // directory before expiry ever ran. Recovery itself must establish coverage.
+        val root = tmp.newFolder("queue-fresh-owner-markers")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val id = "8a8a8a8a-1111-2222-3333-444444444444"
+        val store = ContributionStore(root, limits())
+        assertTrue(
+            "precondition: ready entry prepared",
+            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id)) != null,
+        )
+        val markerDir = File(root, "disqualified")
+        markerDir.mkdirs()
+        File(markerDir, "$id.disqualified").writeBytes("disqualified".toByteArray())
+        (0..512).forEach { i -> File(markerDir, "infl-%04d".format(i)).writeBytes(ByteArray(4)) }
+
+        store.recover()
+
+        assertTrue(
+            "recovery must hold on overflowing markers - no expiry call involved",
+            store.unknownFootprintForTest(),
+        )
+        assertTrue(
+            "and must not serve until reconciliation",
+            store.readyEntries().isEmpty(),
+        )
+    }
+
+    @Test
+    fun `a held handle cannot record an attempt through a root-scan failure`() {
+        // reviewer 6cbb4efa: recordAttempt gated only on markerCoverageUnknown, so a held handle could
+        // still record when rootEnumerationUnknown was true. The gate is now the complete owner-coverage
+        // predicate.
+        val root = tmp.newFolder("queue-attempt-root-hold")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val id = "9b9b9b9b-1111-2222-3333-444444444444"
+        val store = ContributionStore(root, limits())
+        assertTrue(
+            "precondition: prepared",
+            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id)) != null,
+        )
+
+        // Overflow the QUEUE ROOT: recovery's root discovery fails -> rootEnumerationUnknown.
+        (0..512).forEach { i ->
+            File(contributions, "gen\$h.%d.someid.recording.wav.part".format(i)).writeBytes(ByteArray(4))
+        }
+        store.recover()
+        assertTrue("precondition: root discovery is unknown", store.rootUnknownForTest())
+
+        assertTrue(
+            "an attempt must be refused while ROOT discovery is unknown, not just marker coverage",
+            store.recordAttempt(0, id) == null,
+        )
+    }
+
+    @Test
     fun `a marker directory beyond its bound defers the disposal retry`() {
         // reviewer 3eec6e62: the disposal-marker directory still used eager markerDir.listFiles(), and
         // `?: return` treated ENUMERATION FAILURE as an empty directory - indistinguishable from genuine
@@ -1691,8 +1750,13 @@ class DirectoryDurabilityTest {
         val contributions = File(root, "contributions")
         val digest = File(contributions, "$id.sha256")
         digest.delete()
-        val huge = java.nio.file.Files.newByteChannel(
-            digest.toPath(),
+        // The oversized artifact must ALSO be undeletable: recovery reconciles intents, and a deletable
+        // sidecar is destroyed (and its unknown state legitimately resolved) before measurement. A
+        // non-empty digest DIRECTORY containing a sparse child survives the reconcile and still measures
+        // past Int.MAX_VALUE.
+        digest.mkdirs()
+        val hugeChild = java.nio.file.Files.newByteChannel(
+            File(digest, "huge.bin").toPath(),
             java.util.EnumSet.of(
                 java.nio.file.StandardOpenOption.CREATE,
                 java.nio.file.StandardOpenOption.WRITE,
@@ -1701,12 +1765,23 @@ class DirectoryDurabilityTest {
             channel.position(Int.MAX_VALUE.toLong() + 1024L)
             channel.write(java.nio.ByteBuffer.wrap(byteArrayOf(0)))
         }
-        assertTrue("precondition: sparse file is oversized", digest.length() > Int.MAX_VALUE)
+        assertTrue(
+            "precondition: sparse child is oversized",
+            File(digest, "huge.bin").length() > Int.MAX_VALUE,
+        )
 
         // Disqualify so the capture is charged WITHOUT validation, which would otherwise reject the
         // oversized digest and drop the entry before any measurement of it happens.
         File(root, "disqualified").mkdirs()
         File(root, "disqualified/$id").writeText("disqualified")
+        // Recovery now reconciles disposal intents, so the oversized sidecar would be deleted cleanly and
+        // the unknown state legitimately resolved. Keep the test's premise (measurement fails) by making
+        // the WAV undeletable: the reconcile fails, the residue stays, and the oversized sum is still
+        // measured and must still become unknown accounting.
+        val wav = File(contributions, "$id.recording.wav")
+        wav.delete()
+        wav.mkdirs()
+        File(wav, "held.bin").writeBytes(ByteArray(16))
 
         val fresh = ContributionStore(root, limits())
         fresh.recover()

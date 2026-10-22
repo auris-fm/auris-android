@@ -112,7 +112,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { gen, captureId, _ ->
+            attemptUpload = { gen, captureId, _, _ ->
                 assertTrue("attempt runs under a VALID generation", store.fence.isValid(gen))
                 assertEquals("the pickup durably recorded the attempt BEFORE transport", 1, store.stateAttemptsForTest(captureId))
                 attempted += captureId
@@ -146,7 +146,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { gen, captureId, _ ->
+            attemptUpload = { gen, captureId, _, _ ->
                 attempts++
                 // Production re-entrancy: a slow upload overlapping the next poll tick. The same entry
                 // is already in flight, so the nested poll must NOT attempt it again.
@@ -183,7 +183,7 @@ class ContributionRetryCallerTest {
                 true
             },
             networkAvailable = { true },
-            attemptUpload = { _, _, _ ->
+            attemptUpload = { _, _, _, _ ->
                 attempts++
                 true
             },
@@ -222,7 +222,7 @@ class ContributionRetryCallerTest {
                 }
                 true
             },
-            attemptUpload = { _, _, _ ->
+            attemptUpload = { _, _, _, _ ->
                 attempts++
                 true
             },
@@ -254,7 +254,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { _, _, _ ->
+            attemptUpload = { _, _, _, _ ->
                 attempts++
                 false // always retryable failure
             },
@@ -286,7 +286,7 @@ class ContributionRetryCallerTest {
 
         var attempts = 0
         var policy = false
-        var caller = ContributionRetryCaller(store, clock = { now }, policyAllows = { policy }, networkAvailable = { true }, attemptUpload = { _, _, _ ->
+        var caller = ContributionRetryCaller(store, clock = { now }, policyAllows = { policy }, networkAvailable = { true }, attemptUpload = { _, _, _, _ ->
             attempts++
             true
         }, ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)), responseFor = { _, _ -> wireReceipt(id) })
@@ -296,7 +296,7 @@ class ContributionRetryCallerTest {
 
         policy = true
         var network = false
-        caller = ContributionRetryCaller(store, clock = { now }, policyAllows = { true }, networkAvailable = { network }, attemptUpload = { _, _, _ ->
+        caller = ContributionRetryCaller(store, clock = { now }, policyAllows = { true }, networkAvailable = { network }, attemptUpload = { _, _, _, _ ->
             attempts++
             true
         }, ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)), responseFor = { _, _ -> wireReceipt(id) })
@@ -305,7 +305,7 @@ class ContributionRetryCallerTest {
         assertEquals(1, caller.pollOnce().deferredNetwork)
 
         network = true
-        caller = ContributionRetryCaller(store, clock = { now }, policyAllows = { true }, networkAvailable = { true }, attemptUpload = { _, _, _ ->
+        caller = ContributionRetryCaller(store, clock = { now }, policyAllows = { true }, networkAvailable = { true }, attemptUpload = { _, _, _, _ ->
             attempts++
             true
         }, ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)), responseFor = { _, _ -> wireReceipt(id) })
@@ -326,7 +326,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { _, _, _ -> false }, // retryable failure
+            attemptUpload = { _, _, _, _ -> false }, // retryable failure
             ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
             responseFor = { _, _ -> wireReceipt(id) },
         )
@@ -336,7 +336,7 @@ class ContributionRetryCallerTest {
         assertTrue(store.retryEligible(now + 3_999L).isNotEmpty())
 
         // And the caller acts on it at the elapsed time.
-        val second = ContributionRetryCaller(store, clock = { now + 3_999L }, policyAllows = { true }, networkAvailable = { true }, attemptUpload = { _, _, _ -> true }, ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)), responseFor = { _, _ -> wireReceipt(id) })
+        val second = ContributionRetryCaller(store, clock = { now + 3_999L }, policyAllows = { true }, networkAvailable = { true }, attemptUpload = { _, _, _, _ -> true }, ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)), responseFor = { _, _ -> wireReceipt(id) })
         assertEquals(1, second.pollOnce().attempted)
     }
 
@@ -359,7 +359,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { _, _, isRevoked ->
+            attemptUpload = { _, _, isRevoked, _ ->
                 entered.countDown()
                 // The transport is genuinely in flight: an external authority revokes from ANOTHER thread.
                 // It must not be blocked by the ownership monitor, and its cancellation must be visible.
@@ -417,7 +417,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { _, captureId, _ ->
+            attemptUpload = { _, captureId, _, _ ->
                 launched.add(captureId)
                 true
             },
@@ -468,7 +468,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { _, _, _ ->
+            attemptUpload = { _, _, _, _ ->
                 networkOperations++
                 true
             },
@@ -495,7 +495,7 @@ class ContributionRetryCallerTest {
             clock = { now2 },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { _, _, isRevoked ->
+            attemptUpload = { _, _, isRevoked, _ ->
                 enteredUpload.countDown()
                 check(revocationDone.await(5, java.util.concurrent.TimeUnit.SECONDS)) { "in-flight revoke blocked" }
                 cancelledMidFlight = isRevoked()
@@ -583,7 +583,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { generation, captureId, isRevoked ->
+            attemptUpload = { generation, captureId, isRevoked, _ ->
                 if (isRevoked()) return@ContributionRetryCaller false
                 // A wrong-digest acceptance must NOT release; a matching one must. Settlement goes
                 // through the resolver exactly as production composition does.
@@ -623,7 +623,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { _, _, _ -> true },
+            attemptUpload = { _, _, _, _ -> true },
             ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
             responseFor = { _, _ -> """{"schema_version":1,"code":"storage_unavailable"}""".toByteArray() },
         )
@@ -648,7 +648,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { _, _, _ -> false },
+            attemptUpload = { _, _, _, _ -> false },
             ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
             retryAfterFor = { _, _ -> 600L }, // the server said: at least 600s
         )
@@ -694,7 +694,7 @@ class ContributionRetryCallerTest {
                 clock = { now },
                 policyAllows = { true },
                 networkAvailable = { true },
-                attemptUpload = { _, _, _ -> true },
+                attemptUpload = { _, _, _, _ -> true },
                 ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
                 responseFor = { _, _ -> body },
             )
@@ -720,7 +720,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { generation, captureId, _ ->
+            attemptUpload = { generation, captureId, _, _ ->
                 // While this attempt is in flight a SUCCESSOR admits the next attempt on the same entry
                 // (a normal consequence of a backoff elapsing under a still-current epoch).
                 store.scheduleRetryForAdmittedAttempt(store.admittedAttemptForTest(captureId)!!)
@@ -789,7 +789,7 @@ class ContributionRetryCallerTest {
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { _, _, _ -> throw java.io.IOException("response lost") },
+            attemptUpload = { _, _, _, _ -> throw java.io.IOException("response lost") },
             ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
             responseFor = { _, _ -> wireReceipt(id) },
         )
@@ -809,7 +809,7 @@ class ContributionRetryCallerTest {
             clock = { now + 3_999L },
             policyAllows = { true },
             networkAvailable = { true },
-            attemptUpload = { _, captureId, _ ->
+            attemptUpload = { _, captureId, _, _ ->
                 retriedBytes = File(store.dirForTest(), "$captureId.recording.wav").readBytes()
                 true
             },

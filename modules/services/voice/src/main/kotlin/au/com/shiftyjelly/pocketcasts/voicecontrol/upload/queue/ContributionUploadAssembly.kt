@@ -33,11 +33,6 @@ class ContributionUploadAssembly(
     networkAvailable: () -> Boolean,
     /** Called after a VALIDATED acceptance releases the entry; never on an unvalidated one. */
     private val onAccepted: (generation: Long, captureId: String) -> Unit = { _, _ -> },
-    /**
-     * Binds a live call's cancellation to the owner of this attempt's authorization (the launch lease).
-     * Without this the transport only has a Boolean to poll, and a blocked write never polls.
-     */
-    private val bindCancel: ((() -> Unit) -> Unit)? = null,
 ) {
     /** A durable capture plus the record that claims it. */
     data class Capture(val record: RecordNode.Obj, val audio: File)
@@ -63,7 +58,7 @@ class ContributionUploadAssembly(
         // One attempt: refuse before any byte leaves, then send the metadata-first envelope and remember
         // the classified answer. `true` here means only "a receipt came back", never "the capture is safe
         // to delete" - deletion happens solely through the resolver's validation.
-        attemptUpload = { _, captureId, isRevoked ->
+        attemptUpload = { _, captureId, isRevoked, bindCancellation ->
             val capture = captureFor(captureId)
             if (capture == null) {
                 // A local "nothing to send" is not a transport answer: the caller settles the thrown
@@ -83,7 +78,10 @@ class ContributionUploadAssembly(
                 capture.record,
                 capture.audio,
                 isCancelled = isRevoked,
-                onRegistered = { handle -> bindCancel?.invoke { transport.cancelRegistered(handle) } },
+                // The REAL chain: the transport reports the registered handle, and the abort that cancels
+                // THAT call is installed on the lease which owns this attempt's authorization. A
+                // revocation then reaches a transmitting Call without anyone polling a flag.
+                onRegistered = { handle -> bindCancellation { transport.cancelRegistered(handle) } },
             )
             lastResponse[captureId] = response
             // A cancelled attempt has NO answer to settle from, whatever the socket happened to return.

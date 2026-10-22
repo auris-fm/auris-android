@@ -118,8 +118,9 @@ class ContributionUploadTransport(
             // A blocked write cannot re-read a Boolean, so the registration is what makes live revocation
             // actually stop the call (reviewer d53d9c68 finding 1).
             val handle = register(call)
-            onRegistered(handle)
             try {
+                // INSIDE the cleanup: if this callback throws, the handle must still be removed.
+                onRegistered(handle)
                 if (isCancelled()) {
                     call.cancel()
                     return Response.Cancelled

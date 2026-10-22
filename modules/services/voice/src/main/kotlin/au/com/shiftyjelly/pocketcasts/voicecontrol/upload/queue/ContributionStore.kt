@@ -1216,11 +1216,6 @@ class ContributionStore(
             // Reach the CALL, not just the flag: this is what interrupts a blocked write.
             abort?.let { runCatching { it() } }
         }
-
-        /** Re-runs the bound abort so a revocation path outside the lease still reaches the call. */
-        internal fun cancelIfLiveForTest() {
-            abort?.let { runCatching { it() } }
-        }
     }
 
     /**

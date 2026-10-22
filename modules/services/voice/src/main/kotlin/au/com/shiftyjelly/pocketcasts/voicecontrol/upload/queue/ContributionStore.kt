@@ -178,8 +178,21 @@ class ContributionStore(
         return true
     }
 
+    // Marker coverage must be established BEFORE the first admission, not only at recovery/expiry: a newly
+    // constructed store over an EXISTING directory would otherwise admit immediately over intents nobody
+    // has enumerated (reviewer f4436ced; required precondition under spec 7e9606b). The reconcile is
+    // bounded and runs once per instance - afterwards the flag reflects what was found.
+    private var markerCoverageEstablished = false
+
+    private fun establishMarkerCoverage() {
+        if (markerCoverageEstablished) return
+        retryDisqualifiedCleanupLocked()
+        markerCoverageEstablished = true
+    }
+
     /** Claim count+bytes atomically; returns null when the queue cannot hold another entry. */
     private fun reserve(sampleCount: Long, projected: Long): Admission? {
+        establishMarkerCoverage()
         val id = java.util.UUID.randomUUID().toString()
         return synchronized(lock) {
             if (!roomLocked(projected)) {
@@ -194,6 +207,8 @@ class ContributionStore(
     /** Test seam: reserve a small admission sized for [samples]/[metadataBytes] (fails loudly if refused). */
     fun admitForTest(samples: Long, metadataBytes: Int): Admission = admit(samples, metadataBytes)
         ?: throw AssertionError("test admission should have been accepted")
+
+    fun admitForTestOrNull(samples: Long, metadataBytes: Int): Admission? = admit(samples, metadataBytes)
 
     /** Test seam: how many records' worth of budget live reservations currently occupy. */
     fun reservedRecordsForTest(): Int = synchronized(lock) { reservations.size }
@@ -1073,6 +1088,11 @@ class ContributionStore(
         // what recovery found BEFORE the reconcile deletes what it can - a sweep finding that later
         // reconciles away still records its measurement failure. Failure inside leaves the hold set.
         retryDisqualifiedCleanupLocked()
+        markerCoverageEstablished = true
+        // If marker discovery failed, the hold is set: recovery must not hand its caller ready entries
+        // either - readyEntries() withholding them is not enough when the caller consumes this list
+        // directly (reviewer f4436ced).
+        if (markerCoverageUnknown) return emptyList()
         return keep.sortedBy { it.createdAtMs }
     }
 

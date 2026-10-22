@@ -1160,6 +1160,64 @@ class DirectoryDurabilityTest {
     private fun java.io.File.writeBytesByteArray() = writeBytes(ByteArray(4))
 
     @Test
+    fun `recovery returns NO ready entries while marker discovery is unknown`() {
+        // reviewer f4436ced: recover() ran reconciliation last but still returned its earlier local keep
+        // list unconditionally - readyEntries() withholding them was not enough when the caller consumes
+        // the recovery list directly.
+        val root = tmp.newFolder("queue-recover-return-hold")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val id = "2c2c2c2c-1111-2222-3333-444444444444"
+        val store = ContributionStore(root, limits())
+        assertTrue(
+            "precondition: ready entry prepared",
+            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id)) != null,
+        )
+        val markerDir = File(root, "disqualified")
+        markerDir.mkdirs()
+        File(markerDir, "$id.disqualified").writeBytes("disqualified".toByteArray())
+        (0..512).forEach { i -> File(markerDir, "infl-%04d".format(i)).writeBytes(ByteArray(4)) }
+
+        val recovered = store.recover()
+
+        assertTrue("precondition: hold set", store.unknownFootprintForTest())
+        assertTrue(
+            "the recovery RETURN VALUE must be empty under marker uncertainty (got ${recovered.size})",
+            recovered.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `direct ADMISSION on a fresh instance over overflowing markers is refused`() {
+        // reviewer f4436ced: admission did not establish marker coverage, so a newly constructed store
+        // over an existing overflowing marker directory could admit immediately - required precondition
+        // under spec 7e9606b, pinned WITHOUT any recover/expiry call.
+        val root = tmp.newFolder("queue-admit-coverage")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        // Existing debris in the queue dir and an overflowing marker directory: no recover() anywhere.
+        File(contributions, "leftover.recording.wav").writeBytes(ByteArray(64))
+        val markerDir = File(root, "disqualified")
+        markerDir.mkdirs()
+        File(markerDir, "some-capture.disqualified").writeBytes("disqualified".toByteArray())
+        (0..512).forEach { i -> File(markerDir, "infl-%04d".format(i)).writeBytes(ByteArray(4)) }
+
+        val store = ContributionStore(root, limits())
+
+        assertTrue(
+            "admission must establish marker coverage and be refused while it is unknown",
+            store.unknownFootprintForTest() || run {
+                // Trigger the admission path itself: reservation must fail.
+                store.admitForTestOrNull(1600, 32) == null
+            },
+        )
+        assertTrue(
+            "and the coverage hold is what refuses it",
+            store.unknownFootprintForTest(),
+        )
+    }
+
+    @Test
     fun `fresh-owner RECOVERY discovers overflowing markers without any expiry call`() {
         // reviewer 6cbb4efa: marker coverage was established only by retryDisqualifiedCleanupLocked, called
         // from expireOlderThan - so a fresh owner could recover, serve and admit with an overflowing marker

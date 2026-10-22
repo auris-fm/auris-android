@@ -21,6 +21,29 @@ class QueueFence(private val ownership: QueueOwnership) {
         override fun invoke(tx: QueueOwnership.OwnershipTransaction) = tx.revoke()
     })
 
+    /**
+     * Revocation that ALSO withdraws in-flight launch authorization. An epoch bump alone invalidates
+     * future checks, but a transport already running would only notice it on its next probe, so every
+     * live [ContributionStore.LaunchLease] is cancelled here (reviewer 4d72e463).
+     */
+    fun revokeAndCancelLaunches(reason: String): Long {
+        // ONE ownership section for both effects: bump the epoch, then withdraw every live launch. Doing
+        // it in two transactions would leave a window where the epoch moved but running uploads still
+        // believed they were authorized (reviewer 4d72e463). The cancellation callback only touches the
+        // store's lease registry (its own lock), never the queue state, so it stays lock-order safe.
+        val cancel = pendingLaunchCancellation
+        return ownership.transaction(object : (QueueOwnership.OwnershipTransaction) -> Long {
+            override fun invoke(tx: QueueOwnership.OwnershipTransaction): Long {
+                val generation = tx.revoke()
+                cancel?.invoke()
+                return generation
+            }
+        })
+    }
+
+    /** Set by [ContributionStore] so a fence-level revocation also cancels its live leases. */
+    internal var pendingLaunchCancellation: (() -> Unit)? = null
+
     fun isValid(captured: Long): Boolean = ownership.transaction(object : (QueueOwnership.OwnershipTransaction) -> Boolean {
         override fun invoke(tx: QueueOwnership.OwnershipTransaction) = tx.isValid(captured)
     })

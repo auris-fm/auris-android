@@ -97,31 +97,41 @@ class ContributionRetryCaller(
                 // The transport launch is the authorization boundary: the final validity check runs in
                 // the SAME transaction as the launch, so an epoch bump that completed before it is seen
                 // (a revocation that lands after it is handled by the completion resolution).
+                // LEASE, don't hold the monitor (reviewer 4d72e463): the launch authorization is taken in
+                // ONE ownership transaction that is RELEASED before any network work, so an external
+                // revocation is never blocked and can cancel this attempt while it is in flight.
+                val lease = store.leaseTransportLaunch(generation, captureId)
+                if (lease == null) {
+                    // Refused before the first request: the attempt was already consumed, so this is an
+                    // unconfirmed outcome. Durable boundary under a CURRENT generation - never a stale
+                    // one, so a fresh owner recovers the same wait (reviewer 4d72e463).
+                    cancelledEpoch++
+                    reArmBoundary(store.fence.currentGeneration(), captureId)
+                    continue
+                }
                 try {
-                    // The transport launch runs INSIDE the ownership transaction: the validity check and
-                    // the first network operation are one atomic decision, so an epoch bump that
-                    // completed before it aborts the launch (reviewer 279de1d4).
-                    val launched = store.fence.guard(generation) { attemptUpload(generation, captureId) { !store.fence.isValid(generation) } }
-                    if (launched == null) {
-                        // Refused at launch, but the attempt was already durably consumed: an
-                        // unconfirmed attempt must not be retried immediately either (reviewer 279de1d4).
+                    val accepted = attemptUpload(generation, captureId) { lease.isCancelled() || !store.fence.isValid(generation) }
+                    if (lease.isCancelled()) {
+                        // A revocation withdrew authorization while the upload ran. The response cannot be
+                        // trusted for THIS owner: retain and let a newer owner decide (completion
+                        // resolution revalidates the epoch).
                         cancelledEpoch++
-                        reArmBoundary(generation, captureId)
-                        continue
-                    }
-                    attempted++
-                    if (launched) {
+                    } else if (accepted) {
+                        attempted++
                         onSuccess(generation, captureId)
                     } else {
+                        attempted++
                         reArmBoundary(generation, captureId)
                     }
                 } catch (lost: Throwable) {
                     // A thrown upload (ordinary network exception / lost response) is an AMBIGUOUS
-                    // outcome: ownership is RETAINED and the durable boundary re-armed - the next poll
-                    // must not retry immediately, and the completion resolution still validates the
-                    // epoch (reviewer 279de1d4).
+                    // outcome: ownership is RETAINED and the durable boundary re-armed under a CURRENT
+                    // generation - never written through a stale one (reviewer 4d72e463). The next poll
+                    // must not retry immediately.
                     attempted++
-                    reArmBoundary(generation, captureId)
+                    reArmBoundary(store.fence.currentGeneration(), captureId)
+                } finally {
+                    store.releaseLaunchLease(lease)
                 }
             } finally {
                 synchronized(inFlightLock) { inFlight.remove(captureId) }

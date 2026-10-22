@@ -35,6 +35,15 @@ class StoreHooks(
      * Production wiring passes [NONE].
      */
     val settlementAbsenceOverride: ((java.io.File) -> Int?)? = null,
+
+    /**
+     * Invoked INSIDE the ownership transaction after the attempt pickup consumed the attempt and
+     * immediately BEFORE the transport launch decision (reviewer 279de1d4, spec c02328d1). A hook that
+     * revokes the epoch here proves the launch re-checks authorization in the SAME atomic decision it
+     * launches from: a launch moved outside the transaction would start the upload anyway. Production
+     * wiring passes [NONE].
+     */
+    val beforeTransportLaunch: ((generation: Long, captureId: String) -> Unit)? = null,
 ) {
     companion object {
         val NONE = StoreHooks()

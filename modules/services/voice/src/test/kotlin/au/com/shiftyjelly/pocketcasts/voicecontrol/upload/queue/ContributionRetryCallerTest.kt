@@ -309,47 +309,98 @@ class ContributionRetryCallerTest {
     }
 
     @Test
-    fun `a revocation that lands DURING the first attempt stops the network op and retains ownership`() {
+    fun `a SECOND-THREAD revocation during an in-flight upload cancels it, retains ownership and leaves a durable boundary`() {
         var now = 15_000_000L
-        val root = tmp.newFolder("caller-revoke-mid-transport")
+        val root = tmp.newFolder("caller-revoke-in-flight")
         val id = UUID.randomUUID().toString()
         val store = newStore(root, { now })
         prepare(store, id)
         val wav = File(store.dirForTest(), "$id.recording.wav")
         val bytesBefore = wav.readBytes()
 
-        var networkOperations = 0
-        var abortObserved = false
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val revocationDone = java.util.concurrent.CountDownLatch(1)
+        var cancelledMidFlight = false
+
         val caller = ContributionRetryCaller(
             store,
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
             attemptUpload = { _, _, isRevoked ->
-                // The revocation lands AFTER pickup consumed the attempt but BEFORE the first network
-                // operation; the seam must be able to SEE it (its authorization is the live epoch).
-                store.fence.revoke()
-                if (isRevoked()) {
-                    abortObserved = true
-                    return@ContributionRetryCaller false // abort: no request is issued
-                }
-                networkOperations++
+                entered.countDown()
+                // The transport is genuinely in flight: an external authority revokes from ANOTHER thread.
+                // It must not be blocked by the ownership monitor, and its cancellation must be visible.
+                check(revocationDone.await(5, java.util.concurrent.TimeUnit.SECONDS)) { "revocation was blocked" }
+                cancelledMidFlight = isRevoked()
+                true // the server answers anyway; a revoked response must not count as success
+            },
+        )
+
+        val poller = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val pollResult = poller.submit<ContributionRetryCaller.PollResult> { caller.pollOnce() }
+        check(entered.await(5, java.util.concurrent.TimeUnit.SECONDS)) { "upload never started" }
+        // Runs on the TEST thread (a different thread from the poller) while the upload is in flight.
+        store.fence.revokeAndCancelLaunches("account changed")
+        revocationDone.countDown()
+        val result = pollResult.get(10, java.util.concurrent.TimeUnit.SECONDS)
+        poller.shutdown()
+
+        assertTrue("the in-flight upload observed the cancellation", cancelledMidFlight)
+        assertEquals("a revoked epoch is not reported as an attempt completed", 0, result.attempted)
+        assertEquals("the revocation is attributed", 1, result.cancelledEpoch)
+        assertTrue("capture bytes untouched", wav.readBytes().contentEquals(bytesBefore))
+        assertTrue("ownership retained", store.readyEntries().any { it.captureId == id })
+    }
+
+    @Test
+    fun `a revocation after pickup leaves a durable boundary a FRESH owner recovers`() {
+        var now = 15_500_000L
+        val root = tmp.newFolder("caller-revoke-durable")
+        val store = newStore(root, { now })
+        // The hook runs INSIDE the ownership transaction after the attempt was consumed and before the
+        // launch decision - the pickup->launch window the second-thread control cannot address
+        // deterministically (spec c02328d1, reviewer 4d72e463).
+        val hookedRef = arrayOfNulls<ContributionStore>(1)
+        val hooked = ContributionStore(
+            root,
+            QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { it - 1 },
+            hooks = StoreHooks(beforeTransportLaunch = { _, _ ->
+                hookedRef[0]!!.fence.revokeAndCancelLaunches("epoch changed")
+            }),
+        )
+        hookedRef[0] = hooked
+        val id = UUID.randomUUID().toString()
+        val admission = hooked.admitForTest(1600, meta(id).size)
+        val generation = hooked.fence.currentGeneration()
+        assertTrue(hooked.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+
+        val launched = mutableListOf<String>()
+        val caller = ContributionRetryCaller(
+            hooked,
+            clock = { now },
+            policyAllows = { true },
+            networkAvailable = { true },
+            attemptUpload = { _, captureId, _ ->
+                launched.add(captureId)
                 true
             },
         )
-        val first = caller.pollOnce()
-        assertTrue("the seam observed the revocation", abortObserved)
-        assertEquals("no network operation after the revocation", 0, networkOperations)
-        assertTrue("capture bytes untouched", wav.readBytes().contentEquals(bytesBefore))
-        assertTrue("ownership retained", store.readyEntries().any { it.captureId == id })
-        // The attempt WAS durably consumed by the pickup, and the unconfirmed abort re-armed the durable
-        // boundary instead of leaving the entry immediately retryable.
-        assertEquals("the revoked attempt is still accounted", 1, store.stateAttemptsForTest(id))
-        assertEquals(1, first.attempted)
-        assertTrue(
-            "the abort left a durable not-before boundary",
-            store.retryBoundariesForTest().containsKey(id) || store.retryEligible(now + 3_999L).any { it == id },
-        )
+        val result = caller.pollOnce()
+        assertTrue("a launch refused under a revoked epoch issues no request", launched.isEmpty())
+        assertEquals("the refusal is attributed to the epoch", 1, result.cancelledEpoch)
+        assertEquals("the consumed attempt is still accounted", 1, hooked.stateAttemptsForTest(id))
+
+        // A FRESH owner reads the SAME durable boundary: not through the old generation, not in memory.
+        val fresh = newStore(root, { now })
+        fresh.recover()
+        val boundary = fresh.retryBoundariesForTest()[id]
+        assertTrue("a durable not-before boundary was persisted for the capture", boundary != null)
+        assertTrue("the boundary is in the future", boundary!! > now)
+        assertEquals("a fresh owner refuses an immediate retry", 0, fresh.retryEligible(now).size)
+        assertEquals("and retries it once the boundary elapses", listOf(id), fresh.retryEligible(boundary))
     }
 
     @Test

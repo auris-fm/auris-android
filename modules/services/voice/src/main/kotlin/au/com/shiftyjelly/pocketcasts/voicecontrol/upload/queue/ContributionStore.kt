@@ -1039,15 +1039,92 @@ class ContributionStore(
         return true
     }
 
+    // ATOMIC PICKUP (reviewer 1b926fa0, spec 8aa20001): inside ONE ownership transaction the caller
+    // revalidates the COMPLETE current eligibility - readiness, coverage, budget, unresolved records and
+    // the durable boundary, i.e. everything that gates retryEligible - and CONSUMES the attempt by
+    // recording it durably. A gate callback or a concurrent poll that re-arms a boundary or changes
+    // coverage between listing and pickup is caught HERE, not by the generation check alone. Returns the
+    // durably recorded attempt count, or null when the pickup is refused (stale epoch, no longer
+    // eligible, or the attempt record could not be persisted - never attempt on an unpersisted count).
+
     /**
-     * ATOMIC PICKUP (reviewer 1b926fa0, spec 8aa20001): inside ONE ownership transaction the caller
-     * revalidates the COMPLETE current eligibility - readiness, coverage, budget, unresolved records and
-     * the durable boundary, i.e. everything that gates [retryEligible] - and CONSUMES the attempt by
-     * recording it durably. A gate callback or a concurrent poll that re-arms a boundary or changes
-     * coverage between listing and pickup is caught HERE, not by the generation check alone. Returns the
-     * durably recorded attempt count, or null when the pickup is refused (stale epoch, no longer
-     * eligible, or the attempt record could not be persisted - never attempt on an unpersisted count).
+     * LEASE a transport launch (reviewer 279de1d4 + 4d72e463). Runs ONE ownership transaction that
+     * revalidates [generation] and, only if it still holds, marks `captureId` as launched under its own
+     * cancellation flag. The returned [LaunchLease] is used OUTSIDE the monitor: the monitor is released
+     * before the caller performs any network work, so an external revocation is never blocked, and
+     * [LaunchLease.cancel] (driven by a revocation listener) is visible while the upload is in flight.
+     * Returns null when the epoch already changed, i.e. the launch is refused before any request.
      */
+    fun leaseTransportLaunch(generation: Long, captureId: String): LaunchLease? = ownership.transaction(
+        object : (QueueOwnership.OwnershipTransaction) -> LaunchLease? {
+            override fun invoke(tx: QueueOwnership.OwnershipTransaction): LaunchLease? = if (!tx.isValid(generation)) {
+                null
+            } else {
+                // Register FIRST so a revocation triggered by the hook can cancel this very lease.
+                val lease = LaunchLease(generation, captureId)
+                synchronized(launchLeasesLock) { launchLeases.add(lease) }
+                hooks.beforeTransportLaunch?.invoke(generation, captureId)
+                // The hook may have revoked: a cancelled lease is NOT a valid launch authorization.
+                if (lease.isCancelled()) {
+                    synchronized(launchLeasesLock) { launchLeases.remove(lease) }
+                    null
+                } else {
+                    lease
+                }
+            }
+        },
+    )
+
+    /** A launched attempt whose authorization may be withdrawn while it is in flight. */
+    class LaunchLease internal constructor(val generation: Long, val captureId: String) {
+        private val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        /** True once a revocation (or a newer owner) withdrew this launch's authorization. */
+        fun isCancelled(): Boolean = cancelled.get()
+
+        internal fun cancel() {
+            cancelled.set(true)
+        }
+    }
+
+    private fun currentGenerationForProbe(): Long = ownership.currentGeneration()
+
+    private val launchLeases = mutableListOf<LaunchLease>()
+    private val launchLeasesLock = Any()
+
+    /**
+     * Withdraw every in-flight launch authorization and bump the generation in ONE section, so a
+     * revocation both invalidates the epoch and makes already-launched uploads observe cancellation.
+     */
+    fun revokeAndCancelLaunches(reason: String) {
+        revokeAndPurge(reason)
+        synchronized(launchLeasesLock) {
+            launchLeases.forEach { it.cancel() }
+            launchLeases.clear()
+        }
+    }
+
+    /**
+     * Retire a lease once its upload finished, so a later revocation only cancels live attempts. A
+     * REVOKED lease is left to be cleared wholesale by [revokeAndCancelLaunches].
+     */
+    fun releaseLaunchLease(lease: LaunchLease) {
+        synchronized(launchLeasesLock) { if (!lease.isCancelled()) launchLeases.remove(lease) }
+    }
+
+    init {
+        // A fence-level revocation must also cancel in-flight launches (reviewer 4d72e463).
+        fence.pendingLaunchCancellation = {
+            synchronized(launchLeasesLock) {
+                launchLeases.forEach { it.cancel() }
+                launchLeases.clear()
+            }
+        }
+    }
+
+    /** Test seam: how many launch leases are currently outstanding. */
+    fun launchLeasesForTest(): Int = synchronized(launchLeasesLock) { launchLeases.size }
+
     fun pickupAttempt(generation: Long, captureId: String, nowMs: Long = clock()): Int? = synchronized(lock) {
         if (unknownFootprintLocked() || !ownership.isValidUnderLock(generation)) {
             null

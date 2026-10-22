@@ -33,6 +33,12 @@ object VoiceObservationModule {
 
     @Provides
     @Singleton
+    fun provideEngineCollectionAuthority(
+        authority: CollectionAuthority,
+    ): () -> AuthorityDecision = authority::decideLossSignalWrapped
+
+    @Provides
+    @Singleton
     fun provideCollectionTx(
         accountStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup,
         policyProvider: VoiceSharingPolicyProvider,

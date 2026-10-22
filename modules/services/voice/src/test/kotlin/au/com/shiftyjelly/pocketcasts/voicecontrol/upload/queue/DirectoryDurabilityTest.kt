@@ -1160,6 +1160,49 @@ class DirectoryDurabilityTest {
     private fun java.io.File.writeBytesByteArray() = writeBytes(ByteArray(4))
 
     @Test
+    fun `direct ADMISSION on a fresh instance over an overflowing ROOT is refused`() {
+        // reviewer 92911de9: admission established marker coverage but not root coverage - a fresh store
+        // over an existing overflowing contributions directory could admit without any bounded root scan.
+        val root = tmp.newFolder("queue-admit-root-coverage")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        (0..512).forEach { i -> File(contributions, "debris-%04d.recording.wav".format(i)).writeBytes(ByteArray(4)) }
+
+        val store = ContributionStore(root, limits())
+
+        assertTrue(
+            "the bounded root scan must fail and refuse admission (got footprints ${store.unknownBreakdownForTest()})",
+            store.admitForTestOrNull(1600, 32) == null,
+        )
+        assertTrue("root enumeration must be unknown", store.rootUnknownForTest())
+    }
+
+    @Test
+    fun `direct ADMISSION on a fresh instance accounts RETAINED unowned bytes before granting`() {
+        // reviewer 92911de9: retained ready bytes that consume the budget must be charged before admission,
+        // without any recover or expiry call. An unowned capture's subtree fills the budget; admission must
+        // see those bytes, not grant over them.
+        val root = tmp.newFolder("queue-admit-root-accounting")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val retained = "aaaa1111-2222-4333-8444-555566667777"
+        val cap = File(contributions, "$retained.recording.wav")
+        cap.outputStream().use {
+            it.write(ByteArray(8))
+            it.channel.position(70L * 1024 * 1024)
+            it.write(ByteArray(1))
+        }
+        File(contributions, "$retained.metadata.json").writeBytes("{}".toByteArray())
+
+        val store = ContributionStore(root, limits().copy(maxQueueBytes = 64L * 1024 * 1024))
+
+        assertTrue(
+            "retained unowned bytes must consume the budget (refusal, not grant over them)",
+            store.admitForTestOrNull(1600, 32) == null,
+        )
+    }
+
+    @Test
     fun `recovery returns NO ready entries while marker discovery is unknown`() {
         // reviewer f4436ced: recover() ran reconciliation last but still returned its earlier local keep
         // list unconditionally - readyEntries() withholding them was not enough when the caller consumes

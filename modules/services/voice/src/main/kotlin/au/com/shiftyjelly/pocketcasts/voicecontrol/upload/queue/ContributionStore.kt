@@ -178,21 +178,54 @@ class ContributionStore(
         return true
     }
 
-    // Marker coverage must be established BEFORE the first admission, not only at recovery/expiry: a newly
-    // constructed store over an EXISTING directory would otherwise admit immediately over intents nobody
-    // has enumerated (reviewer f4436ced; required precondition under spec 7e9606b). The reconcile is
-    // bounded and runs once per instance - afterwards the flag reflects what was found.
-    private var markerCoverageEstablished = false
+    // Marker AND root coverage must be established BEFORE the first admission, not only at
+    // recovery/expiry: a newly constructed store over an EXISTING directory would otherwise admit
+    // immediately over intents and bytes nobody has enumerated (reviewers f4436ced, 92911de9; required
+    // precondition under spec 7e9606b). The scans are bounded and run once per instance - afterwards the
+    // flags reflect what was found. The root pass only ACCOUNTS: it charges retained unowned captures it
+    // finds; deletion stays the recovery sweep's job, so admission never destroys on partial knowledge.
+    private var coverageEstablished = false
 
-    private fun establishMarkerCoverage() {
-        if (markerCoverageEstablished) return
+    private fun establishCoverage() {
+        if (coverageEstablished) return
+        // A FRESH install has no directory yet; without this, the first listing would fail with
+        // NoSuchFileException and permanently refuse admission on a perfectly empty queue (recover()
+        // creates the directory the same way).
+        dir.mkdirs()
+        val files = try {
+            boundedRootListing()
+        } catch (unknown: MeasurementError) {
+            synchronized(lock) {
+                rootEnumerationUnknown = true
+                measurementFailures++
+            }
+            coverageEstablished = true
+            return
+        }
+        synchronized(lock) { rootEnumerationUnknown = false }
+        // Account every on-disk capture this instance holds no charge for, grouped by capture id. The
+        // staging prefix/suffix shapes mirror the recovery debris grouping: an id that cannot be derived
+        // is still a file somebody left, so it is charged under its raw name rather than skipped.
+        val suffixes = listOf(SUFFIX_READY, SUFFIX_PART, SUFFIX_ATTEMPTS, SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST)
+        synchronized(lock) {
+            files.groupBy { f ->
+                val hit = suffixes.firstOrNull { f.name.endsWith(it) }
+                if (hit != null) {
+                    f.name.removeSuffix(hit).removePrefix(STAGING_PREFIX).removeSuffix(SUFFIX_WAV)
+                } else {
+                    f.name
+                }
+            }.forEach { (id, _) ->
+                if (id !in ownedCharges) chargeRetainedLocked(id, ready = false)
+            }
+        }
         retryDisqualifiedCleanupLocked()
-        markerCoverageEstablished = true
+        coverageEstablished = true
     }
 
     /** Claim count+bytes atomically; returns null when the queue cannot hold another entry. */
     private fun reserve(sampleCount: Long, projected: Long): Admission? {
-        establishMarkerCoverage()
+        establishCoverage()
         val id = java.util.UUID.randomUUID().toString()
         return synchronized(lock) {
             if (!roomLocked(projected)) {
@@ -1088,7 +1121,7 @@ class ContributionStore(
         // what recovery found BEFORE the reconcile deletes what it can - a sweep finding that later
         // reconciles away still records its measurement failure. Failure inside leaves the hold set.
         retryDisqualifiedCleanupLocked()
-        markerCoverageEstablished = true
+        coverageEstablished = true
         // If marker discovery failed, the hold is set: recovery must not hand its caller ready entries
         // either - readyEntries() withholding them is not enough when the caller consumes this list
         // directly (reviewer f4436ced).

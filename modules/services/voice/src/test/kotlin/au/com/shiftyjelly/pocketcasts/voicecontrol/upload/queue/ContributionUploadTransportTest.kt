@@ -1,0 +1,196 @@
+package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
+
+import com.sun.net.httpserver.HttpExchange
+import com.sun.net.httpserver.HttpServer
+import java.io.File
+import java.net.InetSocketAddress
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+
+/**
+ * The REAL HTTP adapter, exercised against a local JDK HTTP server: no seam, no simulated response. The
+ * server is the Worker's own contract shape (worker `src/contributions/upload_route.ts`): a 2xx body is an
+ * `UploadReceipt`, a non-2xx body is an `UploadErrorBody`, and everything else is ambiguous.
+ */
+class ContributionUploadTransportTest {
+
+    @get:Rule
+    val tmp = TemporaryFolder()
+
+    private lateinit var server: HttpServer
+    private val receivedBodies = mutableListOf<ByteArray>()
+    private val receivedMethods = mutableListOf<String>()
+    private val requestCount = AtomicInteger(0)
+
+    /** What the fake Worker answers with; set per test. */
+    private var responseStatus = 200
+    private var responseBody = ""
+    private var responseDelayMs = 0L
+
+    private var port = 0
+
+    @Before
+    fun startServer() {
+        server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/v1/contributions") { exchange: HttpExchange ->
+            requestCount.incrementAndGet()
+            receivedMethods += exchange.requestMethod
+            receivedBodies += exchange.requestBody.readBytes()
+            if (responseDelayMs > 0) Thread.sleep(responseDelayMs)
+            val bytes = responseBody.toByteArray()
+            exchange.responseHeaders.add("Content-Type", "application/json")
+            exchange.sendResponseHeaders(responseStatus, bytes.size.toLong())
+            exchange.responseBody.use { it.write(bytes) }
+        }
+        server.start()
+        port = server.address.port
+    }
+
+    @After
+    fun stopServer() {
+        server.stop(0)
+    }
+
+    private fun receipt(captureId: String, digest: String, status: String = "accepted"): String = "{" +
+        "\"schema_version\":1," +
+        "\"capture_id\":\"$captureId\"," +
+        "\"record_sha256\":\"$digest\"," +
+        "\"status\":\"$status\"," +
+        "\"receipt_id\":\"rcpt-1\"," +
+        "\"accepted_at\":\"2026-10-22T00:00:00Z\"," +
+        "\"retention_expires_at\":\"2026-11-21T00:00:00Z\"}"
+
+    private fun transport(token: String = "test-token") = ContributionUploadTransport(
+        endpoint = "http://127.0.0.1:$port/v1/contributions",
+        authorization = { "Bearer $token" },
+        connectTimeoutMs = 5_000,
+        readTimeoutMs = 10_000,
+    )
+
+    private fun wavFile(id: String): File {
+        val file = File(tmp.root, "$id.recording.wav")
+        // A minimal but structurally valid WAV: RIFF/WAVE header + one PCM data chunk.
+        val data = ByteArray(64)
+        val out = java.io.ByteArrayOutputStream()
+        fun le32(v: Int) = out.write(byteArrayOf((v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte(), ((v shr 16) and 0xFF).toByte(), ((v shr 24) and 0xFF).toByte()))
+        fun le16(v: Int) = out.write(byteArrayOf((v and 0xFF).toByte(), ((v shr 8) and 0xFF).toByte()))
+        out.write("RIFF".toByteArray())
+        le32(36 + data.size)
+        out.write("WAVE".toByteArray())
+        out.write("fmt ".toByteArray())
+        le32(16)
+        le16(1)
+        le16(1)
+        le32(16_000)
+        le32(32_000)
+        le16(2)
+        le16(16)
+        out.write("data".toByteArray())
+        le32(data.size)
+        out.write(data)
+        file.writeBytes(out.toByteArray())
+        return file
+    }
+
+    private fun sha256(file: File): String = java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) }
+
+    @Test
+    fun `a real 200 with a matching receipt body uploads the exact bytes and is ACCEPTED`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        val digest = sha256(file)
+        responseStatus = 200
+        responseBody = receipt(id, digest)
+
+        val result = transport().upload(id, file)
+
+        assertEquals("exactly one request", 1, requestCount.get())
+        assertEquals("POST", receivedMethods.single())
+        assertTrue("the WAV bytes reached the server unchanged", receivedBodies.single().contentEquals(file.readBytes()))
+        assertEquals(ContributionUploadTransport.Response.Accepted::class, result::class)
+        val accepted = result as ContributionUploadTransport.Response.Accepted
+        assertEquals(200, accepted.statusCode)
+        assertTrue("the receipt body is handed to validation", accepted.payload.isNotEmpty())
+    }
+
+    @Test
+    fun `a real 201 also yields an acceptance`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 201
+        responseBody = receipt(id, sha256(file), status = "duplicate")
+        val result = transport().upload(id, file)
+        assertEquals(201, (result as ContributionUploadTransport.Response.Accepted).statusCode)
+    }
+
+    @Test
+    fun `a non-2xx error body is RETRYABLE when the Worker says retry_after_s`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 503
+        responseBody = """{"schema_version":1,"code":"storage_unavailable","retry_after_s":30}"""
+        val result = transport().upload(id, file)
+        val retryable = result as ContributionUploadTransport.Response.Retryable
+        assertEquals(503, retryable.statusCode)
+        assertEquals(30L, retryable.retryAfterS)
+    }
+
+    @Test
+    fun `a 4xx WITHOUT a retry hint is RETRYABLE only when the code is transient, else unreachable`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 401
+        responseBody = """{"schema_version":1,"code":"unauthorized"}"""
+        val result = transport().upload(id, file)
+        // A 401 is a policy refusal, not a lost upload: it must NOT become an acceptance.
+        assertTrue("a 401 is never an acceptance", result !is ContributionUploadTransport.Response.Accepted)
+    }
+
+    @Test
+    fun `a THROWN transport failure is Ambiguous, never an acceptance`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        // Point at a closed port: the connection genuinely fails.
+        val dead = ContributionUploadTransport(
+            endpoint = "http://127.0.0.1:1/v1/contributions",
+            authorization = { "Bearer t" },
+            connectTimeoutMs = 500,
+            readTimeoutMs = 500,
+        )
+        val result = dead.upload(id, file)
+        assertTrue("a failed connection is ambiguous", result is ContributionUploadTransport.Response.Ambiguous)
+        assertNull("no status for a request that never landed", (result as ContributionUploadTransport.Response.Ambiguous).statusCode)
+    }
+
+    @Test
+    fun `a 200 with an ERROR body is Ambiguous because validation rejects it`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 200
+        responseBody = """{"schema_version":1,"code":"storage_unavailable"}"""
+        val validator = CaptureReceiptValidator { sha256(file) }
+        val result = transport().upload(id, file)
+        val accepted = result as ContributionUploadTransport.Response.Accepted
+        assertFalse("a 2xx error body must not validate", validator.validate(id, accepted.payload))
+    }
+
+    @Test
+    fun `a receipt echoing a DIFFERENT digest does not validate`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 200
+        responseBody = receipt(id, "0".repeat(64))
+        val validator = CaptureReceiptValidator { sha256(file) }
+        val accepted = transport().upload(id, file) as ContributionUploadTransport.Response.Accepted
+        assertFalse("a forged digest must not validate", validator.validate(id, accepted.payload))
+    }
+}

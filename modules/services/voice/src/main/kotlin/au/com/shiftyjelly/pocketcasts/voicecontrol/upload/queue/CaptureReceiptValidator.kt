@@ -93,6 +93,18 @@ internal data class CanonicalReceipt(
             )
         }
 
+        /** Flat field view of any JSON object body (used for error bodies too); null if malformed. */
+        fun parseFields(body: ByteArray): Map<String, String>? {
+            val text = String(body, Charsets.UTF_8).trim()
+            if (!text.startsWith("{") || !text.endsWith("}")) return null
+            val fields = mutableMapOf<String, String>()
+            for ((key, value) in members(text.removePrefix("{").removeSuffix("}")) ?: return null) {
+                if (key in fields) return null
+                fields[key] = value
+            }
+            return fields
+        }
+
         // Split the object body into key/raw-value members at TOP-LEVEL commas only: a comma or colon
         // inside a string value is not a separator. Returns null on any structural surprise.
         private fun members(body: String): List<Pair<String, String>>? {

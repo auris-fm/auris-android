@@ -665,7 +665,11 @@ class ContributionStore(
         // Serving from memory alone could hand out entries whose files were swept, changed or never
         // accounted while the root was unknown; eligibility is restored by a recovery that enumerates
         // successfully (reviewer d1cce25b).
-        if (rootEnumerationUnknown) emptyList() else memoryEntries.values.sortedBy { it.createdAtMs }
+        if (rootEnumerationUnknown || markerCoverageUnknown) {
+            emptyList()
+        } else {
+            memoryEntries.values.sortedBy { it.createdAtMs }
+        }
     }
 
     private var recovered = false
@@ -720,7 +724,11 @@ class ContributionStore(
         // stale owner's bump attributed to the successor's entry.
         var sidecarFailure: Throwable? = null
         val result: Int? = synchronized(lock) {
-            if (!ownership.isValidUnderLock(generation)) {
+            // Spec 896632f4: unknown marker coverage holds ATTEMPT accounting too - a bump attributed
+            // while marker coverage is unknown could contradict an intent nobody has seen yet.
+            if (markerCoverageUnknown) {
+                null
+            } else if (!ownership.isValidUnderLock(generation)) {
                 null
             } else {
                 val current = memoryEntries[captureId]
@@ -883,6 +891,14 @@ class ContributionStore(
     // accounting stays unknown - refusing admission - until a later recovery enumerates successfully.
     @Volatile
     private var rootEnumerationUnknown = false
+
+    // Spec 896632f4 (relayed by reviewer cb236dd5): unknown DISPOSAL-MARKER coverage holds admission AND
+    // serving/attempt for this owner. A marker can disqualify a retained survivor, so neither readiness
+    // nor full accounting can be established while marker coverage is partially known. Ownership and
+    // charges are preserved; the hold lifts only after bounded marker discovery succeeds and the recorded
+    // intents are reconciled (the retry pass runs to completion over the fully enumerated set).
+    @Volatile
+    private var markerCoverageUnknown = false
 
     // Root discovery with the same discipline as the measurement walk: a lazy directory stream, ONE shared
     // entry budget, error-explicit. The eager `dir.listFiles()` materialized the entire directory with no
@@ -1266,25 +1282,42 @@ class ContributionStore(
             // treated ENUMERATION FAILURE as an empty directory - indistinguishable from genuine absence,
             // so a sweep over a partially-known marker set would silently skip intents it never saw
             // (reviewer 3eec6e62). A failure here marks root discovery unknown and defers the retry.
-            // A marker directory that does not exist yet is GENUINE absence - no intents were ever
-            // recorded - and must not be confused with a failure to look (reviewer 3eec6e62).
-            try {
+            // Absence vs failure, settled on the STAT, not the listing: a marker directory that does not
+            // exist yet is GENUINE absence (no intents were ever recorded). Any other stat failure -
+            // permission, I/O, a security manager - is a failure to look and takes the deferred-retry
+            // path, exactly like a listing failure. The no-follow stat also verifies the entry IS a
+            // directory before anything is opened (reviewer c571c932).
+            val attributes = try {
                 java.nio.file.Files.readAttributes(
                     markerDir.toPath(),
                     java.nio.file.attribute.BasicFileAttributes::class.java,
                     java.nio.file.LinkOption.NOFOLLOW_LINKS,
                 )
             } catch (missing: java.nio.file.NoSuchFileException) {
+                // No marker directory at all: coverage is trivially complete.
+                markerCoverageUnknown = false
+                return
+            } catch (failure: java.io.IOException) {
+                // Failure to stat is neither absence nor coverage: hold, count, defer.
+                markerCoverageUnknown = true
+                measurementFailures++
+                return
+            }
+            if (!attributes.isDirectory) {
+                // A file where the marker directory belongs is corrupted state, not an empty set: hold,
+                // refuse to act on it, and record the degradation.
+                markerCoverageUnknown = true
+                measurementFailures++
                 return
             }
             val ids = try {
                 boundedDirectoryListing(markerDir).map { it.name }
             } catch (unknown: MeasurementError) {
                 // FAILURE IS NOT ABSENCE: the retry is deferred - no marker is acted on from partial
-                // knowledge, every recorded intent stays on disk and is retried by a later sweep - and the
-                // degradation is counted. It does not refuse admission: unseen disposal intents are
-                // deletions, not retention, so retention accounting stays exactly what the queue root
-                // enumeration (gated separately) says it is.
+                // knowledge, every recorded intent stays on disk and is retried by a later sweep - and
+                // per spec 896632f4 the unknown coverage holds admission AND serving/attempt until a
+                // later sweep enumerates fully and reconciles the intents.
+                markerCoverageUnknown = true
                 measurementFailures++
                 return
             }
@@ -1312,6 +1345,9 @@ class ContributionStore(
                     chargeRetainedLocked(id, ready = false)
                 }
             }
+            // Bounded marker discovery succeeded and every enumerated intent was reconciled - the pass
+            // ran to completion, so the hold lifts (spec 896632f4).
+            markerCoverageUnknown = false
         }
     }
 
@@ -1497,9 +1533,13 @@ class ContributionStore(
     // capture limit that happens to be small is not a queue-wide guarantee (reviewer e6eeabda, 7340fe2d).
     private val unmeasuredIds = mutableSetOf<String>()
 
-    private fun unknownFootprintLocked(): Boolean = unmeasuredIds.isNotEmpty() || rootEnumerationUnknown
+    private fun unknownFootprintLocked(): Boolean = unmeasuredIds.isNotEmpty() || rootEnumerationUnknown || markerCoverageUnknown
 
     fun unknownFootprintForTest(): Boolean = synchronized(lock) { unknownFootprintLocked() }
+
+    fun unknownBreakdownForTest(): String = synchronized(lock) {
+        "unmeasured=$unmeasuredIds rootUnknown=$rootEnumerationUnknown markerUnknown=$markerCoverageUnknown"
+    }
 
     // How many charges had to fall back to the placeholder. Exposed for tests and diagnostics.
     var measurementFailures: Long = 0L

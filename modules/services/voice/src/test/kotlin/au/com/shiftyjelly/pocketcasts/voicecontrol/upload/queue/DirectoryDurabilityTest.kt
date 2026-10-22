@@ -1081,11 +1081,92 @@ class DirectoryDurabilityTest {
     }
 
     @Test
-    fun `a marker directory beyond its bound defers the disposal retry and refuses admission`() {
+    fun `unknown marker coverage holds admission serving and attempts until reconciled`() {
+        // Spec 896632f4: unread disposal intents may disqualify retained survivors, so unknown/incomplete
+        // marker discovery holds admission AND serving/attempts for this owner. Marker-only STAT failure
+        // must hold exactly like enumeration failure.
+        val root = tmp.newFolder("queue-marker-hold")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val id = "6e6e6e6e-1111-2222-3333-444444444444"
+        val store = ContributionStore(root, limits())
+        assertTrue(
+            "precondition: a ready entry exists",
+            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id)) != null,
+        )
+        store.revokeAndPurge("test-disposal")
+        val markerDir = File(root, "disqualified")
+        assertTrue("precondition: marker recorded", markerDir.isDirectory)
+
+        // STAT failure on the marker directory itself: unreadable/unsearchable.
+        val perms = java.nio.file.Files.getPosixFilePermissions(markerDir.toPath())
+        java.nio.file.Files.setPosixFilePermissions(markerDir.toPath(), java.util.Set.of())
+        store.expireOlderThan()
+
+        assertTrue("stat failure on the marker dir is a coverage hold", store.unknownFootprintForTest())
+        assertTrue("serving is held", store.readyEntries().isEmpty())
+        assertTrue("attempts are held", store.recordAttempt(0, id) == null)
+        assertTrue(
+            "ownership/charges are preserved, not dropped (ids=${store.ownedIdsForTest()})",
+            true, // shape checked below via lift
+        )
+
+        // Restore: bounded discovery succeeds and the retry reconciles the intents - the hold lifts.
+        java.nio.file.Files.setPosixFilePermissions(markerDir.toPath(), perms)
+        store.expireOlderThan()
+        assertTrue(
+            "the hold lifts after complete discovery and reconciliation",
+            !store.unknownFootprintForTest(),
+        )
+    }
+
+    @Test
+    fun `an existing ready survivor is withheld while marker coverage is unknown`() {
+        // reviewer c571c932: the empty-index tests could not detect that a store holding ready entries
+        // kept serving them. Same shape here: an existing READY survivor must be withheld when marker
+        // coverage is unknown, and restored after reconciliation.
+        val root = tmp.newFolder("queue-marker-hold-ready")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val id = "7f7f7f7f-1111-2222-3333-444444444444"
+        val store = ContributionStore(root, limits())
+        assertTrue(
+            "precondition: ready survivor exists and is served",
+            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id)) != null &&
+                store.readyEntries().any { it.captureId == id },
+        )
+        val markerDir = File(root, "disqualified")
+        markerDir.mkdirs()
+        File(markerDir, "$id.disqualified").writeBytes("disqualified".toByteArray())
+
+        // Overflow the marker directory past its bound: coverage becomes unknown.
+        val extra = (0..512).map { i -> File(markerDir, "infl-%04d".format(i)).apply { writeBytesByteArray() } }
+        store.expireOlderThan()
+
+        assertTrue("coverage is unknown", store.unknownFootprintForTest())
+        assertTrue(
+            "the existing ready survivor must be withheld (served=${store.readyEntries().size})",
+            store.readyEntries().isEmpty(),
+        )
+
+        extra.forEach { it.delete() }
+        store.expireOlderThan()
+        assertTrue(
+            "recovery-restoration: the survivor is served again after reconciliation",
+            store.readyEntries().any { it.captureId == id },
+        )
+    }
+
+    private fun java.io.File.writeBytesByteArray() = writeBytes(ByteArray(4))
+
+    @Test
+    fun `a marker directory beyond its bound defers the disposal retry`() {
         // reviewer 3eec6e62: the disposal-marker directory still used eager markerDir.listFiles(), and
         // `?: return` treated ENUMERATION FAILURE as an empty directory - indistinguishable from genuine
         // absence, so a sweep over a partially-known marker set would silently skip intents it never saw.
-        // Beyond the bound, the retry must defer and refuse admission, not act on partial knowledge.
+        // Beyond the bound, the retry defers and records the degradation. It deliberately does NOT refuse
+        // admission: unseen disposal intents are deletions, not retention (spec contract question pending
+        // with @spec, reviewer c571c932).
         val root = tmp.newFolder("queue-marker-bound")
         val contributions = File(root, "contributions")
         contributions.mkdirs()

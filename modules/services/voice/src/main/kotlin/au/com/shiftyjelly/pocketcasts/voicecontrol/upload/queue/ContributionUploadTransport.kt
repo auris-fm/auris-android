@@ -1,8 +1,10 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
+import com.squareup.moshi.JsonReader
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
+import okio.Buffer
 
 /**
  * The REAL upload transport: it POSTs the immutable capture's exact bytes to the Worker's contributions
@@ -75,14 +77,36 @@ class ContributionUploadTransport(
 
     private fun classify(status: Int, body: ByteArray): Response {
         if (status in 200..299) return Response.Accepted(status, body)
-        val fields = runCatching { CanonicalReceipt.parseFields(body) }.getOrNull()
-        val code = fields?.get("code")
-        val retryAfterS = fields?.get("retry_after_s")?.toLongOrNull()
+        // An error body is NOT a receipt: it carries code/retry_after_s, so read just those strictly.
+        val code = runCatching { CanonicalReceipt.parseFields(body) }.getOrNull()?.get("code")
+            ?: errorField(body, "code")
+        val retryAfterS = errorField(body, "retry_after_s")?.toLongOrNull()
         return when {
             retryAfterS != null && retryAfterS > 0 -> Response.Retryable(status, retryAfterS)
             status == 408 || status == 429 || status in 500..599 -> Response.Retryable(status, null)
             status in 400..499 -> Response.Refused(status, code)
             else -> Response.Ambiguous(status)
+        }
+    }
+
+    /** Read ONE optional field from an arbitrary JSON object body (error bodies are not receipts). */
+    private fun errorField(body: ByteArray, name: String): String? {
+        val reader = JsonReader.of(Buffer().write(body))
+        return try {
+            var value: String? = null
+            reader.beginObject()
+            while (reader.hasNext()) {
+                val key = reader.nextName()
+                when {
+                    key == name && reader.peek() == JsonReader.Token.STRING -> value = reader.nextString()
+                    key == name && reader.peek() == JsonReader.Token.NUMBER -> value = reader.nextString()
+                    else -> reader.skipValue()
+                }
+            }
+            reader.endObject()
+            if (reader.peek() != JsonReader.Token.END_DOCUMENT) null else value
+        } catch (malformed: Throwable) {
+            null
         }
     }
 

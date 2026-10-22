@@ -1,5 +1,8 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
+import com.squareup.moshi.JsonReader
+import okio.Buffer
+
 /**
  * Production [ContributionAckResolver.AcceptValidator]: decides, from the server's response alone, whether
  * it proves THIS capture was durably accepted.
@@ -60,8 +63,14 @@ class CaptureReceiptValidator(
 }
 
 /**
- * The receipt shape the client is willing to read. Parsing is strict and total: anything not matching the
- * wire contract yields null, never a guess.
+ * The receipt shape the client is willing to read, parsed with the SAME strict Moshi [JsonReader] pattern
+ * the account projection uses (spec bcace44b): the parser owns syntax strictness (quoted names only, no
+ * single quotes, no trailing junk, no bare strings where literals are required), this layer owns the
+ * contract (decoded-key duplicate detection, exact field set, exact value types).
+ *
+ * `schema_version` must be the NUMBER 1 - a quoted `"1"` is a different type and is rejected. Every other
+ * field must be a non-empty STRING: `null` is rejected rather than stringified, and control characters or
+ * escapes are rejected rather than interpreted.
  */
 internal data class CanonicalReceipt(
     val schemaVersion: Long,
@@ -73,14 +82,22 @@ internal data class CanonicalReceipt(
     val retentionExpiresAt: String,
 ) {
     companion object {
+        private val ALLOWED_KEYS = setOf(
+            "schema_version",
+            "capture_id",
+            "record_sha256",
+            "status",
+            "receipt_id",
+            "accepted_at",
+            "retention_expires_at",
+        )
+
         fun parse(body: ByteArray): CanonicalReceipt? {
-            val text = String(body, Charsets.UTF_8).trim()
-            if (!text.startsWith("{") || !text.endsWith("}")) return null
-            val fields = mutableMapOf<String, String>()
-            for ((key, rawValue) in members(text.removePrefix("{").removeSuffix("}")) ?: return null) {
-                if (key in fields) return null // duplicate keys are ambiguous, not "last wins"
-                fields[key] = rawValue
-            }
+            val fields = parseFields(body) ?: return null
+            // schema_version must be the NUMBER 1: a quoted value is a different type (parseFields would
+            // keep it as a string, and toLongOrNull would happily accept it), so it is checked here.
+            if (fields.keys != ALLOWED_KEYS) return null
+            if (!isNumericField("schema_version")) return null
             val version = fields["schema_version"]?.toLongOrNull() ?: return null
             return CanonicalReceipt(
                 schemaVersion = version,
@@ -93,73 +110,53 @@ internal data class CanonicalReceipt(
             )
         }
 
-        /** Flat field view of any JSON object body (used for error bodies too); null if malformed. */
+        // Strict flat-object parse into decoded fields. Numbers are returned as their exact lexeme and only
+        // schema_version may be numeric; every other value must be a non-empty string without control
+        // characters. Returns null on ANY deviation - this never guesses.
+        // Keys whose value was a NUMBER token, so a quoted number is rejected as a type mismatch.
+        private var numericKeys: Set<String> = emptySet()
+
         fun parseFields(body: ByteArray): Map<String, String>? {
-            val text = String(body, Charsets.UTF_8).trim()
-            if (!text.startsWith("{") || !text.endsWith("}")) return null
-            val fields = mutableMapOf<String, String>()
-            for ((key, value) in members(text.removePrefix("{").removeSuffix("}")) ?: return null) {
-                if (key in fields) return null
-                fields[key] = value
-            }
-            return fields
-        }
+            val reader = JsonReader.of(Buffer().write(body))
+            val fields = LinkedHashMap<String, String>()
+            val numeric = HashSet<String>()
+            return try {
+                reader.beginObject()
+                while (reader.hasNext()) {
+                    val key = reader.nextName()
+                    if (key in fields) return null // decoded-key duplicate detection
+                    val next = reader.peek()
+                    when {
+                        next == JsonReader.Token.STRING -> {
+                            // schema_version must be a NUMBER: a quoted "1" is a type mismatch.
+                            if (key == "schema_version") return null
+                            val value = reader.nextString()
+                            if (value.isEmpty()) return null
+                            if (value.any { it.isISOControl() }) return null
+                            fields[key] = value
+                        }
 
-        // Split the object body into key/raw-value members at TOP-LEVEL commas only: a comma or colon
-        // inside a string value is not a separator. Returns null on any structural surprise.
-        private fun members(body: String): List<Pair<String, String>>? {
-            val out = mutableListOf<Pair<String, String>>()
-            var index = 0
-            while (index < body.length) {
-                while (index < body.length && body[index].isWhitespace()) index++
-                if (index >= body.length) break
-                if (body[index] != '"') return null
-                val keyEnd = closingQuote(body, index) ?: return null
-                val key = unquote(body.substring(index, keyEnd + 1)) ?: return null
-                index = keyEnd + 1
-                while (index < body.length && body[index].isWhitespace()) index++
-                if (index >= body.length || body[index] != ':') return null
-                index++
-                while (index < body.length && body[index].isWhitespace()) index++
-                val valueEnd = if (index < body.length && body[index] == '"') {
-                    closingQuote(body, index) ?: return null
-                } else {
-                    var scan = index
-                    while (scan < body.length && body[scan] != ',') scan++
-                    scan - 1
+                        // Only schema_version is numeric in the contract; any other number is a type error.
+                        next == JsonReader.Token.NUMBER && key == "schema_version" -> {
+                            fields[key] = reader.nextString()
+                            numeric += key
+                        }
+
+                        else -> return null // booleans, nulls, objects, arrays and stray numbers are rejected
+                    }
                 }
-                val raw = body.substring(index, valueEnd + 1).trim()
-                // String members are unquoted here (escapes rejected); bare members keep their text.
-                val value = if (raw.startsWith("\"")) unquote(raw) ?: return null else raw
-                if (value.isEmpty()) return null
-                out += key to value
-                index = valueEnd + 1
-                while (index < body.length && body[index].isWhitespace()) index++
-                if (index < body.length) {
-                    if (body[index] != ',') return null
-                    index++
-                }
+                reader.endObject()
+                if (reader.peek() != JsonReader.Token.END_DOCUMENT) return null // trailing junk
+                numericKeys = numeric
+                // A receipt body is exactly the contract's field set: unknown keys are rejected.
+                if (fields.keys != ALLOWED_KEYS) return null
+                fields
+            } catch (malformed: Throwable) {
+                null
             }
-            return out
         }
 
-        private fun closingQuote(text: String, open: Int): Int? {
-            var scan = open + 1
-            while (scan < text.length) {
-                if (text[scan] == '\\') return null // escapes are rejected, never interpreted
-                if (text[scan] == '"') return scan
-                scan++
-            }
-            return null
-        }
-
-        private fun unquote(token: String): String? {
-            if (token.length < 2 || !token.startsWith('"') || !token.endsWith('"')) return null
-            val inner = token.substring(1, token.length - 1)
-            // Escapes are rejected rather than interpreted: no receipt field needs them, and accepting
-            // them would let a crafted body smuggle a different id past the comparison.
-            if (inner.contains('\\')) return null
-            return inner
-        }
+        // True only when [key] was parsed from a NUMBER token in the last parseFields call.
+        fun isNumericField(key: String): Boolean = key in numericKeys
     }
 }

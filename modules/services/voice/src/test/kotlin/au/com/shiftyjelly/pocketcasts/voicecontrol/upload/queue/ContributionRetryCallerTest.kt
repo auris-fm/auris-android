@@ -633,6 +633,40 @@ class ContributionRetryCallerTest {
     }
 
     @Test
+    fun `caller REJECTS and RETAINS on each malformed receipt shape`() {
+        var now = 21_000_000L
+        val bad = mapOf(
+            "quoted schema version" to """{"schema_version":"1","capture_id":"ID","record_sha256":"DIGEST","status":"accepted","receipt_id":"r","accepted_at":"t","retention_expires_at":"t"}""",
+            "bare string value" to """{"schema_version":1,"capture_id":ID,"record_sha256":"DIGEST","status":"accepted","receipt_id":"r","accepted_at":"t","retention_expires_at":"t"}""",
+            "null status" to """{"schema_version":1,"capture_id":"ID","record_sha256":"DIGEST","status":null,"receipt_id":"r","accepted_at":"t","retention_expires_at":"t"}""",
+            "trailing comma" to """{"schema_version":1,"capture_id":"ID","record_sha256":"DIGEST","status":"accepted","receipt_id":"r","accepted_at":"t","retention_expires_at":"t",}""",
+            "unknown key" to """{"schema_version":1,"capture_id":"ID","record_sha256":"DIGEST","status":"accepted","receipt_id":"r","accepted_at":"t","retention_expires_at":"t","extra":"x"}""",
+            "duplicate key" to """{"schema_version":1,"capture_id":"ID","capture_id":"ID","record_sha256":"DIGEST","status":"accepted","receipt_id":"r","accepted_at":"t","retention_expires_at":"t"}""",
+            "wrong status literal" to """{"schema_version":1,"capture_id":"ID","record_sha256":"DIGEST","status":"stored","receipt_id":"r","accepted_at":"t","retention_expires_at":"t"}""",
+        )
+        bad.forEach { (label, template) ->
+            val root = tmp.newFolder("caller-bad-" + label.replace(' ', '-'))
+            val id = UUID.randomUUID().toString()
+            val store = newStore(root, { now })
+            prepare(store, id)
+            val digest = store.recordedDigest(id)!!
+            val body = template.replace("ID", id).replace("DIGEST", digest).toByteArray()
+            val caller = ContributionRetryCaller(
+                store,
+                clock = { now },
+                policyAllows = { true },
+                networkAvailable = { true },
+                attemptUpload = { _, _, _ -> true },
+                ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+                responseFor = { _, _ -> body },
+            )
+            caller.pollOnce()
+            assertTrue("[$label] the capture is RETAINED", store.readyEntries().any { it.captureId == id })
+            assertEquals("[$label] no acceptance counted", 0L, store.terminalCounter(ContributionStore.TerminalReason.UPLOAD_ACCEPTED))
+        }
+    }
+
+    @Test
     fun `a LATE old completion reaching the caller leaves a successor-owned entry untouched`() {
         var now = 20_500_000L
         val root = tmp.newFolder("caller-late-completion")

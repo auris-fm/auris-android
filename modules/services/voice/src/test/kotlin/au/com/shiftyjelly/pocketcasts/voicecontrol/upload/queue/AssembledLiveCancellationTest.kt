@@ -117,12 +117,9 @@ class AssembledLiveCancellationTest {
 
     /**
      * A capture far larger than any socket buffer, so the write blocks once the peer stops reading, and
-     * [progressed] proves the writer actually entered the body rather than the control passing because
-     * nothing was ever written.
      */
-    private fun capture(id: String, progressed: CountDownLatch): File = File(tmp.root, "$id.recording.wav").also { file ->
+    private fun capture(id: String): File = File(tmp.root, "$id.recording.wav").also { file ->
         file.writeBytes(ByteArray(8 * 1024 * 1024) { b -> (b % 251).toByte() })
-        progressed.countDown()
     }
 
     @Test
@@ -145,16 +142,22 @@ class AssembledLiveCancellationTest {
         assertTrue(store.prepareAt(generation, admission, id, "epoch-1", pcm, metadata) != null)
         assertEquals(1, store.recordAttempt(generation, id))
 
-        val enteredBody = CountDownLatch(1)
+        // Progress is signalled by ACTUAL BODY WRITES leaving this process, not by file creation or a
+        // sleep: backpressure is established only when chunks were emitted and the peer is not draining.
+        val chunksWritten = java.util.concurrent.atomic.AtomicInteger(0)
+        val bodyFlowing = CountDownLatch(1)
         val transport = ContributionUploadTransport(
             endpoint = "http://127.0.0.1:$port/v1/contributions",
             authorization = { "Bearer token" },
             callTimeoutMs = 120_000,
+            onBodyProgressForTest = {
+                if (chunksWritten.incrementAndGet() >= 8) bodyFlowing.countDown()
+            },
         )
         val assembly = ContributionUploadAssembly(
             store = store,
             transport = transport,
-            captureFor = { captureId -> ContributionUploadAssembly.Capture(record(captureId), capture(captureId, enteredBody)) },
+            captureFor = { captureId -> ContributionUploadAssembly.Capture(record(captureId), capture(captureId)) },
             clock = { now },
             policyAllows = { true },
             networkAvailable = { true },
@@ -164,9 +167,8 @@ class AssembledLiveCancellationTest {
         pools += pool
         val poll = pool.submit<ContributionRetryCaller.PollResult> { assembly.poll() }
 
-        // The writer is inside the transfer and the peer is not reading: the write is blocked.
-        assertTrue("the writer entered the body", enteredBody.await(15, TimeUnit.SECONDS))
-        Thread.sleep(600)
+        // The writer has EMITTED chunks into a peer that never reads: the write is genuinely blocked.
+        assertTrue("body bytes were actually written", bodyFlowing.await(15, TimeUnit.SECONDS))
         val revokedAt = System.nanoTime()
         // THE ONLY cancellation trigger: revoke the lease authority in the STORE.
         store.revokeAndCancelLaunches("epoch changed")

@@ -293,6 +293,77 @@ class ContributionStore(
     // actually holds. Null when the queue holds no such entry.
     fun recordedDigest(captureId: String): String? = synchronized(lock) { memoryEntries[captureId]?.recordSha256 }
 
+    /**
+     * THE durable capture authority: serves the immutable record and audio for a capture id, bound to THIS
+     * store's own published state, so no weaker parallel reader can exist (reviewer 0004628b, spec
+     * 07ae8661). Every returned pair satisfies ALL of:
+     * - the entry exists and is servable (not held-uncertain) and the epoch matches the entry;
+     * - the metadata is read BOUNDED, its canonical bytes hash to the DIGEST THIS STORE WROTE at publish
+     *   time (the .digest sibling agrees, so a replaced or rewritten record is refused);
+     * - the WAV passes the header validator against the recorded byte count, so truncated or same-length
+     *   damaged audio cannot ride a valid record.
+     * Null means "this store cannot vouch for these bytes", which the assembly holds rather than sends.
+     */
+    fun durableCapture(captureId: String): DurableCapture? = synchronized(lock) {
+        val entry = memoryEntries[captureId] ?: return null
+        if (heldUncertainLocked(captureId)) return null
+        val audio = File(dir, "$captureId$SUFFIX_WAV")
+        val meta = File(dir, "$captureId$SUFFIX_META")
+        if (!audio.isFile || !meta.isFile) return null
+        if (audio.length() != entry.audioBytes) return null
+        // BOUNDED metadata read: a metadata file larger than the recorded size is damage, not data.
+        val metadataBytes = try {
+            if (meta.length() > MAX_METADATA_READ_BYTES) return null else meta.readBytes()
+        } catch (io: Throwable) {
+            return null
+        }
+        if (metadataBytes.size != entry.metadataBytes) return null
+        val digest = try {
+            sha256Hex(metadataBytes)
+        } catch (io: Throwable) {
+            return null
+        }
+        // The record is exactly the bytes this store published: the in-memory entry AND the durable
+        // .digest sibling must both agree, so a swapped-in valid record of another capture is refused.
+        if (digest != entry.recordSha256) return null
+        val digestSibling = try {
+            File(dir, "$captureId$SUFFIX_DIGEST").readText(Charsets.UTF_8)
+        } catch (io: Throwable) {
+            return null
+        }
+        if (digestSibling != digest) return null
+        // The audio must still be the WAV these bytes describe.
+        val header = try {
+            audio.inputStream().use { input ->
+                val buffer = ByteArray(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.WavWriter.HEADER_BYTES)
+                var read = 0
+                while (read < buffer.size) {
+                    val n = input.read(buffer, read, buffer.size - read)
+                    if (n < 0) return null
+                    read += n
+                }
+                buffer
+            }
+        } catch (io: Throwable) {
+            return null
+        }
+        if (WavHeaderValidator.validate(header, audio.length()) == null) return null
+        val node = try {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson.parse(metadataBytes.toString(Charsets.UTF_8))
+        } catch (io: Throwable) {
+            return null
+        }
+        val record = node as? au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj ?: return null
+        DurableCapture(record, audio, entry.enrollmentEpoch)
+    }
+
+    /** A capture THIS STORE vouches for: validated record bytes, matching audio, the owning epoch. */
+    class DurableCapture(
+        val record: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj,
+        val audio: File,
+        val enrollmentEpoch: String,
+    )
+
     // The identity of the attempt most recently ADMITTED for captureId: the generation it was admitted
     // under plus the durable attempt count recorded for it. A completion (accept, failure, cancellation)
     // may only settle state for the attempt it actually belongs to - an OLD completion must never borrow
@@ -2379,6 +2450,9 @@ class ContributionStore(
         private const val SUFFIX_META = ".metadata.json"
         private const val SUFFIX_READY = ".ready"
         private const val SUFFIX_PART = ".wav.part"
+
+        /** Cap for reading a published metadata file back; the recorded size must fit under it. */
+        private const val MAX_METADATA_READ_BYTES = 1 shl 20
         private const val STAGING_PREFIX = "gen$"
         private const val ADMISSION_HELD = 0
         private const val ADMISSION_RELEASED = 1

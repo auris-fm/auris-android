@@ -47,6 +47,11 @@ class ContributionUploadTransport(
      * instead of hoping to hit it by timing. No-op in production.
      */
     private val onBeforeRegistrationForTest: (() -> Unit)? = null,
+    /**
+     * Test seam only: invoked after each request-body chunk the writer actually emits, so a control can
+     * wait for REAL transmission progress instead of guessing that a sleep reached backpressure.
+     */
+    private val onBodyProgressForTest: (() -> Unit)? = null,
 ) {
 
     sealed class Response {
@@ -108,7 +113,7 @@ class ContributionUploadTransport(
             // never outlive the total the caller promised.
             val budget = (remainingMs ?: callTimeoutMs).coerceAtMost(callTimeoutMs).coerceAtLeast(1)
             val callClient = client.newBuilder().callTimeout(budget, TimeUnit.MILLISECONDS).build()
-            val call = callClient.newCall(buildRequest(credentials, metadata, audio, isCancelled, remainingMs))
+            val call = callClient.newCall(buildRequest(credentials, metadata, audio, isCancelled, remainingMs, onBodyProgressForTest))
             // The admission-to-send window: everything up to here has already decided to upload, and the
             // request below is the first thing that touches the network. A withdrawal landing here must
             // still prevent transmission.
@@ -188,8 +193,9 @@ class ContributionUploadTransport(
         audio: File,
         isCancelled: () -> Boolean,
         remainingMs: Long?,
+        onBodyProgress: (() -> Unit)? = null,
     ): Request {
-        val body = requireNotNull(multipartFor(metadata, audio, isCancelled, remainingMs)) { "envelope" }
+        val body = requireNotNull(multipartFor(metadata, audio, isCancelled, remainingMs, onBodyProgress)) { "envelope" }
         // The per-call budget is the caller's REMAINING deadline when it has one, so this can never
         // outlive the total the caller promised.
         return Request.Builder()
@@ -204,6 +210,7 @@ class ContributionUploadTransport(
         audio: File,
         isCancelled: () -> Boolean,
         remainingMs: Long?,
+        onBodyProgress: (() -> Unit)? = null,
     ): MultipartBody? {
         if (!audio.isFile) return null
         val metadataBody = metadata.toRequestBody(METADATA_TYPE)
@@ -212,7 +219,7 @@ class ContributionUploadTransport(
             override fun contentType() = AUDIO_TYPE
             override fun contentLength() = audio.length()
             override fun writeTo(sink: BufferedSink) {
-                audio.inputStream().use { input -> copyCancellable(input, sink, isCancelled) }
+                audio.inputStream().use { input -> copyCancellable(input, sink, isCancelled, onBodyProgress) }
             }
         }
         return MultipartBody.Builder(boundaryToken())
@@ -228,7 +235,12 @@ class ContributionUploadTransport(
     /** The boundary the parity harness expects; a plain UUID, never a random base64 token. */
     private fun boundaryToken(): String = "----auris-contribution-" + java.util.UUID.randomUUID()
 
-    private fun copyCancellable(input: InputStream, sink: BufferedSink, isCancelled: () -> Boolean) {
+    private fun copyCancellable(
+        input: InputStream,
+        sink: BufferedSink,
+        isCancelled: () -> Boolean,
+        onBodyProgress: (() -> Unit)? = null,
+    ) {
         val buffer = ByteArray(COPY_BUFFER_BYTES)
         while (true) {
             // If the call has already been cancelled the stream itself fails; this is the cooperative
@@ -237,6 +249,8 @@ class ContributionUploadTransport(
             val read = input.read(buffer)
             if (read < 0) break
             sink.write(buffer, 0, read)
+            // A chunk LEFT THIS PROCESS: the control can now trust that transmission is under way.
+            onBodyProgress?.invoke()
         }
     }
 

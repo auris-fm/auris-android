@@ -120,6 +120,8 @@ class ContributionRetryCallerTest {
             },
             ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
             responseFor = { _, _ -> wireReceipt(id) },
+            // The contract pairs a first acceptance with 201; the receipt's own status must agree with it.
+            httpStatusFor = { _, _ -> 201 },
         )
         val result = caller.pollOnce()
         assertEquals(listOf(id), attempted)
@@ -585,16 +587,17 @@ class ContributionRetryCallerTest {
                 if (isRevoked()) return@ContributionRetryCaller false
                 // A wrong-digest acceptance must NOT release; a matching one must. Settlement goes
                 // through the resolver exactly as production composition does.
-                val wrong = resolver.resolveForAttempt(store.admittedAttemptForTest(captureId)!!, ContributionAckResolver.Ack.ACCEPTED, receipt(echoedDigest = "0".repeat(64)))
+                val wrong = resolver.resolveForAttempt(store.admittedAttemptForTest(captureId)!!, ContributionAckResolver.Ack.ACCEPTED, receipt(echoedDigest = "0".repeat(64)), httpStatus = 201)
                 assertTrue("forged digest retains ownership", wrong is ContributionAckResolver.Resolution.UnvalidatedAccept)
                 assertTrue("still queued after the forged receipt", store.readyEntries().any { it.captureId == captureId })
-                val ok = resolver.resolveForAttempt(store.admittedAttemptForTest(captureId)!!, ContributionAckResolver.Ack.ACCEPTED, receipt())
+                val ok = resolver.resolveForAttempt(store.admittedAttemptForTest(captureId)!!, ContributionAckResolver.Ack.ACCEPTED, receipt(), httpStatus = 201)
                 assertTrue("the matching receipt releases", ok is ContributionAckResolver.Resolution.Released)
                 // The caller's own settlement gate sees the attempt already released.
                 !store.readyEntries().any { it.captureId == captureId }
             },
             ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
             responseFor = { _, _ -> wireReceipt(id) },
+            httpStatusFor = { _, _ -> 201 },
         )
         val polled = caller.pollOnce()
         assertTrue(

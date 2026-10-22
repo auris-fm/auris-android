@@ -38,12 +38,18 @@ class CaptureReceiptValidator(
     private val recordedDigest: (captureId: String) -> String?,
 ) : ContributionAckResolver.AcceptValidator {
 
-    override fun validate(captureId: String, payload: ByteArray?): Boolean {
+    override fun validate(captureId: String, payload: ByteArray?, httpStatus: Int?): Boolean {
         val body = payload ?: return false
         val receipt = runCatching { CanonicalReceipt.parse(body) }.getOrNull() ?: return false
         if (receipt.schemaVersion != SUPPORTED_SCHEMA_VERSION) return false
         if (receipt.captureId != captureId) return false
         if (receipt.status !in ACCEPTANCE_STATUSES) return false
+        // The owning contract PAIRS each success status with one HTTP status: 201 for a first acceptance
+        // and 200 for a duplicate. A receipt whose status disagrees with the response status it arrived on
+        // is a malformed pair, and releasing on it would drop audio on a server's inconsistency.
+        // `null` means the caller could not supply a status, which is not proof of a good pair.
+        if (httpStatus == null) return false
+        if (STATUS_FOR_HTTP[httpStatus] != receipt.status) return false
         if (receipt.receiptId.isEmpty()) return false
         // The receipt timestamps must be REAL ISO-8601 instants: a nonempty placeholder such as "t"
         // authorizes deletion just as wrongly as a wrong digest. A timestamp that cannot parse is a
@@ -62,6 +68,9 @@ class CaptureReceiptValidator(
 
         /** The Worker's two SUCCESS statuses. `duplicate` means "already accepted", never "rejected". */
         val ACCEPTANCE_STATUSES = setOf("accepted", "duplicate")
+
+        /** The Worker's own pairing: a first acceptance is 201, a duplicate is 200 (upload_route.ts). */
+        val STATUS_FOR_HTTP = mapOf(201 to "accepted", 200 to "duplicate")
 
         /** Digest lookup for a store: the digest the queue recorded for the entry it is holding. */
         fun forStore(store: ContributionStore): CaptureReceiptValidator = CaptureReceiptValidator(store::recordedDigest)

@@ -51,7 +51,11 @@ class ContributionAckResolver(
      * check; tests pin that an unvalidated ACCEPTED never releases ownership.
      */
     fun interface AcceptValidator {
-        fun validate(captureId: String, payload: ByteArray?): Boolean
+        /**
+         * [httpStatus] is the status the payload arrived on; the receipt's own status must PAIR with it
+         * (201/accepted, 200/duplicate). Null means no status was supplied, which never validates.
+         */
+        fun validate(captureId: String, payload: ByteArray?, httpStatus: Int?): Boolean
     }
 
     /**
@@ -67,9 +71,10 @@ class ContributionAckResolver(
         ack: Ack,
         payload: ByteArray? = null,
         retryAfterS: Long? = null,
+        httpStatus: Int? = null,
     ): Resolution = when (ack) {
         Ack.ACCEPTED ->
-            if (!validator.validate(token.captureId, payload)) {
+            if (!validator.validate(token.captureId, payload, httpStatus)) {
                 val r = store.scheduleRetryForAdmittedAttempt(token, retryAfterS)
                 if (r != null) Resolution.UnvalidatedAccept(r) else Resolution.StaleEpoch
             } else {

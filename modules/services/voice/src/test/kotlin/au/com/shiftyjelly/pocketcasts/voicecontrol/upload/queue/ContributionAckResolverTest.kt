@@ -91,7 +91,7 @@ class ContributionAckResolverTest {
         assertEquals(1, token?.attemptNumber)
         val wavBefore = sha256Hex(wavOf(store, id).readBytes())
 
-        val resolver = ContributionAckResolver(store) { captureId, _ -> captureId.isNotEmpty() }
+        val resolver = ContributionAckResolver(store) { captureId, _, _ -> captureId.isNotEmpty() }
         val resolution = resolver.resolveForAttempt(token!!, ContributionAckResolver.Ack.AMBIGUOUS)
         assertTrue(resolution is ContributionAckResolver.Resolution.Retained)
         assertTrue((resolution as ContributionAckResolver.Resolution.Retained).retryAtMs != null)
@@ -112,7 +112,7 @@ class ContributionAckResolverTest {
         val bytesBefore = wavOf(store, id).readBytes()
         val digestBefore = sha256Hex(bytesBefore)
 
-        val resolver = ContributionAckResolver(store) { _, _ -> true }
+        val resolver = ContributionAckResolver(store) { _, _, _ -> true }
         resolver.resolveForAttempt(token!!, ContributionAckResolver.Ack.AMBIGUOUS)
         now += 10_000L
 
@@ -132,7 +132,7 @@ class ContributionAckResolverTest {
         assertEquals(1, token.attemptNumber)
 
         // Unvalidated ACCEPTED (wrong payload): treated as ambiguous, ownership retained.
-        val strict = ContributionAckResolver(store) { _, payload -> payload != null && payload.size == 4 }
+        val strict = ContributionAckResolver(store) { _, payload, _ -> payload != null && payload.size == 4 }
         val unvalidated = strict.resolveForAttempt(token, ContributionAckResolver.Ack.ACCEPTED, payload = "no".toByteArray())
         assertTrue(unvalidated is ContributionAckResolver.Resolution.UnvalidatedAccept)
         assertTrue("unvalidated accept retains the entry", store.readyEntries().any { it.captureId == id })
@@ -158,7 +158,7 @@ class ContributionAckResolverTest {
         // An epoch bump (enrollment/account change) invalidates the attempt's generation while the
         // response is in flight - WITHOUT a purge, so the local queue must survive untouched.
         store.fence.revoke()
-        val resolver = ContributionAckResolver(store) { _, _ -> true }
+        val resolver = ContributionAckResolver(store) { _, _, _ -> true }
         assertEquals(
             "stale ACCEPTED must not release (or delete) anything",
             ContributionAckResolver.Resolution.StaleEpoch,
@@ -188,7 +188,7 @@ class ContributionAckResolverTest {
         val token = store.pickupAttemptToken(generation, id)!!
         assertEquals(1, token.attemptNumber)
 
-        val resolver = ContributionAckResolver(store) { _, _ -> true }
+        val resolver = ContributionAckResolver(store) { _, _, _ -> true }
         assertEquals(
             ContributionAckResolver.Resolution.Released,
             resolver.resolveForAttempt(token, ContributionAckResolver.Ack.TERMINAL_DISPOSAL),

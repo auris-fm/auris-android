@@ -43,13 +43,14 @@ class ContributionUploadAssemblyTest {
     private var responseStatus = 200
     private var responseBody = ""
     private var onRequest: (() -> Unit)? = null
+    private var lastBody: ByteArray = ByteArray(0)
 
     @Before
     fun startServer() {
         server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/v1/contributions") { exchange: HttpExchange ->
             requests.incrementAndGet()
-            exchange.requestBody.readBytes() // drain so the client's POST completes
+            lastBody = exchange.requestBody.readBytes() // drain so the client's POST completes
             onRequest?.invoke()
             val bytes = responseBody.toByteArray()
             exchange.responseHeaders.add("Content-Type", "application/json")
@@ -102,21 +103,31 @@ class ContributionUploadAssemblyTest {
     /** A capture on disk plus the record that describes it, exactly as the product would supply one. */
     private class Fixture(val id: String, val file: File)
 
-    private fun fixture(store: ContributionStore, root: String): Fixture {
+    private fun fixture(store: ContributionStore, label: String): Fixture {
         val id = UUID.randomUUID().toString()
-        val wav = wavBytes(1600)
-        val file = File(tmp.newFolder(root), "$id.recording.wav").also { it.writeBytes(wav) }
-        val meta = CanonicalJson.canonicalBytes(record(id, sha256Hex(wav), wav.size.toLong()))
+        // The recorded digest must be the digest of the file that is ACTUALLY sent, so the capture the
+        // store publishes is the one the record describes.
+        val sample = wavBytes(1600)
+        val meta = CanonicalJson.canonicalBytes(record(id, sha256Hex(sample), sample.size.toLong()))
         val admission = store.admitForTest(1600, meta.size)
         val generation = store.fence.currentGeneration()
         check(store.prepareAt(generation, admission, id, "epoch-1", listOf(ShortArray(1600) { i -> i.toShort() } to 1600), meta) != null) {
-            "the capture was not admitted into the queue"
+            "the capture was not admitted into the queue ($label)"
         }
-        return Fixture(id, file)
+        // The DURABLE file the store published - not a test-side copy standing in for it. The store
+        // stages under a generation prefix, so the published name is discovered rather than assumed.
+        val durable = store.dirForTest().walkTopDown().firstOrNull { it.isFile && it.name.endsWith("$id.recording.wav") }
+        check(durable != null) {
+            "the store published no capture file for $id ($label); have: " +
+                store.dirForTest().walkTopDown().filter { it.isFile }.map { it.name }.toList()
+        }
+        return Fixture(id, durable)
     }
 
+    private var storeRoot: File = File(".")
+
     private fun newStore(now: () -> Long): ContributionStore = ContributionStore(
-        tmp.newFolder("store-${UUID.randomUUID()}"),
+        tmp.newFolder("store-${UUID.randomUUID()}").also { storeRoot = it },
         QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
         clock = now,
         jitter = { it - 1 },
@@ -154,8 +165,9 @@ class ContributionUploadAssemblyTest {
         val store = newStore { now }
         val fixture = fixture(store, "assembly-accept")
         val accepted = mutableListOf<String>()
-        responseStatus = 200
-        responseBody = receiptFor(store, fixture.id)
+        // The contract's pair for a FIRST acceptance: 201 with status `accepted`.
+        responseStatus = 201
+        responseBody = receiptFor(store, fixture.id, status = "accepted")
 
         val result = assembly(store, { now }, capturesFor(store, fixture), accepted).poll()
 
@@ -175,13 +187,59 @@ class ContributionUploadAssemblyTest {
             store.recordedDigest(fixture.id)!!,
             "0".repeat(64),
         )
-        responseStatus = 200
+        responseStatus = 201 // a valid pair, so the digest is the ONLY defect under test
         responseBody = forged
 
         assembly(store, { now }, capturesFor(store, fixture), accepted).poll()
 
         assertEquals("a forged receipt must not delete audio", 1, store.readyEntries().count { it.captureId == fixture.id })
         assertTrue("no acceptance is reported", accepted.isEmpty())
+    }
+
+    @Test
+    fun `a 200 claiming accepted is a mismatched pair and retains`() {
+        var now = 30_000_000L
+        val store = newStore { now }
+        val fixture = fixture(store, "assembly-pair-200-accepted")
+        val accepted = mutableListOf<String>()
+        responseStatus = 200
+        responseBody = receiptFor(store, fixture.id, status = "accepted")
+
+        assembly(store, { now }, capturesFor(store, fixture), accepted).poll()
+
+        assertEquals("200/accepted is not the contract's pair; the capture stays", 1, store.readyEntries().count { it.captureId == fixture.id })
+        assertTrue("no acceptance is reported for a mismatched pair", accepted.isEmpty())
+    }
+
+    @Test
+    fun `a 201 claiming duplicate is a mismatched pair and retains`() {
+        var now = 30_000_000L
+        val store = newStore { now }
+        val fixture = fixture(store, "assembly-pair-201-duplicate")
+        val accepted = mutableListOf<String>()
+        responseStatus = 201
+        responseBody = receiptFor(store, fixture.id, status = "duplicate")
+
+        assembly(store, { now }, capturesFor(store, fixture), accepted).poll()
+
+        assertEquals("201/duplicate is not the contract's pair; the capture stays", 1, store.readyEntries().count { it.captureId == fixture.id })
+        assertTrue("no acceptance is reported for a mismatched pair", accepted.isEmpty())
+    }
+
+    @Test
+    fun `a 200 claiming duplicate IS an acceptance and releases`() {
+        var now = 30_000_000L
+        val store = newStore { now }
+        val fixture = fixture(store, "assembly-pair-200-duplicate")
+        val accepted = mutableListOf<String>()
+        responseStatus = 200
+        responseBody = receiptFor(store, fixture.id, status = "duplicate")
+
+        val result = assembly(store, { now }, capturesFor(store, fixture), accepted).poll()
+
+        assertEquals("the duplicate pair is a real acceptance", 0, store.readyEntries().count { it.captureId == fixture.id })
+        assertEquals("the acceptance is reported", listOf(fixture.id), accepted)
+        assertEquals("attempted", 1, result.attempted)
     }
 
     @Test
@@ -247,16 +305,42 @@ class ContributionUploadAssemblyTest {
     }
 
     @Test
-    fun `the stored audio is sent, byte for byte, by the assembled path`() {
+    fun `the DUPLICATE pair is an acceptance - 200 with status duplicate releases`() {
         var now = 30_000_000L
         val store = newStore { now }
         val fixture = fixture(store, "assembly-bytes")
         responseStatus = 200
-        responseBody = receiptFor(store, fixture.id)
+        responseBody = receiptFor(store, fixture.id, status = "duplicate")
 
         assembly(store, { now }, capturesFor(store, fixture)).poll()
 
-        assertTrue("the capture on disk is non-empty", fixture.file.length() > 0)
-        assertFalse("the entry was settled by a validated receipt", store.readyEntries().any { it.captureId == fixture.id })
+        assertFalse("a duplicate pair is a validated receipt", store.readyEntries().any { it.captureId == fixture.id })
+    }
+
+    @Test
+    fun `the audio that reaches the server is the DURABLE capture, byte for byte`() {
+        var now = 30_000_000L
+        val store = newStore { now }
+        val fixture = fixture(store, "assembly-wire-bytes-wire")
+        responseStatus = 201
+        responseBody = receiptFor(store, fixture.id)
+        // Capture the request body the server actually received.
+        var received: ByteArray? = null
+        onRequest = { received = lastBody }
+        // Read the DURABLE capture BEFORE the poll: a validated acceptance deletes it, which is the
+        // correct outcome and would otherwise make this comparison impossible.
+        val durable = fixture.file.readBytes()
+        assertTrue("the durable queue capture is non-empty", durable.isNotEmpty())
+
+        assembly(store, { now }, capturesFor(store, fixture)).poll()
+
+        // A validated acceptance deletes the durable capture: the assertion that it is gone is itself
+        // evidence the release was real, and it is why the bytes were read above.
+        assertFalse("a validated acceptance deletes the durable capture", fixture.file.exists())
+        val body = received ?: error("the server received no body")
+        assertTrue(
+            "the multipart body must carry the durable capture's exact bytes",
+            body.toString(Charsets.ISO_8859_1).contains(durable.toString(Charsets.ISO_8859_1)),
+        )
     }
 }

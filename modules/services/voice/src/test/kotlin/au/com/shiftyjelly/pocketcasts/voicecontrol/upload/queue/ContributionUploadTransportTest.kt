@@ -366,7 +366,7 @@ class ContributionUploadTransportTest {
         val validator = CaptureReceiptValidator { sha256(file) }
         val result = transport().upload(id, record(id), file)
         val accepted = result as ContributionUploadTransport.Response.Accepted
-        assertFalse("a 2xx error body must not validate", validator.validate(id, accepted.payload))
+        assertFalse("a 2xx error body must not validate", validator.validate(id, accepted.payload, accepted.statusCode))
     }
 
     @Test
@@ -377,6 +377,6 @@ class ContributionUploadTransportTest {
         responseBody = receipt(id, "0".repeat(64))
         val validator = CaptureReceiptValidator { sha256(file) }
         val accepted = transport().upload(id, record(id), file) as ContributionUploadTransport.Response.Accepted
-        assertFalse("a forged digest must not validate", validator.validate(id, accepted.payload))
+        assertFalse("a forged digest must not validate", validator.validate(id, accepted.payload, accepted.statusCode))
     }
 }

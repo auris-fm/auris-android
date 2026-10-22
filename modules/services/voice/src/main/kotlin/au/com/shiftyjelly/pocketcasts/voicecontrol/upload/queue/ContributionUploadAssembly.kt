@@ -84,6 +84,11 @@ class ContributionUploadAssembly(
         retryAfterFor = { _, captureId ->
             (lastResponse[captureId] as? ContributionUploadTransport.Response.Retryable)?.retryAfterS
         },
+        // The status the receipt arrived on: validation pairs it with the receipt's own status, so a 200
+        // claiming `accepted` (or a 201 claiming `duplicate`) never releases.
+        httpStatusFor = { _, captureId ->
+            (lastResponse[captureId] as? ContributionUploadTransport.Response.Accepted)?.statusCode
+        },
     )
 
     /** Poll once. Present so callers do not reach past the assembly for anything. */

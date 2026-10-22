@@ -40,6 +40,11 @@ class ContributionRetryCaller(
     private val responseFor: (generation: Long, captureId: String) -> ByteArray? = { _, _ -> null },
     /** The server's Retry-After for this attempt, when it sent one. A MINIMUM for the next attempt. */
     private val retryAfterFor: (generation: Long, captureId: String) -> Long? = { _, _ -> null },
+    /**
+     * The HTTP status the acceptance arrived on. The receipt's own status must PUBLISH with it
+     * (201/accepted, 200/duplicate); a body alone is never enough to release.
+     */
+    private val httpStatusFor: (generation: Long, captureId: String) -> Int? = { _, _ -> null },
     /** The owning-table disposition of this attempt's refusal, when the server refused with a code. */
     private val dispositionFor: (generation: Long, captureId: String) -> ContributionUploadTransport.Response? = { _, _ -> null },
 ) {
@@ -134,9 +139,10 @@ class ContributionRetryCaller(
                             else -> if (accepted) ContributionAckResolver.Ack.ACCEPTED else ContributionAckResolver.Ack.RETRYABLE
                         }
                         val payload = if (accepted) responseFor(generation, captureId) else null
+                        val httpStatus = if (accepted) httpStatusFor(generation, captureId) else null
                         // The server minimum survives the resolver: it is a floor on the next attempt.
                         val retryAfterS = if (accepted) null else retryAfterFor(generation, captureId)
-                        when (resolve(token, ack, payload, retryAfterS)) {
+                        when (resolve(token, ack, payload, retryAfterS, httpStatus)) {
                             is ContributionAckResolver.Resolution.Released -> {
                                 attempted++
                                 onSuccess(token.generation, captureId)
@@ -174,7 +180,8 @@ class ContributionRetryCaller(
         ack: ContributionAckResolver.Ack,
         payload: ByteArray?,
         retryAfterS: Long? = null,
-    ): ContributionAckResolver.Resolution = runCatching { ackResolver.resolveForAttempt(token, ack, payload, retryAfterS) }
+        httpStatus: Int? = null,
+    ): ContributionAckResolver.Resolution = runCatching { ackResolver.resolveForAttempt(token, ack, payload, retryAfterS, httpStatus) }
         .getOrElse { ContributionAckResolver.Resolution.StaleEpoch }
 
     fun close() {

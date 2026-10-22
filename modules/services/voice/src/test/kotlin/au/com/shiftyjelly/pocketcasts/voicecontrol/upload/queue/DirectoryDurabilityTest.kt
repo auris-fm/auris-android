@@ -1081,6 +1081,66 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `a failed recovery stops serving entries a successful recovery later restores`() {
+        // reviewer d1cce25b: the failure path left memoryEntries intact and readyEntries() served them
+        // without checking rootEnumerationUnknown, so a store that already held ready entries kept serving
+        // them after recovery could not enumerate the root - and the empty-index test could not detect it.
+        val root = tmp.newFolder("queue-failed-recovery-stops-serving")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val id = "3c3c3c3c-1111-2222-3333-444444444444"
+        val store = ContributionStore(root, limits())
+        val prepared = store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id))
+        assertTrue("precondition: prepared ready", prepared != null)
+        assertTrue("precondition: served", store.readyEntries().isNotEmpty())
+
+        // Push the root past its enumeration bound: recovery fails, and the entry must stop being served.
+        val debris = (0..512).map { i ->
+            File(contributions, "gen\$f.%d.someid.recording.wav.part".format(i)).apply { writeBytes(ByteArray(4)) }
+        }
+        store.recover()
+        assertTrue("recovery failed", store.unknownFootprintForTest())
+        assertTrue(
+            "a store whose root is unknown must not serve from memory alone",
+            store.readyEntries().isEmpty(),
+        )
+
+        // A later recovery that enumerates successfully restores eligibility.
+        debris.forEach { it.delete() }
+        store.recover()
+        assertTrue(
+            "successful recovery restores eligibility",
+            store.readyEntries().any { it.captureId == id },
+        )
+    }
+
+    @Test
+    fun `expireOlderThan through the bounded reload cannot bypass the root bound`() {
+        // reviewer d1cce25b: reloadUnownedFromDisk, discardCurrentPartials and deleteStaging still called
+        // dir.listFiles() eagerly, and expireOlderThan invokes the reload while recovered is still false
+        // after a failed recovery - bypassing the recovery bound immediately.
+        val root = tmp.newFolder("queue-expire-bypass")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val debris = (0..512).map { i ->
+            File(contributions, "gen\$g.%d.someid.recording.wav.part".format(i)).apply { writeBytes(ByteArray(4)) }
+        }
+
+        val store = ContributionStore(root, limits())
+        store.expireOlderThan()
+
+        assertTrue(
+            "the lazy reload path must refuse an unbounded root, not enumerate it eagerly",
+            store.unknownFootprintForTest(),
+        )
+        assertTrue(
+            "and must not have swept debris it could not fully enumerate (survivors=" +
+                debris.count { it.exists() } + ")",
+            debris.all { it.exists() },
+        )
+    }
+
+    @Test
     fun `a queue root beyond its entry bound defers sweeps and refuses admission`() {
         // reviewer c66fda06 series: recover() materialized the ENTIRE root with dir.listFiles(), unbounded -
         // the same eager-allocation defect already fixed inside the measurement walk. Beyond the bound,

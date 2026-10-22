@@ -324,7 +324,18 @@ class ContributionStore(
     }
 
     private fun deleteStaging(attemptId: String) {
-        dir.listFiles()?.forEach { f ->
+        // Bounded root traversal, like recovery: sweeping a partially-known listing is destructive with
+        // unknown coverage, so enumeration failure defers the sweep and refuses admission instead.
+        val files = try {
+            boundedRootListing()
+        } catch (unknown: MeasurementError) {
+            synchronized(lock) {
+                rootEnumerationUnknown = true
+                measurementFailures++
+            }
+            return
+        }
+        files.forEach { f ->
             // Checked, like every other deletion: a staging file that refuses to delete still occupies the
             // queue, and discarding the result left those bytes charged nowhere (reviewer e4342946).
             if (f.name.startsWith("$STAGING_PREFIX$attemptId.")) f.deleteOrChargeOnFailure()
@@ -649,7 +660,12 @@ class ContributionStore(
 
     /** Ready entries (durable state), oldest first; age computed against [clock]. */
     fun readyEntries(): List<Entry> = synchronized(lock) {
-        memoryEntries.values.sortedBy { it.createdAtMs }
+        // A failed recovery leaves memoryEntries intact from before the failure, but the queue DIRECTORY
+        // could not be enumerated, so what is on disk can no longer be reconciled with what is in memory.
+        // Serving from memory alone could hand out entries whose files were swept, changed or never
+        // accounted while the root was unknown; eligibility is restored by a recovery that enumerates
+        // successfully (reviewer d1cce25b).
+        if (rootEnumerationUnknown) emptyList() else memoryEntries.values.sortedBy { it.createdAtMs }
     }
 
     private var recovered = false
@@ -841,9 +857,19 @@ class ContributionStore(
 
     /** Listening/permission closure: remove IN-PROGRESS preparation only; ready entries stay. */
     fun discardCurrentPartials() {
+        // Same bounded traversal as recovery (reviewer d1cce25b): enumeration failure defers the sweep.
+        val files = try {
+            boundedRootListing()
+        } catch (unknown: MeasurementError) {
+            synchronized(lock) {
+                rootEnumerationUnknown = true
+                measurementFailures++
+            }
+            return
+        }
         // Same checked deletion as the recovery sweep. Discarding the result here left surviving partials
         // invisible to accounting (reviewer e4342946).
-        dir.listFiles()?.forEach { f -> if (f.name.endsWith(SUFFIX_PART)) f.deleteOrChargeOnFailure() }
+        files.forEach { f -> if (f.name.endsWith(SUFFIX_PART)) f.deleteOrChargeOnFailure() }
     }
 
     /**
@@ -1486,7 +1512,15 @@ class ContributionStore(
     private fun reloadUnownedFromDisk() {
         // Under lock: adopt on-disk entries this instance did not prepare (restart simulation);
         // never resurrect ids it explicitly dropped/purged.
-        val files = dir.listFiles() ?: return
+        val files = try {
+            boundedRootListing()
+        } catch (unknown: MeasurementError) {
+            // Adopting from a partially-known listing could resurrect entries a full listing would have
+            // swept, or miss bytes it would have charged. Unknown accounting refuses admission instead.
+            rootEnumerationUnknown = true
+            measurementFailures++
+            return
+        }
         // Keyed off AUDIO, not the ready marker. A partially-failed deletion can remove the marker while
         // leaving the audio behind; keying off the marker made those residual bytes invisible to a
         // restarted store, so they occupied the queue without being charged anywhere. Anything holding

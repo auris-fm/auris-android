@@ -38,6 +38,8 @@ class ContributionRetryCaller(
     private val ackResolver: ContributionAckResolver,
     /** The transport response payload for the attempt just run (null when the response was lost). */
     private val responseFor: (generation: Long, captureId: String) -> ByteArray? = { _, _ -> null },
+    /** The owning-table disposition of this attempt's refusal, when the server refused with a code. */
+    private val dispositionFor: (generation: Long, captureId: String) -> ContributionUploadTransport.Response? = { _, _ -> null },
 ) {
 
     data class PollResult(
@@ -123,7 +125,12 @@ class ContributionRetryCaller(
                     } else {
                         // The response is classified by the REAL resolver against the wire receipt; a
                         // Boolean transport success deletes nothing by itself.
-                        val ack = if (accepted) ContributionAckResolver.Ack.ACCEPTED else ContributionAckResolver.Ack.RETRYABLE
+                        // The owning response table decides: a terminal code is SERVER_TERMINAL
+                        // disposal (token-scoped, epoch-gated); everything else retries or retains.
+                        val ack = when (dispositionFor(generation, captureId)) {
+                            is ContributionUploadTransport.Response.Terminal -> ContributionAckResolver.Ack.TERMINAL_DISPOSAL
+                            else -> if (accepted) ContributionAckResolver.Ack.ACCEPTED else ContributionAckResolver.Ack.RETRYABLE
+                        }
                         val payload = if (accepted) responseFor(generation, captureId) else null
                         when (resolve(token, ack, payload)) {
                             is ContributionAckResolver.Resolution.Released -> {

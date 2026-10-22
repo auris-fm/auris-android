@@ -40,8 +40,13 @@ class ContributionUploadTransport(
         /** Credentials were refused: RECOVER, never delete. Ownership is retained. */
         data class Unauthorized(val statusCode: Int) : Response()
 
-        /** The request or the capture is wrong and repeating it changes nothing. */
-        data class Rejected(val statusCode: Int, val code: String?) : Response()
+        /**
+         * The OWNING table's terminal entry failure (docs/specs/voice-recording-uploads.md): 400
+         * invalid_request, 409 capture_conflict, 410 record_gone|enrollment_retired, 413
+         * payload_too_large, 415 unsupported_audio, 422 integrity_mismatch. Do not retry; the queued
+         * entry takes its terminal disposition under token-scoped, epoch-gated release.
+         */
+        data class Terminal(val statusCode: Int, val code: String?) : Response()
 
         /** The enrollment/collection is not currently accepting uploads: a policy state, not a fault. */
         data class PolicyRefused(val statusCode: Int, val code: String?) : Response()
@@ -56,19 +61,21 @@ class ContributionUploadTransport(
     // 415 unsupported_audio, 422 integrity_mismatch, 429 rate_limited/quota_exceeded,
     // 503 upload_pending/policy_unavailable/storage_unavailable. The client mirrors it code-first, so a
     // NEW server code does not silently become "terminal" on this side.
-    private enum class Disposition { RETRY, UNAUTHORIZED, REJECTED, POLICY }
+    private enum class Disposition { RETRY, UNAUTHORIZED, TERMINAL, POLICY }
 
+    // Authority: docs/specs/voice-recording-uploads.md response table; the Worker's statusFor is the
+    // implementation to compare against, not the contract.
     private val byCode = mapOf(
-        "invalid_request" to Disposition.REJECTED,
+        "invalid_request" to Disposition.TERMINAL,
         "unauthorized" to Disposition.UNAUTHORIZED,
         "not_enrolled" to Disposition.POLICY,
         "collection_disabled" to Disposition.POLICY,
-        "capture_conflict" to Disposition.REJECTED,
-        "record_gone" to Disposition.REJECTED,
-        "enrollment_retired" to Disposition.POLICY,
-        "payload_too_large" to Disposition.REJECTED,
-        "unsupported_audio" to Disposition.REJECTED,
-        "integrity_mismatch" to Disposition.REJECTED,
+        "capture_conflict" to Disposition.TERMINAL,
+        "record_gone" to Disposition.TERMINAL,
+        "enrollment_retired" to Disposition.TERMINAL,
+        "payload_too_large" to Disposition.TERMINAL,
+        "unsupported_audio" to Disposition.TERMINAL,
+        "integrity_mismatch" to Disposition.TERMINAL,
         "rate_limited" to Disposition.RETRY,
         "quota_exceeded" to Disposition.RETRY,
         "upload_pending" to Disposition.RETRY,
@@ -118,7 +125,7 @@ class ContributionUploadTransport(
         return when (byCode[code] ?: unknownFor(status)) {
             Disposition.RETRY -> Response.Retryable(status, retryHint)
             Disposition.UNAUTHORIZED -> Response.Unauthorized(status)
-            Disposition.REJECTED -> Response.Rejected(status, code)
+            Disposition.TERMINAL -> Response.Terminal(status, code)
             Disposition.POLICY -> Response.PolicyRefused(status, code)
         }
     }

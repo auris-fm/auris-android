@@ -159,15 +159,15 @@ class ContributionUploadTransportTest {
         val id = UUID.randomUUID().toString()
         val file = wavFile(id)
         val cases = listOf(
-            Triple(400, "invalid_request", ContributionUploadTransport.Response.Rejected::class),
-            Triple(409, "capture_conflict", ContributionUploadTransport.Response.Rejected::class),
-            Triple(410, "record_gone", ContributionUploadTransport.Response.Rejected::class),
-            Triple(413, "payload_too_large", ContributionUploadTransport.Response.Rejected::class),
-            Triple(415, "unsupported_audio", ContributionUploadTransport.Response.Rejected::class),
-            Triple(422, "integrity_mismatch", ContributionUploadTransport.Response.Rejected::class),
+            Triple(400, "invalid_request", ContributionUploadTransport.Response.Terminal::class),
+            Triple(409, "capture_conflict", ContributionUploadTransport.Response.Terminal::class),
+            Triple(410, "record_gone", ContributionUploadTransport.Response.Terminal::class),
+            Triple(413, "payload_too_large", ContributionUploadTransport.Response.Terminal::class),
+            Triple(415, "unsupported_audio", ContributionUploadTransport.Response.Terminal::class),
+            Triple(422, "integrity_mismatch", ContributionUploadTransport.Response.Terminal::class),
+            Triple(410, "enrollment_retired", ContributionUploadTransport.Response.Terminal::class),
             Triple(403, "not_enrolled", ContributionUploadTransport.Response.PolicyRefused::class),
             Triple(403, "collection_disabled", ContributionUploadTransport.Response.PolicyRefused::class),
-            Triple(410, "enrollment_retired", ContributionUploadTransport.Response.PolicyRefused::class),
             Triple(429, "rate_limited", ContributionUploadTransport.Response.Retryable::class),
             Triple(429, "quota_exceeded", ContributionUploadTransport.Response.Retryable::class),
             Triple(503, "upload_pending", ContributionUploadTransport.Response.Retryable::class),
@@ -191,7 +191,7 @@ class ContributionUploadTransportTest {
         val result = transport().upload(id, file)
         assertTrue(
             "an unknown code retains rather than deletes",
-            result !is ContributionUploadTransport.Response.Accepted && result !is ContributionUploadTransport.Response.Rejected,
+            result !is ContributionUploadTransport.Response.Accepted && result !is ContributionUploadTransport.Response.Terminal,
         )
     }
 

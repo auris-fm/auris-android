@@ -68,8 +68,13 @@ class ContributionUploadAssembly(
             if (isRevoked()) {
                 throw AttemptCancelled(captureId)
             }
-            val response = transport.upload(captureId, capture.record, capture.audio)
+            // The revocation signal now reaches INSIDE the upload: the transport checks it before the
+            // first byte, per request-body chunk, and around the response read, so a withdrawal stops a
+            // transfer already in flight instead of only being noticed after it finishes.
+            val response = transport.upload(captureId, capture.record, capture.audio, isCancelled = isRevoked)
             lastResponse[captureId] = response
+            // A cancelled attempt has NO answer to settle from, whatever the socket happened to return.
+            if (response is ContributionUploadTransport.Response.Cancelled) throw AttemptCancelled(captureId)
             // Cancellation observed again before settlement: the response may belong to a revoked owner.
             if (isRevoked()) throw AttemptCancelled(captureId)
             response is ContributionUploadTransport.Response.Accepted

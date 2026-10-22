@@ -33,6 +33,12 @@ class ContributionUploadTransport(
     private val authorization: () -> String?,
     private val connectTimeoutMs: Int = 15_000,
     private val readTimeoutMs: Int = 60_000,
+    /**
+     * TOTAL wall budget for one upload, enforced by an actual disconnect rather than by a socket
+     * inactivity timeout. A server that drips steadily, each chunk inside [readTimeoutMs], never trips an
+     * inactivity timeout - so without this a trickling response can hold the attempt open indefinitely.
+     */
+    private val totalDeadlineMs: Long = 120_000,
 ) {
 
     sealed class Response {
@@ -180,10 +186,17 @@ class ContributionUploadTransport(
         } catch (invalid: Throwable) {
             return Response.Ambiguous(null)
         }
+        // THE WALL DEADLINE. It is enforced by the READ LOOP itself (see readWithinDeadline) rather than by
+        // a timer that cancels the connection: an inactivity timeout cannot bound a trickle, and cancelling
+        // the connection from another thread was measured to be unreliable. A read loop with a bounded
+        // per-read timeout and an absolute end time is deterministic, and it owns the cutoff.
+        val expired = java.util.concurrent.atomic.AtomicBoolean(false)
         return try {
             connection.requestMethod = "POST"
             connection.connectTimeout = connectTimeoutMs
-            connection.readTimeout = readTimeoutMs
+            // A SHORT per-read timeout is what lets the loop re-check the absolute deadline: each read
+            // returns within a slice, so the cutoff lands on time however slowly the peer drips.
+            connection.readTimeout = minOf(readTimeoutMs.toLong(), maxOf(1L, totalDeadlineMs / 4)).toInt()
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", envelope.contentType)
             connection.setRequestProperty("Authorization", credentials)
@@ -195,7 +208,12 @@ class ContributionUploadTransport(
             // ambiguous outcome.
             if (status == 401) return Response.Unauthorized(status)
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-            val responseBody = stream?.use { readBounded(it) }
+            val responseBody = readWithinDeadline(stream, expired = expired)
+            // A BODY WE ABANDONED IS NOT AN ANSWER. When the deadline fires, the read of this stream is
+            // cut short: whatever arrived is a PREFIX, and a prefix can look exactly like a complete
+            // terminal envelope. Classifying it would turn "we do not know" into a deletion, so the
+            // expired flag wins over any prefix we managed to hold.
+            if (expired.get()) return Response.Ambiguous(status)
             if (responseBody == null) Response.Ambiguous(status) else classify(status, responseBody)
         } catch (io: Throwable) {
             Response.Ambiguous(null)
@@ -203,6 +221,56 @@ class ContributionUploadTransport(
             runCatching { connection.disconnect() }
         }
     }
+
+    /**
+     * Read a response body against an ABSOLUTE wall deadline. Each individual read gets a bounded socket
+     * timeout, and the loop stops at the deadline regardless of how much is still in flight - so a peer
+     * that drips steadily, each byte inside the timeout, cannot hold this attempt open.
+     *
+     * @return the COMPLETE body, or null when the deadline was spent (an unknown outcome: a prefix is not
+     *   an answer, and classifying one would turn "we do not know" into a deletion).
+     */
+    private fun readWithinDeadline(stream: InputStream?, expired: java.util.concurrent.atomic.AtomicBoolean): ByteArray? {
+        if (stream == null) return null
+        val deadlineAt = System.nanoTime() + totalDeadlineMs * 1_000_000
+        // Lets the test observe that the peer was still producing when we gave up.
+        return stream.use { readBoundedAfter(it, deadlineAt, expired) }
+    }
+
+    private fun readBoundedAfter(stream: InputStream, deadlineAt: Long, expired: java.util.concurrent.atomic.AtomicBoolean): ByteArray? {
+        val buffer = ByteArray(8 * 1024)
+        val out = java.io.ByteArrayOutputStream()
+        while (true) {
+            if (System.nanoTime() >= deadlineAt) {
+                expired.lazySet(true)
+                return null
+            }
+            val read = try {
+                stream.read(buffer)
+            } catch (timeout: java.net.SocketTimeoutException) {
+                // No byte arrived inside this slice. Only a spent deadline makes that fatal.
+                if (System.nanoTime() >= deadlineAt) {
+                    expired.lazySet(true)
+                    return null
+                }
+                continue
+            } catch (io: java.io.IOException) {
+                return null
+            }
+            if (read < 0) return out.toByteArray()
+            out.write(buffer, 0, read)
+            if (out.size() > MAX_BODY_BYTES) return null
+        }
+    }
+
+    private companion object {
+        const val MAX_BODY_BYTES = 1 shl 20
+
+        /** The only capture-sized buffer a send allocates; the audio itself stays on disk. */
+        const val COPY_BUFFER_BYTES = 16 * 1024
+    }
+
+    // The OWNING envelope pairs    }
 
     // The OWNING envelope pairs each code with ONE status; a body whose code disagrees with the HTTP
     // status is a malformed answer, not a disposition (reviewer d1dfe1cb).
@@ -328,12 +396,5 @@ class ContributionUploadTransport(
                 null
             }
         }
-    }
-
-    private companion object {
-        const val MAX_BODY_BYTES = 1 shl 20
-
-        /** The only capture-sized buffer a send allocates; the audio itself stays on disk. */
-        const val COPY_BUFFER_BYTES = 16 * 1024
     }
 }

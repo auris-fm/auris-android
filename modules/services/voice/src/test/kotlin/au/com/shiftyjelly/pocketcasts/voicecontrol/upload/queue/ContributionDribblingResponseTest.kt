@@ -79,57 +79,69 @@ class ContributionDribblingResponseTest {
     }
 
     /**
-     * Serves a valid-looking terminal receipt PREFIX and then dribbles one byte every 150 ms forever,
-     * declaring a large Content-Length so the client cannot tell the body is short. A client that waits
-     * for the declared length hangs; a client that trusts the prefix deletes the capture.
+     * Serves a valid-looking terminal receipt PREFIX and then dribbles one byte every 150 ms, each one
+     * well INSIDE the client's socket read timeout, and keeps doing it for far longer than the client's
+     * total budget. Without a wall deadline this connection is unbounded: no individual read ever times
+     * out. [produced] tells the test whether the server was STILL producing when the client gave up.
      */
-    private fun startDribbler(prefix: String) {
+    private fun startDribbler(prefix: String): () -> Boolean {
+        val producing = java.util.concurrent.atomic.AtomicBoolean(true)
         server.createContext("/v1/contributions") { exchange: HttpExchange ->
             exchange.requestBody.readBytes()
             exchange.responseHeaders.add("Content-Type", "application/json")
             // Declared length never reached: the receipt is INCOMPLETE and must not be trusted.
-            exchange.sendResponseHeaders(400, prefix.length + 10_000L)
+            exchange.sendResponseHeaders(400, prefix.length + 1_000_000L)
             val out = exchange.responseBody
             out.write(prefix.toByteArray())
             out.flush()
-            // Bounded so the fixture can never outlive the test run: 2s of dribble is far longer than
-            // the client's 1s budget, and the handler always finishes.
+            // The drips last ~30s of wall clock - an order of magnitude past the asserted deadline.
             runCatching {
-                repeat(20) {
+                repeat(200) {
                     out.write(' '.code)
                     out.flush()
                     Thread.sleep(150)
                 }
                 out.close()
             }
+            producing.set(false)
         }
         server.start()
         port = server.address.port
+        return { producing.get() }
     }
 
-    private fun transport(readTimeoutMs: Int) = ContributionUploadTransport(
+    private fun transport(readTimeoutMs: Int, totalDeadlineMs: Long = 120_000) = ContributionUploadTransport(
         endpoint = "http://127.0.0.1:$port/v1/contributions",
         authorization = { "Bearer test-token" },
         readTimeoutMs = readTimeoutMs,
+        totalDeadlineMs = totalDeadlineMs,
     )
 
     @Test
-    fun `a dribbling terminal prefix is never trusted and the bounded read gives up`() {
+    fun `a still-productive drip is CUT OFF at the wall deadline, not waited out`() {
         // A complete-looking terminal envelope as the PREFIX, with the body still in flight.
-        startDribbler("""{"schema_version":1,"code":"invalid_request"}""")
+        val stillProducing = startDribbler("""{"schema_version":1,"code":"invalid_request"}""")
         val id = UUID.randomUUID().toString()
+        val budgetMs = 1_500L
 
         val startedAt = System.nanoTime()
-        val result = transport(readTimeoutMs = 1_000).upload(id, record(id), wavFile(id))
+        val result = transport(readTimeoutMs = 60_000, totalDeadlineMs = budgetMs).upload(id, record(id), wavFile(id))
         val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000
 
-        // BOUNDED: the socket read timeout fires, and the whole call returns promptly rather than
-        // waiting out the server's dribble.
-        assertTrue("the read must be cut off in bounded time (took ${elapsedMs}ms)", elapsedMs < 15_000)
-        // SAFE: an incomplete body is not a disposition. A trickling terminal prefix must not become a
-        // delete, and it must not become an acceptance either.
+        // THE CLAIM UNDER TEST: the client stopped on its OWN budget. The socket inactivity timeout was
+        // 60s, far longer than this whole test, so only the wall deadline can explain the return.
+        // A generous ceiling, because what this control must exclude is "waited for the whole transfer"
+        // (~30s), not jitter of a second or two on a loaded CI box.
         assertTrue(
-            "a dribbling terminal prefix must never dispose a capture: $result",
+            "the upload must stop at its own deadline (took ${elapsedMs}ms, budget ${budgetMs}ms)",
+            elapsedMs >= budgetMs && elapsedMs < 15_000,
+        )
+        // AND THE PEER WAS STILL PRODUCING: the drip runs ~30s, so the server had not finished. Waiting
+        // the transfer out is therefore ruled out as the explanation.
+        assertTrue("the server was still dripping when the client gave up", stillProducing())
+        // SAFE: an incomplete body is not a disposition - it must never dispose a capture.
+        assertTrue(
+            "a cut-off body must never dispose a capture: $result",
             result is ContributionUploadTransport.Response.Ambiguous,
         )
     }

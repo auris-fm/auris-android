@@ -118,7 +118,7 @@ class WorkerIntakeParityE2ETest {
             sha256 = audioSha,
             byteCount = audioBytes,
             retainedSamples = retainedSamples,
-            originalFormat = "oboe_float32",
+            originalFormat = "pcm_s16le",
             conversionVersion = "v1",
             truncated = false,
             droppedSpans = emptyList(),

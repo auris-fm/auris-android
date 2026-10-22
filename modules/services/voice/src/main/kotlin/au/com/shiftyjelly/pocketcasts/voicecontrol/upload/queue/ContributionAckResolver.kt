@@ -104,7 +104,7 @@ class ContributionAckResolver(
     ): Resolution = when (ack) {
         Ack.ACCEPTED ->
             if (!validator.validate(token.captureId, payload)) {
-                val r = store.scheduleRetryForAdmittedAttempt(token)
+                val r = store.scheduleRetryForAdmittedAttempt(token, retryAfterS)
                 if (r != null) Resolution.UnvalidatedAccept(r) else Resolution.StaleEpoch
             } else {
                 if (store.releaseForAdmittedAttempt(token)) {
@@ -115,7 +115,7 @@ class ContributionAckResolver(
             }
 
         Ack.AMBIGUOUS, Ack.RETRYABLE -> {
-            val retryAt = store.scheduleRetryForAdmittedAttempt(token)
+            val retryAt = store.scheduleRetryForAdmittedAttempt(token, retryAfterS)
             if (retryAt != null) Resolution.Retained(retryAt) else Resolution.StaleEpoch
         }
 

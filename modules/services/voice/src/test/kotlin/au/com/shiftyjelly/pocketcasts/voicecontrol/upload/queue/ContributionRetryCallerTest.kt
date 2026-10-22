@@ -43,7 +43,7 @@ class ContributionRetryCallerTest {
             sha256 = sha256HexForTest(audio),
             byteCount = audio.size.toLong(),
             retainedSamples = 1600,
-            originalFormat = "oboe_float32",
+            originalFormat = "pcm_s16le",
             conversionVersion = "v1",
             truncated = false,
             droppedSpans = emptyList(),

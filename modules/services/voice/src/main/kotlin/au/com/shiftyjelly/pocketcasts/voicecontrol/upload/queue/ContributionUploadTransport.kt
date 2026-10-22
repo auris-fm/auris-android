@@ -34,15 +34,47 @@ class ContributionUploadTransport(
         /** A 2xx response. [payload] is the raw body and MUST validate before any release. */
         data class Accepted(val statusCode: Int, val payload: ByteArray) : Response()
 
-        /** The server is alive and asked for a later retry, or a transient failure happened. */
-        data class Retryable(val statusCode: Int?, val retryAfterS: Long?) : Response()
+        /** The server is alive and asked for a later retry ([retryAfterS] is a MINIMUM, not a hint). */
+        data class Retryable(val statusCode: Int, val retryAfterS: Long?) : Response()
 
-        /** The server refused on policy/authority grounds; nothing was stored and no retry hint applies. */
-        data class Refused(val statusCode: Int, val code: String?) : Response()
+        /** Credentials were refused: RECOVER, never delete. Ownership is retained. */
+        data class Unauthorized(val statusCode: Int) : Response()
+
+        /** The request or the capture is wrong and repeating it changes nothing. */
+        data class Rejected(val statusCode: Int, val code: String?) : Response()
+
+        /** The enrollment/collection is not currently accepting uploads: a policy state, not a fault. */
+        data class PolicyRefused(val statusCode: Int, val code: String?) : Response()
 
         /** The outcome is unknown: the bytes may or may not be stored. Ownership is retained. */
         data class Ambiguous(val statusCode: Int?) : Response()
     }
+
+    // The OWNING response table is the Worker's own (`src/contributions/upload_route.ts` statusFor +
+    // refusal): 400 invalid_request, 401 unauthorized, 403 not_enrolled/collection_disabled,
+    // 409 capture_conflict, 410 record_gone/enrollment_retired, 413 payload_too_large,
+    // 415 unsupported_audio, 422 integrity_mismatch, 429 rate_limited/quota_exceeded,
+    // 503 upload_pending/policy_unavailable/storage_unavailable. The client mirrors it code-first, so a
+    // NEW server code does not silently become "terminal" on this side.
+    private enum class Disposition { RETRY, UNAUTHORIZED, REJECTED, POLICY }
+
+    private val byCode = mapOf(
+        "invalid_request" to Disposition.REJECTED,
+        "unauthorized" to Disposition.UNAUTHORIZED,
+        "not_enrolled" to Disposition.POLICY,
+        "collection_disabled" to Disposition.POLICY,
+        "capture_conflict" to Disposition.REJECTED,
+        "record_gone" to Disposition.REJECTED,
+        "enrollment_retired" to Disposition.POLICY,
+        "payload_too_large" to Disposition.REJECTED,
+        "unsupported_audio" to Disposition.REJECTED,
+        "integrity_mismatch" to Disposition.REJECTED,
+        "rate_limited" to Disposition.RETRY,
+        "quota_exceeded" to Disposition.RETRY,
+        "upload_pending" to Disposition.RETRY,
+        "policy_unavailable" to Disposition.RETRY,
+        "storage_unavailable" to Disposition.RETRY,
+    )
 
     fun upload(captureId: String, audio: File): Response {
         val body = runCatching { audio.readBytes() }.getOrElse { return Response.Ambiguous(null) }
@@ -78,16 +110,23 @@ class ContributionUploadTransport(
     private fun classify(status: Int, body: ByteArray): Response {
         if (status in 200..299) return Response.Accepted(status, body)
         // An error body is NOT a receipt: it carries code/retry_after_s, so read just those strictly.
-        val code = runCatching { CanonicalReceipt.parseFields(body) }.getOrNull()?.get("code")
-            ?: errorField(body, "code")
+        val code = errorField(body, "code")
         val retryAfterS = errorField(body, "retry_after_s")?.toLongOrNull()
-        return when {
-            retryAfterS != null && retryAfterS > 0 -> Response.Retryable(status, retryAfterS)
-            status == 408 || status == 429 || status in 500..599 -> Response.Retryable(status, null)
-            status in 400..499 -> Response.Refused(status, code)
-            else -> Response.Ambiguous(status)
+        // The server's own minimum is a MINIMUM: it wins over any default backoff.
+        val retryHint = retryAfterS?.takeIf { it > 0 }
+        // An UNKNOWN code is not a licence to delete: the capture is retained and retried.
+        return when (byCode[code] ?: unknownFor(status)) {
+            Disposition.RETRY -> Response.Retryable(status, retryHint)
+            Disposition.UNAUTHORIZED -> Response.Unauthorized(status)
+            Disposition.REJECTED -> Response.Rejected(status, code)
+            Disposition.POLICY -> Response.PolicyRefused(status, code)
         }
     }
+
+    // Codes this client does not know yet are RETRIED, never treated as terminal disposal: deleting audio
+    // because a server introduced a code we have not read is not a risk worth taking (spec 76f09c72).
+    // 401 is the one status-class fallback that is safe to act on, since it is a credential problem.
+    private fun unknownFor(status: Int): Disposition = if (status == 401) Disposition.UNAUTHORIZED else Disposition.RETRY
 
     /** Read ONE optional field from an arbitrary JSON object body (error bodies are not receipts). */
     private fun errorField(body: ByteArray, name: String): String? {

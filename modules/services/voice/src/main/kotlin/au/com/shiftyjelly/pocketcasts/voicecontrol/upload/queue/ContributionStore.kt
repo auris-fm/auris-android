@@ -327,7 +327,7 @@ class ContributionStore(
     // generation-only write would let a same-generation successor admitted between validation and
     // mutation receive an OLD attempt's delay (reviewer 20a5440b). Null = token no longer owns the
     // queue; NOTHING was mutated.
-    fun scheduleRetryForAdmittedAttempt(token: AdmittedAttempt): Long? = synchronized(lock) {
+    fun scheduleRetryForAdmittedAttempt(token: AdmittedAttempt, retryAfterS: Long? = null): Long? = synchronized(lock) {
         // (spec f6a8f380) ONE owner transaction validates and mutates; no currentGeneration fallback.
         // A REVOKED epoch still allows disposal when the token still owns the attempt slot: the capture
         // was retained, no successor attempt was admitted, and only ownership retired. A successor
@@ -335,7 +335,7 @@ class ContributionStore(
         if (!tokenStillOwnsAttemptLocked(token)) {
             null
         } else {
-            scheduleRetryAfterFailureLocked(token.generation, token.captureId, retryAfterS = null, allowRevokedDisposal = true)
+            scheduleRetryAfterFailureLocked(token.generation, token.captureId, retryAfterS = retryAfterS, allowRevokedDisposal = true)
         }
     }
 

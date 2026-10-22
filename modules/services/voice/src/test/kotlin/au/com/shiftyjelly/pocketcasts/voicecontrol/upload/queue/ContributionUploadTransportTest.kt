@@ -145,14 +145,54 @@ class ContributionUploadTransportTest {
     }
 
     @Test
-    fun `a 4xx WITHOUT a retry hint is RETRYABLE only when the code is transient, else unreachable`() {
+    fun `401 unauthorized asks for credential recovery and is never an acceptance`() {
         val id = UUID.randomUUID().toString()
         val file = wavFile(id)
         responseStatus = 401
         responseBody = """{"schema_version":1,"code":"unauthorized"}"""
         val result = transport().upload(id, file)
-        // A 401 is a policy refusal, not a lost upload: it must NOT become an acceptance.
-        assertTrue("a 401 is never an acceptance", result !is ContributionUploadTransport.Response.Accepted)
+        assertTrue("a 401 is a credential problem, not a stored capture", result is ContributionUploadTransport.Response.Unauthorized)
+    }
+
+    @Test
+    fun `the Worker status table maps each refusal to its own disposition`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        val cases = listOf(
+            Triple(400, "invalid_request", ContributionUploadTransport.Response.Rejected::class),
+            Triple(409, "capture_conflict", ContributionUploadTransport.Response.Rejected::class),
+            Triple(410, "record_gone", ContributionUploadTransport.Response.Rejected::class),
+            Triple(413, "payload_too_large", ContributionUploadTransport.Response.Rejected::class),
+            Triple(415, "unsupported_audio", ContributionUploadTransport.Response.Rejected::class),
+            Triple(422, "integrity_mismatch", ContributionUploadTransport.Response.Rejected::class),
+            Triple(403, "not_enrolled", ContributionUploadTransport.Response.PolicyRefused::class),
+            Triple(403, "collection_disabled", ContributionUploadTransport.Response.PolicyRefused::class),
+            Triple(410, "enrollment_retired", ContributionUploadTransport.Response.PolicyRefused::class),
+            Triple(429, "rate_limited", ContributionUploadTransport.Response.Retryable::class),
+            Triple(429, "quota_exceeded", ContributionUploadTransport.Response.Retryable::class),
+            Triple(503, "upload_pending", ContributionUploadTransport.Response.Retryable::class),
+            Triple(503, "policy_unavailable", ContributionUploadTransport.Response.Retryable::class),
+            Triple(503, "storage_unavailable", ContributionUploadTransport.Response.Retryable::class),
+        )
+        for ((status, code, expected) in cases) {
+            responseStatus = status
+            responseBody = """{"schema_version":1,"code":"$code"}"""
+            val result = transport().upload(id, file)
+            assertEquals("$status $code", expected, result::class)
+        }
+    }
+
+    @Test
+    fun `an UNKNOWN error code is never a terminal delete`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 400
+        responseBody = """{"schema_version":1,"code":"some_future_code"}"""
+        val result = transport().upload(id, file)
+        assertTrue(
+            "an unknown code retains rather than deletes",
+            result !is ContributionUploadTransport.Response.Accepted && result !is ContributionUploadTransport.Response.Rejected,
+        )
     }
 
     @Test

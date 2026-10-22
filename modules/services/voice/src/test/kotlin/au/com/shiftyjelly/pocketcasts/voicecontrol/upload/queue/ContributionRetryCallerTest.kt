@@ -633,6 +633,38 @@ class ContributionRetryCallerTest {
     }
 
     @Test
+    fun `the server retry_after_s minimum survives a RESTART as the durable boundary`() {
+        var now = 22_000_000L
+        val root = tmp.newFolder("caller-retryafter-restart")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root, { now })
+        prepare(store, id)
+
+        val caller = ContributionRetryCaller(
+            store,
+            clock = { now },
+            policyAllows = { true },
+            networkAvailable = { true },
+            attemptUpload = { _, _, _ -> false },
+            ackResolver = ContributionAckResolver(store, CaptureReceiptValidator.forStore(store)),
+            retryAfterFor = { _, _ -> 600L }, // the server said: at least 600s
+        )
+        caller.pollOnce()
+
+        // A FRESH owner (restart) reads the same durable boundary: at least the server minimum.
+        val fresh = newStore(root, { now })
+        fresh.recover()
+        val boundary = fresh.retryBoundariesForTest()[id]
+        assertTrue("a boundary was persisted", boundary != null)
+        assertTrue(
+            "the persisted boundary is AT LEAST the server minimum",
+            boundary!! >= now + 600L,
+        )
+        assertTrue("not retry-eligible before the minimum", fresh.retryEligible(now + 599_999L).isEmpty())
+        assertEquals("retry-eligible at the minimum", listOf(id), fresh.retryEligible(now + 600_000L))
+    }
+
+    @Test
     fun `caller REJECTS and RETAINS on each malformed receipt shape`() {
         var now = 21_000_000L
         val bad = mapOf(
@@ -643,6 +675,9 @@ class ContributionRetryCallerTest {
             "unknown key" to """{"schema_version":1,"capture_id":"ID","record_sha256":"DIGEST","status":"accepted","receipt_id":"r","accepted_at":"t","retention_expires_at":"t","extra":"x"}""",
             "duplicate key" to """{"schema_version":1,"capture_id":"ID","capture_id":"ID","record_sha256":"DIGEST","status":"accepted","receipt_id":"r","accepted_at":"t","retention_expires_at":"t"}""",
             "wrong status literal" to """{"schema_version":1,"capture_id":"ID","record_sha256":"DIGEST","status":"stored","receipt_id":"r","accepted_at":"t","retention_expires_at":"t"}""",
+            "placeholder accepted_at" to """{"schema_version":1,"capture_id":"ID","record_sha256":"DIGEST","status":"accepted","receipt_id":"r","accepted_at":"t","retention_expires_at":"2026-11-21T00:00:00Z"}""",
+            "placeholder retention" to """{"schema_version":1,"capture_id":"ID","record_sha256":"DIGEST","status":"accepted","receipt_id":"r","accepted_at":"2026-10-22T00:00:00Z","retention_expires_at":"t"}""",
+            "retention before acceptance" to """{"schema_version":1,"capture_id":"ID","record_sha256":"DIGEST","status":"accepted","receipt_id":"r","accepted_at":"2026-11-21T00:00:00Z","retention_expires_at":"2026-10-22T00:00:00Z"}""",
         )
         bad.forEach { (label, template) ->
             val root = tmp.newFolder("caller-bad-" + label.replace(' ', '-'))

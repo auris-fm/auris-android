@@ -1,9 +1,12 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
 import com.squareup.moshi.JsonReader
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
+import java.util.UUID
 import okio.Buffer
 
 /**
@@ -82,6 +85,60 @@ class ContributionUploadTransport(
         "policy_unavailable" to Disposition.RETRY,
         "storage_unavailable" to Disposition.RETRY,
     )
+
+    /**
+     * The metadata-first multipart envelope the Worker intake actually reads
+     * (`src/contributions/stream_intake.ts`): part 1 named `metadata`, `application/json`, body exactly
+     * `{"record":<canonical record>,"record_sha256":"<hex>"}` with the digest over the CLIENT's canonical
+     * record bytes; part 2 named `audio`, `audio/wav`, filename `recording.wav`, the exact capture bytes.
+     * Bearer authentication travels on the request. No side-channel headers carry identity.
+     */
+    fun upload(captureId: String, record: RecordNode.Obj, audio: File): Response {
+        val recordBytes = CanonicalJson.canonicalBytes(record)
+        val recordSha256 = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(recordBytes).joinToString("") { "%02x".format(it) }
+        val metadata = "{\"record\":" + String(recordBytes, Charsets.UTF_8) + ",\"record_sha256\":\"$recordSha256\"}"
+        val audioBytes = runCatching { audio.readBytes() }.getOrElse { return Response.Ambiguous(null) }
+        val boundary = "----auris-contribution-${UUID.randomUUID()}"
+        val body = Buffer()
+        fun part(name: String, filename: String?, contentType: String, bytes: ByteArray) {
+            body.writeUtf8("--$boundary\r\n")
+            body.writeUtf8("Content-Disposition: form-data; name=\"$name\"")
+            if (filename != null) body.writeUtf8("; filename=\"$filename\"")
+            body.writeUtf8("\r\n")
+            body.writeUtf8("Content-Type: $contentType\r\n\r\n")
+            body.write(bytes)
+            body.writeUtf8("\r\n")
+        }
+        part("metadata", null, "application/json", metadata.toByteArray(Charsets.UTF_8))
+        part("audio", "recording.wav", "audio/wav", audioBytes)
+        body.writeUtf8("--$boundary--\r\n")
+        val payload = body.readByteArray()
+
+        val connection = try {
+            URI(endpoint).toURL().openConnection() as HttpURLConnection
+        } catch (invalid: Throwable) {
+            return Response.Ambiguous(null)
+        }
+        return try {
+            connection.requestMethod = "POST"
+            connection.connectTimeout = connectTimeoutMs
+            connection.readTimeout = readTimeoutMs
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            authorization()?.let { connection.setRequestProperty("Authorization", it) }
+            connection.setFixedLengthStreamingMode(payload.size)
+            connection.outputStream.use { it.write(payload) }
+            val status = connection.responseCode
+            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+            val responseBody = stream?.use { it.readBytes() } ?: ByteArray(0)
+            classify(status, responseBody)
+        } catch (io: Throwable) {
+            Response.Ambiguous(null)
+        } finally {
+            runCatching { connection.disconnect() }
+        }
+    }
 
     fun upload(captureId: String, audio: File): Response {
         val body = runCatching { audio.readBytes() }.getOrElse { return Response.Ambiguous(null) }

@@ -38,6 +38,8 @@ class ContributionRetryCaller(
     private val ackResolver: ContributionAckResolver,
     /** The transport response payload for the attempt just run (null when the response was lost). */
     private val responseFor: (generation: Long, captureId: String) -> ByteArray? = { _, _ -> null },
+    /** The server's Retry-After for this attempt, when it sent one. A MINIMUM for the next attempt. */
+    private val retryAfterFor: (generation: Long, captureId: String) -> Long? = { _, _ -> null },
     /** The owning-table disposition of this attempt's refusal, when the server refused with a code. */
     private val dispositionFor: (generation: Long, captureId: String) -> ContributionUploadTransport.Response? = { _, _ -> null },
 ) {
@@ -132,7 +134,9 @@ class ContributionRetryCaller(
                             else -> if (accepted) ContributionAckResolver.Ack.ACCEPTED else ContributionAckResolver.Ack.RETRYABLE
                         }
                         val payload = if (accepted) responseFor(generation, captureId) else null
-                        when (resolve(token, ack, payload)) {
+                        // The server minimum survives the resolver: it is a floor on the next attempt.
+                        val retryAfterS = if (accepted) null else retryAfterFor(generation, captureId)
+                        when (resolve(token, ack, payload, retryAfterS)) {
                             is ContributionAckResolver.Resolution.Released -> {
                                 attempted++
                                 onSuccess(token.generation, captureId)
@@ -169,7 +173,8 @@ class ContributionRetryCaller(
         token: ContributionStore.AdmittedAttempt,
         ack: ContributionAckResolver.Ack,
         payload: ByteArray?,
-    ): ContributionAckResolver.Resolution = runCatching { ackResolver.resolveForAttempt(token, ack, payload) }
+        retryAfterS: Long? = null,
+    ): ContributionAckResolver.Resolution = runCatching { ackResolver.resolveForAttempt(token, ack, payload, retryAfterS) }
         .getOrElse { ContributionAckResolver.Resolution.StaleEpoch }
 
     fun close() {

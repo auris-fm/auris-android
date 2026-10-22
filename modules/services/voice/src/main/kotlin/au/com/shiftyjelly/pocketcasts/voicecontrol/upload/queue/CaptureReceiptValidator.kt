@@ -44,7 +44,13 @@ class CaptureReceiptValidator(
         if (receipt.schemaVersion != SUPPORTED_SCHEMA_VERSION) return false
         if (receipt.captureId != captureId) return false
         if (receipt.status !in ACCEPTANCE_STATUSES) return false
-        if (receipt.receiptId.isEmpty() || receipt.acceptedAt.isEmpty() || receipt.retentionExpiresAt.isEmpty()) return false
+        if (receipt.receiptId.isEmpty()) return false
+        // The receipt timestamps must be REAL ISO-8601 instants: a nonempty placeholder such as "t"
+        // authorizes deletion just as wrongly as a wrong digest. A timestamp that cannot parse is a
+        // malformed receipt, not an acceptance.
+        val acceptedAt = runCatching { java.time.Instant.parse(receipt.acceptedAt) }.getOrNull() ?: return false
+        val retentionExpiresAt = runCatching { java.time.Instant.parse(receipt.retentionExpiresAt) }.getOrNull() ?: return false
+        if (!retentionExpiresAt.isAfter(acceptedAt)) return false
         val expected = recordedDigest(captureId) ?: return false
         // The digest must match EXACTLY: a truncated or case-folded echo is a different value, not a match.
         return receipt.recordSha256 == expected

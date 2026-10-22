@@ -204,8 +204,8 @@ class RecordValidatorNegativeTest {
             sha256 = "a".repeat(64),
             byteCount = 3244,
             retainedSamples = 1600,
-            originalFormat = "pcm_s16le",
-            conversionVersion = "1",
+            originalFormat = "oboe_float32",
+            conversionVersion = "v1",
             truncated = false,
             droppedSpans = emptyList(),
         )

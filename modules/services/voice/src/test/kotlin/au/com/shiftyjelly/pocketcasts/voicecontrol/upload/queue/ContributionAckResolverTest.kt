@@ -42,8 +42,8 @@ class ContributionAckResolverTest {
             sha256 = sha256Hex(audio),
             byteCount = audio.size.toLong(),
             retainedSamples = 1600,
-            originalFormat = "pcm_s16le",
-            conversionVersion = "1",
+            originalFormat = "oboe_float32",
+            conversionVersion = "v1",
             truncated = false,
             droppedSpans = emptyList(),
         )

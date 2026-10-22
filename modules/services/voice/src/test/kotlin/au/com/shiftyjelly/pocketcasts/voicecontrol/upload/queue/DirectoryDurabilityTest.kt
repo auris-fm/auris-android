@@ -65,8 +65,8 @@ class DirectoryDurabilityTest {
             sha256 = sha256HexForTest(audio),
             byteCount = audio.size.toLong(),
             retainedSamples = sampleCount.toLong(),
-            originalFormat = "pcm_s16le",
-            conversionVersion = "1",
+            originalFormat = "oboe_float32",
+            conversionVersion = "v1",
             truncated = false,
             droppedSpans = emptyList(),
         )

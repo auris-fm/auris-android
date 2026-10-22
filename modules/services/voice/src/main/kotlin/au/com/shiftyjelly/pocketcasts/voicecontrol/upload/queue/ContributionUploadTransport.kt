@@ -3,7 +3,9 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
 import com.squareup.moshi.JsonReader
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URI
 import java.util.UUID
@@ -131,9 +133,13 @@ class ContributionUploadTransport(
             connection.setFixedLengthStreamingMode(payload.size)
             connection.outputStream.use { it.write(payload) }
             val status = connection.responseCode
+            // `unauthorized` pairs with 401 in the owning table and needs no body: never read the error
+            // stream here, so a server that closes it abruptly cannot turn a credential refusal into an
+            // ambiguous outcome.
+            if (status == 401) return Response.Unauthorized(status)
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-            val responseBody = stream?.use { it.readBytes() } ?: ByteArray(0)
-            classify(status, responseBody)
+            val responseBody = stream?.use { readBounded(it) }
+            if (responseBody == null) Response.Ambiguous(status) else classify(status, responseBody)
         } catch (io: Throwable) {
             Response.Ambiguous(null)
         } finally {
@@ -162,13 +168,13 @@ class ContributionUploadTransport(
     )
 
     private fun classify(status: Int, body: ByteArray): Response {
-        if (status in 200..299) return Response.Accepted(status, readBounded(body))
+        if (status in 200..299) return Response.Accepted(status, body)
         // An error body is NOT a receipt: read it strictly and BOUNDED. A malformed error body is an
         // unknown outcome, which retains.
         // A credential refusal needs no body to be actionable: it is a 401 by the owning table.
         if (status == 401) return Response.Unauthorized(status)
         // A body that is not exactly {schema_version, code, retry_after_s?} is an UNKNOWN outcome.
-        val fields = errorFields(readBounded(body)) ?: return Response.Retryable(status, null)
+        val fields = errorFields(body) ?: return Response.Retryable(status, null)
         val code = fields["code"]
         val retryAfterS = fields["retry_after_s"]?.toLongOrNull()
         // A code whose status disagrees with the HTTP status is not a disposition this client acts on.
@@ -181,8 +187,22 @@ class ContributionUploadTransport(
         }
     }
 
-    /** Receipts and error bodies are small; anything larger is a malformed answer, not data. */
-    private fun readBounded(body: ByteArray): ByteArray = if (body.size > MAX_BODY_BYTES) body.copyOf(MAX_BODY_BYTES) else body
+    /**
+     * Read the response with the cap enforced WHILE reading: the first byte past [MAX_BODY_BYTES] aborts
+     * the read and the answer is refused as oversize. A truncated prefix is never returned - a valid
+     * terminal-looking prefix followed by an excess of junk must not parse into a delete verdict. Null
+     * means "no usable body": an oversize answer is unknown, never a disposition.
+     */
+    private fun readBounded(stream: InputStream): ByteArray? {
+        val buffer = ByteArray(8 * 1024)
+        val out = ByteArrayOutputStream()
+        while (true) {
+            val read = stream.read(buffer)
+            if (read < 0) return out.toByteArray()
+            if (out.size() + read > MAX_BODY_BYTES) return null
+            out.write(buffer, 0, read)
+        }
+    }
 
     private fun retryHint(retryAfterS: Long?): Long? = retryAfterS?.takeIf { it > 0 }
 
@@ -191,46 +211,69 @@ class ContributionUploadTransport(
      * members only, no trailing junk. Null on any deviation - a malformed error body is an unknown
      * outcome, which retains.
      */
-    private fun errorFields(body: ByteArray): Map<String, String>? {
-        val reader = JsonReader.of(Buffer().write(body))
-        return try {
-            val fields = LinkedHashMap<String, String>()
-            reader.beginObject()
-            while (reader.hasNext()) {
-                val key = reader.nextName()
-                if (key in fields) return null
-                when (reader.peek()) {
-                    JsonReader.Token.STRING -> {
-                        val value = reader.nextString()
-                        if (value.isEmpty() || value.any { it.isISOControl() }) return null
-                        fields[key] = value
-                    }
-
-                    JsonReader.Token.NUMBER -> fields[key] = reader.nextString()
-
-                    else -> return null
-                }
-            }
-            reader.endObject()
-            if (reader.peek() != JsonReader.Token.END_DOCUMENT) return null
-            // Exactly the Worker's UploadErrorBody: a version, a code, an optional retry hint. Any other
-            // member makes the answer one this client does not understand, so it is retained.
-            if (!fields.containsKey("code")) return null
-            if (fields.keys.any { it !in ERROR_BODY_KEYS }) return null
-            if (fields["schema_version"] != "1") return null
-            fields
-        } catch (malformed: Throwable) {
-            null
-        }
-    }
+    private fun errorFields(body: ByteArray): Map<String, String>? = ErrorBody.parse(body)
 
     // Codes this client does not know yet are RETRIED, never terminal disposal: deleting audio because a
     // server introduced a code we have not read is not a risk worth taking. 401 is the one status-class
     // fallback safe to act on, since it is a credential problem.
     private fun unknownFor(status: Int): Disposition = if (status == 401) Disposition.UNAUTHORIZED else Disposition.RETRY
 
+    /**
+     * The Worker's `UploadErrorBody` read with the SAME strict Moshi discipline as the receipt parser:
+     * typed tokens are preserved, so a quoted `"schema_version":"1"` is a TYPE MISMATCH rather than a
+     * string that merely equals "1" and authorizes a terminal delete.
+     */
+    private object ErrorBody {
+        private val ALLOWED_KEYS = setOf("schema_version", "code", "retry_after_s")
+
+        /** schema_version and retry_after_s are NUMBERS; a quoted number is a type error. */
+        private val NUMERIC_KEYS = setOf("schema_version", "retry_after_s")
+
+        fun parse(body: ByteArray): Map<String, String>? {
+            val reader = JsonReader.of(Buffer().write(body))
+            val fields = LinkedHashMap<String, String>()
+            val numeric = HashSet<String>()
+            return try {
+                reader.beginObject()
+                while (reader.hasNext()) {
+                    val key = reader.nextName()
+                    if (key in fields) return null // decoded-key duplicate detection
+                    when {
+                        reader.peek() == JsonReader.Token.NUMBER && key in NUMERIC_KEYS -> {
+                            fields[key] = reader.nextString()
+                            numeric += key
+                        }
+
+                        // Everything else is a non-empty, control-character-free string.
+                        reader.peek() == JsonReader.Token.STRING && key !in NUMERIC_KEYS -> {
+                            val value = reader.nextString()
+                            if (value.isEmpty() || value.any { it.isISOControl() }) return null
+                            fields[key] = value
+                        }
+
+                        else -> return null // wrong token type for the key, or bool/null/object/array
+                    }
+                }
+                reader.endObject()
+                if (reader.peek() != JsonReader.Token.END_DOCUMENT) return null // trailing junk
+                // Exactly the Worker's envelope: no member this client does not understand.
+                if (fields.keys.any { it !in ALLOWED_KEYS }) return null
+                if ("code" !in fields) return null
+                if ("schema_version" !in numeric || fields["schema_version"] != "1") return null
+                val hint = fields["retry_after_s"]
+                if (hint != null) {
+                    if ("retry_after_s" !in numeric) return null
+                    val value = hint.toLongOrNull() ?: return null
+                    if (value < 0) return null
+                }
+                fields
+            } catch (malformed: Throwable) {
+                null
+            }
+        }
+    }
+
     private companion object {
         const val MAX_BODY_BYTES = 1 shl 20
-        val ERROR_BODY_KEYS = setOf("schema_version", "code", "retry_after_s")
     }
 }

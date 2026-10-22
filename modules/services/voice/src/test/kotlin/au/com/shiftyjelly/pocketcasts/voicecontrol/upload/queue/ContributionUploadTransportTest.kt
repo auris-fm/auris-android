@@ -256,6 +256,51 @@ class ContributionUploadTransportTest {
     }
 
     @Test
+    fun `an oversized response is refused WHILE reading and never release`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 503
+        // A perfectly valid terminal-looking prefix, then an excess that must not be truncated into it.
+        responseBody = """{"schema_version":1,"code":"invalid_request"}""" + "x".repeat(2 shl 20)
+        val result = transport().upload(id, record(id), file)
+        assertTrue(
+            "a truncated prefix must never become a delete verdict: $result",
+            result is ContributionUploadTransport.Response.Ambiguous,
+        )
+    }
+
+    @Test
+    fun `a body the server streams past the cap is never parsed as a terminal answer`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 400
+        responseBody = """{"schema_version":1,"code":"invalid_request"}""" + " ".repeat(3 shl 20) + "}"
+        val result = transport().upload(id, record(id), file)
+        assertTrue("oversize is unknown, not terminal: $result", result is ContributionUploadTransport.Response.Ambiguous)
+    }
+
+    @Test
+    fun `a QUOTED schema_version is a type mismatch, so nothing becomes terminal`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 400
+        responseBody = """{"schema_version":"1","code":"invalid_request"}"""
+        val result = transport().upload(id, record(id), file)
+        assertTrue("a quoted version is not a numeric envelope: $result", result is ContributionUploadTransport.Response.Retryable)
+    }
+
+    @Test
+    fun `a quoted retry_after_s is a type mismatch and is not honoured`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        responseStatus = 503
+        responseBody = """{"schema_version":1,"code":"storage_unavailable","retry_after_s":"30"}"""
+        val result = transport().upload(id, record(id), file)
+        assertTrue("a quoted hint is malformed: $result", result is ContributionUploadTransport.Response.Retryable)
+        assertNull("no server minimum can be read from a type-mismatched field", (result as ContributionUploadTransport.Response.Retryable).retryAfterS)
+    }
+
+    @Test
     fun `the Worker status table maps each refusal to its own disposition`() {
         val id = UUID.randomUUID().toString()
         val file = wavFile(id)

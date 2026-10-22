@@ -203,9 +203,9 @@ class ContributionStore(
             return
         }
         synchronized(lock) { rootEnumerationUnknown = false }
-        // Account every on-disk capture this instance holds no charge for, grouped by capture id. The
-        // staging prefix/suffix shapes mirror the recovery debris grouping: an id that cannot be derived
-        // is still a file somebody left, so it is charged under its raw name rather than skipped.
+        // Account every on-disk capture this instance holds no charge for, grouped by derived capture id
+        // but measured at the CONCRETE discovered paths. Deriving an id and charging canonical paths only
+        // charged zero for raw or staging debris (reviewer 7a47fff8): the bytes live where they live.
         val suffixes = listOf(SUFFIX_READY, SUFFIX_PART, SUFFIX_ATTEMPTS, SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST)
         synchronized(lock) {
             files.groupBy { f ->
@@ -215,8 +215,31 @@ class ContributionStore(
                 } else {
                     f.name
                 }
-            }.forEach { (id, _) ->
-                if (id !in ownedCharges) chargeRetainedLocked(id, ready = false)
+            }.forEach { (id, captureFiles) ->
+                if (id in ownedCharges) return@forEach
+                try {
+                    val budget = MeasurementBudget(MEASURE_MAX_ENTRIES)
+                    var audio = 0L
+                    var rest = 0L
+                    for (file in captureFiles) {
+                        val bytes = retainedFootprintLocked(id).first // M61: wrong measurement, not the concrete file
+                        if (file.name.endsWith(SUFFIX_WAV) || file.name.endsWith(SUFFIX_PART)) {
+                            audio = checkedAdd(audio, bytes)
+                        } else {
+                            rest = checkedAdd(rest, bytes)
+                        }
+                    }
+                    if (rest < 0L || rest > Int.MAX_VALUE.toLong()) {
+                        throw MeasurementError("retained footprint unrepresentable: $rest")
+                    }
+                    unmeasuredIds -= id
+                    claimOwnedLocked(id, audio, rest.toInt(), ready = false)
+                } catch (failure: MeasurementError) {
+                    measurementFailures++
+                    unmeasuredIds += id
+                    // Small placeholder; the unknown state above is the refusal mechanism.
+                    claimOwnedLocked(id, 0L, 0, ready = false)
+                }
             }
         }
         retryDisqualifiedCleanupLocked()

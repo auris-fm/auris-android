@@ -1160,6 +1160,48 @@ class DirectoryDurabilityTest {
     private fun java.io.File.writeBytesByteArray() = writeBytes(ByteArray(4))
 
     @Test
+    fun `direct ADMISSION measures an ARBITRARY-NAME retained file, not the id's canonical paths`() {
+        // reviewer 7a47fff8: accounting derived an id and charged canonical paths only - a raw file like
+        // foreign.bin pointed at foreign.bin.wav (absent) and charged zero.
+        val root = tmp.newFolder("queue-admit-arbitrary-name")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        File(contributions, "foreign.bin").outputStream().use {
+            it.write(ByteArray(8))
+            it.channel.position(70L * 1024 * 1024)
+            it.write(ByteArray(1))
+        }
+
+        val store = ContributionStore(root, limits().copy(maxQueueBytes = 64L * 1024 * 1024))
+
+        assertTrue(
+            "the actual discovered artifact must be measured (refusal, not a zero-byte charge)",
+            store.admitForTestOrNull(1600, 32) == null,
+        )
+    }
+
+    @Test
+    fun `direct ADMISSION measures a retained PART file at its concrete path`() {
+        // reviewer 7a47fff8: gen$...wav.part lost its suffix chain through id derivation and was charged
+        // at a path that does not exist.
+        val root = tmp.newFolder("queue-admit-part-path")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        File(contributions, "gen\$123e4567-e89b-42d3-a456-426614174000.recording.wav.part").outputStream().use {
+            it.write(ByteArray(8))
+            it.channel.position(70L * 1024 * 1024)
+            it.write(ByteArray(1))
+        }
+
+        val store = ContributionStore(root, limits().copy(maxQueueBytes = 64L * 1024 * 1024))
+
+        assertTrue(
+            "retained staging bytes must be charged at their concrete path",
+            store.admitForTestOrNull(1600, 32) == null,
+        )
+    }
+
+    @Test
     fun `direct ADMISSION on a fresh instance over an overflowing ROOT is refused`() {
         // reviewer 92911de9: admission established marker coverage but not root coverage - a fresh store
         // over an existing overflowing contributions directory could admit without any bounded root scan.

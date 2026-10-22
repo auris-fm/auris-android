@@ -238,30 +238,74 @@ class ContributionStore(
      */
     // A .part file that will not delete still occupies the queue. Charge the bytes under the name the file
     // implies so they are owned rather than invisible; a later sweep retries the delete.
+    // Delete ONE file and settle its accounting as a single owner transition.
+    //
+    // Everything happens under the ownership monitor: the delete, the measurement of what survived, and the
+    // charge or its release. The previous version was called from outside the lock by discardCurrentPartials
+    // and the recovery sweep, so deletion and accounting could interleave with a competing owner holding the
+    // monitor - reintroducing through these paths the same race the main transitions were fixed for
+    // (reviewer 78c775dc).
     private fun File.deleteOrChargeOnFailure() {
-        if (delete() || !exists()) {
-            // REVERSE TRANSITION. A previous sweep may have charged this exact file; now that the bytes are
-            // gone, that charge and any unknown state keyed to it must go too, or a transient failure would
-            // permanently consume capacity and keep admission refused over bytes that no longer exist
-            // (reviewer e4342946).
-            val id = name.removeSuffix(SUFFIX_PART)
-            ownedCharges.remove(id)
-            unmeasuredIds -= id
-            return
-        }
-        if (exists()) {
-            // Charged by the file's ACTUAL name, not by a capture id: a staging name is not a capture, and
-            // measuring "$id$SUFFIX_WAV" for it found nothing and charged zero, which is the same blindness
-            // this delete check exists to remove. The survivor is measured where it actually is.
-            val id = name.removeSuffix(SUFFIX_PART)
-            val survivorBytes = runCatching { measuredPathBytes(this, MeasurementBudget(MEASURE_MAX_ENTRIES)) }
-                .getOrElse {
+        val file = this
+        val id = file.name.removeSuffix(SUFFIX_PART)
+        synchronized(lock) {
+            val deleted = file.delete()
+            // ABSENCE IS CHECKED THE SAME WAY MEASUREMENT CHECKS IT. `!exists()` returns false for an
+            // unreadable or permission-denied path, so a FAILED delete could look like a successful one and
+            // free retained bytes. Only a no-follow stat that reports NoSuchFileException proves absence.
+            val absence = absenceOf(file)
+            when {
+                absence == Absence.PRESENT -> {
+                    // The file survived. Charge it where it actually is; measuring "$id$SUFFIX_WAV" for a
+                    // staging name found nothing and charged zero, the blindness this check exists to remove.
+                    val survivorBytes = try {
+                        measuredPathBytes(file, MeasurementBudget(MEASURE_MAX_ENTRIES))
+                    } catch (unknown: MeasurementError) {
+                        measurementFailures++
+                        unmeasuredIds += id
+                        limits.maxQueueBytes
+                    }
+                    claimOwnedLocked(id, survivorBytes, 0, ready = false)
+                }
+
+                absence == Absence.ABSENT && deleted -> {
+                    // REVERSE TRANSITION: the bytes are provably gone, so the charge and any unknown state
+                    // keyed to them must go too, or a transient failure would permanently consume capacity.
+                    ownedCharges.remove(id)
+                    unmeasuredIds -= id
+                }
+
+                else -> {
+                    // UNKNOWN: the outcome cannot be established. That includes "delete() succeeded but the
+                    // path is provably ABSENT yet the file we charged is not the file we removed" - a path
+                    // replaced underneath us. Never free the charge on a failure to look, and never free it
+                    // on a deletion whose target we cannot tie to the charge; that is the whole defect.
                     measurementFailures++
                     unmeasuredIds += id
-                    limits.maxQueueBytes
                 }
-            claimOwnedLocked(id, survivorBytes, 0, ready = false)
+            }
+            if (deleted && absence == Absence.UNKNOWN) {
+                // Defensive: delete() claimed success but absence cannot be proven.
+                unmeasuredIds += id
+            }
         }
+    }
+
+    private enum class Absence { ABSENT, PRESENT, UNKNOWN }
+
+    // Absence that distinguishes "not there" from "could not look", using the same no-follow stat as
+    // measurement. Only NoSuchFileException proves absence.
+    private fun absenceOf(file: File): Absence = try {
+        java.nio.file.Files.readAttributes(
+            file.toPath(),
+            java.nio.file.attribute.BasicFileAttributes::class.java,
+            java.nio.file.LinkOption.NOFOLLOW_LINKS,
+        )
+        Absence.PRESENT
+    } catch (missing: java.nio.file.NoSuchFileException) {
+        Absence.ABSENT
+    } catch (failure: java.io.IOException) {
+        Absence.UNKNOWN
     }
 
     private fun deleteStaging(attemptId: String) {
@@ -1502,6 +1546,9 @@ class ContributionStore(
     fun ownedBytesForTest(): Long = synchronized(lock) { ownerBytesLocked() }
 
     fun ownedIdsForTest(): Set<String> = synchronized(lock) { ownedCharges.keys.toSet() }
+
+    // Lock-free on purpose: the held-monitor control needs to observe the charge while holding the monitor.
+    fun ownedChargesSnapshotForTest(): Map<String, Long> = ownedCharges.mapValues { it.value.audioBytes }
 
     // Test seam: the exact bytes currently charged for a capture, so a control can assert the MEASURED
     // charge directly instead of inferring it through an admission probe whose budget has to straddle an

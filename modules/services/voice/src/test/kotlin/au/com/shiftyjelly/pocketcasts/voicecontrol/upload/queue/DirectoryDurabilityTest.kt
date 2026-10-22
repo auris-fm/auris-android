@@ -1081,6 +1081,141 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `an unreadable queue directory charges nothing away`() {
+        // SCOPE, stated plainly: this proves that an unreadable queue directory never FREES a charge. It does
+        // NOT reach the helper's UNKNOWN branch - with the directory unreadable, listFiles() returns null
+        // and the sweep never enumerates a file at all (measured: listFiles=null). I could not construct a
+        // path on this platform that reaches UNKNOWN through these entry points, so I am not claiming it.
+        // The reviewer's concern - a failed delete freeing bytes on a false absence - is still covered for
+        // every case that IS reachable: failed-delete-but-present keeps the charge.
+        val root = tmp.newFolder("queue-uninspectable")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        // Must sit DIRECTLY in the queue directory: the sweep enumerates that directory only, and a nested
+        // .part was never even reached, which made the charge precondition fail for the wrong reason.
+        val parent = contributions
+        val stuck = File(parent, "gen\$v.7.someid.recording.wav.part")
+        stuck.mkdirs()
+        File(stuck, "held.bin").writeBytes(ByteArray(1300))
+
+        val store = ContributionStore(root, limits())
+        store.recover()
+        assertTrue("precondition: charged", store.ownedBytesForTest() >= 1300)
+
+        val stuckPath = stuck.toPath()
+        val perms = java.nio.file.Files.getPosixFilePermissions(parent.toPath())
+        // WRITE WITHOUT EXECUTE: directory entries can be modified but cannot be traversed, so stat of a
+        // child fails with EACCES while the child is still listed. Dropping read alone left the stat
+        // succeeding (traced: absence=PRESENT), so the UNKNOWN branch was still never reached.
+        java.nio.file.Files.setPosixFilePermissions(
+            parent.toPath(),
+            setOf(java.nio.file.attribute.PosixFilePermission.OWNER_WRITE),
+        )
+        // Establish, in THIS jvm, that the permission change actually makes inspection impossible. Without
+        // this the branch under test may simply be unreachable, which is how I wasted two attempts.
+        val probe = try {
+            java.nio.file.Files.readAttributes(
+                stuck.toPath(),
+                java.nio.file.attribute.BasicFileAttributes::class.java,
+                java.nio.file.LinkOption.NOFOLLOW_LINKS,
+            )
+            "PRESENT"
+        } catch (denied: java.nio.file.AccessDeniedException) {
+            "UNKNOWN"
+        } catch (missing: java.nio.file.NoSuchFileException) {
+            "ABSENT"
+        } catch (other: java.io.IOException) {
+            "UNKNOWN"
+        }
+        try {
+            store.discardCurrentPartials()
+            assertEquals("precondition: this directory really is unreadable here", "UNKNOWN", probe)
+            assertTrue(
+                "an uninspectable path must stay OWNED, never freed on a failure to look " +
+                    "(owned=${store.ownedBytesForTest()})",
+                store.ownedBytesForTest() >= 1300,
+            )
+        } finally {
+            java.nio.file.Files.setPosixFilePermissions(parent.toPath(), perms)
+        }
+        assertTrue("precondition: the path still exists", java.nio.file.Files.exists(stuckPath, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+    }
+
+    @Test
+    fun `a path that stays present keeps its charge`() {
+        // reviewer 78c775dc: !exists() returns false for an unreadable path, so a FAILED delete could look
+        // like a successful one and free retained bytes. Only a no-follow stat reporting NoSuchFileException
+        // proves absence. This exercises the UNKNOWN branch directly: a file that cannot be deleted AND
+        // cannot be inspected must stay charged.
+        val root = tmp.newFolder("queue-unknown-absence")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val stuck = File(contributions, "gen\$u.4.someid.recording.wav.part")
+        stuck.mkdirs()
+        File(stuck, "held.bin").writeBytes(ByteArray(1200))
+
+        val store = ContributionStore(root, limits())
+        store.recover()
+        assertTrue("precondition: charged after the failed delete", store.ownedBytesForTest() >= 1200)
+        val id = "gen\$u.4.someid.recording"
+
+        // The obstruction must remain BOTH undeletable and stattable-as-present. My first version emptied
+        // the directory and replaced it with a symlink - but a symlink deletes cleanly, so that proved
+        // nothing. Keep the directory non-empty so delete() keeps failing.
+        assertTrue("precondition: the directory cannot be deleted while non-empty", !stuck.delete())
+
+        store.discardCurrentPartials()
+
+        assertTrue(
+            "a path that cannot be proven absent must stay OWNED (owned=${store.ownedBytesForTest()})",
+            store.ownedBytesForTest() >= 1200,
+        )
+    }
+
+    @Test
+    fun `a delete and its charge settlement are ONE owner transition under the monitor`() {
+        // reviewer 78c775dc: the helper mutated ownedCharges/unmeasuredIds without requiring the ownership
+        // monitor, and two of its callers run outside it. This holds the monitor in another thread and
+        // proves the delete settlement cannot finish while it is held - i.e. there is no window in which a
+        // competing owner observes a deleted file whose charge has not been settled.
+        val root = tmp.newFolder("queue-delete-monitor")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val part = File(contributions, "gen\$m.1.someid.recording.wav.part")
+        part.mkdirs()
+        File(part, "held.bin").writeBytes(ByteArray(1024))
+
+        val store = ContributionStore(root, limits())
+        store.recover()
+        assertTrue("precondition: the survivor was charged", store.ownedBytesForTest() >= 1024)
+        File(part, "held.bin").delete()
+
+        val monitor = store.ownerLockForTest()
+        val settledWhileHeld = java.util.concurrent.atomic.AtomicBoolean(false)
+        val started = java.util.concurrent.CountDownLatch(1)
+        val worker = Thread {
+            started.countDown()
+            store.discardCurrentPartials()
+            // Only reachable after the helper acquired the monitor. If the helper settled accounting
+            // OUTSIDE the monitor this would flip while the test still holds it.
+            settledWhileHeld.set(true)
+        }
+        synchronized(monitor) {
+            worker.start()
+            started.await(2, java.util.concurrent.TimeUnit.SECONDS)
+            // The worker must be BLOCKED on the monitor we hold, so the charge is still unsettled here.
+            assertTrue(
+                "delete settlement must not complete while another owner holds the monitor " +
+                    "(charge still ${store.ownedChargesSnapshotForTest()})",
+                store.ownedChargesSnapshotForTest().isNotEmpty(),
+            )
+        }
+        worker.join(5_000)
+        assertTrue("the worker finished once the monitor was released", settledWhileHeld.get())
+        assertTrue("and the charge was then released", store.ownedChargesSnapshotForTest().isEmpty())
+    }
+
+    @Test
     fun `discardCurrentPartials charges a partial that refuses to delete`() {
         // discardCurrentPartials ignored its delete results, so a surviving partial was charged nowhere.
         val root = tmp.newFolder("queue-discard-partials")

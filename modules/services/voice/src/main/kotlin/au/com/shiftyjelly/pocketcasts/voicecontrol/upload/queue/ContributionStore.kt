@@ -271,6 +271,9 @@ class ContributionStore(
 
     fun admitForTestOrNull(samples: Long, metadataBytes: Int): Admission? = admit(samples, metadataBytes)
 
+    /** Test seam: current durable/in-memory retry boundaries. */
+    fun retryBoundariesForTest(): Map<String, Long> = synchronized(lock) { nextRetryAtMs.toMap() }
+
     /** Test seam: how many records' worth of budget live reservations currently occupy. */
     fun reservedRecordsForTest(): Int = synchronized(lock) { reservations.size }
 

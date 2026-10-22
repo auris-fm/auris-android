@@ -848,12 +848,13 @@ class ContributionStore(
     }
 
     /**
-     * Presence is read from one bounded directory listing, NOT from exists(): a stat failure must look
-     * UNKNOWN, never absent (reviewer 199ccdee). Returns null when the directory cannot be enumerated.
+     * Presence is read from the BOUNDED directory listing, NOT from exists(): a stat failure must look
+     * UNKNOWN, never absent, and an over-bound root is an explicit failure, not an eager allocation
+     * (reviewer 45b9d4de). Returns null when the directory cannot be enumerated or exceeds the bound.
      */
     private fun visibleNamesLocked(): Set<String>? = try {
-        dir.list()?.toSet()
-    } catch (unknown: Throwable) {
+        boundedDirectoryListing(dir).mapTo(HashSet()) { it.name }
+    } catch (unknown: MeasurementError) {
         null
     }
 
@@ -1052,16 +1053,22 @@ class ContributionStore(
             } else if (!ownership.isValidUnderLock(generation)) {
                 null
             } else {
-                val countResolved = try {
+                val reconciledCount: Int? = try {
                     reconcileAttemptsIntentLocked(captureId)
-                    true
                 } catch (uncertain: IllegalStateException) {
                     // The pending count intent could not be finished: no further attempt may be recorded
                     // from the older record (reviewer 199ccdee). The hold persists until recovery resolves.
                     sidecarFailure = uncertain
-                    false
+                    null
                 }
-                val current = if (countResolved) memoryEntries[captureId] else null
+                var current = memoryEntries[captureId]
+                if (reconciledCount != null && current != null) {
+                    // The RECONCILED record is the trusted count: the in-memory copy may predate the
+                    // pending increment, and re-deriving from it would republish the same count instead
+                    // of advancing (reviewer 45b9d4de).
+                    current = current.copy(attempts = reconciledCount)
+                    memoryEntries[captureId] = current
+                }
                 if (current == null) {
                     null
                 } else {

@@ -383,6 +383,64 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `a SAME-INSTANCE count reconciliation advances the next attempt past the pending increment`() {
+        // reviewer 45b9d4de: the reconciled record is the trusted count - re-deriving from the stale
+        // in-memory copy would republish the pending count instead of advancing it.
+        var now = 10_200_000L
+        val root = tmp.newFolder("queue-count-same-instance")
+        val id = "e7e7e7e7-1111-4222-8333-444444444444"
+        var attemptsTmpSyncs = 0
+        val store = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+            fileSync = FileSync { file ->
+                if (file.name.endsWith(".attempts.tmp")) {
+                    attemptsTmpSyncs++
+                    if (attemptsTmpSyncs == 2) throw java.io.IOException("pre-rename count failure")
+                }
+            },
+        )
+        val admission = store.admitForTest(1600, meta(id).size)
+        val generation = store.fence.currentGeneration()
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertEquals(1, store.recordAttempt(generation, id))
+        assertTrue("count publication fails pre-rename", runCatching { store.recordAttempt(generation, id) }.isFailure)
+        now += 10L
+
+        // SAME instance, fault cleared: reconciliation finishes the intent, adopts the reconciled
+        // count, and the next publication is 3 - not a republish of the pending 2.
+        assertEquals(3, store.recordAttempt(generation, id))
+    }
+
+    @Test
+    fun `reconciliation through a root BEYOND the bound fails closed`() {
+        // reviewer 45b9d4de: reconciliation must use the bounded listing with its explicit failure, so
+        // an over-bound root holds the capture instead of silently reading absence.
+        var now = 10_600_000L
+        val root = tmp.newFolder("queue-count-overbound")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        val id = "f8f8f8f8-1111-4222-8333-444444444444"
+        val store = ContributionStore(root, limits().copy(retryInitialS = 4, retryMaxS = 8), clock = { now }, jitter = { bound -> bound - 1 })
+        val admission = store.admitForTest(1600, meta(id).size)
+        val generation = store.fence.currentGeneration()
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertEquals(1, store.recordAttempt(generation, id))
+        // Flooding the root past the measurement bound must turn every reconciliation UNKNOWN.
+        repeat(3000) { n ->
+            File(contributions, "overflow-fill-$n.bin").writeBytes(byteArrayOf(n.toByte()))
+        }
+        now += 10L
+
+        assertTrue(
+            "over-bound root: attempt recording fails closed",
+            runCatching { store.recordAttempt(generation, id) }.getOrNull() == null,
+        )
+    }
+
+    @Test
     fun `retry scheduling survives a RESTART without shortening the boundary`() {
         // reviewer 21176965: nextRetryAtMs was in-memory only and a missing value counted as eligible-now,
         // so a restart bypassed both the local backoff and a received server minimum.

@@ -222,7 +222,7 @@ class ContributionStore(
                     var audio = 0L
                     var rest = 0L
                     for (file in captureFiles) {
-                        val bytes = retainedFootprintLocked(id).first // M61: wrong measurement, not the concrete file
+                        val bytes = measuredPathBytes(file, budget, optional = false)
                         if (file.name.endsWith(SUFFIX_WAV) || file.name.endsWith(SUFFIX_PART)) {
                             audio = checkedAdd(audio, bytes)
                         } else {

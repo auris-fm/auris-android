@@ -265,7 +265,8 @@ class ContributionStore(
                     } catch (unknown: MeasurementError) {
                         measurementFailures++
                         unmeasuredIds += id
-                        limits.maxQueueBytes
+                        // Worst-case placeholder: the bytes could not be counted, so they are assumed to
+                        // fill the whole budget until a successful measurement clears the unknown mark.
                         claimOwnedLocked(id, limits.maxQueueBytes, 0, ready = false)
                         return@synchronized
                     }
@@ -851,9 +852,51 @@ class ContributionStore(
      * restored). Invalid complete-looking entries are dropped with a content-free counter —
      * recovery admits nothing unvalidated to upload.
      */
+    // Set when root enumeration failed or exceeded its bound. Recovery cannot know what the queue
+    // directory holds, so it must not run a DESTRUCTIVE sweep over a partially-known listing, and
+    // accounting stays unknown - refusing admission - until a later recovery enumerates successfully.
+    @Volatile
+    private var rootEnumerationUnknown = false
+
+    // Root discovery with the same discipline as the measurement walk: a lazy directory stream, ONE shared
+    // entry budget, error-explicit. The eager `dir.listFiles()` materialized the entire directory with no
+    // bound, so a pathological queue root allocated without limit at every startup (reviewer c66fda06
+    // series; the same defect already fixed inside the measurement walk).
+    private fun boundedRootListing(): List<File> {
+        val budget = MeasurementBudget(MEASURE_MAX_ENTRIES)
+        val found = mutableListOf<File>()
+        try {
+            java.nio.file.Files.newDirectoryStream(dir.toPath()).use { stream ->
+                for (child in stream) {
+                    if (!budget.consume()) throw MeasurementError("root exceeds $MEASURE_MAX_ENTRIES entries")
+                    found += child.toFile()
+                }
+            }
+        } catch (unknown: MeasurementError) {
+            throw unknown
+        } catch (failure: java.io.IOException) {
+            throw MeasurementError("unreadable root $dir: ${failure.message}")
+        } catch (failure: RuntimeException) {
+            throw MeasurementError("root discovery failed after ${found.size} entries: ${failure.message}")
+        }
+        return found
+    }
+
     fun recover(): List<Entry> {
         dir.mkdirs()
-        val files = dir.listFiles()?.toList() ?: emptyList()
+        val files = try {
+            boundedRootListing()
+        } catch (unknown: MeasurementError) {
+            synchronized(lock) {
+                rootEnumerationUnknown = true
+                measurementFailures++
+            }
+            // NO sweep, NO serving: deleting from a directory whose contents are only partially known is
+            // destructive with unknown coverage, and nothing can be validated for serving. Accounting is
+            // unknown, so admission is refused until a later recovery enumerates successfully.
+            return emptyList()
+        }
+        synchronized(lock) { rootEnumerationUnknown = false }
         // 1) Debris sweep: .part files are NEVER ready; .ready without wav/meta is invalid.
         // The RESULT of delete() used to be discarded here, so staging bytes that survived occupied the
         // queue while being charged nowhere (reviewer c71672c0).
@@ -1400,7 +1443,7 @@ class ContributionStore(
     // capture limit that happens to be small is not a queue-wide guarantee (reviewer e6eeabda, 7340fe2d).
     private val unmeasuredIds = mutableSetOf<String>()
 
-    private fun unknownFootprintLocked(): Boolean = unmeasuredIds.isNotEmpty()
+    private fun unknownFootprintLocked(): Boolean = unmeasuredIds.isNotEmpty() || rootEnumerationUnknown
 
     fun unknownFootprintForTest(): Boolean = synchronized(lock) { unknownFootprintLocked() }
 

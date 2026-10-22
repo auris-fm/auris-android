@@ -1081,6 +1081,43 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `a queue root beyond its entry bound defers sweeps and refuses admission`() {
+        // reviewer c66fda06 series: recover() materialized the ENTIRE root with dir.listFiles(), unbounded -
+        // the same eager-allocation defect already fixed inside the measurement walk. Beyond the bound,
+        // recovery must refuse to discover rather than sweep a partially-known directory: a destructive
+        // sweep with unknown coverage could delete entries it never enumerated, and nothing can be safely
+        // served from a listing that was cut off.
+        val root = tmp.newFolder("queue-root-bound")
+        val contributions = File(root, "contributions")
+        contributions.mkdirs()
+        // Bound + 1 .part files: every one of them is debris the sweep WOULD delete if it ran.
+        val parts = (0..512).map { i ->
+            File(contributions, "gen\$b.%d.someid.recording.wav.part".format(i)).apply { writeBytes(ByteArray(8)) }
+        }
+
+        val store = ContributionStore(root, limits())
+        store.recover()
+
+        assertTrue(
+            "recovery must refuse a root it could not fully enumerate",
+            store.unknownFootprintForTest(),
+        )
+        assertTrue(
+            "the destructive sweep must NOT run on partially-known coverage (survivors=" +
+                parts.count { it.exists() } + ")",
+            parts.all { it.exists() },
+        )
+
+        // A later recovery with the obstruction removed (files deleted externally) must clear the mark.
+        parts.forEach { it.delete() }
+        store.recover()
+        assertTrue(
+            "a successful enumeration must clear the unknown mark",
+            !store.unknownFootprintForTest(),
+        )
+    }
+
+    @Test
     fun `an unknown survivor that later measures successfully stops refusing admission`() {
         // reviewer 7e09c62b: the PRESENT branch computed survivorBytes then claimOwnedLocked but never
         // cleared unmeasuredIds, so an id that once could not be measured kept refusing admission forever

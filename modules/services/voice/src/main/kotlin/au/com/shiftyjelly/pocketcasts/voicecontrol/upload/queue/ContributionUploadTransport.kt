@@ -95,13 +95,24 @@ class ContributionUploadTransport(
      * record bytes; part 2 named `audio`, `audio/wav`, filename `recording.wav`, the exact capture bytes.
      * Bearer authentication travels on the request. No side-channel headers carry identity.
      */
-    fun upload(captureId: String, record: RecordNode.Obj, audio: File): Response {
+    fun upload(captureId: String, record: RecordNode.Obj, audio: File): Response = runCatching {
+        val (payload, contentType) = requireNotNull(buildEnvelope(record, audio)) { "envelope" }
+        send(captureId, payload, contentType)
+    }.getOrElse { Response.Ambiguous(null) }
+
+    /**
+     * The exact request body this transport emits for [record] + [audio], and the Content-Type carrying
+     * its boundary. Exposed so a parity harness can feed the BYTES THIS CLIENT PRODUCES to the real
+     * intake rather than re-deriving an envelope that only resembles it.
+     */
+    internal fun requestEnvelope(record: RecordNode.Obj, audio: File): Pair<ByteArray, String>? = buildEnvelope(record, audio)
+
+    private fun buildEnvelope(record: RecordNode.Obj, audio: File): Pair<ByteArray, String>? {
         val recordBytes = CanonicalJson.canonicalBytes(record)
         val recordSha256 = java.security.MessageDigest.getInstance("SHA-256")
             .digest(recordBytes).joinToString("") { "%02x".format(it) }
         val metadata = "{\"record\":" + String(recordBytes, Charsets.UTF_8) + ",\"record_sha256\":\"$recordSha256\"}"
-        val credentials = authorization() ?: return Response.Unauthorized(-1) // local refusal: nothing leaves
-        val audioBytes = runCatching { audio.readBytes() }.getOrElse { return Response.Ambiguous(null) }
+        val audioBytes = runCatching { audio.readBytes() }.getOrElse { return null }
         val boundary = "----auris-contribution-${UUID.randomUUID()}"
         val body = Buffer()
         fun part(name: String, filename: String?, contentType: String, bytes: ByteArray) {
@@ -116,8 +127,12 @@ class ContributionUploadTransport(
         part("metadata", null, "application/json", metadata.toByteArray(Charsets.UTF_8))
         part("audio", "recording.wav", "audio/wav", audioBytes)
         body.writeUtf8("--$boundary--\r\n")
-        val payload = body.readByteArray()
+        return body.readByteArray() to "multipart/form-data; boundary=$boundary"
+    }
 
+    private fun send(captureId: String, payload: ByteArray, contentType: String): Response {
+        // Resolved BEFORE anything is read or sent: a device with no usable credential issues NO request.
+        val credentials = authorization() ?: return Response.Unauthorized(-1)
         val connection = try {
             URI(endpoint).toURL().openConnection() as HttpURLConnection
         } catch (invalid: Throwable) {
@@ -128,7 +143,7 @@ class ContributionUploadTransport(
             connection.connectTimeout = connectTimeoutMs
             connection.readTimeout = readTimeoutMs
             connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            connection.setRequestProperty("Content-Type", contentType)
             connection.setRequestProperty("Authorization", credentials)
             connection.setFixedLengthStreamingMode(payload.size)
             connection.outputStream.use { it.write(payload) }

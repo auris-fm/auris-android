@@ -798,10 +798,17 @@ class ContributionStore(
     // inventing a persisted clock (spec: resume from durable queue state).
     private val nextRetryAtMs = mutableMapOf<String, Long>()
 
-    /** Backoff BOUND (ms) for the given attempt number: min(retry_max_s, retry_initial_s * 2^(attempt-1)) * 1000. */
+    /**
+     * Backoff BOUND (ms) for the given failed-attempt number: min(retry_max_s, retry_initial_s *
+     * 2^(attempt-1)) * 1000. Capped exponential growth WITHOUT shifts: doubling saturates at retry_max_s,
+     * so no attempt count (however large) can overflow into a negative or wrapped bound.
+     */
     internal fun backoffBoundMs(attempt: Int): Long {
-        val shifted = limits.retryInitialS shl (attempt - 1).coerceAtMost(62)
-        val boundS = minOf(shifted, limits.retryMaxS)
+        require(attempt >= 1) { "backoff needs a FAILED attempt, got $attempt" }
+        var boundS = limits.retryInitialS
+        repeat((attempt - 1).coerceAtMost(63)) {
+            if (boundS < limits.retryMaxS) boundS = minOf(boundS * 2, limits.retryMaxS)
+        }
         return boundS * 1000L
     }
 
@@ -822,12 +829,38 @@ class ContributionStore(
         } else if (captureId !in memoryEntries) {
             null
         } else {
-            val bound = backoffBoundMs(memoryEntries[captureId]!!.attempts)
+            val attempt = memoryEntries[captureId]!!.attempts
+            if (attempt < 1) return@synchronized null // no FAILED attempt to back off
+            val bound = backoffBoundMs(attempt)
             val jittered = jitter(bound)
-            val floor = (retryAfterS ?: 0L).coerceAtLeast(0L) * 1000L
-            val eligibleAt = clock() + maxOf(jittered, floor)
-            nextRetryAtMs[captureId] = eligibleAt
-            eligibleAt
+            // Saturating arithmetic: a huge server minimum must mean "never within representable time",
+            // not a wrapped earlier/past retry.
+            val floorMs = when {
+                retryAfterS == null -> 0L
+                retryAfterS > Long.MAX_VALUE / 1000L -> Long.MAX_VALUE
+                else -> retryAfterS * 1000L
+            }
+            val delay = maxOf(jittered, floorMs)
+            val eligibleAt =
+                if (delay >= Long.MAX_VALUE - 9_000_000_000_000L) {
+                    Long.MAX_VALUE
+                } else {
+                    val sum = clock() + delay
+                    if (sum < 0) Long.MAX_VALUE else sum
+                }
+            // The not-before boundary is DURABLE: it rides the attempts sidecar so a restart cannot
+            // reroll the jitter or bypass a received server minimum (spec requires attempts and their
+            // retry state to survive the process).
+            val sidecar = File(dir, "$captureId$SUFFIX_ATTEMPTS")
+            try {
+                sidecar.writeText("$attempt $eligibleAt")
+                nextRetryAtMs[captureId] = eligibleAt
+                eligibleAt
+            } catch (_: Throwable) {
+                // Roll the in-memory mark back; the sidecar's original text is untouched on failure.
+                nextRetryAtMs.remove(captureId)
+                throw IllegalStateException("retry boundary sidecar write failed")
+            }
         }
     }
 
@@ -851,6 +884,15 @@ class ContributionStore(
                 .sorted()
         }
     }
+
+    /**
+     * Durable not-before retry boundary from the attempts sidecar ("<attempts>[ <nextRetryAtMs>]");
+     * absent when the sidecar predates scheduling or the field is malformed. Missing is NOT eligible-now:
+     * only a DURABLY RECORDED boundary moves an entry earlier, so a restart can never reroll the jitter
+     * or bypass a server minimum (reviewer 21176965).
+     */
+    private fun readRetryBoundaryLocked(id: String): Long? = readBoundedSidecar(File(dir, "$id$SUFFIX_ATTEMPTS"), MAX_ATTEMPTS_SIDECAR_BYTES)
+        ?.trim()?.split(' ')?.getOrNull(1)?.toLongOrNull()?.takeIf { it > 0 }
 
     fun recordAttempt(generation: Long, captureId: String): Int? {
         // ONE ownership transaction: validate, advance the index, and write the durable attempts sidecar all
@@ -876,7 +918,12 @@ class ContributionStore(
                     memoryEntries[captureId] = updated
                     hooks.beforeAttemptWrite?.invoke(generation)
                     try {
-                        File(dir, "$captureId$SUFFIX_ATTEMPTS").writeText(updated.attempts.toString())
+                        // Preserve any durably scheduled retry boundary: the attempts sidecar carries
+                        // "<attempts>[ <nextRetryAtMs>]" and the count alone must not erase the deadline.
+                        val boundary = nextRetryAtMs[captureId]
+                        File(dir, "$captureId$SUFFIX_ATTEMPTS").writeText(
+                            if (boundary == null) updated.attempts.toString() else updated.attempts.toString() + " " + boundary,
+                        )
                         updated.attempts
                     } catch (_: Throwable) {
                         // Roll back only while this generation still owns the queue; after a revoke the whole
@@ -1199,6 +1246,9 @@ class ContributionStore(
                 ownedCharges.getOrPut(it.captureId) {
                     OwnedCharge(it.audioBytes, it.metadataBytes, ready = false)
                 }.ready = true
+                // Restore the durable retry boundary: a restart must not shorten a scheduled backoff
+                // or a received server minimum by "forgetting" them.
+                readRetryBoundaryLocked(it.captureId)?.let { boundary -> nextRetryAtMs[it.captureId] = boundary }
             }
             recovered = true
         }
@@ -1226,8 +1276,10 @@ class ContributionStore(
             // A missing or malformed sidecar is a REFUSAL, never a default: defaulting attempts to 0
             // would hand back a spent retry budget, and defaulting created-at to mtime would let a
             // touched file silently renew its queue age.
+            // Sidecar format "<attempts>[ <nextRetryAtMs>]": the optional retry boundary is parsed
+            // where it is used (readRetryBoundaryLocked); validation reads the count token only.
             val attempts = readBoundedSidecar(attemptsFile, MAX_ATTEMPTS_SIDECAR_BYTES)
-                ?.trim()?.toIntOrNull()?.takeIf { it >= 0 } ?: return null
+                ?.trim()?.split(' ')?.firstOrNull()?.toIntOrNull()?.takeIf { it >= 0 } ?: return null
             val created = readBoundedSidecar(File(dir, "$id$SUFFIX_CREATED"), MAX_CREATED_SIDECAR_BYTES)
                 ?.trim()?.toLongOrNull()?.takeIf { it > 0 } ?: return null
             // --- Mandatory digest identity: this on-disk format is unreleased, so there is NO legacy

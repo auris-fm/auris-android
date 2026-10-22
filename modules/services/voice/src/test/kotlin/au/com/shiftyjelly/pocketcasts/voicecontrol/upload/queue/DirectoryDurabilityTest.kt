@@ -88,6 +88,91 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `retry scheduling survives a RESTART without shortening the boundary`() {
+        // reviewer 21176965: nextRetryAtMs was in-memory only and a missing value counted as eligible-now,
+        // so a restart bypassed both the local backoff and a received server minimum.
+        var now = 5_000_000L
+        val root = tmp.newFolder("queue-retry-restart")
+        val id = "9c9c9c9c-1111-4222-8333-444444444444"
+        val store = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+        )
+        val admission = store.admitForTest(1600, meta(id).size)
+        val generation = store.fence.currentGeneration()
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertEquals(1, store.recordAttempt(generation, id))
+        assertEquals(now + 3_999L, store.scheduleRetryAfterFailure(generation, id, retryAfterS = null))
+
+        // RESTART: a fresh instance over the same root must load the durable not-before boundary.
+        val revived = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+        )
+        assertEquals(listOf(id), revived.recover().map { it.captureId })
+        assertTrue(
+            "the scheduled boundary must survive the restart (still not eligible before it)",
+            revived.retryEligible(now + 3_998L).isEmpty(),
+        )
+        assertEquals(
+            "eligible exactly at the persisted boundary",
+            listOf(id),
+            revived.retryEligible(now + 3_999L),
+        )
+    }
+
+    @Test
+    fun `retry scheduling saturates extreme values and refuses a zero-attempt entry`() {
+        // reviewer 21176965: shift overflow, negative shifts and unchecked clock/floor additions could
+        // turn a large server minimum into an immediate or past retry.
+        var now = 8_000_000L
+        val root = tmp.newFolder("queue-retry-extremes")
+        val id = "adadadad-1111-4222-8333-444444444444"
+        val store = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+        )
+        val admission = store.admitForTest(1600, meta(id).size)
+        val generation = store.fence.currentGeneration()
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+
+        assertNull(
+            "an entry with ZERO attempts has no failed attempt to schedule backoff for",
+            store.scheduleRetryAfterFailure(generation, id, retryAfterS = null),
+        )
+
+        // Drive attempts up so the exponent far exceeds what any shift can represent: the bound must
+        // CAP at retry_max_s, never overflow negative.
+        var attempts = 0
+        for (i in 1..12) {
+            attempts = store.recordAttempt(generation, id) ?: break
+            now += 1L
+            store.scheduleRetryAfterFailure(generation, id, retryAfterS = null)
+        }
+        assertEquals(12, attempts)
+        now += 1L
+        assertEquals(13, store.recordAttempt(generation, id))
+        val hugeAttemptEligible = store.scheduleRetryAfterFailure(generation, id, retryAfterS = null)
+        assertEquals("attempt 13 bound must cap at retry_max_s (8s) minus the pinned jitter draw", now + 7_999L, hugeAttemptEligible)
+
+        // A near-limit server minimum must SATURATE, not wrap into the past.
+        assertEquals(
+            Long.MAX_VALUE,
+            store.scheduleRetryAfterFailure(generation, id, retryAfterS = Long.MAX_VALUE / 4),
+        )
+        assertTrue(
+            "a saturated boundary means never eligible within this test's lifetime",
+            store.retryEligible(Long.MAX_VALUE - 1).isEmpty(),
+        )
+    }
+
+    @Test
     fun `a failed attempt schedules a FULL-JITTER retry that the FENCE bounds`() {
         // Spec voice-recording-uploads.md retry: full-jitter exponential backoff uniformly selected from
         // zero to min(retry_max_s, retry_initial_s * 2^(attempt-1)); a server Retry-After is a MINIMUM

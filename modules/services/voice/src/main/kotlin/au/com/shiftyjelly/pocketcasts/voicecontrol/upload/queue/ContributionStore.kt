@@ -30,6 +30,11 @@ class ContributionStore(
     private val limits: QueueLimits,
     private val clock: () -> Long = System::currentTimeMillis,
     /**
+     * Full-jitter source for the retry policy: given the exclusive backoff bound in ms, returns the drawn
+     * delay in [0, bound). Injected so tests pin the draw; production uses a uniform random generator.
+     */
+    internal val jitter: (Long) -> Long = { bound -> if (bound <= 0) 0 else kotlin.random.Random.Default.nextLong(bound) },
+    /**
      * The single shared ownership boundary: one monitor holding BOTH the queue state and the revocation
      * generation. Defaults to a fresh [QueueOwnership]; the controller and the account-loss watcher MUST be
      * given the same instance, because a fence over a different monitor would let an authority validate a
@@ -788,6 +793,65 @@ class ContributionStore(
      * Returns the new count, or null when the entry is unknown, the generation went stale, or the durable
      * sidecar write failed (a swallowed write error would silently reset retry budget on restart).
      */
+    // In-memory retry scheduling. The ATTEMPT COUNT is durable (sidecar); the delay is recomputable from
+    // it, so a restart legitimately re-enters the eligible set at the recomputed bound rather than
+    // inventing a persisted clock (spec: resume from durable queue state).
+    private val nextRetryAtMs = mutableMapOf<String, Long>()
+
+    /** Backoff BOUND (ms) for the given attempt number: min(retry_max_s, retry_initial_s * 2^(attempt-1)) * 1000. */
+    internal fun backoffBoundMs(attempt: Int): Long {
+        val shifted = limits.retryInitialS shl (attempt - 1).coerceAtMost(62)
+        val boundS = minOf(shifted, limits.retryMaxS)
+        return boundS * 1000L
+    }
+
+    /**
+     * Schedule the NEXT retry for an entry whose attempt just failed. ONE ownership transaction: the
+     * generation, the coverage predicate and the entry are validated together, so a revoked generation or
+     * an unknown-coverage hold refuses to schedule (the retry path cannot outrun the fence). Returns the
+     * eligible-at epoch ms, or null when refused. A server Retry-After is a MINIMUM delay: it raises the
+     * floor but never shortens the jittered backoff.
+     */
+    fun scheduleRetryAfterFailure(
+        generation: Long,
+        captureId: String,
+        retryAfterS: Long? = null,
+    ): Long? = synchronized(lock) {
+        if (unknownFootprintLocked() || !ownership.isValidUnderLock(generation)) {
+            null
+        } else if (captureId !in memoryEntries) {
+            null
+        } else {
+            val bound = backoffBoundMs(memoryEntries[captureId]!!.attempts)
+            val jittered = jitter(bound)
+            val floor = (retryAfterS ?: 0L).coerceAtLeast(0L) * 1000L
+            val eligibleAt = clock() + maxOf(jittered, floor)
+            nextRetryAtMs[captureId] = eligibleAt
+            eligibleAt
+        }
+    }
+
+    /**
+     * READY entries whose backoff has elapsed and whose attempt budget is not spent, under the CURRENT
+     * coverage: unknown accounting holds the whole retry path, and a revoked generation is handled by the
+     * caller's fence (the ids returned are still only leaves for a guarded pickup).
+     */
+    fun retryEligible(nowMs: Long = clock()): List<String> = synchronized(lock) {
+        if (unknownFootprintLocked()) {
+            emptyList()
+        } else {
+            memoryEntries
+                .mapNotNull { (id, entry) ->
+                    val charge = ownedCharges[id]
+                    if (charge?.ready != true) return@mapNotNull null
+                    if (entry.attempts >= limits.maxUploadAttempts) return@mapNotNull null
+                    if ((nextRetryAtMs[id] ?: 0L) > nowMs) return@mapNotNull null
+                    id
+                }
+                .sorted()
+        }
+    }
+
     fun recordAttempt(generation: Long, captureId: String): Int? {
         // ONE ownership transaction: validate, advance the index, and write the durable attempts sidecar all
         // happen while holding the shared monitor (reviewer ee26880c finding 4). The pre-fix shape validated

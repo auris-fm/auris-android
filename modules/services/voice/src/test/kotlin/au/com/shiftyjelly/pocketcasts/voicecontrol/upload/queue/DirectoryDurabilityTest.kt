@@ -88,6 +88,56 @@ class DirectoryDurabilityTest {
     }
 
     @Test
+    fun `a failed attempt schedules a FULL-JITTER retry that the FENCE bounds`() {
+        // Spec voice-recording-uploads.md retry: full-jitter exponential backoff uniformly selected from
+        // zero to min(retry_max_s, retry_initial_s * 2^(attempt-1)); a server Retry-After is a MINIMUM
+        // delay; pre-attempt rechecks include valid generation and coverage; one bounded attempt budget.
+        var now = 1_000_000L
+        val root = tmp.newFolder("queue-retry-fence")
+        val id = "7b7b7b7b-1111-4222-8333-444444444444"
+        // Pinned jitter: always the LARGEST draw (bound-1), so the backoff math is fully deterministic.
+        val store = ContributionStore(
+            root,
+            limits().copy(retryInitialS = 4, retryMaxS = 8),
+            clock = { now },
+            jitter = { bound -> bound - 1 },
+        )
+        val admission = store.admitForTest(1600, meta(id).size)
+        val gen = store.fence.currentGeneration()
+        assertTrue(
+            "precondition: entry prepared",
+            store.prepareAt(gen, admission, id, "epoch-1", chunks(1600), meta(id)) != null,
+        )
+        val generation = store.fence.currentGeneration()
+
+        // Attempt 1 fails -> backoff bound is retry_initial_s * 2^0 = 4s; largest jitter draw = 3999ms.
+        assertEquals(1, store.recordAttempt(generation, id))
+        val eligible1 = store.scheduleRetryAfterFailure(generation, id, retryAfterS = null)
+        assertEquals("attempt 1 backoff must be initial * 2^0 with the pinned max jitter", now + 3_999L, eligible1)
+        assertTrue("not eligible before the backoff", store.retryEligible(now).isEmpty())
+        assertEquals("eligible exactly at the boundary", listOf(id), store.retryEligible(now + 3_999L))
+
+        // Attempt 2 fails -> bound doubles to 8s (capped by retry_max_s=8), draws 7999ms.
+        now += 10_000L
+        assertEquals(2, store.recordAttempt(generation, id))
+        val eligible2 = store.scheduleRetryAfterFailure(generation, id, retryAfterS = null)
+        assertEquals("attempt 2 backoff must be initial * 2^1 (still within max)", now + 7_999L, eligible2)
+
+        // Retry-After (100s) is a MINIMUM: it must dominate the tiny jittered delay.
+        now += 10_000L
+        assertEquals(3, store.recordAttempt(generation, id))
+        val eligible3 = store.scheduleRetryAfterFailure(generation, id, retryAfterS = 100L)
+        assertEquals("Retry-After must raise the floor above the jittered delay", now + 100_000L, eligible3)
+
+        // Revocation closes the whole path: a STALE generation cannot schedule, and eligibility is gone.
+        val staleGeneration = generation
+        store.revokeAndPurge("account change")
+        now += 200_000L
+        assertNull("scheduling must refuse for a stale generation", store.scheduleRetryAfterFailure(staleGeneration, id, retryAfterS = null))
+        assertTrue("no entry is retry-eligible after revocation", store.retryEligible(now).isEmpty())
+    }
+
+    @Test
     fun `a published entry syncs the directory at every durability point`() {
         val sync = RecordingSync()
         val root = tmp.newFolder("queue")

@@ -214,12 +214,27 @@ object VoiceUploadModule {
             // THE ATOMIC PUBLICATION SECTION (reviewer 8288ac15): the frozen tuple is compared
             // against ONE coherent live read AND the producer's own identity reads + reservation +
             // prepare+commit run inside the SAME owner transaction — no check-then-use window.
-            publishUnderOwner = { frozen, commit ->
-                accountStartup.validateUnderOwnerTransaction { snap ->
-                    val epoch = accountStartup.state.projection.value?.enrollmentEpoch
-                    if (snap.accountName == frozen.account && snap.session == frozen.session && epoch == frozen.enrollmentEpoch) commit() else false
-                }
-            },
+            // THE SHARED owner-publication rule (reviewer fd3faba7): module and barrier control
+            // both go through ownerPublicationBinding, so the locking rule has ONE definition.
+            // The section adapter reads the coherent identity INSIDE the owner transaction
+            // (enrollment epoch from the live projection included) and hands it to the shared
+            // validator; a missing account name is "no live identity" (refusal, no reservation).
+            publishUnderOwner = ownerPublicationBinding(
+                object : OwnerPublicationSection {
+                    override fun underOwnerTransaction(
+                        section: (live: RetentionPublishTrigger.LiveIdentity?) -> Boolean?,
+                    ): Boolean? = accountStartup.validateUnderOwnerTransaction { snap ->
+                        val live = snap.accountName?.let { account ->
+                            RetentionPublishTrigger.LiveIdentity(
+                                account = account,
+                                session = snap.session,
+                                enrollmentEpoch = accountStartup.state.projection.value?.enrollmentEpoch,
+                            )
+                        }
+                        section(live)
+                    }
+                },
+            ),
             dispatch = { body -> scope.launch { body() } },
         )
     }

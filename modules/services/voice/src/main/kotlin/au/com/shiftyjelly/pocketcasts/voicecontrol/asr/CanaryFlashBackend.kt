@@ -150,7 +150,13 @@ class CanaryFlashBackend @Inject constructor(
                 sha256 = "e41a2ab9c0c2fe81a1e8ade5a45fb02a74bc4db7d1f91b89a54a25e2cf79cba2",
                 manifestId = CANARY_MANIFEST_ID,
             ),
-            ModelFile(url = "$CANARY_BASE_URL/$CANARY_TOKENS_FILENAME", filename = CANARY_TOKENS_FILENAME, manifestId = CANARY_MANIFEST_ID),
+            ModelFile(
+                url = "$CANARY_BASE_URL/$CANARY_TOKENS_FILENAME",
+                filename = CANARY_TOKENS_FILENAME,
+                // Raw (non-LFS) file; digest pinned from the bytes fetched at the pinned commit.
+                sha256 = "2dae6fc7815f9640645e0c765522b278ee0cef49b482d91f6913e334628d3e77",
+                manifestId = CANARY_MANIFEST_ID,
+            ),
         ),
         targetDir = CANARY_TARGET_DIR,
     )

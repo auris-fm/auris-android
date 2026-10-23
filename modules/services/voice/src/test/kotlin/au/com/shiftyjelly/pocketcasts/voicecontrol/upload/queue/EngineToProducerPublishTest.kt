@@ -55,6 +55,10 @@ class EngineToProducerPublishTest {
         override fun authoritySnapshot() = snap
         override fun sessionGeneration(): Long = snap.session
         override fun <T> transaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
+
+        /** ONE coherent live read for the shared binding: account+session from the snapshot,
+         *  enrollment epoch standing in for the projection (fixed in this fixture). */
+        fun liveIdentityForTest(): RetentionPublishTrigger.LiveIdentity? = snap.accountName?.let { RetentionPublishTrigger.LiveIdentity(it, snap.session, "epoch-1") }
         override fun installOwnershipBinding(binding: au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipBinding?) = snap
         override fun beginRefresh(observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot) = null
         override fun publishRefresh(
@@ -624,28 +628,32 @@ class EngineToProducerPublishTest {
             },
             enrollmentSession = { owner.authoritySnapshot().session },
         )
+        // THE SHARED PRODUCTION BINDING (reviewer fd3faba7): the same ownerPublicationBinding
+        // the module wires, with the barrier injected through the control-only interleave hook
+        // -- a regression in the locking rule can no longer hide behind a handwritten copy.
+        val binding = ownerPublicationBinding(
+            object : OwnerPublicationSection {
+                override fun underOwnerTransaction(
+                    section: (live: RetentionPublishTrigger.LiveIdentity?) -> Boolean?,
+                ): Boolean? = owner.transaction { section(owner.liveIdentityForTest()) }
+            },
+            interleave = {
+                // THE INTERLEAVING POINT: release the flip attempt between validation
+                // and prepare, then hold until the flip thread is demonstrably BLOCKED
+                // on the owner lock -- proof the transition cannot complete while the
+                // validate -> prepare -> commit section is running.
+                flipGate.countDown()
+                val deadline = System.currentTimeMillis() + 5000
+                while (flipThread.state != Thread.State.BLOCKED && System.currentTimeMillis() < deadline) Thread.sleep(5)
+                assertEquals(Thread.State.BLOCKED, flipThread.state)
+            },
+        )
         val trig = RetentionPublishTrigger(
             sink,
             producer1,
             fixedModels = fixedModels,
             stagesProvider = { stages },
-            publishUnderOwner = { frozen, commit ->
-                // validateUnderOwnerTransaction (production shape): ONE section.
-                owner.transaction {
-                    val snap = owner.authoritySnapshot()
-                    val valid = snap.accountName == frozen.account && snap.session == frozen.session
-                    if (!valid) return@transaction false
-                    // THE INTERLEAVING POINT: release the flip attempt between validation
-                    // and prepare, then hold until the flip thread is demonstrably BLOCKED
-                    // on the owner lock -- proof the transition cannot complete while the
-                    // validate -> prepare -> commit section is running.
-                    flipGate.countDown()
-                    val deadline = System.currentTimeMillis() + 5000
-                    while (flipThread.state != Thread.State.BLOCKED && System.currentTimeMillis() < deadline) Thread.sleep(5)
-                    assertEquals(Thread.State.BLOCKED, flipThread.state)
-                    commit()
-                }
-            },
+            publishUnderOwner = binding,
             dispatch = directDispatch(),
         )
         trig.attach()

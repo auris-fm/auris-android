@@ -310,7 +310,9 @@ class VoiceControlService : Service() {
         }
         Timber.i("Selected ASR backend: %s", backend::class.simpleName)
 
-        val needDownload = !modelManager.isModelReady(backend.requiredModel) ||
+        // Digest verification runs on IO (reviewer ff30b294): hashing a cached model never
+        // blocks the main/audio path.
+        val needDownload = !modelManager.isModelReadyVerified(backend.requiredModel) ||
             !modelManager.isLfmModelReady()
 
         if (needDownload) {

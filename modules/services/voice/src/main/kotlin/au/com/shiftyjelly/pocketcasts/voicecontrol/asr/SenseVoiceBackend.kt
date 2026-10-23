@@ -119,9 +119,11 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
                 manifestId = SENSEVOICE_MANIFEST_ID,
             ),
             ModelFile(
+                // tokens.txt is a raw (non-LFS) file; its digest is pinned from the bytes
+                // fetched at the pinned commit, so EVERY manifest artifact is content-verified.
                 url = "$SENSEVOICE_BASE_URL/$SENSEVOICE_TOKENS_FILENAME",
                 filename = SENSEVOICE_TOKENS_FILENAME,
-                sha256 = "",
+                sha256 = "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
                 manifestId = SENSEVOICE_MANIFEST_ID,
             ),
         ),

@@ -73,6 +73,9 @@ class ContributionStore(
         val metadataBytes: Int,
         val attempts: Int,
         val createdAtMs: Long,
+        /** Admitted ownership at capture start; null for epoch-only (older) admissions. */
+        val enrollmentAccount: String? = null,
+        val enrollmentSession: Long? = null,
     )
 
     // Reservation for one entry, claimed atomically against the queue's count and byte budgets
@@ -359,7 +362,8 @@ class ContributionStore(
             return null
         }
         if (WavHeaderValidator.validate(header, audio.length()) == null) return null
-        DurableCapture(record, audio, entry.enrollmentEpoch)
+        val owner = readOwnerSidecar(captureId)
+        DurableCapture(record, audio, entry.enrollmentEpoch, owner?.first, owner?.second)
     }
 
     /**
@@ -418,12 +422,28 @@ class ContributionStore(
         return sha.value.takeIf { it.length == 64 }
     }
 
-    /** A capture THIS STORE vouches for: validated record bytes, matching audio, the owning epoch. */
+    /** A capture THIS STORE vouches for: validated record bytes, matching audio, the owning identity. */
     class DurableCapture(
         val record: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj,
         val audio: File,
         val enrollmentEpoch: String,
+        /** Admitted account/session from the owner sidecar; null for older epoch-only admissions. */
+        val enrollmentAccount: String? = null,
+        val enrollmentSession: Long? = null,
     )
+
+    /**
+     * Reads the admitted-ownership sidecar: (account, session) or null when absent/corrupt.
+     * Corruption refuses (never fabricates a fallback identity): a capture whose ownership
+     * sidecar is unreadable is treated as epoch-only, the weakest claim it could have.
+     */
+    private fun readOwnerSidecar(captureId: String): Pair<String, Long>? {
+        val bytes = readExactlyBounded(File(dir, "$captureId$SUFFIX_OWNER"), 512L, 512L) ?: return null
+        val text = String(bytes, Charsets.UTF_8)
+        val account = Regex("\u0022account\u0022\\s*:\\s*\u0022([^\u0022]+)\u0022").find(text)?.groupValues?.get(1) ?: return null
+        val session = Regex("\u0022session\u0022\\s*:\\s*(-?\\d+)").find(text)?.groupValues?.get(1)?.toLongOrNull() ?: return null
+        return account to session
+    }
 
     // The identity of the attempt most recently ADMITTED for captureId: the generation it was admitted
     // under plus the durable attempt count recorded for it. A completion (accept, failure, cancellation)
@@ -683,7 +703,15 @@ class ContributionStore(
      * exactly one free slot admits one preparation instead of demanding a second one (reviewer 195845cb
      * finding 5). The handle is settled exactly once: adopted on publication, released on every other exit.
      */
-    fun prepare(admission: Admission, captureId: String, enrollmentEpoch: String, pcmChunks: List<Pair<ShortArray, Int>>, canonicalMetadata: ByteArray): Entry? = prepareAt(fence.currentGeneration(), admission, captureId, enrollmentEpoch, pcmChunks, canonicalMetadata)
+    fun prepare(
+        admission: Admission,
+        captureId: String,
+        enrollmentEpoch: String,
+        pcmChunks: List<Pair<ShortArray, Int>>,
+        canonicalMetadata: ByteArray,
+        enrollmentAccount: String? = null,
+        enrollmentSession: Long? = null,
+    ): Entry? = prepareAt(fence.currentGeneration(), admission, captureId, enrollmentEpoch, pcmChunks, canonicalMetadata, enrollmentAccount, enrollmentSession)
 
     fun prepare(
         captureId: String,
@@ -723,6 +751,8 @@ class ContributionStore(
         enrollmentEpoch: String,
         pcmChunks: List<Pair<ShortArray, Int>>,
         canonicalMetadata: ByteArray,
+        enrollmentAccount: String? = null,
+        enrollmentSession: Long? = null,
     ): Entry? {
         // ONE ownership transaction covers validation, staging claim, writing and publication/settlement
         // (reviewer ee26880c findings 2 and 3): the handle is validated against THIS store's reservation table
@@ -755,7 +785,7 @@ class ContributionStore(
             return null
         }
         val published = try {
-            writeAndPublish(generation, admission, captureId, enrollmentEpoch, pcmChunks, samples, canonicalMetadata)
+            writeAndPublish(generation, admission, captureId, enrollmentEpoch, pcmChunks, samples, canonicalMetadata, enrollmentAccount, enrollmentSession)
         } catch (uncertain: PublicationUncertain) {
             // Re-thrown, NOT converted to null. The spec (ecbe84dd) names this exact mistake: a generic
             // error handler must not erase the difference between "not published" and "may have been
@@ -803,6 +833,8 @@ class ContributionStore(
         pcmChunks: List<Pair<ShortArray, Int>>,
         samples: Long,
         canonicalMetadata: ByteArray,
+        enrollmentAccount: String?,
+        enrollmentSession: Long?,
     ): Entry? {
         val createdAt = clock()
         // Creating the entry directory adds a NAME to the parent. Syncing only the new directory does
@@ -855,6 +887,19 @@ class ContributionStore(
                 out.flush()
             }
             fileSync.sync(digestFile)
+            // Admitted ownership sidecar: the FULL admitted identity at capture start, so a
+            // restarted queue still knows WHICH account/session admitted this capture. Missing
+            // sidecar (older entries) = epoch-only admissions, and the identity check degrades to
+            // the epoch path - never to "no check".
+            if (enrollmentAccount != null || enrollmentSession != null) {
+                val ownerJson = """{"account":${enrollmentAccount?.let { "\"" + it + "\"" } ?: "null"},"session":$enrollmentSession,"epoch":"$enrollmentEpoch"}"""
+                val ownerFile = File(dir, "$captureId$SUFFIX_OWNER")
+                FileOutputStream(ownerFile).use { out ->
+                    out.write(ownerJson.toByteArray(Charsets.UTF_8))
+                    out.flush()
+                }
+                fileSync.sync(ownerFile)
+            }
             val entry = Entry(
                 captureId,
                 enrollmentEpoch,
@@ -863,6 +908,8 @@ class ContributionStore(
                 canonicalMetadata.size,
                 attempts = 0,
                 createdAtMs = createdAt,
+                enrollmentAccount = enrollmentAccount,
+                enrollmentSession = enrollmentSession,
             )
             // ONE ownership transaction for the whole validate-then-mutate section: the shared monitor is held
             // from the ownership verdict through the commit point, so nothing can slip between checking the
@@ -2525,6 +2572,9 @@ class ContributionStore(
         // failed publications and restarts independently of the attempt count (reviewer 7433e6a9).
         private const val SUFFIX_RETRY = ".retry"
         private const val SAMPLE_RATE_HZ = 16_000L
+
+        /** Admitted-ownership sidecar: {"account":...,"session":...,"epoch":...}. */
+        const val SUFFIX_OWNER = ".owner"
         private const val SUFFIX_CREATED = ".created"
         private const val SUFFIX_DIGEST = ".sha256"
 

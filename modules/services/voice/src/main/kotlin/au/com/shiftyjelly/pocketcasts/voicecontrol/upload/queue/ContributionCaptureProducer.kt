@@ -66,9 +66,13 @@ class ContributionCaptureProducer(
         val samples = pcmChunks.sumOf { it.second.toLong() }
         // BOUNDED VALIDATION BEFORE ALLOCATION (reviewer 064d5a00): refuse over-budget input with the
         // same arithmetic the store will apply, so no unbounded buffer is ever constructed.
+        // ALL input validation happens here, BEFORE any allocation, and REFUSES (null) instead of
+        // throwing through the recorder path (reviewer d2f1bfc8): invalid rates, empty or
+        // out-of-range chunk lengths, and over-budget input never reach WavWriter.
+        if (sampleRateHz != SAMPLE_RATE.toInt()) return null
         if (samples <= 0 || store.projectedBytesFor(samples, 0) > store.limits.maxClipBytes) return null
         if (samples * 1000L / SAMPLE_RATE > store.limits.maxClipMs) return null
-        require(sampleRateHz == 16000) { "record audio is 16 kHz mono" }
+        if (pcmChunks.any { (chunk, valid) -> valid <= 0 || valid > chunk.size }) return null
         val sessionId = captureSessionId()
         if (sessionId.isEmpty()) return null
         // The record's audio block describes EXACTLY the bytes WavWriter will produce.

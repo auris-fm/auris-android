@@ -40,15 +40,30 @@ class ContributionUploadAssembly(
      */
     private val identityHolds: ((epoch: String) -> Boolean)? = null,
     /**
-     * Acquires the credential FOR THE ADMITTED EPOCH as one atomic snapshot: returns the bearer and the
-     * epoch the account authority currently has, or null when no credential is in force. The assembly
-     * validates the returned epoch AGAINST THE ADMITTED EPOCH and freezes the bearer into the attempt,
-     * so a switch after acquisition cannot swap identity mid-flight (reviewer 064d5a00).
+     * Acquires the credential FOR THE ADMITTED IDENTITY (account/session/epoch) as one owner-lock
+     * snapshot, or null when any component disagrees. The assembly freezes the returned bearer into
+     * the attempt, so the transport can never consult a fresher identity mid-flight.
      */
-    private val credentialFor: ((admittedEpoch: String) -> Pair<String, String>?)? = null,
+    private val credentialFor: ((admitted: UploadIdentityAuthority.AdmittedIdentity) -> UploadIdentityAuthority.LiveCredential?)? = null,
+    /**
+     * LAUNCH revalidation (reviewer d2f1bfc8): the acquisition lock ends before transmission, so the
+     * window between acquisition and Call execution is closed by THIS check - it re-runs the full
+     * identity comparison immediately before transport.upload on the caller thread. False refuses
+     * (retains), which is the only safe answer for a moved account.
+     */
+    private val launchIdentityCheck: ((admitted: UploadIdentityAuthority.AdmittedIdentity) -> Boolean)? = null,
+    /** Deterministic control seam: runs after acquisition, before launch validation. Tests only. */
+    @Volatile var afterAcquisitionForTest: (() -> Unit)? = null,
 ) {
     /** A durable capture plus the record that claims it, and the epoch the store admitted it under. */
-    data class Capture(val record: RecordNode.Obj, val audio: File, val enrollmentEpoch: String? = null)
+    data class Capture(
+        val record: RecordNode.Obj,
+        val audio: File,
+        val enrollmentEpoch: String? = null,
+        /** Admitted ownership from the store's owner sidecar; null = epoch-only claim. */
+        val enrollmentAccount: String? = null,
+        val enrollmentSession: Long? = null,
+    )
 
     /**
      * The last transport answer per capture id. The caller's seams are synchronous and read-after-attempt;
@@ -83,16 +98,25 @@ class ContributionUploadAssembly(
             if (capture.enrollmentEpoch != null && identityHolds?.invoke(capture.enrollmentEpoch) == false) {
                 throw CaptureUnavailable(captureId)
             }
-            // CREDENTIAL ACQUISITION BOUND TO THE ADMITTED IDENTITY: the snapshot is taken atomically,
-            // the returned epoch is revalidated HERE, and the bearer is FROZEN for this attempt - so a
-            // switch inside the transport's own authorization path cannot swap the identity.
+            // CREDENTIAL ACQUISITION BOUND TO THE ADMITTED IDENTITY (account/session/epoch): one
+            // owner-lock snapshot; any component mismatch retains.
+            val admitted = UploadIdentityAuthority.AdmittedIdentity(
+                capture.enrollmentAccount,
+                capture.enrollmentSession,
+                capture.enrollmentEpoch,
+            )
             var frozenBearer: String? = null
             if (capture.enrollmentEpoch != null && credentialFor != null) {
-                val snapshot = credentialFor(capture.enrollmentEpoch)
-                    ?: throw CaptureUnavailable(captureId) // no credential in force for this identity
-                val (bearer, currentEpoch) = snapshot
-                if (currentEpoch != capture.enrollmentEpoch) throw CaptureUnavailable(captureId)
-                frozenBearer = bearer
+                val live = credentialFor(admitted)
+                    ?: throw CaptureUnavailable(captureId) // identity moved or no credential in force
+                frozenBearer = live.bearer
+            }
+            afterAcquisitionForTest?.invoke()
+            // LAUNCH revalidation: the acquisition transaction has ENDED by now; the window between
+            // acquisition and Call execution is closed here, on the caller thread, immediately
+            // before the transport is entered (reviewer d2f1bfc8).
+            if (capture.enrollmentEpoch != null && launchIdentityCheck?.invoke(admitted) == false) {
+                throw CaptureUnavailable(captureId)
             }
             if (isRevoked()) {
                 throw AttemptCancelled(captureId)

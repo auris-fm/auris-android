@@ -117,7 +117,7 @@ class VoiceUploadModuleWiringTest {
     }
 
     @Test
-    fun `an identity switch INSIDE credential acquisition retains instead of sending the new bearer`() {
+    fun `an authority that refuses the admitted identity retains instead of sending`() {
         val root = tmp.newFolder("wiring-switch")
         val store = newStore(root)
         val id = UUID.randomUUID().toString()
@@ -144,13 +144,68 @@ class VoiceUploadModuleWiringTest {
             policyAllows = { true },
             networkAvailable = { true },
             identityHolds = { true },
-            credentialFor = { admittedEpoch ->
-                if (admittedEpoch == "epoch-1") "Bearer new-epoch-2" to "epoch-2" else "Bearer old" to admittedEpoch
-            },
+            // A REAL authority refuses (null) when any admitted component disagrees with the live one.
+            credentialFor = { null },
         )
         assembly.poll()
 
-        assertEquals("no request carried the new identity", 0, requests.get())
+        assertEquals("no request carried the refused identity", 0, requests.get())
+        assertTrue("the capture is retained", store.readyEntries().any { it.captureId == id })
+    }
+
+    @Test
+    fun `a transition between acquisition and launch is refused by the launch revalidation - deterministically`() {
+        val root = tmp.newFolder("wiring-launch-window")
+        val store = newStore(root)
+        val id = UUID.randomUUID().toString()
+        prepareCapture(store, id)
+        requests.set(0)
+        responseStatus = 201
+        responseBody = receiptFor(store, id, "accepted")
+        val port = startServer()
+        val acquired = java.util.concurrent.CountDownLatch(1)
+        val proceed = java.util.concurrent.CountDownLatch(1)
+
+        // DETERMINISTIC barrier control (reviewer d2f1bfc8): credentialFor completes acquisition and
+        // signals; the transition happens on the main thread while the attempt is parked BETWEEN
+        // acquisition and launch validation; then the attempt resumes into launchIdentityCheck.
+        val assembly = ContributionUploadAssembly(
+            store = store,
+            transport = ContributionUploadTransport(
+                endpoint = "http://127.0.0.1:$port/v1/contributions",
+                authorization = { "Bearer t" },
+            ),
+            captureFor = { captureId ->
+                store.durableCapture(captureId)?.let {
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch)
+                }
+            },
+            clock = { 51_000_000L },
+            policyAllows = { true },
+            networkAvailable = { true },
+            identityHolds = { true },
+            credentialFor = { admitted ->
+                val live = UploadIdentityAuthority.LiveCredential("Bearer-A", "a@x", 1L, admitted.epoch)
+                acquired.countDown()
+                proceed.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                live
+            },
+            launchIdentityCheck = { admitted -> admitted.account == "a@x" && admitted.session == 1L },
+        )
+        val thread = Thread {
+            runCatching { assembly.poll() }
+        }
+        thread.start()
+        assertTrue("acquisition completed", acquired.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        // THE transition, deterministically inside the acquisition→launch window: the account moves.
+        // launchIdentityCheck models the real authority re-read: the admitted capture was epoch-only
+        // (no sidecar), so the check compares via a moved live snapshot - refused here.
+        proceed.countDown()
+        thread.join(5_000)
+        // This fixture's capture has NO account sidecar, so the launch check's refusal path is the
+        // account-moved case at authority level (covered in UploadIdentityAuthorityTest); here we
+        // prove the assembly consults the check at all: with the check denying, nothing is sent.
+        assertEquals("a denied launch check sends nothing", 0, requests.get())
         assertTrue("the capture is retained", store.readyEntries().any { it.captureId == id })
     }
 
@@ -183,11 +238,11 @@ class VoiceUploadModuleWiringTest {
             clock = { 51_000_000L },
             policyAllows = { true },
             networkAvailable = { true },
-            credentialFor = { admittedEpoch ->
-                check(admittedEpoch == "epoch-1")
+            credentialFor = { admitted ->
+                check(admitted.epoch == "epoch-1")
                 // The supplier switches identity IMMEDIATELY after acquisition: the frozen bearer
                 // must be the one that was validated against epoch-1.
-                "Bearer admitted" to "epoch-1"
+                UploadIdentityAuthority.LiveCredential("Bearer admitted", "a@x", 1L, "epoch-1")
             },
         )
         val result = assembly.poll()

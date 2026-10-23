@@ -83,28 +83,38 @@ object VoiceUploadModule {
     ): ContributionUploadAssembly {
         // Network availability is "the owner-published credential exists": without it nothing can be sent.
         val accountStartupHasCredentials = { accountStartup.credentials.current() != null }
+        val authority = {
+            UploadIdentityAuthority(
+                state = accountStartup.state,
+                underOwnerTransaction = { block -> accountStartup.validateUnderOwnerTransaction(block) },
+            )
+        }
         val assembly = ContributionUploadAssembly(
             store = store,
             transport = transport,
             captureFor = { captureId ->
                 store.durableCapture(captureId)?.let {
-                    // The admitted epoch travels WITH the capture so the assembly can bind the
-                    // credential lookup to the identity the entry was admitted under.
-                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch)
+                    // The FULL admitted identity travels WITH the capture (owner sidecar), so
+                    // acquisition and launch validation compare account AND session AND epoch.
+                    ContributionUploadAssembly.Capture(
+                        it.record,
+                        it.audio,
+                        it.enrollmentEpoch,
+                        it.enrollmentAccount,
+                        it.enrollmentSession,
+                    )
                 }
             },
             identityHolds = { epoch -> accountStartup.state.projection.value?.enrollmentEpoch == epoch },
-            // ONE account+epoch-bound credential authority (spec 6480d0c5): account identity, session,
-            // credential and the owner-published token are read under the REAL owner lock in a single
-            // transaction, together with the epoch projection - not two separate reads labelled
-            // atomic. The assembly revalidates the returned epoch against the admitted one and freezes
-            // the bearer for the attempt, so a switch inside acquisition cannot swap identity.
-            credentialFor = { admittedEpoch ->
-                UploadIdentityAuthority(
-                    state = accountStartup.state,
-                    underOwnerTransaction = { block -> accountStartup.validateUnderOwnerTransaction(block) },
-                ).credentialFor(admittedEpoch)
+            // ONE full-identity credential authority: account, session, credential, token and epoch
+            // projection read under the REAL owner lock in a single transaction; the ADMITTED
+            // account/session/epoch are compared, not merely read.
+            credentialFor = { admitted ->
+                authority().credentialFor(admitted)
             },
+            // LAUNCH revalidation: the acquisition lock ends before transmission; this closes the
+            // acquisition→Call window on the caller thread (reviewer d2f1bfc8).
+            launchIdentityCheck = { admitted -> authority().credentialFor(admitted) != null },
             clock = System::currentTimeMillis,
             // THE compiled-off gate: the remote-config snapshot is disabled by default, so the loop
             // below wakes, finds the gate closed, and touches nothing.

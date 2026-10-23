@@ -624,7 +624,16 @@ class AndroidPlatformTtsEngine @Inject constructor(
      */
     internal var trackFactoryForTest: ((Int) -> AudioTrack?)? = null
 
-    private fun buildTrack(sampleRateHz: Int): AudioTrack? = trackFactoryForTest?.invoke(sampleRateHz) ?: runCatching {
+    // An installed factory OVERRIDES track creation outright: a null it returns IS the failure
+    // (reviewer b0a21f8d), never a reason to fall through to the real constructor.
+    private fun buildTrack(sampleRateHz: Int): AudioTrack? {
+        val factory = trackFactoryForTest
+        // The null-check is on the FACTORY's presence, not its result: an installed factory's null
+        // return is the failure itself and must not select the platform fallback.
+        return if (factory != null) factory.invoke(sampleRateHz) else createPlatformTrack(sampleRateHz)
+    }
+
+    private fun createPlatformTrack(sampleRateHz: Int): AudioTrack? = runCatching {
         val minBuffer = AudioTrack.getMinBufferSize(
             sampleRateHz,
             AudioFormat.CHANNEL_OUT_MONO,

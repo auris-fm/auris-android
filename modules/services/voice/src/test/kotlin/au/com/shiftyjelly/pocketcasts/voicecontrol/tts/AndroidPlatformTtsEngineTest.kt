@@ -110,6 +110,14 @@ class AndroidPlatformTtsEngineTest {
         val (wired, fake, _) = engineWithFakeSynthesizer()
         fake.onInitialized?.invoke(true)
         wired.trackFactoryForTest = { null }
+        // NO REAL-TRACK FALLBACK (reviewer b0a21f8d): with the factory installed, a null result
+        // must be the terminal. If the engine still fell through to the real constructor, playback
+        // would proceed and reach the write loop -- countable here.
+        var writeAttempts = 0
+        wired.writeToSink = { _, _, _, count ->
+            writeAttempts += 1
+            count
+        }
 
         val scope = CoroutineScope(Dispatchers.Default)
         var failure: Throwable? = null
@@ -134,6 +142,12 @@ class AndroidPlatformTtsEngineTest {
             "an unplayable synthesis must fail the utterance with zero frames played " +
                 "(got ${failure?.javaClass?.simpleName}: ${failure?.message})",
             incomplete != null && incomplete.message.orEmpty().contains("0 of 0 frames"),
+        )
+        assertEquals(
+            "an installed factory's null must never fall through to the real track " +
+                "(writeAttempts=$writeAttempts)",
+            0,
+            writeAttempts,
         )
     }
 

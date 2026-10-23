@@ -55,6 +55,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.route.toMicExposure
 import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlCaptureStateHolder
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.DeletionState
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentController
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentOutcome
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionStore
@@ -65,6 +66,13 @@ import au.com.shiftyjelly.pocketcasts.localization.R as LR
 
 @AndroidEntryPoint
 class VoiceControlSettingsFragment : BaseFragment() {
+
+    /**
+     * Serializes the fence check together with the mutation it authorizes. Private to the fragment
+     * instance: every stop/clear effect in this screen passes through [applyStopEffect], so one lock
+     * is sufficient to make check-then-act indivisible.
+     */
+    private val stopEffectLock = Any()
 
     @Inject lateinit var settings: Settings
 
@@ -88,6 +96,46 @@ class VoiceControlSettingsFragment : BaseFragment() {
         this,
         Manifest.permission.RECORD_AUDIO,
     ) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * The ONE place an enrollment outcome may mutate the durable stop.
+     *
+     * Both the fencing decision and the mutation are made under [stopEffectLock], so a competing
+     * outcome cannot slip between "is this still authoritative?" and "do it". Without that pairing
+     * the check would be true, another account's action could be issued, and the mutation would then
+     * apply to state the decision no longer described - the same defect as an unfenced branch, just
+     * narrower.
+     *
+     * Unfenced outcomes do NOTHING: not even the conservative re-record. A stop written on behalf of
+     * a superseded or foreign action is indistinguishable from a real one, and would silently re-stop
+     * sharing after the user turned it on.
+     */
+    private fun applyStopEffect(
+        checked: Boolean,
+        outcome: EnrollmentOutcome,
+        controller: EnrollmentController,
+        intent: LocalWithdrawalIntentStore,
+        onReleased: () -> Unit,
+    ) {
+        synchronized(stopEffectLock) {
+            if (!controller.stillApplies(outcome)) return
+            when {
+                // A fresh explicit opt-in, applied, releases the local stop. Only an APPLIED enrollment
+                // releases: a failed one is not consent to resume collection.
+                checked && outcome is EnrollmentOutcome.Applied -> {
+                    intent.clearOnUserEnrollment()
+                    onReleased()
+                }
+
+                // Withdrawal applied: the stop is kept (a stale enrolled projection must not resume
+                // collection), so this restates the request rather than clearing anything.
+                !checked && outcome is EnrollmentOutcome.Applied -> intent.onServerAgrees()
+
+                // A failed withdrawal leaves the stop in place: a network failure is not consent.
+                !checked -> intent.onWithdrawalFailed()
+            }
+        }
+    }
 
     private fun newEnrollmentController() = voiceSharingAccountStartup.enrollmentController {
         // Use the store's single ownership transaction, not a bare file sweep: a withdrawal must
@@ -245,26 +293,23 @@ class VoiceControlSettingsFragment : BaseFragment() {
                         // the stop back after the opt-in had cleared it. It can also belong to a
                         // different account, and the durable stop is global.
                         if (outcome is EnrollmentOutcome.Superseded) return@launch
-                        when {
-                            checked && outcome is EnrollmentOutcome.Applied -> {
-                                // A fresh explicit opt-in releases the local stop - but only once the
-                                // server has actually applied it, so a failed enroll cannot silently
-                                // re-permit collection, and only if it is STILL the authoritative
-                                // action for THIS account when the effect is applied. The check is
-                                // repeated here rather than trusted from the controller: between the
-                                // controller returning and this line running, another action can be
-                                // issued, and the stop is global.
-                                if (!enrollmentController.stillApplies(outcome)) return@launch
-                                localWithdrawalIntent.clearOnUserEnrollment()
-                                locallySharing = true
-                            }
-
-                            !checked && outcome is EnrollmentOutcome.Applied -> localWithdrawalIntent.onServerAgrees()
-
-                            // A failed withdrawal deliberately leaves the stop in place: a network
-                            // failure is not consent to resume.
-                            !checked -> localWithdrawalIntent.onWithdrawalFailed()
-                        }
+                        // EVERY outcome-driven side effect is fenced, not only the release
+                        // (reviewer a65eef2f). The stop-recording branches had no check at all, and
+                        // an outcome can go stale between the controller returning and this code
+                        // running just as easily for a withdrawal as for an enrollment. The durable
+                        // stop is GLOBAL, so an unfenced branch can mutate another account's state or
+                        // overwrite a newer decision.
+                        //
+                        // The check and the mutation run under ONE lock (see applyStopEffect) so a
+                        // competing owner/action change cannot interleave between them: checking and
+                        // then mutating unlocked would leave the same window one level down.
+                        applyStopEffect(
+                            checked = checked,
+                            outcome = outcome,
+                            controller = enrollmentController,
+                            intent = localWithdrawalIntent,
+                            onReleased = { locallySharing = true },
+                        )
                     }
                 },
                 onDeleteSharedData = { confirmDelete = true },

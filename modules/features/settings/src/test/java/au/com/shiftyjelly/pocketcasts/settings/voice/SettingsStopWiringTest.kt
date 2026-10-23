@@ -48,24 +48,55 @@ class SettingsStopWiringTest {
             source.contains("if (outcome is EnrollmentOutcome.Superseded) return@launch"),
         )
         val supersededDrop = source.indexOf("if (outcome is EnrollmentOutcome.Superseded) return@launch")
-        val catchall = source.indexOf("!checked -> localWithdrawalIntent.onWithdrawalFailed()")
-        assertTrue("the catchall stop-recording branch must still exist", catchall > 0)
+        assertTrue("the Superseded drop must exist", supersededDrop > 0)
+        // Source ORDER no longer expresses this: the catchall moved into a helper defined above the
+        // launch block, so "precedes" would be satisfied by an unrelated layout. The structural claim
+        // is what matters - the drop must sit in the same outcome-handling block that dispatches, so
+        // no branch can be reached before it.
+        // Whitespace-normalised so the control survives reindentation of the launch block.
+        val flat = source.replace(Regex("\\s+"), " ")
+        val dispatch = flat.indexOf("val outcome = if (checked)")
+        // The CALL SITE, not the helper definition (which appears earlier in the file).
+        val effects = flat.indexOf("applyStopEffect( checked = checked,")
+        assertTrue("the launch block must still compute an outcome", dispatch > 0)
+        assertTrue("the launch block must still dispatch a stop effect", effects > dispatch)
         assertTrue(
-            "the Superseded drop must precede the catchall, or Superseded still reaches it",
-            supersededDrop in 1 until catchall,
+            "the Superseded drop must sit between computing the outcome and dispatching its effect",
+            flat.indexOf("if (outcome is EnrollmentOutcome.Superseded) return@launch") in dispatch until effects,
         )
-        // The release of the global stop is fenced to the action AND account at application time,
-        // not trusted from controller return.
+        // And the helper itself must refuse a superseded outcome, so the guarantee does not depend
+        // on the caller remembering to pre-filter.
         assertTrue(
-            "releasing the durable stop must be fenced by stillApplies(outcome) at application time",
-            source.contains("if (!enrollmentController.stillApplies(outcome)) return@launch"),
+            "the fenced helper must treat a Superseded outcome as refused on its own",
+            source.contains("if (!controller.stillApplies(outcome)) return"),
         )
-        val clear = source.indexOf("localWithdrawalIntent.clearOnUserEnrollment()")
-        val fence = source.indexOf("if (!enrollmentController.stillApplies(outcome)) return@launch")
-        assertTrue("the enrollment success path must still release the stop", clear > 0)
+        // EVERY outcome-driven side effect is fenced, not just the release (reviewer a65eef2f).
+        // The withdrawal branches previously mutated the global stop with no check at all.
         assertTrue(
-            "the apply-time fence must come BEFORE the stop is released",
-            fence in 1 until clear,
+            "the stop/clear effects must pass through one fenced entry point",
+            source.contains("applyStopEffect("),
+        )
+        assertTrue(
+            "that entry point must perform the stillApplies check",
+            source.contains("if (!controller.stillApplies(outcome)) return"),
+        )
+        // The fence and the mutation must be indivisible: checking then mutating unlocked leaves
+        // the same window one level down.
+        assertTrue(
+            "the fence check and the mutation must run under the same lock",
+            source.contains("synchronized(stopEffectLock)"),
+        )
+        // The fragment must not mutate the store directly any more: a direct call is an unfenced
+        // branch by definition, and it is exactly how the withdrawal paths escaped the fence.
+        val directEffects = listOf(
+            "localWithdrawalIntent.clearOnUserEnrollment()",
+            "localWithdrawalIntent.onServerAgrees()",
+            "localWithdrawalIntent.onWithdrawalFailed()",
+        ).filter { source.contains(it) }
+        assertTrue(
+            "the fragment must reach the stop store ONLY through the fenced helper, but these are " +
+                "still called directly from the outcome handling: $directEffects",
+            directEffects.isEmpty(),
         )
     }
 

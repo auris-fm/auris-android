@@ -311,13 +311,10 @@ class ContributionStore(
         val meta = File(dir, "$captureId$SUFFIX_META")
         if (!audio.isFile || !meta.isFile) return null
         if (audio.length() != entry.audioBytes) return null
-        // BOUNDED metadata read: a metadata file larger than the recorded size is damage, not data.
-        val metadataBytes = try {
-            if (meta.length() > MAX_METADATA_READ_BYTES) return null else meta.readBytes()
-        } catch (io: Throwable) {
-            return null
-        }
-        if (metadataBytes.size != entry.metadataBytes) return null
+        // BOUNDED, EXACT metadata read: read exactly the recorded number of bytes from a regular file and
+        // confirm nothing more follows, so a growing or replaced file cannot exceed the observed bound
+        // (reviewer 31b75e03).
+        val metadataBytes = readExactlyBounded(meta, entry.metadataBytes.toLong(), MAX_METADATA_READ_BYTES) ?: return null
         val digest = try {
             sha256Hex(metadataBytes)
         } catch (io: Throwable) {
@@ -326,12 +323,26 @@ class ContributionStore(
         // The record is exactly the bytes this store published: the in-memory entry AND the durable
         // .digest sibling must both agree, so a swapped-in valid record of another capture is refused.
         if (digest != entry.recordSha256) return null
-        val digestSibling = try {
-            File(dir, "$captureId$SUFFIX_DIGEST").readText(Charsets.UTF_8)
+        // The .digest sibling is read with the same bounded exact-read primitive: 64 hex characters,
+        // nothing more.
+        val digestSibling = readExactlyBounded(File(dir, "$captureId$SUFFIX_DIGEST"), 64L, 64L)
+            ?.toString(Charsets.UTF_8) ?: return null
+        if (digestSibling != digest) return null
+        val node = try {
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson.parse(metadataBytes.toString(Charsets.UTF_8))
         } catch (io: Throwable) {
             return null
         }
-        if (digestSibling != digest) return null
+        val record = node as? au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj ?: return null
+        // STREAMED AUDIO BINDING: the header check alone lets a same-length PCM mutation through, so the
+        // FULL payload is hashed while streaming and compared to the sha256 the record itself declares.
+        val declaredAudioSha = audioShaOf(record) ?: return null
+        val actualAudioSha = try {
+            sha256HexBounded(audio, limits.maxClipBytes) ?: return null
+        } catch (io: Throwable) {
+            return null
+        }
+        if (actualAudioSha != declaredAudioSha) return null
         // The audio must still be the WAV these bytes describe.
         val header = try {
             audio.inputStream().use { input ->
@@ -348,13 +359,63 @@ class ContributionStore(
             return null
         }
         if (WavHeaderValidator.validate(header, audio.length()) == null) return null
-        val node = try {
-            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson.parse(metadataBytes.toString(Charsets.UTF_8))
-        } catch (io: Throwable) {
-            return null
-        }
-        val record = node as? au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj ?: return null
         DurableCapture(record, audio, entry.enrollmentEpoch)
+    }
+
+    /**
+     * Read EXACTLY [exactBytes] from a regular file, refusing if the file is shorter, longer, larger than
+     * [capBytes], or grows past the bound while being read. No unbounded read anywhere on this path.
+     */
+    private fun readExactlyBounded(file: File, exactBytes: Long, capBytes: Long): ByteArray? {
+        if (exactBytes <= 0 || exactBytes > capBytes) return null
+        if (!file.isFile || file.length() != exactBytes) return null
+        return try {
+            file.inputStream().use { input ->
+                val out = ByteArray(exactBytes.toInt())
+                var read = 0
+                while (read < out.size) {
+                    val n = input.read(out, read, out.size - read)
+                    if (n <= 0) break
+                    if (n <= 0) break
+                    read += n
+                }
+                // Nothing may follow the exact byte count.
+                if (read != out.size || input.read() != -1) null else out
+            }
+        } catch (io: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Stream the WHOLE audio payload through SHA-256, refusing anything past [maxBytes] DURING the read.
+     * Returns null on oversize or read failure - a payload that cannot be fully digested is not vouched.
+     */
+    private fun sha256HexBounded(file: File, maxBytes: Long): String? {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        var total = 0L
+        return try {
+            file.inputStream().use { input ->
+                val buffer = ByteArray(16 * 1024)
+                while (true) {
+                    val n = input.read(buffer)
+                    if (n < 0) break
+                    total += n
+                    if (total > maxBytes) return null
+                    digest.update(buffer, 0, n)
+                }
+            }
+            digest.digest().joinToString("") { "%02x".format(it) }
+        } catch (io: Throwable) {
+            null
+        }
+    }
+
+    /** The audio sha256 the record itself declares, as written at capture time. */
+    private fun audioShaOf(record: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj): String? {
+        val audio = record.fields["audio"] as? au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Obj ?: return null
+        val sha = audio.fields["sha256"] as? au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode.Str ?: return null
+        return sha.value.takeIf { it.length == 64 }
     }
 
     /** A capture THIS STORE vouches for: validated record bytes, matching audio, the owning epoch. */
@@ -2452,7 +2513,7 @@ class ContributionStore(
         private const val SUFFIX_PART = ".wav.part"
 
         /** Cap for reading a published metadata file back; the recorded size must fit under it. */
-        private const val MAX_METADATA_READ_BYTES = 1 shl 20
+        private const val MAX_METADATA_READ_BYTES = 1L shl 20
         private const val STAGING_PREFIX = "gen$"
         private const val ADMISSION_HELD = 0
         private const val ADMISSION_RELEASED = 1

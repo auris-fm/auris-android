@@ -19,6 +19,8 @@ class DurableCaptureAuthorityTest {
     @get:Rule
     val tmp = TemporaryFolder()
 
+    private fun sha256HexForTest(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
     private fun newStore(root: File, now: Long = 41_000_000L) = ContributionStore(
         root,
         QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
@@ -27,9 +29,15 @@ class DurableCaptureAuthorityTest {
     )
 
     private fun prepare(store: ContributionStore, root: File, id: String): Long {
-        val audio = ByteArray(44 + 1600 * 2)
+        // The declared audio sha must be over EXACTLY the bytes the store's WavWriter will produce, so
+        // the fixture reproduces them with the same writer.
+        val pcm = listOf(ShortArray(1600) { i -> i.toShort() } to 1600)
+        val expected = java.io.ByteArrayOutputStream()
+        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.WavWriter.writeHeader(expected, 1600)
+        for ((chunk, valid) in pcm) au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.WavWriter.writePcm(expected, chunk, valid)
+        val audio = expected.toByteArray()
         val block = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.AudioBlock(
-            sha256 = "0".repeat(64),
+            sha256 = sha256HexForTest(audio),
             byteCount = audio.size.toLong(),
             retainedSamples = 1600,
             originalFormat = "pcm_s16le",
@@ -54,7 +62,6 @@ class DurableCaptureAuthorityTest {
         )
         val admission = store.admitForTest(1600, metadata.size)
         val generation = store.fence.currentGeneration()
-        val pcm = listOf(ShortArray(1600) { i -> i.toShort() } to 1600)
         assertNotNull(store.prepareAt(generation, admission, id, "epoch-1", pcm, metadata))
         return generation
     }
@@ -112,6 +119,22 @@ class DurableCaptureAuthorityTest {
         wav.writeBytes(bytes)
 
         assertNull("damaged audio cannot ride a valid record", store.durableCapture(id))
+    }
+
+    @Test
+    fun `a same-length PAYLOAD byte mutation is refused, not only header damage`() {
+        val root = tmp.newFolder("authority-payload")
+        val store = newStore(root)
+        val id = UUID.randomUUID().toString()
+        prepare(store, root, id)
+        val wav = File(captureDir(root), "$id.recording.wav")
+        // Identical length, identical header, one PCM byte flipped: the header check alone passes this.
+        val bytes = wav.readBytes()
+        val original = bytes[1000].toInt()
+        bytes[1000] = (original xor 0x55).toByte()
+        wav.writeBytes(bytes)
+
+        assertNull("mutated payload cannot ride a valid record and header", store.durableCapture(id))
     }
 
     @Test

@@ -86,7 +86,15 @@ class VoiceSharingAccountAuthBinding(
     /** Explicit null seed: revokes the previous binding (reviewer b7ad5a9a). */
     fun install(binding: CredentialOwnershipBinding?): AuthoritySnapshot? = if (binding == null) ownership.installOwnershipBinding(null) else binding.let { ownership.installOwnershipBinding(it) }
 
-    /** Owner login/install transaction tail (INSIDE the owner lock): arm session + mirror. */
+    /**
+     * THE authoritative authority-moved tail (reviewer f4d85031): invoked INSIDE the owner
+     * transaction for every real login/logout/removal. Subscribers read the coherent snapshot;
+     * there is no polling fallback and none is needed - every transition fires this exactly once.
+     */
+    @Volatile
+    var authorityMovedListener: (() -> Unit)? = null
+
+    /** Owner login/install transaction tail (INSIDE the owner lock): arm session + mirror + notify. */
     override fun onSessionStarted(session: Long) {
         val snapshot = ownership.authoritySnapshot() // reentrant owner read
         coordinator.login(
@@ -95,10 +103,12 @@ class VoiceSharingAccountAuthBinding(
             snapshot.token?.value,
             session,
         )
+        authorityMovedListener?.invoke()
     }
 
-    /** Owner logout/removal transaction tail (INSIDE the owner lock): clear mirror + end session. */
+    /** Owner logout/removal transaction tail (INSIDE the owner lock): clear mirror + end session + notify. */
     override fun onSessionEnded(session: Long) {
         coordinator.loggedOut()
+        authorityMovedListener?.invoke()
     }
 }

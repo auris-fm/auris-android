@@ -103,7 +103,7 @@ class DirectoryDurabilityTest {
         )
         val admission = store.admitForTest(1600, meta(id).size)
         val generation = store.fence.currentGeneration()
-        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, store.recordAttempt(generation, id))
         assertEquals(
             "the LOCAL cap applies before growth: initial=10s is capped to retry_max_s=2s",
@@ -145,7 +145,7 @@ class DirectoryDurabilityTest {
         )
         val admission = store.admitForTest(1600, meta(id).size)
         val generation = store.fence.currentGeneration()
-        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, store.recordAttempt(generation, id))
 
         val outcome = runCatching { store.scheduleRetryAfterFailure(generation, id, retryAfterS = null) }
@@ -189,7 +189,7 @@ class DirectoryDurabilityTest {
         )
         val admission = faulted.admitForTest(1600, meta(id).size)
         val generation = faulted.fence.currentGeneration()
-        assertTrue(faulted.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(faulted.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, faulted.recordAttempt(generation, id))
         assertTrue(runCatching { faulted.scheduleRetryAfterFailure(generation, id, retryAfterS = null) }.isFailure)
         now += 10L // still strictly before the 3999ms backoff the failed publication was carrying
@@ -222,7 +222,7 @@ class DirectoryDurabilityTest {
         val store = ContributionStore(root, limits().copy(retryInitialS = 4, retryMaxS = 8), clock = { now }, jitter = { bound -> bound - 1 })
         val admission = store.admitForTest(1600, meta(id).size)
         val generation = store.fence.currentGeneration()
-        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, store.recordAttempt(generation, id))
         // Simulate the post-rename, pre-dir-sync state: the record exists with the boundary content.
         val boundaryAt = now + 3_999L
@@ -255,7 +255,7 @@ class DirectoryDurabilityTest {
         )
         val admission = faulted.admitForTest(1600, meta(id).size)
         val generation = faulted.fence.currentGeneration()
-        assertTrue(faulted.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(faulted.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, faulted.recordAttempt(generation, id))
         assertTrue(runCatching { faulted.scheduleRetryAfterFailure(generation, id, retryAfterS = null) }.isFailure)
         now += 999_999L
@@ -296,7 +296,7 @@ class DirectoryDurabilityTest {
         val store = ContributionStore(root, limits().copy(retryInitialS = 4, retryMaxS = 8), clock = { now }, jitter = { bound -> bound - 1 })
         val admission = store.admitForTest(1600, meta(id).size)
         val generation = store.fence.currentGeneration()
-        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, store.recordAttempt(generation, id))
         assertTrue(store.scheduleRetryAfterFailure(generation, id, retryAfterS = null) != null)
         now += 10L
@@ -337,7 +337,7 @@ class DirectoryDurabilityTest {
         )
         val admission = store.admitForTest(1600, meta(id).size)
         val generation = store.fence.currentGeneration()
-        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, store.recordAttempt(generation, id))
         assertTrue("second count publication fails pre-rename", runCatching { store.recordAttempt(generation, id) }.isFailure)
         now += 10L
@@ -371,7 +371,7 @@ class DirectoryDurabilityTest {
         )
         val admission = faulted.admitForTest(1600, meta(id).size)
         val generation = faulted.fence.currentGeneration()
-        assertTrue(faulted.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(faulted.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, faulted.recordAttempt(generation, id))
         assertTrue(runCatching { faulted.scheduleRetryAfterFailure(generation, id, retryAfterS = null) }.isFailure)
         now += 999_999L
@@ -404,7 +404,7 @@ class DirectoryDurabilityTest {
         )
         val admission = store.admitForTest(1600, meta(id).size)
         val generation = store.fence.currentGeneration()
-        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, store.recordAttempt(generation, id))
         assertTrue("count publication fails pre-rename", runCatching { store.recordAttempt(generation, id) }.isFailure)
         now += 10L
@@ -426,7 +426,7 @@ class DirectoryDurabilityTest {
         val store = ContributionStore(root, limits().copy(retryInitialS = 4, retryMaxS = 8), clock = { now }, jitter = { bound -> bound - 1 })
         val admission = store.admitForTest(1600, meta(id).size)
         val generation = store.fence.currentGeneration()
-        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, store.recordAttempt(generation, id))
         // Flooding the root past the measurement bound must turn every reconciliation UNKNOWN.
         repeat(3000) { n ->
@@ -465,7 +465,7 @@ class DirectoryDurabilityTest {
         )
         val admission = store.admitForTest(1600, meta(id).size)
         val generation = store.fence.currentGeneration()
-        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, store.recordAttempt(generation, id))
         assertTrue(runCatching { store.recordAttempt(generation, id) }.isFailure) // intent pending, syncs now faulted
         val intentBefore = File(contributions, "$id.attempts.tmp").readText()
@@ -506,7 +506,7 @@ class DirectoryDurabilityTest {
         )
         val admission = store.admitForTest(1600, meta(id).size)
         val generation = store.fence.currentGeneration()
-        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, store.recordAttempt(generation, id))
         assertEquals(now + 3_999L, store.scheduleRetryAfterFailure(generation, id, retryAfterS = null))
 
@@ -544,7 +544,7 @@ class DirectoryDurabilityTest {
         )
         val admission = store.admitForTest(1600, meta(id).size)
         val generation = store.fence.currentGeneration()
-        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
 
         assertNull(
             "an entry with ZERO attempts has no failed attempt to schedule backoff for",
@@ -595,7 +595,7 @@ class DirectoryDurabilityTest {
         val gen = store.fence.currentGeneration()
         assertTrue(
             "precondition: entry prepared",
-            store.prepareAt(gen, admission, id, "epoch-1", chunks(1600), meta(id)) != null,
+            store.prepareAt(gen, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null,
         )
         val generation = store.fence.currentGeneration()
 
@@ -633,7 +633,7 @@ class DirectoryDurabilityTest {
         val store = ContributionStore(root, limits(), directorySync = sync)
         val id = java.util.UUID.randomUUID().toString()
 
-        val entry = store.prepare(id, "epoch-1", chunks(1600), meta(id))
+        val entry = store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
         assertTrue("entry must publish", entry != null)
         assertEquals("entry must remain readable", 1, store.readyEntries().size)
 
@@ -697,7 +697,7 @@ class DirectoryDurabilityTest {
         // raise PublicationUncertain. Anything else (silent null, silent success) is a defect.
         var outcome: Any? = null
         try {
-            outcome = store.prepare(id, "epoch-1", chunks(1600), meta(id))
+            outcome = store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
         } catch (uncertain: PublicationUncertain) {
             outcome = uncertain
         } catch (other: Throwable) {
@@ -747,7 +747,7 @@ class DirectoryDurabilityTest {
         val store = ContributionStore(root, limits(), directorySync = failing)
         val id = java.util.UUID.randomUUID().toString()
 
-        val outcome = runCatching { store.prepare(id, "epoch-1", chunks(1600), meta(id)) }
+        val outcome = runCatching { store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) }
         assertTrue(
             "a pre-marker sync failure must be an ordinary failure, got ${outcome.exceptionOrNull()}",
             outcome.exceptionOrNull() !is PublicationUncertain,
@@ -778,7 +778,7 @@ class DirectoryDurabilityTest {
 
         var outcome: Any? = null
         try {
-            outcome = store.prepare(id, "epoch-1", chunks(1600), meta(id))
+            outcome = store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
         } catch (uncertain: PublicationUncertain) {
             outcome = uncertain
         }
@@ -814,7 +814,7 @@ class DirectoryDurabilityTest {
         val firstId = java.util.UUID.randomUUID().toString()
 
         // First attempt: the directory gets created, the parent barrier fails -> uncommitted.
-        val first = runCatching { store.prepare(firstId, "epoch-1", chunks(1600), meta(firstId)) }
+        val first = runCatching { store.prepare(firstId, "epoch-1", chunks(1600), meta(firstId), "a@x", 7L) }
         assertTrue(
             "a failed parent barrier must refuse the preparation, got ${first.exceptionOrNull()}",
             first.exceptionOrNull() is java.io.IOException || first.getOrNull() == null,
@@ -835,7 +835,7 @@ class DirectoryDurabilityTest {
             },
         )
         val secondId = java.util.UUID.randomUUID().toString()
-        assertTrue(observing.prepare(secondId, "epoch-1", chunks(1600), meta(secondId)) != null)
+        assertTrue(observing.prepare(secondId, "epoch-1", chunks(1600), meta(secondId), "a@x", 7L) != null)
         assertTrue(
             "the parent barrier must run even when the directory already existed, got ${parentSyncs.get()}",
             parentSyncs.get() >= 1,
@@ -849,7 +849,7 @@ class DirectoryDurabilityTest {
         // The confirmation step must run, and must be able to FAIL, on a fresh instance.
         val root = tmp.newFolder("queue-uncertain-recovery")
         val id = java.util.UUID.randomUUID().toString()
-        ContributionStore(root, limits(), directorySync = RecordingSync()).prepare(id, "epoch-1", chunks(1600), meta(id))
+        ContributionStore(root, limits(), directorySync = RecordingSync()).prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
 
         val failingFileSync = FileSync { throw java.io.IOException("simulated confirmation failure") }
         val fresh = ContributionStore(root, limits(), directorySync = RecordingSync(), fileSync = failingFileSync)
@@ -889,7 +889,7 @@ class DirectoryDurabilityTest {
             }
         }
         val store = ContributionStore(root, limits(), directorySync = gated, fileSync = FileSync { })
-        assertTrue("precondition: the entry prepares", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: the entry prepares", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals("precondition: it is ready", listOf(id), store.readyEntries().map { it.captureId })
 
         failSyncs = true
@@ -930,7 +930,7 @@ class DirectoryDurabilityTest {
         // (a) marker-content barrier: every other file syncs fine, only the marker throws.
         run {
             val root = tmp.newFolder("queue-marker-barrier")
-            ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id))
+            ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
             val onlyMarkerFails = FileSync { file ->
                 if (file.name.endsWith(".ready")) throw java.io.IOException("simulated marker sync failure")
             }
@@ -944,7 +944,7 @@ class DirectoryDurabilityTest {
         // (b) parent-namespace barrier: files and the entry directory sync fine, only the parent throws.
         run {
             val root = tmp.newFolder("queue-parent-barrier")
-            ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id))
+            ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
             val entriesDir = File(root, "contributions")
             val onlyParentFails = object : DirectorySync {
                 override fun sync(directory: File) {
@@ -977,7 +977,7 @@ class DirectoryDurabilityTest {
             }
         }
         val store = ContributionStore(root, limits(), directorySync = gated)
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
 
         failSyncs = true
         store.recover() // confirmation fails -> withheld, recorded as uncertain
@@ -1008,7 +1008,7 @@ class DirectoryDurabilityTest {
             if (file.name.endsWith(".ready")) throw java.io.IOException("simulated marker sync failure")
         }
         val store = ContributionStore(root, limits(), fileSync = failingFileSync)
-        val outcome = runCatching { store.prepare(id, "epoch-1", chunks(1600), meta(id)) }
+        val outcome = runCatching { store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) }
         assertTrue(
             "precondition: prepare must be uncertain, got ${outcome.exceptionOrNull()}",
             outcome.exceptionOrNull() is PublicationUncertain,
@@ -1034,7 +1034,7 @@ class DirectoryDurabilityTest {
         // store must charge every validated entry before it branches on confirmation.
         val root = tmp.newFolder("queue-fresh-withheld")
         val id = java.util.UUID.randomUUID().toString()
-        ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id))
+        ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
         val entryCharge = File(root, "contributions").listFiles()!!
             .filter { it.name.startsWith(id) && (it.name.endsWith(".recording.wav") || it.name.endsWith(".metadata.json")) }
             .sumOf { it.length() }
@@ -1079,7 +1079,7 @@ class DirectoryDurabilityTest {
         run {
             val sizingRoot = tmp.newFolder("queue-expiry-charge")
             val id0 = java.util.UUID.randomUUID().toString()
-            ContributionStore(sizingRoot, limits()).prepare(id0, "epoch-1", chunks(1600), meta(id0))
+            ContributionStore(sizingRoot, limits()).prepare(id0, "epoch-1", chunks(1600), meta(id0), "a@x", 7L)
         }
         val oneEntry = 4_265L
         val store = ContributionStore(
@@ -1090,7 +1090,7 @@ class DirectoryDurabilityTest {
             limits().copy(maxQueueBytes = oneEntry + probeBytes - 1, maxQueueAgeSeconds = 60),
             clock = { now },
         )
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
 
         // Advance well past the age bound so the entry is genuinely expired.
         now += 120_000L
@@ -1111,7 +1111,7 @@ class DirectoryDurabilityTest {
         // accounting says the queue is empty, so new work is admitted on top of them.
         val root = tmp.newFolder("queue-reload-charge")
         val id = java.util.UUID.randomUUID().toString()
-        ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id))
+        ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
 
         val probeMeta = meta(java.util.UUID.randomUUID().toString())
         val probeSamples = 256L
@@ -1149,7 +1149,7 @@ class DirectoryDurabilityTest {
             clock = { now },
         )
         val deletingStore = store
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         val charge = store.readyEntries().single().let { it.audioBytes + it.metadataBytes }
 
         // Make the audio file undeletable by replacing it with a non-empty DIRECTORY of the same name:
@@ -1211,7 +1211,7 @@ class DirectoryDurabilityTest {
         val id = java.util.UUID.randomUUID().toString()
         var now = 1_000_000L
         val store = ContributionStore(root, limits().copy(maxQueueAgeSeconds = 60), clock = { now })
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
 
         val wav = File(root, "contributions/$id.recording.wav")
         assertTrue("precondition: audio is a regular file", wav.isFile)
@@ -1268,7 +1268,7 @@ class DirectoryDurabilityTest {
         // and the conservative bound is understated. This control pins the FULL footprint.
         val root = tmp.newFolder("queue-footprint")
         val id = java.util.UUID.randomUUID().toString()
-        ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id))
+        ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
 
         val contributions = File(root, "contributions")
         val wav = File(contributions, "$id.recording.wav")
@@ -1308,7 +1308,7 @@ class DirectoryDurabilityTest {
         val root = tmp.newFolder("queue-purge-residue")
         val id = java.util.UUID.randomUUID().toString()
         val store = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         val wav = File(root, "contributions/$id.recording.wav")
         val audio = wav.readBytes()
         wav.delete()
@@ -1356,7 +1356,7 @@ class DirectoryDurabilityTest {
                 }
             },
         )
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         val wav = File(root, "contributions/$id.recording.wav")
         assertTrue("precondition: audio present", wav.isFile)
 
@@ -1387,7 +1387,7 @@ class DirectoryDurabilityTest {
             }
         }
         val store = ContributionStore(root, limits(), intentDirectorySyncOverride = faulting)
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
 
         store.revokeAndPurge("account_changed")
         val wav = File(root, "contributions/$id.recording.wav")
@@ -1419,7 +1419,7 @@ class DirectoryDurabilityTest {
                 }
             },
         )
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         store.revokeAndPurge("account_changed")
         val wav = File(root, "contributions/$id.recording.wav")
         assertTrue("nothing was destroyed while intent could not be confirmed", wav.isFile)
@@ -1463,7 +1463,7 @@ class DirectoryDurabilityTest {
             }
         }
         val store = ContributionStore(root, limits(), intentDirectorySyncOverride = faulting)
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertTrue("precondition: no disqualified directory yet", !File(root, "disqualified").exists())
 
         val wav = File(root, "contributions/$id.recording.wav")
@@ -1505,7 +1505,7 @@ class DirectoryDurabilityTest {
         val root = tmp.newFolder("queue-recovery-failed-cleanup")
         val id = java.util.UUID.randomUUID().toString()
         val store = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
 
         // Make the capture INVALID (recovery's invalid branch) and undeletable (cleanup fails), with an
         // extra unexpected subtree so a primary-files-only charge is measurably narrower.
@@ -1538,7 +1538,7 @@ class DirectoryDurabilityTest {
         val root = tmp.newFolder("queue-deep-debris")
         val id = java.util.UUID.randomUUID().toString()
         val store = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
 
         // Replace the attempts sidecar with a matching directory holding a nested payload.
         val attempts = File(File(root, "contributions"), "$id.attempts")
@@ -1565,7 +1565,7 @@ class DirectoryDurabilityTest {
         val root = tmp.newFolder("queue-fail-mid-iteration")
         val id = java.util.UUID.randomUUID().toString()
         val writer = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", writer.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", writer.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         File(root, "disqualified").mkdirs()
         File(root, "disqualified/$id").writeText("disqualified")
 
@@ -1631,7 +1631,7 @@ class DirectoryDurabilityTest {
         val store = ContributionStore(root, limits())
         assertTrue(
             "precondition: a ready entry exists",
-            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id)) != null,
+            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null,
         )
         store.revokeAndPurge("test-disposal")
         val markerDir = File(root, "disqualified")
@@ -1671,7 +1671,7 @@ class DirectoryDurabilityTest {
         val store = ContributionStore(root, limits())
         assertTrue(
             "precondition: ready survivor exists and is served",
-            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id)) != null &&
+            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null &&
                 store.readyEntries().any { it.captureId == id },
         )
         val markerDir = File(root, "disqualified")
@@ -1795,7 +1795,7 @@ class DirectoryDurabilityTest {
         val store = ContributionStore(root, limits())
         assertTrue(
             "precondition: ready entry prepared",
-            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id)) != null,
+            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null,
         )
         val markerDir = File(root, "disqualified")
         markerDir.mkdirs()
@@ -1853,7 +1853,7 @@ class DirectoryDurabilityTest {
         val store = ContributionStore(root, limits())
         assertTrue(
             "precondition: ready entry prepared",
-            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id)) != null,
+            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null,
         )
         val markerDir = File(root, "disqualified")
         markerDir.mkdirs()
@@ -1884,7 +1884,7 @@ class DirectoryDurabilityTest {
         val store = ContributionStore(root, limits())
         assertTrue(
             "precondition: prepared",
-            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id)) != null,
+            store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null,
         )
 
         // Overflow the QUEUE ROOT: recovery's root discovery fails -> rootEnumerationUnknown.
@@ -1913,7 +1913,7 @@ class DirectoryDurabilityTest {
         contributions.mkdirs()
         val id = "5d5d5d5d-1111-2222-3333-444444444444"
         val store = ContributionStore(root, limits())
-        assertTrue("precondition: prepared", store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepared", store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         store.revokeAndPurge("test-disposal")
         val markerDir = File(root, "disqualified")
         assertTrue("precondition: an intent marker exists", markerDir.isDirectory)
@@ -1956,7 +1956,7 @@ class DirectoryDurabilityTest {
         contributions.mkdirs()
         val id = "3c3c3c3c-1111-2222-3333-444444444444"
         val store = ContributionStore(root, limits())
-        val prepared = store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id))
+        val prepared = store.prepareAt(0, store.admitForTest(1600, meta(id).size), id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
         assertTrue("precondition: prepared ready", prepared != null)
         assertTrue("precondition: served", store.readyEntries().isNotEmpty())
 
@@ -2427,7 +2427,7 @@ class DirectoryDurabilityTest {
         val root = tmp.newFolder("queue-oversized-sidecar")
         val id = java.util.UUID.randomUUID().toString()
         val store = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
 
         val contributions = File(root, "contributions")
         val digest = File(contributions, "$id.sha256")
@@ -2486,7 +2486,7 @@ class DirectoryDurabilityTest {
 
         // Separate owner publishes a complete, valid entry.
         val writer = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", writer.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", writer.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
 
         // Make a SIDECAR unmeasurable while leaving the entry VALID. Burying the digest would fail
         // validation (it is read as content), so the debris goes under the .ready marker, which is only
@@ -2524,7 +2524,7 @@ class DirectoryDurabilityTest {
         val root = tmp.newFolder("queue-unmeasurable")
         val id = java.util.UUID.randomUUID().toString()
         val store = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         File(root, "disqualified").mkdirs()
         File(root, "disqualified/$id").writeText("disqualified")
 
@@ -2576,7 +2576,7 @@ class DirectoryDurabilityTest {
         val root = tmp.newFolder("queue-sidecar-footprint")
         val id = java.util.UUID.randomUUID().toString()
         val store = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         // Real captures accumulate retry state; the digest is a fixed-size file. Together they make the
         // sidecar band wide enough to place a probe inside it, which is what isolates these bytes.
         repeat(4) { store.recordAttempt(store.ownership.currentGeneration(), id) }
@@ -2620,7 +2620,7 @@ class DirectoryDurabilityTest {
         val root = tmp.newFolder("queue-late-cleanup")
         val id = java.util.UUID.randomUUID().toString()
         val store = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         // Disqualify without deleting anything, simulating a previous failed attempt.
         File(root, "disqualified").mkdirs()
         // Exactly the content the store itself writes, so the measured footprint matches production.
@@ -2671,7 +2671,7 @@ class DirectoryDurabilityTest {
         // that adopted it from disk even though recovery would have withheld it (spec ecbe84dd).
         val root = tmp.newFolder("queue-reload-confirm")
         val id = java.util.UUID.randomUUID().toString()
-        ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id))
+        ContributionStore(root, limits()).prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
 
         // Confirmation fails for this instance only.
         val failing = object : DirectorySync {
@@ -2698,7 +2698,7 @@ class DirectoryDurabilityTest {
         val id = java.util.UUID.randomUUID().toString()
         var now = 1_000_000L
         val store = ContributionStore(root, limits().copy(maxQueueAgeSeconds = 60), clock = { now })
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
 
         val contributions = File(root, "contributions")
         val wav = File(contributions, "$id.recording.wav")
@@ -2727,7 +2727,7 @@ class DirectoryDurabilityTest {
         val root = tmp.newFolder("queue-disqualified")
         val id = java.util.UUID.randomUUID().toString()
         val store = ContributionStore(root, limits())
-        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue("precondition: prepare", store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         // Marker written by the store itself via a failed delete.
         File(root, "disqualified/$id").apply { parentFile?.mkdirs() }.writeText("disqualified\n")
         val restarted = ContributionStore(root, limits())
@@ -2752,7 +2752,7 @@ class DirectoryDurabilityTest {
             fileSync = FileSync { file -> syncedFiles += file.name },
         )
         val id = java.util.UUID.randomUUID().toString()
-        assertTrue(store.prepare(id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
 
         assertTrue(
             "created.at must be file-synced, synced=${syncedFiles.toList()}",
@@ -2789,7 +2789,7 @@ class DirectoryDurabilityTest {
         val sync = RecordingSync()
         val store = ContributionStore(root, limits(), directorySync = sync)
         val id = java.util.UUID.randomUUID().toString()
-        val entry = store.prepare(id, "epoch-1", chunks(1600), meta(id))
+        val entry = store.prepare(id, "epoch-1", chunks(1600), meta(id), "a@x", 7L)
         assertTrue(entry != null)
 
         // Simulate the crash outcome the ready marker exists for: the directory entry for the marker

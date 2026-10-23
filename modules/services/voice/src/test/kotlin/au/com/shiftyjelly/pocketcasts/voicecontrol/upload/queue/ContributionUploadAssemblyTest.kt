@@ -111,7 +111,7 @@ class ContributionUploadAssemblyTest {
         val meta = CanonicalJson.canonicalBytes(record(id, sha256Hex(sample), sample.size.toLong()))
         val admission = store.admitForTest(1600, meta.size)
         val generation = store.fence.currentGeneration()
-        check(store.prepareAt(generation, admission, id, "epoch-1", listOf(ShortArray(1600) { i -> i.toShort() } to 1600), meta) != null) {
+        check(store.prepareAt(generation, admission, id, "epoch-1", listOf(ShortArray(1600) { i -> i.toShort() } to 1600), meta, "a@x", 7L) != null) {
             "the capture was not admitted into the queue ($label)"
         }
         // The DURABLE file the store published - not a test-side copy standing in for it. The store

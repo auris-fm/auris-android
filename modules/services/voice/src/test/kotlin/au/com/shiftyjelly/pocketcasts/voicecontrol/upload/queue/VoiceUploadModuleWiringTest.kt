@@ -25,6 +25,68 @@ class VoiceUploadModuleWiringTest {
     @get:Rule
     val tmp = TemporaryFolder()
 
+    /** The owner-interface contract with its real discipline: one monitor, atomic snapshot read. */
+    private class WatchOwner(startAccount: String?, startSession: Long) : au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner {
+        override val collectionSharedLock = Any()
+
+        @Volatile
+        var snap = au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot(
+            startAccount,
+            startSession,
+            startSession,
+            au.com.shiftyjelly.pocketcasts.preferences.AccessToken("Bearer-A"),
+        )
+
+        override fun authoritySnapshot(): au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot = snap
+        override fun sessionGeneration(): Long = snap.session
+        override fun <T> transaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
+        override fun installOwnershipBinding(binding: au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipBinding?) = snap
+        override fun beginRefresh(observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot) = null
+        override fun publishRefresh(
+            lease: au.com.shiftyjelly.pocketcasts.repositories.sync.RefreshLease,
+            refreshToken: au.com.shiftyjelly.pocketcasts.preferences.RefreshToken,
+            accessToken: au.com.shiftyjelly.pocketcasts.preferences.AccessToken,
+        ) = false
+        override fun publishCredentials(
+            observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot,
+            refreshToken: au.com.shiftyjelly.pocketcasts.preferences.RefreshToken,
+            accessToken: au.com.shiftyjelly.pocketcasts.preferences.AccessToken,
+        ) = false
+        override fun invalidateIfCurrent(
+            observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot,
+            transaction: () -> Boolean,
+        ) = transaction()
+        override fun reconcileExternalState() = snap
+
+        /** ONE move of account+session+credential+token under the lock: THE authoritative transition. */
+        fun switchTo(account: String, session: Long) = synchronized(collectionSharedLock) {
+            snap = au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot(
+                account,
+                session,
+                session,
+                au.com.shiftyjelly.pocketcasts.preferences.AccessToken("Bearer-B"),
+            )
+        }
+    }
+
+    /** Real account stack pieces for the connector harness (no Android Context needed). */
+    private fun realConnector(
+        owner: WatchOwner,
+    ): Pair<
+        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountAuthBinding,
+        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountState,
+        > {
+        val state = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountState()
+        val binding = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountAuthBinding(
+            owner,
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountSessionCoordinator(
+                state,
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingCredentialStore(),
+            ),
+        )
+        return binding to state
+    }
+
     private fun newStore(root: java.io.File, now: Long = 51_000_000L) = ContributionStore(
         root,
         QueueLimits.defaults().copy(maxQueueRecords = 8, retryInitialS = 4, retryMaxS = 8),
@@ -315,17 +377,26 @@ class VoiceUploadModuleWiringTest {
         holdRequests = hold
         val response = java.util.concurrent.atomic.AtomicReference<ContributionRetryCaller.PollResult>()
 
-        // Live authority flips at the transition; the watcher (the production shape, a polling loop
-        // here) compares the FULL live account/session/epoch against the LEASES' admitted identities.
-        val liveAccount = java.util.concurrent.atomic.AtomicReference("a@x")
-        val liveSession = java.util.concurrent.atomic.AtomicReference(7L)
-        val liveEpoch = java.util.concurrent.atomic.AtomicReference("epoch-1")
-        val watcher: suspend kotlinx.coroutines.CoroutineScope.() -> Unit = {
-            while (true) {
-                store.cancelLaunchesIdentityMismatch(liveAccount.get(), liveSession.get(), liveEpoch.get(), "account-transition")
-                kotlinx.coroutines.delay(10)
-            }
-        }
+        // THE REAL production connector: the authoritative binding tail -> coherent snapshot read ->
+        // full-identity lease cancellation. No test-substituted loop.
+        val owner = WatchOwner("a@x", 7L)
+        val (binding, accountState) = realConnector(owner)
+        val token = accountState.sessionStarted(7L)
+        val ticket = accountState.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
+        assertTrue(
+            accountState.applyOutcome(
+                token,
+                ticket,
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.projectionJson(epoch = "epoch-1"),
+                ownerSession = 7L,
+            ),
+        )
+        val watcher = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.IdentityRevocationWatchers.production(
+            binding,
+            { owner.authoritySnapshot() },
+            { accountState.projection.value?.enrollmentEpoch },
+            store,
+        )
         val assembly = ContributionUploadAssembly(
             store = store,
             transport = ContributionUploadTransport(
@@ -350,14 +421,17 @@ class VoiceUploadModuleWiringTest {
         val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
         try {
             val trigger = UploadTrigger(assembly, scope, intervalMs = 60_000L, identityRevocationWatcher = watcher)
+            trigger.start()
             val uploadThread = Thread { runCatching { response.set(assembly.poll()) } }
             uploadThread.start()
             val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
             while (requests.get() < 1 && System.nanoTime() < deadline) Thread.sleep(10)
             assertEquals("the request started (call is registered and in flight)", 1, requests.get())
-            // THE TRANSITION, deterministically after registration: SAME epoch, moved SESSION - an
-            // epoch-only filter would miss this; the full-identity comparison must cancel it.
-            liveSession.set(9L)
+            // THE TRANSITION, deterministically after registration: the AUTHORITATIVE owner moves
+            // session 7 to 9 under the SAME epoch - an epoch-only filter would miss this; the real
+            // binding tail fires exactly once and the full-identity comparison must cancel it.
+            owner.switchTo("a@x", 9L)
+            binding.onSessionStarted(9L)
             uploadThread.join(15_000)
             val result = response.get()
             assertTrue("the transition reached the REGISTERED call: the attempt ENDED", result != null)
@@ -365,6 +439,163 @@ class VoiceUploadModuleWiringTest {
             // revocation) - the point is the call STOPPED and nothing settled.
             assertTrue("nothing settled on the network answer", store.readyEntries().any { it.captureId == id })
             assertTrue("the retired-identity capture is retained", store.readyEntries().any { it.captureId == id })
+        } finally {
+            hold.countDown()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `an ACCOUNT-ONLY move with the same epoch cancels an ALREADY-REGISTERED in-flight call`() {
+        val root = tmp.newFolder("wiring-account-only-cancel")
+        val store = newStore(root)
+        val id = UUID.randomUUID().toString()
+        prepareCapture(store, id)
+        requests.set(0)
+        responseStatus = 201
+        responseBody = receiptFor(store, id, "accepted")
+        val port = startServer()
+        val hold = java.util.concurrent.CountDownLatch(1)
+        holdRequests = hold
+        val response = java.util.concurrent.atomic.AtomicReference<ContributionRetryCaller.PollResult>()
+
+        val owner = WatchOwner("a@x", 7L)
+        val (binding, accountState) = realConnector(owner)
+        val token = accountState.sessionStarted(7L)
+        val ticket = accountState.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
+        assertTrue(
+            accountState.applyOutcome(
+                token,
+                ticket,
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.projectionJson(epoch = "epoch-1"),
+                ownerSession = 7L,
+            ),
+        )
+        val watcher = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.IdentityRevocationWatchers.production(
+            binding,
+            { owner.authoritySnapshot() },
+            { accountState.projection.value?.enrollmentEpoch },
+            store,
+        )
+        val assembly = ContributionUploadAssembly(
+            store = store,
+            transport = ContributionUploadTransport(
+                endpoint = "http://127.0.0.1:$port/v1/contributions",
+                authorization = { "Bearer t" },
+                callTimeoutMs = 30_000,
+            ),
+            captureFor = { captureId ->
+                store.durableCapture(captureId)?.let {
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession)
+                }
+            },
+            clock = { 51_000_000L },
+            policyAllows = { true },
+            networkAvailable = { true },
+            identityHolds = { true },
+            credentialFor = { admitted ->
+                UploadIdentityAuthority.LiveCredential("Bearer-A", admitted.account ?: "a@x", admitted.session ?: 7L, admitted.epoch)
+            },
+            launchIdentityCheck = { true },
+        )
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
+        try {
+            val trigger = UploadTrigger(assembly, scope, intervalMs = 60_000L, identityRevocationWatcher = watcher)
+            trigger.start()
+            val uploadThread = Thread { runCatching { response.set(assembly.poll()) } }
+            uploadThread.start()
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+            while (requests.get() < 1 && System.nanoTime() < deadline) Thread.sleep(10)
+            assertEquals("the request started (call is registered and in flight)", 1, requests.get())
+            // ACCOUNT-ONLY move: session 7 stays, the account moves - the epoch never changes.
+            owner.switchTo("b@x", 7L)
+            binding.onSessionStarted(7L)
+            uploadThread.join(15_000)
+            val result = response.get()
+            assertTrue("the account move reached the REGISTERED call: the attempt ENDED", result != null)
+            assertTrue("the retired-identity capture is retained", store.readyEntries().any { it.captureId == id })
+        } finally {
+            hold.countDown()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `after a RESTART a same-epoch session move cancels the registered call of the recovered capture`() {
+        val root = tmp.newFolder("wiring-restart-cancel")
+        val first = newStore(root)
+        val id = UUID.randomUUID().toString()
+        prepareCapture(first, id)
+        // THE RESTART: a NEW store over the SAME directory; recovery must carry the FULL admitted
+        // identity from the validated owner sidecar - a null-ownership lease would skip comparisons.
+        val store = newStore(root)
+        val recovered = store.recover()
+        assertTrue("the capture recovered", recovered.any { it.captureId == id })
+        assertEquals("recovery populated the account", "a@x", recovered.first { it.captureId == id }.enrollmentAccount)
+        assertEquals("recovery populated the session", 7L, recovered.first { it.captureId == id }.enrollmentSession)
+
+        requests.set(0)
+        responseStatus = 201
+        responseBody = receiptFor(store, id, "accepted")
+        val port = startServer()
+        val hold = java.util.concurrent.CountDownLatch(1)
+        holdRequests = hold
+        val response = java.util.concurrent.atomic.AtomicReference<ContributionRetryCaller.PollResult>()
+
+        val owner = WatchOwner("a@x", 7L)
+        val (binding, accountState) = realConnector(owner)
+        val token = accountState.sessionStarted(7L)
+        val ticket = accountState.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
+        assertTrue(
+            accountState.applyOutcome(
+                token,
+                ticket,
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.projectionJson(epoch = "epoch-1"),
+                ownerSession = 7L,
+            ),
+        )
+        val watcher = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.IdentityRevocationWatchers.production(
+            binding,
+            { owner.authoritySnapshot() },
+            { accountState.projection.value?.enrollmentEpoch },
+            store,
+        )
+        val assembly = ContributionUploadAssembly(
+            store = store,
+            transport = ContributionUploadTransport(
+                endpoint = "http://127.0.0.1:$port/v1/contributions",
+                authorization = { "Bearer t" },
+                callTimeoutMs = 30_000,
+            ),
+            captureFor = { captureId ->
+                store.durableCapture(captureId)?.let {
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession)
+                }
+            },
+            clock = { 51_000_000L },
+            policyAllows = { true },
+            networkAvailable = { true },
+            identityHolds = { true },
+            credentialFor = { admitted ->
+                UploadIdentityAuthority.LiveCredential("Bearer-A", admitted.account ?: "a@x", admitted.session ?: 7L, admitted.epoch)
+            },
+            launchIdentityCheck = { true },
+        )
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
+        try {
+            val trigger = UploadTrigger(assembly, scope, intervalMs = 60_000L, identityRevocationWatcher = watcher)
+            trigger.start()
+            val uploadThread = Thread { runCatching { response.set(assembly.poll()) } }
+            uploadThread.start()
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+            while (requests.get() < 1 && System.nanoTime() < deadline) Thread.sleep(10)
+            assertEquals("the RECOVERED capture registered and is in flight", 1, requests.get())
+            owner.switchTo("a@x", 9L)
+            binding.onSessionStarted(9L)
+            uploadThread.join(15_000)
+            val result = response.get()
+            assertTrue("the move reached the REGISTERED call of the recovered capture", result != null)
+            assertTrue("the recovered capture is retained", store.readyEntries().any { it.captureId == id })
         } finally {
             hold.countDown()
             scope.cancel()

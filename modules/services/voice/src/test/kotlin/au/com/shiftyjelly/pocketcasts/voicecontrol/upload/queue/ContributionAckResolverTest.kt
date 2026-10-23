@@ -75,7 +75,7 @@ class ContributionAckResolverTest {
         val id = UUID.randomUUID().toString()
         val admission = store.admitForTest(1600, meta(id).size)
         val generation = store.fence.currentGeneration()
-        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", listOf(ShortArray(1600) { i -> i.toShort() } to 1600), meta(id)) != null)
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", listOf(ShortArray(1600) { i -> i.toShort() } to 1600), meta(id), "a@x", 7L) != null)
         return id to generation
     }
 

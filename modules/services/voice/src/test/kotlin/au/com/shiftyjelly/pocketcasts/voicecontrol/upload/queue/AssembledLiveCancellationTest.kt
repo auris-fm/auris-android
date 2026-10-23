@@ -139,7 +139,7 @@ class AssembledLiveCancellationTest {
         val admission = store.admitForTest(1600, metadata.size)
         val generation = store.fence.currentGeneration()
         val pcm = listOf(ShortArray(1600) { i -> i.toShort() } to 1600)
-        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", pcm, metadata) != null)
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", pcm, metadata, "a@x", 7L) != null)
         assertEquals(1, store.recordAttempt(generation, id))
 
         // Progress is signalled by ACTUAL BODY WRITES leaving this process, not by file creation or a

@@ -109,7 +109,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         // Simulate a kill MID-PREPARATION of a second entry: only .part debris exists.
         val id2 = UUID.randomUUID().toString()
         File(root, "contributions").mkdirs()
@@ -129,10 +129,10 @@ class ContributionStoreTest {
             assertTrue(it.isHeld())
             it.discard()
         }
-        assertNotNull(store.prepare(id, "epoch-1", chunks(16), meta(id)))
+        assertNotNull(store.prepare(id, "epoch-1", chunks(16), meta(id), "a@x", 7L))
         // Record cap reached: deny BEFORE any copy; no new files appear.
         assertNull(store.admit(16, 100))
-        assertNull(store.prepare(UUID.randomUUID().toString(), "epoch-1", chunks(16), meta(UUID.randomUUID().toString())))
+        assertNull(store.prepare(UUID.randomUUID().toString(), "epoch-1", chunks(16), meta(UUID.randomUUID().toString()), "a@x", 7L))
     }
 
     @Test
@@ -156,9 +156,9 @@ class ContributionStoreTest {
         val store = ContributionStore(root, limits, clock = { now })
         val idA = UUID.randomUUID().toString()
         val idB = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(idA, "epoch-1", chunks(8), meta(idA)))
+        assertNotNull(store.prepare(idA, "epoch-1", chunks(8), meta(idA), "a@x", 7L))
         now += 150_000 // A (created at t=1_000_000) is now 150s old > max_queue_age_s=100
-        assertNotNull(store.prepare(idB, "epoch-1", chunks(8), meta(idB)))
+        assertNotNull(store.prepare(idB, "epoch-1", chunks(8), meta(idB), "a@x", 7L))
         store.recordAttempt(store.fence.currentGeneration(), idA)
         // RESTART: fresh store recovers durable state including attempt counts.
         val store2 = ContributionStore(root, limits, clock = { now })
@@ -177,7 +177,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         // In-progress debris from another capture.
         val id2 = UUID.randomUUID().toString()
         File(root, "contributions/$id2.wav.part").writeBytes(ByteArray(4))
@@ -199,8 +199,8 @@ class ContributionStoreTest {
         val store = ContributionStore(root, QueueLimits.defaults())
         val good = UUID.randomUUID().toString()
         val bad = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(good, "epoch-1", chunks(8), meta(good)))
-        assertNotNull(store.prepare(bad, "epoch-1", chunks(8), meta(bad)))
+        assertNotNull(store.prepare(good, "epoch-1", chunks(8), meta(good), "a@x", 7L))
+        assertNotNull(store.prepare(bad, "epoch-1", chunks(8), meta(bad), "a@x", 7L))
         // Corrupt the bad entry's WAV AFTER it was marked ready (truncated body vs header).
         val wav = File(root, "contributions/$bad.recording.wav")
         wav.writeBytes(wav.readBytes().copyOf(wav.readBytes().size - 2))
@@ -217,7 +217,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        store.prepare(id, "epoch-1", chunks(8, 4), meta(id))
+        store.prepare(id, "epoch-1", chunks(8, 4), meta(id), "a@x", 7L)
         val entry = store.readyEntries().single()
         assertEquals(WavWriter.fileBytes(12), entry.audioBytes)
         assertEquals(44 + 24, entry.audioBytes)
@@ -253,7 +253,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        assertNull(store.prepare(id, "epoch-1", chunks(16_000 * 45), meta(id))) // 45 s > max_clip_ms
+        assertNull(store.prepare(id, "epoch-1", chunks(16_000 * 45), meta(id), "a@x", 7L)) // 45 s > max_clip_ms
         assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
         val dir = File(root, "contributions")
         assertTrue(dir.list()?.none { it.startsWith(id) } ?: true)
@@ -274,7 +274,7 @@ class ContributionStoreTest {
         ids.forEach { id ->
             Thread {
                 start.await()
-                if (store.prepare(id, "epoch-1", chunks(16), meta(id)) != null) results.add(id)
+                if (store.prepare(id, "epoch-1", chunks(16), meta(id), "a@x", 7L) != null) results.add(id)
                 done.countDown()
             }.start()
         }
@@ -294,7 +294,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id, "epoch-1", chunks(16), meta(id)))
+        assertNotNull(store.prepare(id, "epoch-1", chunks(16), meta(id), "a@x", 7L))
         store.purgeQueue("account-change")
         assertEquals(0, store.readyEntries().size)
         assertNull("attempt bookkeeping must not resurrect a purged entry", store.recordAttempt(store.fence.currentGeneration(), id))
@@ -324,13 +324,13 @@ class ContributionStoreTest {
                 hooked = true
                 fence.revoke() // revocation lands DURING the stale owner's actual WAV write
                 ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
-                    .prepare(SUCC, "epoch-B", chunks(8), meta(SUCC))
+                    .prepare(SUCC, "epoch-B", chunks(8), meta(SUCC), "a@x", 7L)
                 theStore.purgeQueue("account-change")
             }),
         )
         val store = theStore
         val staleGen = fence.currentGeneration()
-        assertNull(store.prepareAt(staleGen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertNull(store.prepareAt(staleGen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L))
         assertTrue("hook never fired - control did not exercise the actual write", hooked)
         // The successor's COMMITTED files must survive the stale preparation's cleanup untouched: purge is
         // scoped to ids this owner held, never a blanket directory sweep.
@@ -363,14 +363,14 @@ class ContributionStoreTest {
         assertFalse(held.isHeld())
         assertEquals("discard must return the budget", 0, store.reservedRecordsForTest())
         // (c) prepare() that reaches the commit point adopts the reservation (not double counted)
-        assertNotNull(store.prepare(ID_A, "epoch-1", chunks(8), meta(ID_A)))
+        assertNotNull(store.prepare(ID_A, "epoch-1", chunks(8), meta(ID_A), "a@x", 7L))
         assertEquals(1, store.readyEntries().size)
         assertEquals("published entry leaves no live reservation", 0, store.reservedRecordsForTest())
         // (d) duplicate prepare for an owned capture is refused WITHOUT consuming a second slot
-        assertNull(store.prepare(ID_A, "epoch-1", chunks(8), meta(ID_A)))
+        assertNull(store.prepare(ID_A, "epoch-1", chunks(8), meta(ID_A), "a@x", 7L))
         assertEquals(0, store.reservedRecordsForTest())
         // Budget still has exactly one record free: prove it by filling it, then seeing denial.
-        assertNotNull(store.prepare(SUCC, "epoch-2", chunks(8), meta(SUCC)))
+        assertNotNull(store.prepare(SUCC, "epoch-2", chunks(8), meta(SUCC), "a@x", 7L))
         assertEquals(2, store.readyEntries().size)
         assertNull(store.admit(8, 100))
     }
@@ -398,7 +398,7 @@ class ContributionStoreTest {
         )
         val store = theStore
         val gen = fence.currentGeneration()
-        assertNull(store.prepareAt(gen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertNull(store.prepareAt(gen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L))
         assertTrue("hook never fired - control did not reach the publication point", hooked)
         assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
         assertEquals("stale publication leaked its reservation", 0, store.reservedRecordsForTest())
@@ -427,7 +427,7 @@ class ContributionStoreTest {
             }),
         )
         val store = theStore
-        assertNull(store.prepareAt(fence.currentGeneration(), store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertNull(store.prepareAt(fence.currentGeneration(), store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L))
         assertTrue("hook never fired - control did not exercise the actual write", hooked)
         assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
         assertNotNull("stale preparation leaked its reservation into a 1-slot queue", store.admit(8, 100))
@@ -457,14 +457,14 @@ class ContributionStoreTest {
         // Revocation lands at the publication instant, so this preparation publishes nothing and the
         // generation captured by an in-flight callback is now stale.
         val inflightGen = fence.currentGeneration()
-        assertNull(store.prepareAt(inflightGen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertNull(store.prepareAt(inflightGen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L))
         assertTrue("hook never fired - control did not reach the publication point", hooked)
         assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
 
         // A late callback carrying that stale generation must be refused on every mutating surface.
         // The entry below belongs to THIS (now revoked) owner's index, so only the fence can stop it.
         val victim = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
-        assertNotNull(victim.prepare(ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertNotNull(victim.prepare(ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L))
         assertEquals(1, victim.readyEntries().size)
         assertNull("stale recordAttempt must be refused", victim.recordAttempt(inflightGen, ID_A))
         assertFalse(
@@ -483,13 +483,13 @@ class ContributionStoreTest {
         val ownership = QueueOwnership()
         val fence = QueueFence(ownership)
         val oldStore = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
-        assertNotNull(oldStore.prepare(ID_A, "epoch-old", chunks(8), meta(ID_A)))
+        assertNotNull(oldStore.prepare(ID_A, "epoch-old", chunks(8), meta(ID_A), "a@x", 7L))
         val staleGen = fence.currentGeneration()
         fence.revoke()
         oldStore.purgeQueue("account-change")
 
         val newStore = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
-        assertNotNull(newStore.prepare(ID_A, "epoch-new", chunks(8), meta(ID_A)))
+        assertNotNull(newStore.prepare(ID_A, "epoch-new", chunks(8), meta(ID_A), "a@x", 7L))
         val succAttempts = newStore.recordAttempt(newStore.fence.currentGeneration(), ID_A)
         assertEquals(1, succAttempts)
 
@@ -518,16 +518,16 @@ class ContributionStoreTest {
         discarded.discard()
         assertNull(
             "discarded handle must not publish",
-            store.prepareAt(store.fence.currentGeneration(), discarded, ID_A, "epoch-A", chunks(8), meta(ID_A)),
+            store.prepareAt(store.fence.currentGeneration(), discarded, ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L),
         )
         assertEquals(0, store.readyEntries().size)
         // (b) reused after a successful publication
         val used = store.admit(8, meta(idB).size)!!
-        assertNotNull(store.prepareAt(store.fence.currentGeneration(), used, idB, "epoch-A", chunks(8), meta(idB)))
+        assertNotNull(store.prepareAt(store.fence.currentGeneration(), used, idB, "epoch-A", chunks(8), meta(idB), "a@x", 7L))
         assertEquals(1, store.readyEntries().size)
         assertNull(
             "adopted handle must not publish again",
-            store.prepareAt(store.fence.currentGeneration(), used, idC, "epoch-A", chunks(8), meta(idC)),
+            store.prepareAt(store.fence.currentGeneration(), used, idC, "epoch-A", chunks(8), meta(idC), "a@x", 7L),
         )
         assertEquals("reuse must not add an entry", 1, store.readyEntries().size)
         // (c) foreign: created by a DIFFERENT store's reservation registry
@@ -535,14 +535,14 @@ class ContributionStoreTest {
         val foreign = other.admit(8, meta(idD).size)!!
         assertNull(
             "foreign handle must not publish into this store",
-            store.prepareAt(store.fence.currentGeneration(), foreign, idD, "epoch-A", chunks(8), meta(idD)),
+            store.prepareAt(store.fence.currentGeneration(), foreign, idD, "epoch-A", chunks(8), meta(idD), "a@x", 7L),
         )
         assertFalse("foreign handle must be released, not left held", foreign.isHeld())
         // (d) undersized: reserved for 8 samples but asked to write 16
         val small = store.admit(8, meta(idE).size)!!
         assertNull(
             "undersized handle must not publish a larger clip",
-            store.prepareAt(store.fence.currentGeneration(), small, idE, "epoch-A", chunks(16), meta(idE)),
+            store.prepareAt(store.fence.currentGeneration(), small, idE, "epoch-A", chunks(16), meta(idE), "a@x", 7L),
         )
         assertFalse("refused handle must not stay held", small.isHeld())
         // Only the legitimate B entry exists; none of the four refusals created state.
@@ -562,7 +562,7 @@ class ContributionStoreTest {
             Thread {
                 gate.await()
                 val e = runCatching {
-                    store.prepareAt(gen, handle, ID_A, "epoch-A", chunks(8), meta(ID_A))
+                    store.prepareAt(gen, handle, ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L)
                 }.fold({ it?.captureId }, { t -> "THROWN:${t::class.simpleName}" })
                 results += e
             }.apply { isDaemon = true }
@@ -588,7 +588,7 @@ class ContributionStoreTest {
         val gen = fence.currentGeneration()
         val handle = store.admit(8, meta(ID_A).size)!!
         fence.revoke()
-        assertNull(store.prepareAt(gen, handle, ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertNull(store.prepareAt(gen, handle, ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L))
         assertFalse("stale attempt must settle its handle", handle.isHeld())
         val files = store.dirForTest().listFiles()?.toList() ?: emptyList()
         assertEquals(
@@ -607,11 +607,11 @@ class ContributionStoreTest {
         val ownership = QueueOwnership()
         val fence = QueueFence(ownership)
         val oldOwner = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
-        assertNotNull(oldOwner.prepare(ID_A, "epoch-old", chunks(8), meta(ID_A)))
+        assertNotNull(oldOwner.prepare(ID_A, "epoch-old", chunks(8), meta(ID_A), "a@x", 7L))
         fence.revoke()
         oldOwner.revokeAndPurge("account-change")
         val successor = ContributionStore(root, QueueLimits.defaults(), ownership = ownership, fence = fence)
-        assertNotNull(successor.prepare(ID_A, "epoch-new", chunks(8), meta(ID_A, "epoch-new")))
+        assertNotNull(successor.prepare(ID_A, "epoch-new", chunks(8), meta(ID_A, "epoch-new"), "a@x", 7L))
         oldOwner.revokeAndPurge("late-second-purge")
         assertTrue("successor WAV deleted by a revoked owner's late cleanup", File(successor.dirForTest(), "$ID_A.recording.wav").isFile)
         assertTrue("successor READY deleted by a revoked owner's late cleanup", File(successor.dirForTest(), "$ID_A.ready").isFile)
@@ -634,7 +634,7 @@ class ContributionStoreTest {
         repeat(20) { round ->
             // A FRESH entry per round: no cross-round carry-over can poison the baseline.
             val id = UUID.randomUUID().toString()
-            assertNotNull(store.prepare(id, "epoch-A", chunks(8), meta(id)))
+            assertNotNull(store.prepare(id, "epoch-A", chunks(8), meta(id), "a@x", 7L))
             val sidecar = File(dir, "$id.attempts")
             fun sidecarValue(): Int? = sidecar.takeIf { it.isFile }?.readText()?.trim()?.toIntOrNull()
 
@@ -689,7 +689,7 @@ class ContributionStoreTest {
         val admission = store.admit(8, meta(ID_A).size)
         assertNotNull(admission)
         // The caller (retention sink) reserved before copying PCM; the worker now does the disk work.
-        val entry = store.prepare(admission!!, ID_A, "epoch-A", chunks(8), meta(ID_A))
+        val entry = store.prepare(admission!!, ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L)
         assertNotNull("pre-retention admission was not consumed by public prepare", entry)
         assertEquals(1, store.readyEntries().size)
         assertFalse("consumed admission must not stay held", admission.isHeld())
@@ -704,7 +704,7 @@ class ContributionStoreTest {
         val store = ContributionStore(tempRoot(), QueueLimits.defaults())
         val admission = store.admit(8, meta(ID_A).size)!!
         // Invalid per-chunk range makes sampleCount refuse AFTER the handle was handed over.
-        val refused = store.prepareAt(store.fence.currentGeneration(), admission, ID_A, "epoch-A", listOf(ShortArray(4) to 9), meta(ID_A))
+        val refused = store.prepareAt(store.fence.currentGeneration(), admission, ID_A, "epoch-A", listOf(ShortArray(4) to 9), meta(ID_A), "a@x", 7L)
         assertNull(refused)
         assertFalse("invalid-size early return leaked the admission", admission.isHeld())
         assertEquals(0, store.reservedRecordsForTest())
@@ -779,7 +779,7 @@ class ContributionStoreTest {
                 try {
                     while (!stop.get()) {
                         val id = String.format("aaaaaaaa-0000-4000-8000-%012d", i * 1000 + 1)
-                        store.prepare(id, "epoch-$i", chunks(8), meta(id))
+                        store.prepare(id, "epoch-$i", chunks(8), meta(id), "a@x", 7L)
                     }
                 } catch (t: Throwable) {
                     errors += "${t::class.simpleName}: ${t.message}"
@@ -848,7 +848,7 @@ class ContributionStoreTest {
         fun run(samples: Int, chunks: List<Pair<ShortArray, Int>>) {
             try {
                 val handle = store.admitForTest(samples.toLong(), meta(ID_A).size)
-                if (store.prepareAt(gen, handle, ID_A, "epoch-A", chunks, meta(ID_A)) != null) publishedCount.incrementAndGet()
+                if (store.prepareAt(gen, handle, ID_A, "epoch-A", chunks, meta(ID_A), "a@x", 7L) != null) publishedCount.incrementAndGet()
             } catch (t: Throwable) {
                 failure = t
             }
@@ -907,7 +907,7 @@ class ContributionStoreTest {
         )
         val store = theStore
         val gen = fence.currentGeneration()
-        assertNull(store.prepareAt(gen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A)))
+        assertNull(store.prepareAt(gen, store.admitForTest(8, meta(ID_A).size), ID_A, "epoch-A", chunks(8), meta(ID_A), "a@x", 7L))
         // Purge cleared everything; nothing from the fenced-off preparation may have been republished.
         assertEquals(emptyList<String>(), store.readyEntries().map { it.captureId })
         assertFalse(File(root, "contributions/$ID_A.ready").exists())
@@ -918,10 +918,10 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        val first = store.prepare(id, "epoch-1", chunks(8), meta(id))
+        val first = store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L)
         assertNotNull(first)
         val wavBefore = File(root, "contributions/$id.recording.wav").readBytes().toList()
-        val second = store.prepare(id, "epoch-1", chunks(8), meta(id))
+        val second = store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L)
         assertNull("re-preparing an already-owned capture must be refused, not overwrite ready files", second)
         assertEquals(wavBefore, File(root, "contributions/$id.recording.wav").readBytes().toList())
         assertEquals(1, store.readyEntries().count { it.captureId == id })
@@ -933,7 +933,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults().copy(maxQueueRecords = 1))
         val id = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         assertEquals(1, store.readyEntries().size)
     }
 
@@ -943,7 +943,7 @@ class ContributionStoreTest {
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
         val bytes = meta(id)
-        val created = store.prepare(id, "epoch-1", chunks(8), bytes)!!
+        val created = store.prepare(id, "epoch-1", chunks(8), bytes, "a@x", 7L)!!
         val reloaded = ContributionStore(root, QueueLimits.defaults()).recover().single()
         assertEquals(created.recordSha256, reloaded.recordSha256)
         assertEquals(id, reloaded.captureId)
@@ -959,8 +959,8 @@ class ContributionStoreTest {
         // Two ready entries prepared under account A's enrollment epoch.
         val idA = UUID.randomUUID().toString()
         val idB = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(idA, "epoch-A", chunks(64), meta(idA, "epoch-A")))
-        assertNotNull(store.prepare(idB, "epoch-A", chunks(64), meta(idB, "epoch-A")))
+        assertNotNull(store.prepare(idA, "epoch-A", chunks(64), meta(idA, "epoch-A"), "a@x", 7L))
+        assertNotNull(store.prepare(idB, "epoch-A", chunks(64), meta(idB, "epoch-A"), "a@x", 7L))
         // A foreign debris entry under a foreign name must also go in a full revocation.
         File(dir, "not-a-uuid.wav").writeBytes(ByteArray(4))
 
@@ -982,7 +982,7 @@ class ContributionStoreTest {
         val storeB = ContributionStore(root, QueueLimits.defaults())
         assertTrue(storeB.recover().isEmpty())
         val idC = UUID.randomUUID().toString()
-        assertNotNull(storeB.prepare(idC, "epoch-B", chunks(64), meta(idC, "epoch-B")))
+        assertNotNull(storeB.prepare(idC, "epoch-B", chunks(64), meta(idC, "epoch-B"), "a@x", 7L))
         assertEquals(listOf(idC), storeB.readyEntries().map { it.captureId })
     }
 
@@ -996,7 +996,7 @@ class ContributionStoreTest {
         val limits = QueueLimits.defaults().copy(maxMetadataBytes = 4096)
         val store = ContributionStore(root, limits)
         val id = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id, "epoch-1", chunks(64), meta(id)))
+        assertNotNull(store.prepare(id, "epoch-1", chunks(64), meta(id), "a@x", 7L))
         // Inflate the metadata far past the bound: recovery must refuse it, not allocate it.
         val oversized = ByteArray(1 * 1024 * 1024) { ' '.code.toByte() }
         File(root, "contributions/$id.metadata.json").writeBytes(oversized)
@@ -1013,20 +1013,20 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        val prepared = store.prepare(id, "epoch-1", chunks(64), meta(id))
+        val prepared = store.prepare(id, "epoch-1", chunks(64), meta(id), "a@x", 7L)
         assertNotNull(prepared)
         // The recorded digest must equal the digest of the bytes actually on disk, and must change
         // when the metadata content changes (identity is bound to content, not to a size or a name).
         val onDisk = File(root, "contributions/$id.metadata.json").readBytes()
         assertEquals(sha256HexForTest(onDisk), prepared!!.recordSha256)
         val other = UUID.randomUUID().toString()
-        val preparedOther = store.prepare(other, "epoch-1", chunks(64), meta(other, "epoch-2"))
+        val preparedOther = store.prepare(other, "epoch-1", chunks(64), meta(other, "epoch-2"), "a@x", 7L)
         assertNotNull(preparedOther)
         assertNotEquals(preparedOther!!.recordSha256, prepared.recordSha256)
         // Tamper the retained metadata AFTER preparation (the .ready marker and the recorded digest
         // stay untouched). Recovery must refuse the entry: identity is bound to the exact bytes.
         val tampered = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(tampered, "epoch-1", chunks(64), meta(tampered)))
+        assertNotNull(store.prepare(tampered, "epoch-1", chunks(64), meta(tampered), "a@x", 7L))
         File(root, "contributions/$tampered.metadata.json").writeBytes(meta(tampered, "epoch-evil"))
         assertTrue(
             "tampered metadata admitted on recovery",
@@ -1056,7 +1056,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         // Delete the digest sidecar AND change the metadata: without a mandatory digest the changed
         // bytes would be accepted as their own identity.
         File(root, "contributions/$id.sha256").delete()
@@ -1070,17 +1070,17 @@ class ContributionStoreTest {
         val store = ContributionStore(root, QueueLimits.defaults())
         // Malformed attempts: must refuse, not default to 0 and hand back a spent retry budget.
         val id1 = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id1, "epoch-1", chunks(8), meta(id1)))
+        assertNotNull(store.prepare(id1, "epoch-1", chunks(8), meta(id1), "a@x", 7L))
         File(root, "contributions/$id1.attempts").writeText("not-a-number")
         assertTrue("malformed attempts admitted", ContributionStore(root, QueueLimits.defaults()).recover().none { it.captureId == id1 })
         // Malformed created-at: must refuse, not fall back to mtime and silently renew queue age.
         val id2 = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id2, "epoch-1", chunks(8), meta(id2)))
+        assertNotNull(store.prepare(id2, "epoch-1", chunks(8), meta(id2), "a@x", 7L))
         File(root, "contributions/$id2.created").writeText("bogus")
         assertTrue("malformed created-at admitted", ContributionStore(root, QueueLimits.defaults()).recover().none { it.captureId == id2 })
         // Oversized attempts sidecar: bounded read refuses without allocating it.
         val id3 = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id3, "epoch-1", chunks(8), meta(id3)))
+        assertNotNull(store.prepare(id3, "epoch-1", chunks(8), meta(id3), "a@x", 7L))
         File(root, "contributions/$id3.attempts").writeBytes(ByteArray(1024) { '9'.code.toByte() })
         assertTrue("oversized attempts sidecar admitted", ContributionStore(root, QueueLimits.defaults()).recover().none { it.captureId == id3 })
     }
@@ -1090,7 +1090,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         val wav = File(root, "contributions/$id.recording.wav")
         // Flip ONE PCM sample byte deep in the body, leaving the 44-byte header (and the declared
         // byte_count) untouched: a header sniff cannot detect this, the audio digest must.
@@ -1106,7 +1106,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         // Replace the metadata with a valid record for a DIFFERENT capture id, and update the digest
         // sidecar so the digest check passes: only the capture-id binding can refuse this.
         val other = UUID.randomUUID().toString()
@@ -1121,7 +1121,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         val valid = meta(id).toString(Charsets.UTF_8)
         // Wrong byte_count in the record vs the actual file length, digest updated to match.
         val wrongBytes = valid.replace("\"byte_count\"", "\"byte_count_x\"").replace("\"retained_samples\"", "\"retained_samples_x\"")
@@ -1146,7 +1146,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         val valid = meta(id).toString(Charsets.UTF_8)
         // 60 == actual file length; 60.9 would truncate to 60 under Double.toLong().
         val tampered = valid.replace("\"byte_count\":60", "\"byte_count\":60.9")
@@ -1160,7 +1160,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         val valid = meta(id).toString(Charsets.UTF_8)
         val tampered = valid.replace("\"epoch-1\"", "\"\"")
         assertNotEquals("fixture did not contain the expected epoch", valid, tampered)
@@ -1174,13 +1174,13 @@ class ContributionStoreTest {
         val store = ContributionStore(root, QueueLimits.defaults())
         // Unknown ROOT field.
         val id1 = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id1, "epoch-1", chunks(8), meta(id1)))
+        assertNotNull(store.prepare(id1, "epoch-1", chunks(8), meta(id1), "a@x", 7L))
         val valid1 = meta(id1).toString(Charsets.UTF_8)
         tamperMetadata(root, id1, valid1.replaceFirst("{", "{\"surprise_field\":1,"))
         assertTrue("unknown root field admitted", ContributionStore(root, QueueLimits.defaults()).recover().none { it.captureId == id1 })
         // Unknown STAGE field (nested): only the stage allowlist can refuse this.
         val id2 = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id2, "epoch-1", chunks(8), meta(id2)))
+        assertNotNull(store.prepare(id2, "epoch-1", chunks(8), meta(id2), "a@x", 7L))
         val valid2 = meta(id2).toString(Charsets.UTF_8)
         val withObservation = valid2.replace("\"observations\":{", "\"observations\":{\"wake\":{\"state\":\"completed\",\"not_allowed_here\":1},")
         assertNotEquals("fixture lacked observations", valid2, withObservation)
@@ -1279,7 +1279,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         val wav = File(root, "contributions/$id.recording.wav")
         val bytes = wav.readBytes()
         // Corrupt the fmt chunk LENGTH (offset 16) and re-record the audio digest so the digest
@@ -1298,7 +1298,7 @@ class ContributionStoreTest {
         val root = tempRoot()
         val store = ContributionStore(root, QueueLimits.defaults())
         val id = UUID.randomUUID().toString()
-        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id)))
+        assertNotNull(store.prepare(id, "epoch-1", chunks(8), meta(id), "a@x", 7L))
         val wav = File(root, "contributions/$id.recording.wav")
         val bytes = wav.readBytes().copyOf(wav.readBytes().size - 1) // truncated mid-sample
         wav.writeBytes(bytes)

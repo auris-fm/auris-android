@@ -94,7 +94,7 @@ class ContributionRetryCallerTest {
     private fun prepare(store: ContributionStore, id: String): Long {
         val admission = store.admitForTest(1600, meta(id).size)
         val generation = store.fence.currentGeneration()
-        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(store.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         return generation
     }
 
@@ -409,7 +409,7 @@ class ContributionRetryCallerTest {
         val id = UUID.randomUUID().toString()
         val admission = hooked.admitForTest(1600, meta(id).size)
         val generation = hooked.fence.currentGeneration()
-        assertTrue(hooked.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(hooked.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
 
         val launched = mutableListOf<String>()
         val caller = ContributionRetryCaller(
@@ -460,7 +460,7 @@ class ContributionRetryCallerTest {
         hookedRef0[0] = hooked
         val admission = hooked.admitForTest(1600, meta(id).size)
         val generation = hooked.fence.currentGeneration()
-        assertTrue(hooked.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id)) != null)
+        assertTrue(hooked.prepareAt(generation, admission, id, "epoch-1", chunks(1600), meta(id), "a@x", 7L) != null)
         assertEquals(1, hooked.recordAttempt(generation, id))
 
         val caller = ContributionRetryCaller(

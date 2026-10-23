@@ -136,27 +136,21 @@ object VoiceUploadModule {
         accountStartup: VoiceSharingAccountStartup,
         @UploadTriggerScope scope: CoroutineScope,
     ): UploadTrigger {
-        // THE production watcher: polls the AUTHORITATIVE owner snapshot (account+session, under the
-        // owner lock) AND the epoch projection - a same-epoch account or session move must also enter
-        // the mismatch set (reviewer ffca25e6). Selection runs against the LEASES' admitted
-        // identities inside the store; bytes are NOT purged: retired-identity captures are RETAINED.
-        val identityRevocationWatcher: suspend kotlinx.coroutines.CoroutineScope.() -> Unit = {
-            var lastAccount: String? = null
-            var lastSession: Long? = null
-            var lastEpoch: String? = null
-            while (true) {
-                val snap = accountStartup.authoritySnapshot()
-                val epoch = accountStartup.state.projection.value?.enrollmentEpoch
-                if (snap.accountName != lastAccount || snap.session != lastSession || epoch != lastEpoch) {
-                    lastAccount = snap.accountName
-                    lastSession = snap.session
-                    lastEpoch = epoch
-                    store.cancelLaunchesIdentityMismatch(snap.accountName, snap.session, epoch, "account-transition")
-                }
-                kotlinx.coroutines.delay(POLL_INTERVAL_MS)
-            }
-        }
-        return UploadTrigger(assembly, scope, POLL_INTERVAL_MS, identityRevocationWatcher)
+        // THE production watcher (reviewer f4d85031): EVENT-DRIVEN on the authoritative binding tail -
+        // no polling. Every real login/logout/removal fires binding.onSessionStarted/Ended exactly
+        // once inside the owner transaction; the watcher subscribes and cancels from the coherent
+        // snapshot read at each event. Same-epoch account/session moves enter the mismatch set.
+        return UploadTrigger(
+            assembly,
+            scope,
+            POLL_INTERVAL_MS,
+            IdentityRevocationWatchers.production(
+                binding = accountStartup.binding,
+                snapshot = { accountStartup.authoritySnapshot() },
+                epoch = { accountStartup.state.projection.value?.enrollmentEpoch },
+                store = store,
+            ),
+        )
     }
 
     /** THE missing binding (reviewer 13eeec80): the trigger's scope, delegated to the app's scope. */

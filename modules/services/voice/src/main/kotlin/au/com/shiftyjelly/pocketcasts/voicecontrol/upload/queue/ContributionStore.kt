@@ -833,6 +833,8 @@ class ContributionStore(
         enrollmentEpoch: String,
         pcmChunks: List<Pair<ShortArray, Int>>,
         canonicalMetadata: ByteArray,
+        enrollmentAccount: String? = null,
+        enrollmentSession: Long? = null,
     ): Entry? {
         val samples = sampleCount(pcmChunks) ?: return null
         val admission = admit(samples, canonicalMetadata.size)
@@ -840,7 +842,7 @@ class ContributionStore(
                 null
             }
             ?: return null
-        return prepareAt(fence.currentGeneration(), admission, captureId, enrollmentEpoch, pcmChunks, canonicalMetadata)
+        return prepareAt(fence.currentGeneration(), admission, captureId, enrollmentEpoch, pcmChunks, canonicalMetadata, enrollmentAccount, enrollmentSession)
     }
 
     /**
@@ -1469,7 +1471,11 @@ class ContributionStore(
                 } else {
                     // Register FIRST so a revocation triggered by the hook can cancel this very lease.
                     val entry = memoryEntries[captureId]
-                    val lease = LaunchLease(generation, captureId, entry?.enrollmentAccount, entry?.enrollmentSession, entry?.enrollmentEpoch ?: "")
+                    // FULL identity or NO launch (reviewer f4d85031 / spec 718c043c): an entry whose
+                    // admitted ownership is unknown is never leased - a null-ownership lease would
+                    // silently skip its account/session comparisons on revocation.
+                    if (entry == null || entry.enrollmentAccount == null || entry.enrollmentSession == null) return null
+                    val lease = LaunchLease(generation, captureId, entry.enrollmentAccount, entry.enrollmentSession, entry.enrollmentEpoch)
                     synchronized(launchLeasesLock) { launchLeases.add(lease) }
                     hooks.beforeTransportLaunch?.invoke(generation, captureId)
                     // The hook may have revoked: a cancelled lease is NOT a valid launch authorization.
@@ -1766,7 +1772,7 @@ class ContributionStore(
                 }
                 val gone = deleteAll(
                     id,
-                    listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST, SUFFIX_RETRY, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp"),
+                    listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST, SUFFIX_RETRY, SUFFIX_OWNER, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp"),
                 )
                 if (!gone) residueIds += id
             }
@@ -2098,7 +2104,21 @@ class ContributionStore(
             if (!readFully(wav, header)) return null
             val wavValid = WavHeaderValidator.validate(header, declared) ?: return null
             if (wavValid.sampleCount != audio.retainedSamples) return null
-            Entry(id, valid.enrollmentEpoch, recordedDigest, declared, metaBytes.size, attempts, createdAtMs = created)
+            // FULL identity after restart (reviewer f4d85031 / spec 718c043c): a PRESENT sidecar is
+            // validated strictly - an INVALID record or an epoch disagreement refuses the entry
+            // (corruption). An ABSENT sidecar (pre-sidecar durable entry) still RECOVERS with its
+            // full retention semantics - durability never downgrades to deletion - but with a null
+            // ownership; attemptUpload refuses to LEASE such an entry, so it can never be launched
+            // under skipped comparisons. Incomplete identity is unsendable, not unpreserved.
+            var ownerAccount: String? = null
+            var ownerSession: Long? = null
+            if (File(dir, "$id$SUFFIX_OWNER").isFile()) {
+                val owner = readOwnerSidecar(id) ?: return null
+                if (owner.epoch != valid.enrollmentEpoch) return null
+                ownerAccount = owner.account
+                ownerSession = owner.session
+            }
+            Entry(id, valid.enrollmentEpoch, recordedDigest, declared, metaBytes.size, attempts, createdAtMs = created, enrollmentAccount = ownerAccount, enrollmentSession = ownerSession)
         } catch (_: Exception) {
             null
         }
@@ -2166,7 +2186,7 @@ class ContributionStore(
     // Reviewed 805f0828: reloadUnownedFromDisk used to promote marker+validate directly, a SECOND and
     // weaker load path than recovery. Both now call this one transition, so they cannot diverge.
     private fun confirmDurableLocked(id: String): Boolean = runCatching {
-        listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_READY, SUFFIX_RETRY, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp")
+        listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_READY, SUFFIX_RETRY, SUFFIX_OWNER, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp")
             .map { File(dir, "$id$it") }
             .filter { it.isFile }
             .forEach { fileSync.sync(it) }
@@ -2323,7 +2343,7 @@ class ContributionStore(
                 }
                 val gone = deleteAll(
                     id,
-                    listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST, SUFFIX_RETRY, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp"),
+                    listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST, SUFFIX_RETRY, SUFFIX_OWNER, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp"),
                 )
                 if (gone) {
                     disqualificationMarker(id).delete()
@@ -2368,7 +2388,7 @@ class ContributionStore(
         // 2) Attempt every delete, regardless of earlier failures.
         val gone = deleteAll(
             id,
-            listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST, SUFFIX_RETRY, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp"),
+            listOf(SUFFIX_WAV, SUFFIX_META, SUFFIX_READY, SUFFIX_ATTEMPTS, SUFFIX_CREATED, SUFFIX_DIGEST, SUFFIX_RETRY, SUFFIX_OWNER, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp"),
         )
         memoryEntries.remove(id)
         if (gone) {

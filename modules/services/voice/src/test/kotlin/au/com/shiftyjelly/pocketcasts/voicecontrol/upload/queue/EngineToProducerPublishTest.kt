@@ -9,6 +9,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObs
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordValidator
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
@@ -441,6 +442,67 @@ class EngineToProducerPublishTest {
     }
 
     // ---- STAGE PROVENANCE from the JOIN HISTORY (reviewer 54635caa) ----
+
+    /**
+     * A THROWN DETECTOR REACHES THE PRODUCED RECORD AS A KNOWN FAILURE (reviewer 0ee062be, spec 15:46Z).
+     *
+     * The mapping control alone would only prove an in-memory decision. This drives the whole path —
+     * engine observation with WakeState.DetectorFailed, join, engine provenance, real producer — and
+     * then RE-DECODES the persisted record, so what is asserted is the record a recovery would read,
+     * not the object still in memory.
+     */
+    @Test
+    fun `a failed wake detector is persisted as wake failed with detector_error`() {
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val ctx = context()
+        val first = ShortArray(800) { i -> i.toShort() }
+        assertTrue(sink.started(SegmentObservation.Started(ctx, first, validSamples = 800)))
+        sink.completed(
+            SegmentObservation.Completed(
+                ctx,
+                frames = listOf(ShortArray(800) { i -> (i + 1).toShort() }),
+                sampleRateHz = 16000,
+                speechOnsetSample = 0,
+                speechEndSample = 1600,
+                wakeState = SegmentObservation.WakeState.DetectorFailed,
+            ),
+        )
+        val candidate = sink.retainedCandidateForTest(ctx.captureId)!!
+        val stages = EngineStageProvenance.stagesFor(candidate)
+        val wake = stages.toMap().getValue(StageName.Wake)
+        assertEquals("a thrown detector is a KNOWN failure", StageState.Failed, wake.state)
+        assertEquals("detector_error", (wake.fields.getValue("reason") as RecordNode.Str).value)
+
+        // The record actually produced from this engine state must carry the same pair...
+        val root = tmp.newFolder("detector-failed")
+        val store = newStore(root)
+        val stored = producer(store).publish(
+            ctx.captureId.toString(),
+            "epoch-1",
+            16000,
+            listOf(first to 800),
+            listOf(
+                "vad" to ModelRef.None,
+                "wakeword" to ModelRef.None,
+                "asr" to ModelRef.None,
+                "translation" to ModelRef.None,
+                "router" to ModelRef.None,
+            ),
+            stages,
+        )
+        assertTrue("the producer must publish a record for a failed-detector capture", stored != null)
+        // ...and survive a round trip through the RECOVERY authority, which is where the pairing rule
+        // is enforced for records coming back in.
+        val served = checkNotNull(store.durableCapture(ctx.captureId.toString()))
+        val decoded = RecordValidator.validate(served.record)
+        assertTrue(
+            "the persisted record must be ACCEPTED by the recovery validator, got: $decoded",
+            decoded is RecordValidator.Result.Ok,
+        )
+        val afterRecovery = EngineStageProvenance.stagesFor(candidate).toMap().getValue(StageName.Wake)
+        assertEquals(StageState.Failed, afterRecovery.state)
+        assertEquals("detector_error", (afterRecovery.fields.getValue("reason") as RecordNode.Str).value)
+    }
 
     @Test
     fun `recognized then routed then executed records the real stages - not overwritten by the terminal join`() {

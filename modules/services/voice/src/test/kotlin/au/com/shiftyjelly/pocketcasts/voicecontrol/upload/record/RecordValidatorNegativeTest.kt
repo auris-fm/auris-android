@@ -310,6 +310,47 @@ class RecordValidatorNegativeTest {
         }
     }
 
+    /**
+     * `detector_error` ON THE RAW RECOVERY PATH (reviewer 0ee062be).
+     *
+     * Same reasoning as the observation_unavailable matrix: the reason is in the wake stage's general
+     * set, so membership alone would accept `detector_error` with any state. It is valid ONLY for
+     * wake/failed, and it must be refused on every OTHER stage as well — a reason that belongs to one
+     * stage must not become a general-purpose escape hatch elsewhere.
+     */
+    @Test
+    fun `raw records carry detector_error only as wake plus failed`() {
+        val allStages = listOf("wake", "bleed", "asr", "translation", "routing", "execution")
+        val allStates = listOf("completed", "not_run", "unknown", "failed", "cancelled")
+
+        // The ONLY legal cell.
+        val accepted = baseRecord()
+        @Suppress("UNCHECKED_CAST")
+        (accepted["observations"] as MutableMap<String, Any?>)["wake"] = mutableMapOf<String, Any?>(
+            "state" to "failed",
+            "reason" to "detector_error",
+        )
+        val acceptedResult = RecordValidator.validate(toNode(accepted))
+        assertTrue("wake/failed + detector_error must be ACCEPTED, got: $acceptedResult", acceptedResult is RecordValidator.Result.Ok)
+
+        // Every other state on wake, and EVERY state on every other stage, must be refused.
+        for (stage in allStages) {
+            for (state in allStates) {
+                if (stage == "wake" && state == "failed") continue
+                val record = baseRecord()
+
+                @Suppress("UNCHECKED_CAST")
+                val observations = record["observations"] as MutableMap<String, Any?>
+                observations[stage] = mutableMapOf<String, Any?>("state" to state, "reason" to "detector_error")
+                val result = RecordValidator.validate(toNode(record))
+                assertTrue(
+                    "$stage/$state + detector_error must be REFUSED by RecordValidator, got: $result",
+                    result is RecordValidator.Result.Rejected,
+                )
+            }
+        }
+    }
+
     @Test
     fun `the baseline fixture stays accepted after the fixes`() {
         // Guards against "fix by refusing everything": the negative controls above must not have made

@@ -12,6 +12,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -95,6 +96,67 @@ class EnrollmentControllerTest {
         clearLocalPending = onLocalWithdrawal,
         ownerSession = { session },
     )
+
+    @Test
+    fun `stillApplies refuses a superseded outcome and a result from a replaced action`() = runTest {
+        // Settings applies the GLOBAL durable stop on an outcome. Two ways a result must not qualify:
+        // it was superseded, or a newer action was issued after it settled.
+        val gate = CompletableDeferred<Unit>()
+        val entered = CompletableDeferred<Unit>()
+        var outcome: EnrollmentOutcome? = null
+
+        val subject = EnrollmentController(
+            enrollOperation = {
+                entered.complete(Unit)
+                gate.await()
+                // The specific result does not matter here: supersession is decided by the fence
+                // BEFORE the result is inspected, which is exactly the property under test.
+                VoiceSharingMutationResult.Failure
+            },
+            withdrawOperation = { VoiceSharingMutationResult.Failure },
+            deleteOperation = { null },
+            clearLocalPending = {},
+            ownerSession = { session },
+        )
+
+        val worker = launch {
+            outcome = subject.enroll(acceptedDisclosureVersion = "v1")
+        }
+        entered.await()
+        // A newer action replaces the in-flight one before it settles.
+        subject.withdraw()
+        gate.complete(Unit)
+        worker.join()
+
+        assertEquals(
+            "the in-flight enrollment must be reported as Superseded, not as Applied",
+            EnrollmentOutcome.Superseded,
+            outcome,
+        )
+        assertFalse(
+            "a Superseded outcome must never qualify to touch the durable stop",
+            subject.stillApplies(outcome!!),
+        )
+
+        // And a result that IS current qualifies - the check is not simply always false.
+        val current = subject.withdraw()
+        assertFalse(
+            "a FAILED withdrawal still carries the current action identity",
+            current is EnrollmentOutcome.Superseded,
+        )
+        assertTrue(
+            "the current action's outcome must qualify, or the control above proves nothing",
+            subject.stillApplies(current),
+        )
+
+        // An account switch invalidates a result that was current a moment ago.
+        val beforeSwitch = subject.withdraw()
+        session = 99L
+        assertFalse(
+            "a result from a previous account must not release the GLOBAL stop",
+            subject.stillApplies(beforeSwitch),
+        )
+    }
 
     @Test
     fun `a late enrollment success cannot restore sharing-on after the user turned it off`() = runTest {

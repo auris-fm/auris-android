@@ -38,6 +38,38 @@ class SettingsStopWiringTest {
     }
 
     @Test
+    fun `a superseded outcome cannot touch the durable stop, and effects are fenced at apply time`() {
+        val source = fragmentSource()
+        // The reviewer's axis: the catchall `!checked ->` used to absorb Superseded and call
+        // onWithdrawalFailed, re-recording a stop after a newer opt-in had cleared it.
+        assertTrue(
+            "a Superseded outcome must be dropped before the outcome dispatch, otherwise the " +
+                "catchall failure branch re-records the stop after the user re-enabled sharing",
+            source.contains("if (outcome is EnrollmentOutcome.Superseded) return@launch"),
+        )
+        val supersededDrop = source.indexOf("if (outcome is EnrollmentOutcome.Superseded) return@launch")
+        val catchall = source.indexOf("!checked -> localWithdrawalIntent.onWithdrawalFailed()")
+        assertTrue("the catchall stop-recording branch must still exist", catchall > 0)
+        assertTrue(
+            "the Superseded drop must precede the catchall, or Superseded still reaches it",
+            supersededDrop in 1 until catchall,
+        )
+        // The release of the global stop is fenced to the action AND account at application time,
+        // not trusted from controller return.
+        assertTrue(
+            "releasing the durable stop must be fenced by stillApplies(outcome) at application time",
+            source.contains("if (!enrollmentController.stillApplies(outcome)) return@launch"),
+        )
+        val clear = source.indexOf("localWithdrawalIntent.clearOnUserEnrollment()")
+        val fence = source.indexOf("if (!enrollmentController.stillApplies(outcome)) return@launch")
+        assertTrue("the enrollment success path must still release the stop", clear > 0)
+        assertTrue(
+            "the apply-time fence must come BEFORE the stop is released",
+            fence in 1 until clear,
+        )
+    }
+
+    @Test
     fun `the off tap records the durable stop before the request is launched`() {
         val source = fragmentSource()
         val recordIndex = source.indexOf("recordWithdrawalRequested()")

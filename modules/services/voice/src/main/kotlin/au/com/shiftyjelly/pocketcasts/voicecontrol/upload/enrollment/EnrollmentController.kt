@@ -35,20 +35,32 @@ sealed interface EnrollmentState {
 enum class DeletionState { Pending, }
 
 sealed interface EnrollmentOutcome {
-    data class Applied(val state: EnrollmentState) : EnrollmentOutcome
-    data class Conflict(val state: EnrollmentState) : EnrollmentOutcome
-    data class Failed(val state: EnrollmentState) : EnrollmentOutcome
-    data class DeletionRequested(val state: DeletionState) : EnrollmentOutcome
+    /**
+     * Which action and which account produced this result.
+     *
+     * Settings applies SIDE EFFECTS on an outcome (recording or releasing the durable stop), and an
+     * outcome with no identity cannot be checked against the state at application time. Without this,
+     * a delayed result from an action the user has since replaced - or from a previous account - can
+     * re-record a stop the newer opt-in already cleared, or clear a stop that belongs to someone else.
+     */
+    val attempt: MutationFence.Attempt?
+
+    data class Applied(val state: EnrollmentState, override val attempt: MutationFence.Attempt? = null) : EnrollmentOutcome
+    data class Conflict(val state: EnrollmentState, override val attempt: MutationFence.Attempt? = null) : EnrollmentOutcome
+    data class Failed(val state: EnrollmentState, override val attempt: MutationFence.Attempt? = null) : EnrollmentOutcome
+    data class DeletionRequested(val state: DeletionState, override val attempt: MutationFence.Attempt? = null) : EnrollmentOutcome
 
     /** Refused locally before any network call (e.g. no accepted disclosure). */
-    data class Refused(val reason: String) : EnrollmentOutcome
+    data class Refused(val reason: String, override val attempt: MutationFence.Attempt? = null) : EnrollmentOutcome
 
     /**
      * A newer action or an account switch made this result irrelevant. NOT an error: the operation
      * may well have succeeded server-side, but reporting it would describe a state the user has since
      * moved past (or does not belong to this account).
      */
-    data object Superseded : EnrollmentOutcome
+    data object Superseded : EnrollmentOutcome {
+        override val attempt: MutationFence.Attempt? = null
+    }
 }
 
 /**
@@ -87,7 +99,10 @@ class EnrollmentController(
      */
     suspend fun enroll(acceptedDisclosureVersion: String): EnrollmentOutcome {
         if (acceptedDisclosureVersion.isBlank()) {
-            return EnrollmentOutcome.Refused("enrollment requires an accepted disclosure version")
+            return EnrollmentOutcome.Refused(
+                "enrollment requires an accepted disclosure version",
+                fence.peek(),
+            )
         }
         mutableState.value = EnrollmentState.Pending
         val attempt = fence.issue(ownerSession())
@@ -107,10 +122,25 @@ class EnrollmentController(
         }
         mutableState.value = settled
         return when (result) {
-            is VoiceSharingMutationResult.Applied -> EnrollmentOutcome.Applied(settled)
-            is VoiceSharingMutationResult.MembershipConflict -> EnrollmentOutcome.Conflict(settled)
-            VoiceSharingMutationResult.Failure -> EnrollmentOutcome.Failed(settled)
+            is VoiceSharingMutationResult.Applied -> EnrollmentOutcome.Applied(settled, attempt)
+            is VoiceSharingMutationResult.MembershipConflict -> EnrollmentOutcome.Conflict(settled, attempt)
+            VoiceSharingMutationResult.Failure -> EnrollmentOutcome.Failed(settled, attempt)
         }
+    }
+
+    /**
+     * Whether [outcome] still describes the authoritative action for the live account RIGHT NOW.
+     *
+     * Settings applies durable side effects on an outcome (recording or releasing the global stop),
+     * and it must decide that AT APPLICATION TIME, not from what was true when the call returned. A
+     * newer action issued in between makes this false, and so does an account switch - the stop is
+     * global, so releasing it on behalf of an account that is no longer signed in would resume
+     * collection for somebody else.
+     */
+    fun stillApplies(outcome: EnrollmentOutcome): Boolean {
+        if (outcome is EnrollmentOutcome.Superseded) return false
+        val attempt = outcome.attempt ?: return false
+        return fence.isCurrent(attempt, ownerSession)
     }
 
     /**
@@ -145,9 +175,9 @@ class EnrollmentController(
         }
         mutableState.value = settled
         return when (result) {
-            is VoiceSharingMutationResult.Applied -> EnrollmentOutcome.Applied(settled)
-            is VoiceSharingMutationResult.MembershipConflict -> EnrollmentOutcome.Conflict(settled)
-            VoiceSharingMutationResult.Failure -> EnrollmentOutcome.Failed(settled)
+            is VoiceSharingMutationResult.Applied -> EnrollmentOutcome.Applied(settled, attempt)
+            is VoiceSharingMutationResult.MembershipConflict -> EnrollmentOutcome.Conflict(settled, attempt)
+            VoiceSharingMutationResult.Failure -> EnrollmentOutcome.Failed(settled, attempt)
         }
     }
 

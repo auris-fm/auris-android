@@ -100,6 +100,17 @@ class MutationFence {
         attempt.generation == generation && boundSession == live
     }
 
+    /**
+     * The currently authoritative attempt WITHOUT issuing or superseding anything.
+     *
+     * Used only to label a locally-refused outcome with the action that produced it, so Settings can
+     * still fence the side effect to that action. Returning null when no attempt has been issued is
+     * correct: there is then no action whose side effects could apply.
+     */
+    fun peek(): Attempt? = synchronized(this) {
+        Attempt(generation, boundSession ?: return null)
+    }
+
     /** Runs SERVER work one at a time; the caller decides what to do with a superseded result. */
     suspend fun <T> serialize(block: suspend () -> T): T = mutex.withLock { block() }
 

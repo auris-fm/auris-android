@@ -238,11 +238,23 @@ class VoiceControlSettingsFragment : BaseFragment() {
                         } else {
                             enrollmentController.withdraw()
                         }
+                        // SUPERSEDED RESULTS ARE IGNORED ENTIRELY (reviewer 668882eb, fd258849).
+                        // A result the user has already moved past describes an action that no longer
+                        // exists: the catchall below used to treat it as a failure and re-record the
+                        // stop, so a delayed withdrawal superseded by a SUCCESSFUL new enrollment put
+                        // the stop back after the opt-in had cleared it. It can also belong to a
+                        // different account, and the durable stop is global.
+                        if (outcome is EnrollmentOutcome.Superseded) return@launch
                         when {
                             checked && outcome is EnrollmentOutcome.Applied -> {
                                 // A fresh explicit opt-in releases the local stop - but only once the
                                 // server has actually applied it, so a failed enroll cannot silently
-                                // re-permit collection.
+                                // re-permit collection, and only if it is STILL the authoritative
+                                // action for THIS account when the effect is applied. The check is
+                                // repeated here rather than trusted from the controller: between the
+                                // controller returning and this line running, another action can be
+                                // issued, and the stop is global.
+                                if (!enrollmentController.stillApplies(outcome)) return@launch
                                 localWithdrawalIntent.clearOnUserEnrollment()
                                 locallySharing = true
                             }

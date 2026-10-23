@@ -68,6 +68,7 @@ class WorkerWireParityTest {
         // a030ff31 is the c6 `empty_result` intake pin, independently cleared by Reviewer (42 schema
         // tests, both typechecks, explicit text:null/router_input:null negatives).
         "a030ff31d95dd703fab6c5c976f36826ef77f499",
+        "3dd0c91d095512e3c49108c25b726a3b66a66eef",
         "862c7ed3fdc540eccc9fdacd6819c97a9e679536",
     )
 
@@ -296,9 +297,9 @@ class WorkerWireParityTest {
         assertEquals("probe failed: $output", 0, process.waitFor())
         val revisionLine = output.lines().firstOrNull { it.startsWith("# worker-revision") }
         assertTrue(
-            "this control requires an intake that implements delta736d3180 — $deltaRevision or the " +
-                "later $emptyResultRevision, which contains it (got: $revisionLine)",
-            revisionLine?.contains(deltaRevision) == true || revisionLine?.contains(emptyResultRevision) == true,
+            "this control requires an intake that implements delta736d3180 — $deltaRevision or any " +
+                "later approved pin, each a strict superset (got: $revisionLine)",
+            approvedWorkerRevisions.any { revisionLine?.contains(it) == true },
         )
         assertAuthorityPinsReported(output, deltaRevision)
         val verdict = output.lines().firstOrNull { it.startsWith("joined-emitted") }
@@ -337,6 +338,143 @@ class WorkerWireParityTest {
      * on the canonical bytes of the SAME record: the client builder refuses that pair locally (proven
      * in ContributionRecordTest), so the wire-level variant is the only way to ask the Worker.
      */
+    @Test
+    fun `the pinned Worker accepts the combined c6 f8 4d bytes the builder emits`() {
+        // SPEC 20:53Z: 3dd0c91d is the cleared COMBINED c6/f8/4d intake pin. This control sends the
+        // builder's own canonical bytes and asks the real Worker about all three rules at once, which
+        // is the composition that actually ships - separate per-rule pins could each pass while the
+        // combination diverges.
+        val pin = "3dd0c91d095512e3c49108c25b726a3b66a66eef"
+        val workerRoot = cloudWorkerRoot()
+        requireAuthority(workerRoot)
+
+        fun baseBuilder(): Pair<ContributionRecordBuilder, AudioBlock> {
+            val (audio, _) = audioFor(160)
+            return ContributionRecordBuilder(UUID.randomUUID().toString(), "epoch-2", "7")
+                .model("vad", ModelRef.None)
+                .model("wakeword", ModelRef.None)
+                .model("asr", ModelRef.None)
+                .model("translation", ModelRef.None)
+                .model("router", ModelRef.None)
+                .stage(StageName.Wake, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_wake_detected"))))
+                .stage(StageName.Bleed, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_playback_reference"))))
+                .stage(StageName.Asr, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("local_only_action"))))
+                .stage(StageName.Translation, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text"))))
+                .stage(StageName.Routing, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates"))))
+                .stage(StageName.Execution, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("client_refused"))))
+                .let { b -> b to audio }
+        }
+
+        fun emit(stage: StageName, entry: StageEntry): String {
+            val (builder, audio) = baseBuilder()
+            return CanonicalJson.canonicalBytes(
+                builder.replaceStage(stage, entry)
+                    .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio),
+            ).toString(Charsets.UTF_8)
+        }
+
+        // THE THREE POSITIVES, each a real shape this client can produce.
+        val emptyAsr = emit(StageName.Asr, StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("empty_result"))))
+        val rawTranscript = emit(
+            StageName.Asr,
+            StageEntry(StageState.Completed, mapOf("text" to RecordNode.Str("hey auris"), "source_language" to RecordNode.Str("en"))),
+        )
+        val translationSkip = emit(
+            StageName.Translation,
+            StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("backend_handles_translation"))),
+        )
+
+        // Sanity: the emitted bytes really contain each shape, so a silently-absent field cannot make
+        // the corresponding ACCEPT below meaningless.
+        assertTrue(
+            "the asr bytes must contain the empty_result pair: $emptyAsr",
+            emptyAsr.contains("\"asr\":{\"reason\":\"empty_result\",\"state\":\"completed\"}"),
+        )
+        assertTrue(
+            "the wake-only bytes must carry the raw transcript: $rawTranscript",
+            rawTranscript.contains("\"text\":\"hey auris\""),
+        )
+        assertTrue(
+            "the translation bytes must contain the skip reason: $translationSkip",
+            translationSkip.contains("\"reason\":\"backend_handles_translation\""),
+        )
+
+        val cases = linkedMapOf(
+            "accept-empty-asr" to emptyAsr,
+            "accept-raw-transcript" to rawTranscript,
+            "accept-translation-skip" to translationSkip,
+        )
+
+        // REJECT cells, perturbed on canonical output (sorted keys, stable shape), each asserted to
+        // have actually changed the bytes.
+        fun perturb(id: String, source: String, from: String, to: String) {
+            val changed = source.replace(from, to)
+            assertNotEquals("the perturbation $id must actually change the wire bytes", source, changed)
+            cases["reject-$id"] = changed
+        }
+        // f8cac147: a completed non-ASR stage may not carry a reason.
+        perturb(
+            "completed-wake-with-reason",
+            rawTranscript,
+            "\"wake\":{\"reason\":\"no_wake_detected\",\"state\":\"not_run\"}",
+            "\"wake\":{\"reason\":\"no_wake_detected\",\"state\":\"completed\"}",
+        )
+        // c6f3bdf7: empty_result may not carry text.
+        perturb(
+            "empty-asr-with-text",
+            emptyAsr,
+            "\"asr\":{\"reason\":\"empty_result\",\"state\":\"completed\"}",
+            "\"asr\":{\"reason\":\"empty_result\",\"state\":\"completed\",\"text\":\"hi\"}",
+        )
+        // 4d10275f: a skip reason is not_run-only, `failed` included.
+        perturb(
+            "translation-skip-at-failed",
+            translationSkip,
+            "\"translation\":{\"reason\":\"backend_handles_translation\",\"state\":\"not_run\"}",
+            "\"translation\":{\"reason\":\"backend_handles_translation\",\"state\":\"failed\"}",
+        )
+        // 4d10275f: and it belongs to translation, not any other stage.
+        perturb(
+            "translation-skip-on-wake",
+            translationSkip,
+            "\"wake\":{\"reason\":\"no_wake_detected\",\"state\":\"not_run\"}",
+            "\"wake\":{\"reason\":\"backend_handles_translation\",\"state\":\"not_run\"}",
+        )
+
+        val recordsFile = Files.createTempFile("android-combined", ".jsonl").toFile()
+        val probe = File(recordsFile.parentFile, "probe_worker_intake.mjs")
+        probe.writeBytes(javaClass.classLoader!!.getResourceAsStream("worker-parity/probe_worker_intake.mjs")!!.readBytes())
+        recordsFile.writeText(cases.entries.joinToString("\n") { (id, json) -> """{"id":"$id","record":$json}""" })
+        val process = ProcessBuilder("node", probe.absolutePath, workerRoot.absolutePath, recordsFile.absolutePath)
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().readText()
+        assertEquals("probe failed: $output", 0, process.waitFor())
+        val revisionLine = output.lines().firstOrNull { it.startsWith("# worker-revision") }
+        assertTrue(
+            "this control requires the combined intake pin $pin (got: $revisionLine)",
+            revisionLine?.contains(pin) == true,
+        )
+        assertAuthorityPinsReported(output, pin)
+        val verdicts = output.lines().filter { it.isNotBlank() && !it.startsWith("#") }.associate { line ->
+            val parts = line.split('\t')
+            parts[0] to parts.drop(1).joinToString("\t")
+        }
+        for (id in listOf("accept-empty-asr", "accept-raw-transcript", "accept-translation-skip")) {
+            assertEquals(
+                "$id must be ACCEPTed by the pinned Worker: ${verdicts[id]}",
+                "ACCEPT",
+                verdicts[id],
+            )
+        }
+        for (id in cases.keys.filter { it.startsWith("reject-") }) {
+            assertTrue(
+                "$id must be REFUSED by the pinned Worker, got: ${verdicts[id]}",
+                verdicts[id]?.startsWith("REJECT") == true,
+            )
+        }
+    }
+
     @Test
     fun `the pinned Worker accepts exactly the empty_result bytes the builder emits`() {
         // ACTUAL EMITTED-BYTE PARITY (spec 20:08Z, c6f3bdf7 / pin a030ff31).
@@ -406,8 +544,9 @@ class WorkerWireParityTest {
         assertEquals("probe failed: $output", 0, process.waitFor())
         val revisionLine = output.lines().firstOrNull { it.startsWith("# worker-revision") }
         assertTrue(
-            "this control requires the empty_result intake pin $pin (got: $revisionLine)",
-            revisionLine?.contains(pin) == true,
+            "this control requires an intake implementing empty_result — $pin or any later approved " +
+                "pin (got: $revisionLine)",
+            approvedWorkerRevisions.any { revisionLine?.contains(it) == true },
         )
         assertAuthorityPinsReported(output, pin)
         val verdicts = output.lines().filter { it.isNotBlank() && !it.startsWith("#") }.associate { line ->
@@ -494,9 +633,9 @@ class WorkerWireParityTest {
         assertEquals("probe failed: $output", 0, process.waitFor())
         val revisionLine = output.lines().firstOrNull { it.startsWith("# worker-revision") }
         assertTrue(
-            "this control requires an intake that implements delta736d3180 — $deltaRevision or the " +
-                "later $emptyResultRevision, which contains it (got: $revisionLine)",
-            revisionLine?.contains(deltaRevision) == true || revisionLine?.contains(emptyResultRevision) == true,
+            "this control requires an intake that implements delta736d3180 — $deltaRevision or any " +
+                "later approved pin, each a strict superset (got: $revisionLine)",
+            approvedWorkerRevisions.any { revisionLine?.contains(it) == true },
         )
         assertAuthorityPinsReported(output, revisionLine?.substringAfter('\t')?.substringBefore(' ')?.trim() ?: "")
         val verdicts = output.lines().filter { it.isNotBlank() && !it.startsWith("#") }.associate { line ->

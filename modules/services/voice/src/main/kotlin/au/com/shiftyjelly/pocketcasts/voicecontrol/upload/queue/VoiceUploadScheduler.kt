@@ -20,7 +20,9 @@ import java.util.concurrent.TimeUnit
  * foreground microphone service and no continuous background timer. The worker's ONLY job is to run
  * one drain attempt with the durable queue as its state:
  *
- *  - `ExistingWorkPolicy.KEEP`: one drain in flight at a time (a second request never stacks);
+ *  - `ExistingPeriodicWorkPolicy.UPDATE`: one periodic drain; a policy transition REWRITES the
+ *    constraint in place (KEEP would strand a stale network rule forever);
+ *  - `ExistingWorkPolicy.KEEP` for the immediate one-shot: one drain in flight at a time;
  *  - the period is the production cadence, so a suspended/killed process simply resumes from the
  *    durable queue at the next permitted execution (nothing is remembered in memory);
  *  - the required network type comes from the VALIDATED policy snapshot's `upload_network`, never a
@@ -48,7 +50,7 @@ fun interface VoiceUploadDrain {
 }
 
 /**
- * The scheduler: ONE unique periodic drain, KEEP policy, `upload_network`-derived constraint. Every
+ * The scheduler: ONE unique periodic drain, UPDATE policy, `upload_network`-derived constraint. Every
  * input is injected so the production values are the tested values (no constants duplicated in tests).
  */
 class VoiceUploadScheduler(
@@ -62,7 +64,9 @@ class VoiceUploadScheduler(
     /**
      * Schedules the unique drain. [uploadNetwork] is the validated policy's allowed network; the
      * compiled default is [UploadNetwork.ANY] (connectivity only) — no stricter requirement is
-     * invented here (spec 89b4760b).
+     * invented here (spec 89b4760b). UPDATE (not KEEP): a later schedule with a DIFFERENT policy
+     * network must rewrite the constraint in place — KEEP would keep the FIRST constraint forever,
+     * silently bypassing a tightened `upload_network` (reviewer 177645cc).
      */
     fun schedule(uploadNetwork: UploadNetwork) {
         val constraints = Constraints.Builder()
@@ -77,7 +81,7 @@ class VoiceUploadScheduler(
             .setConstraints(constraints)
             .addTag(TAG)
             .build()
-        workManager.enqueueUniquePeriodicWork(TAG, ExistingPeriodicWorkPolicy.KEEP, request)
+        workManager.enqueueUniquePeriodicWork(TAG, ExistingPeriodicWorkPolicy.UPDATE, request)
     }
 
     /** Cancels the scheduled drain (policy disable / withdrawal: collection-owned work stops). */

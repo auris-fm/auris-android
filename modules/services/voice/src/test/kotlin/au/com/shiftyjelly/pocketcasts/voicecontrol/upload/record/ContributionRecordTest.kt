@@ -16,6 +16,30 @@ import org.junit.Test
  */
 class ContributionRecordTest {
 
+    /**
+     * delta736d3180 STRICT PARITY (client side; Cloud intake c569b319 controls U1-U5):
+     * `observation_unavailable` is accepted ONLY paired with state `unknown` and refused with
+     * every other state — a known outcome always keeps its specific reason.
+     */
+    @Test
+    fun `observation_unavailable is accepted only with state unknown and refused with every other state`() {
+        fun record(state: StageState) = runCatching {
+            // A complete otherwise-valid record, with ONLY the bleed stage set to the delta pair.
+            complete(builder()).replaceStage(
+                StageName.Bleed,
+                StageEntry(state, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
+            ).build(platform = "android", appVersion = "8.20", build = "1", audio = audio())
+        }
+
+        assertTrue("unknown + observation_unavailable is accepted", record(StageState.Unknown).isSuccess)
+        for (state in listOf(StageState.NotRun, StageState.Failed, StageState.Cancelled)) {
+            assertTrue(
+                "observation_unavailable refused with state " + state.wire,
+                record(state).isFailure,
+            )
+        }
+    }
+
     private fun audio(
         truncated: Boolean = false,
         spans: List<DroppedSpan> = emptyList(),

@@ -124,6 +124,8 @@ class PocketCastsApplication :
 
     @Inject lateinit var voiceUploadScheduler: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadScheduler
 
+    @Inject lateinit var voiceUploadSchedulerBinding: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploadSchedulerBinding
+
     @Inject lateinit var analyticsController: AnalyticsController
 
     @Inject lateinit var downloadStatisticsReporter: DownloadStatisticsReporter
@@ -257,11 +259,10 @@ class PocketCastsApplication :
                 // starting it puts nothing on the network until every eligibility gate opens.
                 voiceUploadTrigger.start()
                 // Platform deferred-transfer scheduling (spec voice-recording-uploads.md): ONE
-                // unique periodic drain under the validated `upload_network` constraint; no
-                // foreground microphone service and no continuous background timer is added.
-                voiceUploadScheduler.schedule(
-                    au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.UploadNetwork.compiledDefault(),
-                )
+                // unique periodic drain under the validated `upload_network` constraint; the
+                // binding re-schedules on every policy transition (UPDATE rewrites the
+                // constraint, never stacks). No foreground mic service, no background timer.
+                voiceUploadSchedulerBinding.start()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

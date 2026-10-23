@@ -41,9 +41,12 @@ object EngineStageProvenance {
                 SegmentObservation.WakeState.NotDetected ->
                     StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("no_wake_detected")))
 
-                SegmentObservation.WakeState.DetectorFailed -> StageEntry(StageState.Unknown)
+                SegmentObservation.WakeState.DetectorFailed ->
+                    StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable")))
             },
-            StageName.Bleed to StageEntry(StageState.Unknown),
+            // delta736d3180: honest unknown WITH the enumerated reason the schema requires —
+            // the candidate carries no bleed observation at finalization; no specific cause claimed.
+            StageName.Bleed to StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
             StageName.Asr to if (recognized != null) {
                 StageEntry(StageState.Completed, mapOf("text" to RecordNode.Str(recognized.transcript)))
             } else {
@@ -69,7 +72,9 @@ object EngineStageProvenance {
 
                 candidate.translation != null -> StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text")))
 
-                else -> StageEntry(StageState.Unknown)
+                // delta736d3180: translation unobserved at finalization — honest unknown, now
+                // schema-valid.
+                else -> StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable")))
             },
             StageName.Routing to if (routed != null) {
                 StageEntry(StageState.Completed, mapOf("predicted_intent" to RecordNode.Str(routed.intentCategory)))
@@ -77,7 +82,8 @@ object EngineStageProvenance {
                 StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates")))
             },
             // UNVERIFIED by design: dispatch observed, execution result never asserted here.
-            StageName.Execution to StageEntry(StageState.Unknown),
+            // delta736d3180: honest unknown with the enumerated reason the schema requires.
+            StageName.Execution to StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
         )
     }
 }

@@ -299,6 +299,13 @@ data class PolicySnapshot(
     val enabled: Boolean,
     val activatedAtMonotonicMs: Long,
     val activationGeneration: Long,
+    /**
+     * THE allowed upload networks (`upload_network`, spec §73/§152). The compiled default is
+     * [UploadNetwork.ANY]; the value is a validated LOCAL policy input, not a remote key (there is
+     * no `upload_network` field in the published snapshot yet — reviewer 177645cc: it must still
+     * gate BOTH the scheduler constraint and EACH actual attempt, which it now does).
+     */
+    val uploadNetwork: UploadNetwork = UploadNetwork.ANY,
 )
 
 /**

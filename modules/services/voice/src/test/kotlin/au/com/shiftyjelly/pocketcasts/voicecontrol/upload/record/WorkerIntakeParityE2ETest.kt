@@ -51,23 +51,32 @@ class WorkerIntakeParityE2ETest {
     private fun cloudWorkerRoot(): File = System.getenv("AURIS_CLOUD_WORKER_ROOT")?.let(::File)
         ?: File("/Users/dev/code/auris/core/cloud-voice-uploads/worker")
 
+    //
+    // The Worker revision these controls compare against, and the SCOPE of that comparison.
+    //
+    // SCOPE, stated exactly: `d8fe823c` is pinned for INTAKE GUARD behaviour only — the two digest
+    // checks and the record schema this fixture exercises. It is NOT a whole-server approval: the
+    // reviewer blocked that same revision's route changes (empty-digest reserve placeholders), so
+    // nothing here says anything about upload_route.ts, budgeting or delivery. Advancing this value
+    // is a deliberate edit made when a specific, named behaviour is re-cleared — not a general
+    // blessing of the server revision.
+    //
+    // Recording whatever HEAD happens to be checked out is provenance, not an authority: a clean
+    // checkout of a different revision is a different intake, and a parity claim against it says
+    // nothing about the revision anyone reviewed. So the SHA is explicit here and a mismatch FAILS.
+    // Advancing it is a deliberate edit made when a new revision is cleared, which is exactly the
+    // reviewable event this should be.
+    //
+
     /**
-     * The Worker revision these controls compare against, and the SCOPE of that comparison.
-     *
-     * SCOPE, stated exactly: `d8fe823c` is pinned for INTAKE GUARD behaviour only — the two digest
-     * checks and the record schema this fixture exercises. It is NOT a whole-server approval: the
-     * reviewer blocked that same revision's route changes (empty-digest reserve placeholders), so
-     * nothing here says anything about upload_route.ts, budgeting or delivery. Advancing this value
-     * is a deliberate edit made when a specific, named behaviour is re-cleared — not a general
-     * blessing of the server revision.
-     *
-     * Recording whatever HEAD happens to be checked out is provenance, not an authority: a clean
-     * checkout of a different revision is a different intake, and a parity claim against it says
-     * nothing about the revision anyone reviewed. So the SHA is explicit here and a mismatch FAILS.
-     * Advancing it is a deliberate edit made when a new revision is cleared, which is exactly the
-     * reviewable event this should be.
+     * Approved pinned authorities (advancing is a deliberate, reviewable edit):
+     * d8fe823c pre-delta intake-guard baseline; c569b319 delta736d3180 strict intake (pushed
+     * source for fixture/intake parity, NOT a deployed live intake).
      */
-    private val approvedWorkerRevision = "d8fe823cbe43ebb310d632b482312c7b282ef018"
+    private val approvedWorkerRevisions = setOf(
+        "d8fe823cbe43ebb310d632b482312c7b282ef018",
+        "c569b319e19b5971ada44a0f53245630688c1305",
+    )
 
     /** Reads the probe's provenance line and returns the revision it actually loaded. */
     private fun assertApprovedRevision(output: String) {
@@ -80,13 +89,12 @@ class WorkerIntakeParityE2ETest {
             reported.endsWith("CLEAN"),
         )
         val revision = reported.removeSuffix("CLEAN").trim()
-        assertEquals(
-            "INTEGRITY: parity ran against '$revision' but the approved authority is " +
-                "$approvedWorkerRevision. A clean checkout of a different revision proves nothing " +
-                "about the revision under review. Point AURIS_CLOUD_WORKER_ROOT at the approved " +
-                "revision (or advance approvedWorkerRevision deliberately).",
-            approvedWorkerRevision,
-            revision,
+        assertTrue(
+            "INTEGRITY: parity ran against '$revision' but the approved authorities are " +
+                "$approvedWorkerRevisions. A clean checkout of a different revision proves nothing " +
+                "about the revision under review. Point AURIS_CLOUD_WORKER_ROOT at an approved " +
+                "revision (or advance approvedWorkerRevisions deliberately).",
+            revision in approvedWorkerRevisions,
         )
     }
 
@@ -237,7 +245,7 @@ class WorkerIntakeParityE2ETest {
         assertEquals("probe failed:\n$output", 0, process.waitFor())
 
         assertApprovedRevision(output)
-        val revision = approvedWorkerRevision
+        val revision = approvedWorkerRevisions.last()
         val verdicts = output.lines().filter { it.isNotBlank() && !it.startsWith("#") }.map { it.split('\t') }
             .associate { it[0] to it.drop(1) }
 

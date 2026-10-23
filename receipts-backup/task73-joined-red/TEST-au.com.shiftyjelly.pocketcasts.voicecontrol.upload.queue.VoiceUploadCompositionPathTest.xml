@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionPathTest" tests="4" skipped="0" failures="1" errors="0" timestamp="2026-10-23T14:40:33.470Z" hostname="MacBook-Pro.local" time="2.792">
+  <properties/>
+  <testcase name="the module's own trigger polls with the compiled-off gate and touches nothing" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionPathTest" time="2.364"/>
+  <testcase name="the joined engine-sink-trigger-producer path lands a durable record and settles it end to end" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionPathTest" time="0.038">
+    <failure message="java.lang.AssertionError: RED (spec checkpoint): the REAL EngineStageProvenance output cannot build a record - Unknown stages (bleed/translation/execution) carry no enumerated reason, so ContributionRecordBuilder.stage throws and every real engine publish dies record-less in the dispatched coroutine" type="java.lang.AssertionError">java.lang.AssertionError: RED (spec checkpoint): the REAL EngineStageProvenance output cannot build a record - Unknown stages (bleed/translation/execution) carry no enumerated reason, so ContributionRecordBuilder.stage throws and every real engine publish dies record-less in the dispatched coroutine
+	at org.junit.Assert.fail(Assert.java:89)
+	at org.junit.Assert.assertTrue(Assert.java:42)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionPathTest.the joined engine-sink-trigger-producer path lands a durable record and settles it end to end(VoiceUploadCompositionPathTest.kt:416)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.junit.runners.model.FrameworkMethod$1.runReflectiveCall(FrameworkMethod.java:59)
+	at org.junit.internal.runners.model.ReflectiveCallable.run(ReflectiveCallable.java:12)
+	at org.junit.runners.model.FrameworkMethod.invokeExplosively(FrameworkMethod.java:56)
+	at org.junit.internal.runners.statements.InvokeMethod.evaluate(InvokeMethod.java:17)
+	at org.junit.rules.ExternalResource$1.evaluate(ExternalResource.java:54)
+	at org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)
+	at org.robolectric.RobolectricTestRunner$HelperTestRunner$1.evaluate(RobolectricTestRunner.java:524)
+	at org.robolectric.internal.SandboxTestRunner.executeInSandbox(SandboxTestRunner.java:494)
+	at org.robolectric.internal.SandboxTestRunner.access$900(SandboxTestRunner.java:67)
+	at org.robolectric.internal.SandboxTestRunner$7.evaluate(SandboxTestRunner.java:442)
+	at org.junit.runners.BlockJUnit4ClassRunner$1.evaluate(BlockJUnit4ClassRunner.java:100)
+	at org.junit.runners.ParentRunner.runLeaf(ParentRunner.java:366)
+	at org.junit.runners.BlockJUnit4ClassRunner.runChild(BlockJUnit4ClassRunner.java:103)
+	at org.robolectric.internal.SandboxTestRunner.access$600(SandboxTestRunner.java:67)
+	at org.robolectric.internal.SandboxTestRunner$6.evaluate(SandboxTestRunner.java:333)
+	at org.robolectric.internal.SandboxTestRunner$3.evaluate(SandboxTestRunner.java:233)
+	at org.robolectric.internal.SandboxTestRunner$5.lambda$evaluate$0(SandboxTestRunner.java:317)
+	at org.robolectric.internal.bytecode.Sandbox.lambda$runOnMainThread$0(Sandbox.java:101)
+	at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:317)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+</failure>
+  </testcase>
+  <testcase name="drains never overlap an entry and deferred work resumes when the network gate opens" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionPathTest" time="0.133"/>
+  <testcase name="a valid receipt settles through the module-built assembly and an invalid one does not" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionPathTest" time="0.059"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[Mockito is currently self-attaching to enable the inline-mock-maker. This will no longer work in future releases of the JDK. Please add Mockito as an agent to your build as described in Mockito's documentation: https://javadoc.io/doc/org.mockito/mockito-core/latest/org.mockito/org/mockito/Mockito.html#0.3
+WARNING: A Java agent has been loaded dynamically (/var/folders/v3/wk_148693jd3sk8490hmflxm0000gn/T/byteBuddyAgent8155335783693717957.jar)
+WARNING: If a serviceability tool is in use, please run with -XX:+EnableDynamicAgentLoading to hide this warning
+WARNING: If a serviceability tool is not in use, please run with -Djdk.instrument.traceUsage for more information
+WARNING: Dynamic loading of agents will be disallowed by default in a future release
+Exception in thread "SDK 34 Main Thread @coroutine#5" java.lang.IllegalArgumentException: stage bleed is unknown: an enumerated reason is required
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ContributionRecordBuilder.stage(ContributionRecord.kt:194)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionCaptureProducer.publish(ContributionCaptureProducer.kt:112)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RetentionPublishTrigger.publishBody$lambda$0(RetentionPublishTrigger.kt:110)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RetentionPublishTrigger.publishBody$lambda$1(RetentionPublishTrigger.kt:123)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.OwnerPublicationBindingKt.ownerPublicationBinding$lambda$0$0(OwnerPublicationBinding.kt:37)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadModule$provideRetentionPublishTrigger$2.underOwnerTransaction$lambda$0(VoiceUploadModule.kt:250)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup.validateUnderOwnerTransaction$lambda$0(VoiceSharingAccountStartup.kt:88)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionPathTest$AppContextOwner.transaction(VoiceUploadCompositionPathTest.kt:49)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup.validateUnderOwnerTransaction(VoiceSharingAccountStartup.kt:88)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadModule$provideRetentionPublishTrigger$2.underOwnerTransaction(VoiceUploadModule.kt:242)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.OwnerPublicationBindingKt.ownerPublicationBinding$lambda$0(OwnerPublicationBinding.kt:28)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RetentionPublishTrigger.publishBody(RetentionPublishTrigger.kt:123)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RetentionPublishTrigger.onCandidate$lambda$0(RetentionPublishTrigger.kt:73)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadModule$provideRetentionPublishTrigger$3$1.invokeSuspend(VoiceUploadModule.kt:254)
+	at kotlin.coroutines.jvm.internal.BaseContinuationImpl.resumeWith(ContinuationImpl.kt:34)
+	at kotlinx.coroutines.internal.DispatchedContinuationKt.resumeCancellableWithInternal(DispatchedContinuation.kt:384)
+	at kotlinx.coroutines.intrinsics.CancellableKt.startCoroutineCancellable(Cancellable.kt:26)
+	at kotlinx.coroutines.CoroutineStart.invoke(CoroutineStart.kt:358)
+	at kotlinx.coroutines.AbstractCoroutine.start(AbstractCoroutine.kt:134)
+	at kotlinx.coroutines.BuildersKt__Builders_commonKt.launch(Builders.common.kt:209)
+	at kotlinx.coroutines.BuildersKt.launch(Unknown Source)
+	at kotlinx.coroutines.BuildersKt__Builders_commonKt.launch$default(Builders.common.kt:200)
+	at kotlinx.coroutines.BuildersKt.launch$default(Unknown Source)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadModule.provideRetentionPublishTrigger$lambda$0(VoiceUploadModule.kt:254)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RetentionPublishTrigger.onCandidate(RetentionPublishTrigger.kt:73)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RetentionPublishTrigger.access$onCandidate(RetentionPublishTrigger.kt:37)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RetentionPublishTrigger$attach$2.invoke(RetentionPublishTrigger.kt:65)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.RetentionPublishTrigger$attach$2.invoke(RetentionPublishTrigger.kt:65)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink.joinOutcome(ContributionRetentionSink.kt:500)
+	at au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionPathTest.the joined engine-sink-trigger-producer path lands a durable record and settles it end to end(VoiceUploadCompositionPathTest.kt:415)
+	at java.base/jdk.internal.reflect.DirectMethodHandleAccessor.invoke(DirectMethodHandleAccessor.java:103)
+	at java.base/java.lang.reflect.Method.invoke(Method.java:580)
+	at org.junit.runners.model.FrameworkMethod$1.runReflectiveCall(FrameworkMethod.java:59)
+	at org.junit.internal.runners.model.ReflectiveCallable.run(ReflectiveCallable.java:12)
+	at org.junit.runners.model.FrameworkMethod.invokeExplosively(FrameworkMethod.java:56)
+	at org.junit.internal.runners.statements.InvokeMethod.evaluate(InvokeMethod.java:17)
+	at org.junit.rules.ExternalResource$1.evaluate(ExternalResource.java:54)
+	at org.junit.runners.ParentRunner$3.evaluate(ParentRunner.java:306)
+	at org.robolectric.RobolectricTestRunner$HelperTestRunner$1.evaluate(RobolectricTestRunner.java:524)
+	at org.robolectric.internal.SandboxTestRunner.executeInSandbox(SandboxTestRunner.java:494)
+	at org.robolectric.internal.SandboxTestRunner.access$900(SandboxTestRunner.java:67)
+	at org.robolectric.internal.SandboxTestRunner$7.evaluate(SandboxTestRunner.java:442)
+	at org.junit.runners.BlockJUnit4ClassRunner$1.evaluate(BlockJUnit4ClassRunner.java:100)
+	at org.junit.runners.ParentRunner.runLeaf(ParentRunner.java:366)
+	at org.junit.runners.BlockJUnit4ClassRunner.runChild(BlockJUnit4ClassRunner.java:103)
+	at org.robolectric.internal.SandboxTestRunner.access$600(SandboxTestRunner.java:67)
+	at org.robolectric.internal.SandboxTestRunner$6.evaluate(SandboxTestRunner.java:333)
+	at org.robolectric.internal.SandboxTestRunner$3.evaluate(SandboxTestRunner.java:233)
+	at org.robolectric.internal.SandboxTestRunner$5.lambda$evaluate$0(SandboxTestRunner.java:317)
+	at org.robolectric.internal.bytecode.Sandbox.lambda$runOnMainThread$0(Sandbox.java:101)
+	at java.base/java.util.concurrent.FutureTask.run(FutureTask.java:317)
+	at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1144)
+	at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:642)
+	at java.base/java.lang.Thread.run(Thread.java:1583)
+	Suppressed: kotlinx.coroutines.internal.DiagnosticCoroutineContextException: [CoroutineId(5), "coroutine#5":StandaloneCoroutine{Cancelling}@27a3383c, Dispatchers.Unconfined]
+]]></system-err>
+</testsuite>

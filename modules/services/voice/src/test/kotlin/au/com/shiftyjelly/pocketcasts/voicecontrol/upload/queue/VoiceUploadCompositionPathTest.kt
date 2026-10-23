@@ -140,6 +140,7 @@ class VoiceUploadCompositionPathTest {
                 ),
                 policyProvider = policy,
                 accountStartup = startup,
+                context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
             )
             val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
             val producer = VoiceUploadModule.provideContributionCaptureProducer(
@@ -294,6 +295,7 @@ class VoiceUploadCompositionPathTest {
                 ),
                 policyProvider = policy,
                 accountStartup = startup,
+                context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
             )
 
             // 1. INVALID receipt: nothing settles, the durable capture stays.
@@ -318,6 +320,402 @@ class VoiceUploadCompositionPathTest {
                 hits.get() > hitsBefore,
             )
             org.junit.Assert.assertNull("a VALIDATED receipt settles the entry", store.durableCapture(id))
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    //
+    // THE JOINED PATH (spec follow-up to 89b4760b item 1): engine observation events feed the REAL
+    // sink, the module's REAL RetentionPublishTrigger (real owner transaction, real producer)
+    // publishes the capture as a DURABLE store record, and the module-built assembly then drains
+    // that record through the loopback to a VALIDATED receipt — one continuous path, no hand-built
+    // stand-ins for any stage.
+    //
+
+    /**
+     * RED PENDING SPEC DELTA (spec 14:46:41Z): the REAL EngineStageProvenance emits Unknown stages
+     * with NO reason and the record builder refuses them — every real engine publish currently dies
+     * record-less. Spec adjudicated a new shared reason `observation_unavailable` (state unknown
+     * ONLY); the fix lands with the exact spec delta + strict Worker-validator parity, not before.
+     * RED receipt: receipts-backup/task73-joined-red/ (sha256 50b7dd2b…).
+     */
+    @Test
+    fun `the joined engine-sink-trigger-producer path lands a durable record and settles it end to end`() {
+        var status = 500
+        var body = ""
+        val (server, hits) = loopback { status to body }
+        try {
+            val root = tmp.newFolder("joined-path")
+            // Fast retry so the publish→drain sequence needs no wall-clock backoff.
+            val store = ContributionStore(
+                root,
+                QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
+                clock = System::currentTimeMillis,
+                jitter = { 0L },
+            )
+            val startup = moduleStartup()
+            val owner = startup.ownerForHandoff() as AppContextOwner
+            owner.publish("a@x", 7L, "Bearer-fixture")
+            startup.credentials.publish("Bearer-fixture")
+            val token = startup.state.sessionStarted(7L)
+            val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
+            assertTrue(startup.state.applyOutcome(token, ticket, authenticatedProjection("epoch-1"), ownerSession = 7L))
+            val policy = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
+                remoteConfig = org.mockito.kotlin.mock(),
+                featureProvider = org.mockito.kotlin.mock(),
+                ownership = owner,
+                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job().apply { cancel() }),
+            )
+            policy.applySnapshotForTest(
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot(
+                    enabled = true,
+                    activatedAtMonotonicMs = 1L,
+                    activationGeneration = 1L,
+                ),
+            )
+            val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined + kotlinx.coroutines.SupervisorJob())
+            try {
+                // 1. ENGINE side: real observation events into the real sink (frozen authority
+                //    matching the published owner identity), then the Executed join.
+                val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+                val captureId = java.util.UUID.randomUUID()
+                val ctx = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureContext(
+                    captureId,
+                    captureSession = 1L,
+                    routeClass = "Bluetooth",
+                    issuedAuthority = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuthority(
+                        accountName = "a@x",
+                        sessionGeneration = 7L,
+                        credentialIncarnation = 1L,
+                        enrollmentEpoch = "epoch-1",
+                        acceptedDisclosureVersion = "1",
+                        policyEnabledAtIssue = true,
+                    ),
+                    asrModel = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("whisper-model", "ggml-small-q5_1.bin"),
+                )
+                assertTrue(sink.started(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation.Started(ctx, ShortArray(800) { it.toShort() }, validSamples = 800)))
+                sink.completed(
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation.Completed(
+                        ctx,
+                        frames = listOf(ShortArray(800) { (it + 1).toShort() }),
+                        sampleRateHz = 16000,
+                        speechOnsetSample = 0,
+                        speechEndSample = 1600,
+                        wakeState = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation.WakeState.Detected,
+                    ),
+                )
+                // 2. PRODUCER side: the module's own trigger/producer (real owner transaction).
+                val producer = VoiceUploadModule.provideContributionCaptureProducer(
+                    context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
+                    store = store,
+                    accountStartup = startup,
+                )
+                val publishTrigger = VoiceUploadModule.provideRetentionPublishTrigger(
+                    sink = sink,
+                    producer = producer,
+                    accountStartup = startup,
+                    scope = scope,
+                )
+                publishTrigger.attach()
+                // Real pipeline join order: the transcript join carries the Asr stage, the
+                // Executed join is the terminal dispatch observation.
+                assertTrue(sink.joinOutcome(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome.Recognized(captureId, transcript = "skip this ad", detectedLanguage = "en")))
+                assertTrue(sink.joinOutcome(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome.Executed(captureId, dispatchedWithoutThrowing = true)))
+                assertTrue(
+                    "RED (spec checkpoint): the REAL EngineStageProvenance output cannot build a record - " +
+                        "Unknown stages (bleed/translation/execution) carry no enumerated reason, so " +
+                        "ContributionRecordBuilder.stage throws and every real engine publish dies " +
+                        "record-less in the dispatched coroutine",
+                    store.readyEntries().any { it.captureId == captureId.toString() },
+                )
+
+                // 3. DRAIN side: the module-built assembly uploads and the VALIDATED receipt settles.
+                val assembly = VoiceUploadModule.provideUploadAssembly(
+                    store = store,
+                    transport = ContributionUploadTransport(
+                        endpoint = "http://127.0.0.1:${server.address.port}/v1/contributions",
+                        authorization = { "Bearer-fixture" },
+                    ),
+                    policyProvider = policy,
+                    accountStartup = startup,
+                    context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
+                )
+                status = 201
+                body = "{\"schema_version\":1,\"capture_id\":\"$captureId\",\"record_sha256\":\"${store.recordedDigest(captureId.toString())}\"," +
+                    "\"status\":\"accepted\",\"receipt_id\":\"rcpt-j\",\"accepted_at\":\"2026-10-23T00:00:00Z\",\"retention_expires_at\":\"2026-11-22T00:00:00Z\"}"
+                assembly.poll()
+                assertTrue("the joined path reached the transport", hits.get() >= 1)
+                org.junit.Assert.assertNull("the durable record settled through the joined path", store.durableCapture(captureId.toString()))
+            } finally {
+                scope.cancel()
+            }
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    /**
+     * FOREGROUND vs DEFERRED DRAIN (spec follow-up): one serialized store owner. (1) A second drain
+     * while an attempt is in flight never overlaps it — the entry is skipped in-flight, not
+     * double-sent. (2) A drain with the network gate closed defers; when the gate opens (the
+     * owner-published credential appears) the SAME durable entry is picked up and settles — durable
+     * work resumes on the next permitted execution.
+     */
+    @Test
+    fun `drains never overlap an entry and deferred work resumes when the network gate opens`() {
+        var status = 500
+        var body = ""
+        val release = java.util.concurrent.CountDownLatch(1)
+        val (server, hits) = loopback {
+            // Bounded: a blocked handler must never outlive the test (a parked non-daemon
+            // pool thread would hang the JVM after the assertion fails).
+            release.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            status to body
+        }
+        try {
+            val root = tmp.newFolder("shared-owner")
+            val store = ContributionStore(
+                root,
+                QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
+                clock = System::currentTimeMillis,
+                jitter = { 0L },
+            )
+            val id = prepareVerifiedCapture(store)
+            val startup = moduleStartup()
+            val owner = startup.ownerForHandoff() as AppContextOwner
+            owner.publish("a@x", 7L, "Bearer-fixture")
+            val token = startup.state.sessionStarted(7L)
+            val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
+            assertTrue(startup.state.applyOutcome(token, ticket, authenticatedProjection("epoch-1"), ownerSession = 7L))
+            val policy = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
+                remoteConfig = org.mockito.kotlin.mock(),
+                featureProvider = org.mockito.kotlin.mock(),
+                ownership = owner,
+                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job().apply { cancel() }),
+            )
+            policy.applySnapshotForTest(
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot(
+                    enabled = true,
+                    activatedAtMonotonicMs = 1L,
+                    activationGeneration = 1L,
+                ),
+            )
+            val assembly = VoiceUploadModule.provideUploadAssembly(
+                store = store,
+                transport = ContributionUploadTransport(
+                    endpoint = "http://127.0.0.1:${server.address.port}/v1/contributions",
+                    authorization = { "Bearer-fixture" },
+                ),
+                policyProvider = policy,
+                accountStartup = startup,
+                context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
+            )
+            status = 201
+            body = "{\"schema_version\":1,\"capture_id\":\"$id\",\"record_sha256\":\"deadbeef\",\"status\":\"accepted\"}"
+            // The network gate is the owner-published credential: open it for the first drain
+            // (part 2 below closes and reopens it).
+            startup.credentials.publish("Bearer-fixture")
+
+            // (1) Attempt one IN FLIGHT (loopback blocked); a second drain must skip, not overlap.
+            val inFlight = java.util.concurrent.Executors.newSingleThreadExecutor()
+            try {
+                val first = inFlight.submit { assembly.poll() }
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+                while (hits.get() < 1 && System.nanoTime() < deadline) Thread.sleep(10)
+                assertTrue("first drain reached the transport", hits.get() == 1)
+                // While the attempt is in flight the caller's in-flight claim makes a re-entrant
+                // drain SKIP the entry: the second drain starts no attempt (the transport's
+                // metadata-first envelope can legitimately log >1 request for the ONE attempt).
+                val second = assembly.poll()
+                assertTrue(
+                    "an in-flight attempt is NEVER overlapped by a second drain (second=$second): " +
+                        "the in-flight claim (skippedInFlight) or the consumed attempt-charge " +
+                        "(entry absent from retryEligible) each fail closed",
+                    second.attempted == 0 && second.skippedInFlight <= 1,
+                )
+                release.countDown()
+                first.get(5, java.util.concurrent.TimeUnit.SECONDS)
+                assertEquals(
+                    "exactly ONE attempt was consumed for the entry",
+                    1,
+                    store.stateAttemptsForTest(id),
+                )
+            } finally {
+                inFlight.shutdownNow()
+            }
+
+            // (2) The invalid receipt retained the entry. The network gate (owner-published
+            //     credential) now CLOSES: the drain defers. It reopens: the same durable entry
+            //     resumes and settles.
+            org.junit.Assert.assertNotNull(store.durableCapture(id))
+            startup.credentials.publish(null)
+            val closed = assembly.poll()
+            assertEquals("gate closed: deferred, not attempted", 1, closed.deferredNetwork)
+            assertEquals("gate closed: nothing sent", 1, hits.get())
+            startup.credentials.publish("Bearer-fixture")
+            val digest = store.recordedDigest(id)!!
+            body = "{\"schema_version\":1,\"capture_id\":\"$id\",\"record_sha256\":\"$digest\",\"status\":\"accepted\",\"receipt_id\":\"rcpt-r\",\"accepted_at\":\"2026-10-23T00:00:00Z\",\"retention_expires_at\":\"2026-11-22T00:00:00Z\"}"
+            val resumed = assembly.poll()
+            assertTrue("gate open: the deferred entry resumed (poll=$resumed)", hits.get() > 1)
+            org.junit.Assert.assertNull("resumed durable work settles", store.durableCapture(id))
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    /**
+     * FOREGROUND BYPASS (reviewer 177645cc): the platform scheduler constraint alone cannot stop a
+     * drain started outside WorkManager — the policy's `upload_network` must gate EACH attempt.
+     * With the published policy requiring UNMETERED and the actual network metered, the module
+     * assembly defers and touches nothing; when the actual network satisfies the policy, the same
+     * entry goes out and a VALIDATED receipt settles it.
+     */
+    @Test
+    fun `a tightened upload_network gates the foreground drain per attempt`() {
+        var status = 500
+        var body = ""
+        val (server, hits) = loopback { status to body }
+        // The ACTUAL network, controlled by the control (production: ConnectivityManager).
+        var actualUnmetered = false
+        try {
+            val root = tmp.newFolder("foreground-bypass")
+            val store = ContributionStore(
+                root,
+                QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
+                clock = System::currentTimeMillis,
+                jitter = { 0L },
+            )
+            val id = prepareVerifiedCapture(store)
+            val startup = moduleStartup()
+            val owner = startup.ownerForHandoff() as AppContextOwner
+            owner.publish("a@x", 7L, "Bearer-fixture")
+            startup.credentials.publish("Bearer-fixture")
+            val token = startup.state.sessionStarted(7L)
+            val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
+            assertTrue(startup.state.applyOutcome(token, ticket, authenticatedProjection("epoch-1"), ownerSession = 7L))
+            val policy = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
+                remoteConfig = org.mockito.kotlin.mock(),
+                featureProvider = org.mockito.kotlin.mock(),
+                ownership = owner,
+                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job().apply { cancel() }),
+            )
+            policy.applySnapshotForTest(
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot(
+                    enabled = true,
+                    activatedAtMonotonicMs = 1L,
+                    activationGeneration = 1L,
+                    uploadNetwork = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.UploadNetwork.UNMETERED,
+                ),
+            )
+            val assembly = VoiceUploadModule.provideUploadAssembly(
+                store = store,
+                transport = ContributionUploadTransport(
+                    endpoint = "http://127.0.0.1:${server.address.port}/v1/contributions",
+                    authorization = { "Bearer-fixture" },
+                ),
+                policyProvider = policy,
+                accountStartup = startup,
+                actualNetwork = { requested ->
+                    when (requested) {
+                        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.UploadNetwork.ANY -> true
+                        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.UploadNetwork.UNMETERED -> actualUnmetered
+                    }
+                },
+            )
+            // Policy demands UNMETERED; the actual network is metered: DEFER, never send.
+            status = 201
+            body = "{\"schema_version\":1,\"capture_id\":\"$id\",\"record_sha256\":\"deadbeef\",\"status\":\"accepted\"}"
+            val deferred = assembly.poll()
+            assertEquals("policy network unsatisfied: the foreground drain defers", 1, deferred.deferredNetwork)
+            assertEquals("nothing is sent against the policy network", 0, hits.get())
+
+            // The actual network now satisfies the policy: the SAME entry goes out per attempt.
+            actualUnmetered = true
+            val digest = store.recordedDigest(id)!!
+            body = "{\"schema_version\":1,\"capture_id\":\"$id\",\"record_sha256\":\"$digest\",\"status\":\"accepted\",\"receipt_id\":\"rcpt-n\",\"accepted_at\":\"2026-10-23T00:00:00Z\",\"retention_expires_at\":\"2026-11-22T00:00:00Z\"}"
+            assembly.poll()
+            assertTrue("the per-attempt gate opens with the actual network", hits.get() >= 1)
+            org.junit.Assert.assertNull("the durable entry settled", store.durableCapture(id))
+        } finally {
+            server.stop(0)
+        }
+    }
+
+    /**
+     * WORKER EXECUTION CONSTRUCTION (reviewer 177645cc): the persisted worker is instantiated
+     * through the real WorkManager worker-construction path (TestListenableWorkerBuilder +
+     * a WorkerFactory producing the @HiltWorker's constructor shape) and its doWork() runs the
+     * MODULE-BUILT drain (the module assembly's own poll) against a loopback to a VALIDATED
+     * receipt. HONEST BOUNDARY: without a device install the literal HiltWorkerFactory graph
+     * is not executed here — the @AssistedInject constructor shape and the generated
+     * VoiceUploadDrainWorker_HiltWorker registration are source/compilation evidence only.
+     */
+    @Test
+    fun `the drain worker constructs through the worker factory path and runs the module drain`() {
+        var status = 500
+        var body = ""
+        val (server, hits) = loopback { status to body }
+        try {
+            val root = tmp.newFolder("worker-construction")
+            val store = ContributionStore(
+                root,
+                QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
+                clock = System::currentTimeMillis,
+                jitter = { 0L },
+            )
+            val id = prepareVerifiedCapture(store)
+            val startup = moduleStartup()
+            val owner = startup.ownerForHandoff() as AppContextOwner
+            owner.publish("a@x", 7L, "Bearer-fixture")
+            startup.credentials.publish("Bearer-fixture")
+            val token = startup.state.sessionStarted(7L)
+            val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
+            assertTrue(startup.state.applyOutcome(token, ticket, authenticatedProjection("epoch-1"), ownerSession = 7L))
+            val policy = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
+                remoteConfig = org.mockito.kotlin.mock(),
+                featureProvider = org.mockito.kotlin.mock(),
+                ownership = owner,
+                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job().apply { cancel() }),
+            )
+            policy.applySnapshotForTest(
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot(
+                    enabled = true,
+                    activatedAtMonotonicMs = 1L,
+                    activationGeneration = 1L,
+                ),
+            )
+            val assembly = VoiceUploadModule.provideUploadAssembly(
+                store = store,
+                transport = ContributionUploadTransport(
+                    endpoint = "http://127.0.0.1:${server.address.port}/v1/contributions",
+                    authorization = { "Bearer-fixture" },
+                ),
+                policyProvider = policy,
+                accountStartup = startup,
+                context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
+            )
+            // THE MODULE DRAIN BINDING — the exact provider Hilt consumes.
+            val drain = VoiceUploadModule.provideVoiceUploadDrain(assembly)
+            val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
+            val worker = androidx.work.testing.TestListenableWorkerBuilder<VoiceUploadDrainWorker>(context)
+                .setWorkerFactory(object : androidx.work.WorkerFactory() {
+                    override fun createWorker(
+                        appContext: android.content.Context,
+                        workerClassName: String,
+                        workerParameters: androidx.work.WorkerParameters,
+                    ): androidx.work.ListenableWorker = VoiceUploadDrainWorker(appContext, workerParameters, drain)
+                })
+                .build()
+            status = 201
+            val digest = store.recordedDigest(id)!!
+            body = "{\"schema_version\":1,\"capture_id\":\"$id\",\"record_sha256\":\"$digest\",\"status\":\"accepted\",\"receipt_id\":\"rcpt-w\",\"accepted_at\":\"2026-10-23T00:00:00Z\",\"retention_expires_at\":\"2026-11-22T00:00:00Z\"}"
+            val result = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().let { _ ->
+                kotlinx.coroutines.runBlocking { worker.doWork() }
+            }
+            assertEquals("the persisted worker drained successfully", androidx.work.ListenableWorker.Result.success(), result)
+            assertTrue("the worker's drain reached the transport", hits.get() >= 1)
+            org.junit.Assert.assertNull("the worker's drain settled the durable entry", store.durableCapture(id))
         } finally {
             server.stop(0)
         }

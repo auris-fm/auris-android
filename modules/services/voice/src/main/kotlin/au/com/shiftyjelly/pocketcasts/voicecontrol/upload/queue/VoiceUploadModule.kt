@@ -12,6 +12,8 @@ import java.io.File
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
@@ -82,6 +84,27 @@ object VoiceUploadModule {
         transport: ContributionUploadTransport,
         policyProvider: VoiceSharingPolicyProvider,
         accountStartup: VoiceSharingAccountStartup,
+        @ApplicationContext context: Context,
+    ): ContributionUploadAssembly = provideUploadAssembly(
+        store,
+        transport,
+        policyProvider,
+        accountStartup,
+        actualNetworkFrom(context),
+    )
+
+    /**
+     * THE ACTUAL-NETWORK GATE (reviewer 177645cc): the policy snapshot's `upload_network` gates
+     * EVERY attempt — the platform scheduler constraint alone cannot stop a FOREGROUND drain
+     * started outside WorkManager. [actualNetwork] reports what the device can use right now;
+     * the comparison is policy-requested vs actual, nothing invented.
+     */
+    internal fun provideUploadAssembly(
+        store: ContributionStore,
+        transport: ContributionUploadTransport,
+        policyProvider: VoiceSharingPolicyProvider,
+        accountStartup: VoiceSharingAccountStartup,
+        actualNetwork: (UploadNetwork) -> Boolean,
     ): ContributionUploadAssembly {
         // Network availability is "the owner-published credential exists": without it nothing can be sent.
         val accountStartupHasCredentials = { accountStartup.credentials.current() != null }
@@ -121,7 +144,12 @@ object VoiceUploadModule {
             // THE compiled-off gate: the remote-config snapshot is disabled by default, so the loop
             // below wakes, finds the gate closed, and touches nothing.
             policyAllows = { policyProvider.publishedPolicy.value.enabled },
-            networkAvailable = accountStartupHasCredentials,
+            // THE PER-ATTEMPT `upload_network` GATE (reviewer 177645cc): credential presence AND
+            // the CURRENT policy network satisfied by the ACTUAL network, re-read per attempt.
+            networkAvailable = {
+                accountStartupHasCredentials() &&
+                    actualNetwork(policyProvider.publishedPolicy.value.uploadNetwork)
+            },
         )
         return assembly
     }
@@ -171,6 +199,15 @@ object VoiceUploadModule {
     @Provides
     @Singleton
     fun provideVoiceUploadScheduler(@ApplicationContext context: Context): VoiceUploadScheduler = VoiceUploadScheduler(androidx.work.WorkManager.getInstance(context))
+
+    /** THE scheduler↔policy binding (started once at app startup, next to the foreground trigger). */
+    @Provides
+    @Singleton
+    fun provideUploadSchedulerBinding(
+        scheduler: VoiceUploadScheduler,
+        policyProvider: VoiceSharingPolicyProvider,
+        @UploadTriggerScope scope: CoroutineScope,
+    ): UploadSchedulerBinding = UploadSchedulerBinding(scheduler, policyProvider, scope)
 
     /** THE missing binding (reviewer 13eeec80): the trigger's scope, delegated to the app's scope. */
     @Provides
@@ -264,6 +301,48 @@ object VoiceUploadModule {
         "wakeword" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("auris-wake", "1.2"),
         "router" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("lfm-intent", "0.3"),
     )
+}
+
+/**
+ * THE SCHEDULER↔POLICY BINDING (reviewer 177645cc): the periodic drain's constraint is not a
+ * one-shot value — the published policy's `upload_network` is observed, and every DISTINCT change
+ * re-schedules the unique drain (UPDATE semantics rewrite the constraint in place; a transition
+ * NEVER stacks a second drain and NEVER leaves a stale constraint). One binding, started once.
+ */
+class UploadSchedulerBinding(
+    private val scheduler: VoiceUploadScheduler,
+    private val policyProvider: VoiceSharingPolicyProvider,
+    private val scope: CoroutineScope,
+) {
+    private val started = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    fun start() {
+        if (!started.compareAndSet(false, true)) return
+        scope.launch {
+            policyProvider.publishedPolicy
+                .map { it.uploadNetwork }
+                .distinctUntilChanged()
+                .collect { scheduler.schedule(it) }
+        }
+    }
+}
+
+/**
+ * The PRODUCTION actual-network reader: ANY is "there is an active network"; UNMETERED is "the
+ * active network is not metered". No requirement beyond the validated policy is evaluated.
+ */
+internal fun actualNetworkFrom(context: Context): (UploadNetwork) -> Boolean = { policy ->
+    val cm: android.net.ConnectivityManager? =
+        context.getSystemService(android.net.ConnectivityManager::class.java)
+    if (cm == null) {
+        false
+    } else {
+        val connected = cm.activeNetwork != null
+        when (policy) {
+            UploadNetwork.ANY -> connected
+            UploadNetwork.UNMETERED -> connected && !cm.isActiveNetworkMetered
+        }
+    }
 }
 
 /** Distinct qualifier so the upload loop never shares a scope whose failure cancels unrelated work. */

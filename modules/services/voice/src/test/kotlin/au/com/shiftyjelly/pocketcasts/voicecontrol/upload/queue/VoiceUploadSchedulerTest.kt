@@ -55,12 +55,27 @@ class VoiceUploadSchedulerTest {
             TimeUnit.MINUTES.toMillis(VoiceUploadScheduler.DEFAULT_INTERVAL_MINUTES),
             request.periodicityInfo!!.repeatIntervalMillis,
         )
-        // A second schedule() with KEEP must not stack another drain.
+        // A second schedule() with UPDATE must not stack another drain.
         scheduler.schedule(UploadNetwork.compiledDefault())
         assertEquals(
-            "KEEP: a repeated schedule never stacks",
+            "UPDATE: a repeated schedule never stacks",
             1,
             workManager.getWorkInfosForUniqueWork(VoiceUploadScheduler.TAG).get(5, TimeUnit.SECONDS).size,
+        )
+    }
+
+    @Test
+    fun `a policy network transition REWRITES the constraint and never stacks - KEEP would strand the stale rule`() {
+        val scheduler = VoiceUploadScheduler(workManager)
+        scheduler.schedule(UploadNetwork.ANY)
+        // The transition the old KEEP semantics silently dropped:
+        scheduler.schedule(UploadNetwork.UNMETERED)
+        val infos = workManager.getWorkInfosForUniqueWork(VoiceUploadScheduler.TAG).get(5, TimeUnit.SECONDS)
+        assertEquals("the transition never stacks a second drain", 1, infos.size)
+        assertEquals(
+            "the tightened upload_network is in force after the transition",
+            NetworkType.UNMETERED,
+            infos.single().constraints.requiredNetworkType,
         )
     }
 

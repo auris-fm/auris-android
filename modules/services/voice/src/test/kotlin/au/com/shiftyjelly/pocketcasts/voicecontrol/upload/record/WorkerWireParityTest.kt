@@ -35,26 +35,37 @@ class WorkerWireParityTest {
     private fun cloudWorkerRoot(): File = System.getenv("AURIS_CLOUD_WORKER_ROOT")?.let(::File)
         ?: File("/Users/dev/code/auris/core/cloud-voice-uploads/worker")
 
+    //
+    // The Worker revision these controls compare against, and the SCOPE of that comparison.
+    //
+    // SCOPE, stated exactly: `d8fe823c` is pinned for INTAKE GUARD behaviour only — the two digest
+    // checks and the record schema this fixture exercises. It is NOT a whole-server approval: the
+    // reviewer blocked that same revision's route changes (empty-digest reserve placeholders), so
+    // nothing here says anything about upload_route.ts, budgeting or delivery. Advancing this value
+    // is a deliberate edit made when a specific, named behaviour is re-cleared — not a general
+    // blessing of the server revision.
+    //
+    // Both controls must compare against the SAME revision, or their combined evidence describes two
+    // different servers. Advancing this value is a deliberate, reviewable edit made when a new
+    // revision is cleared.
+    //
+
     /**
-     * The Worker revision these controls compare against, and the SCOPE of that comparison.
-     *
-     * SCOPE, stated exactly: `d8fe823c` is pinned for INTAKE GUARD behaviour only — the two digest
-     * checks and the record schema this fixture exercises. It is NOT a whole-server approval: the
-     * reviewer blocked that same revision's route changes (empty-digest reserve placeholders), so
-     * nothing here says anything about upload_route.ts, budgeting or delivery. Advancing this value
-     * is a deliberate edit made when a specific, named behaviour is re-cleared — not a general
-     * blessing of the server revision.
-     *
-     * Both controls must compare against the SAME revision, or their combined evidence describes two
-     * different servers. Advancing this value is a deliberate, reviewable edit made when a new
-     * revision is cleared.
+     * BOTH approved pinned authorities, each for a named behaviour scope (advancing this list is a
+     * deliberate, reviewable edit):
+     *  - d8fe823c: pre-delta INTAKE GUARD baseline (digest checks + record schema fixtures);
+     *  - c569b319: delta736d3180 strict intake (observation_unavailable with state unknown).
+     * c569b319 is pushed source for fixture/intake parity — NOT a deployed live intake (spec).
      */
-    private val approvedWorkerRevision = "d8fe823cbe43ebb310d632b482312c7b282ef018"
+    private val approvedWorkerRevisions = setOf(
+        "d8fe823cbe43ebb310d632b482312c7b282ef018",
+        "c569b319e19b5971ada44a0f53245630688c1305",
+    )
 
     private fun requireAuthority(root: File) {
         assertTrue(
             "INTEGRITY: the Worker schema authority is missing at ${root.absolutePath}. Point " +
-                "AURIS_CLOUD_WORKER_ROOT at a worktree at $approvedWorkerRevision; a skipped " +
+                "AURIS_CLOUD_WORKER_ROOT at a worktree at one of $approvedWorkerRevisions; a skipped " +
                 "parity check is not parity.",
             File(root, "src/contributions/record_schema.ts").isFile,
         )
@@ -67,11 +78,10 @@ class WorkerWireParityTest {
             ?: error("probe did not report its Worker revision; refusing to claim parity")
         val reported = line.substringAfter("\t").trim()
         assertTrue("INTEGRITY: authority reports '$reported' — dirty is not an authority", reported.endsWith("CLEAN"))
-        assertEquals(
-            "INTEGRITY: parity ran against '${reported.removeSuffix("CLEAN").trim()}' but the approved " +
-                "authority is $approvedWorkerRevision",
-            approvedWorkerRevision,
-            reported.removeSuffix("CLEAN").trim(),
+        assertTrue(
+            "INTEGRITY: parity ran against '${reported.removeSuffix("CLEAN").trim()}' which is not an " +
+                "approved authority: $approvedWorkerRevisions",
+            reported.removeSuffix("CLEAN").trim() in approvedWorkerRevisions,
         )
     }
 
@@ -220,6 +230,80 @@ class WorkerWireParityTest {
             assertEquals("Android record '$id' was NOT accepted by the Worker: ${verdicts[id]}", "ACCEPT", verdicts[id])
         }
         assertTrue("no verdicts produced", verdicts.isNotEmpty())
+    }
+
+    /**
+     * delta736d3180 STRICT INTAKE PARITY against a pinned Cloud revision (c569b319 — pushed source
+     * for fixture/intake parity, NOT a deployed live intake): the Worker accepts
+     * `observation_unavailable` ONLY with state `unknown` and refuses the reason with any other
+     * state. The ACCEPT case is an Android-builder record; the REJECT case is the SAME wire shape
+     * with the state flipped to not_run (the client builder refuses that pair locally — covered in
+     * ContributionRecordTest — so the reject variant is a wire-level perturbation).
+     */
+    @Test
+    fun `observation_unavailable parity - unknown accepted, other states refused by the pinned Worker`() {
+        // The delta semantics EXIST only at the delta revision; the pre-delta baseline would
+        // (correctly) refuse the unknown pair, so this control pins c569b319 itself.
+        val deltaRevision = "c569b319e19b5971ada44a0f53245630688c1305"
+        val workerRoot = cloudWorkerRoot()
+        requireAuthority(workerRoot)
+        val (audio, _) = audioFor(160)
+        val accepted = ContributionRecordBuilder(UUID.randomUUID().toString(), "epoch-2", "7")
+            .model("vad", ModelRef.None)
+            .model("wakeword", ModelRef.None)
+            .model("asr", ModelRef.None)
+            .model("translation", ModelRef.None)
+            .model("router", ModelRef.None)
+            .stage(StageName.Wake, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_wake_detected"))))
+            .stage(StageName.Bleed, StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))))
+            .stage(StageName.Asr, StageEntry(StageState.Cancelled, mapOf("reason" to RecordNode.Str("cancelled_by_user"))))
+            .stage(StageName.Translation, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text"))))
+            .stage(StageName.Routing, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates"))))
+            .stage(StageName.Execution, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("outcome_wait_expired"))))
+            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio)
+        val acceptedJson = CanonicalJson.canonicalBytes(accepted).toString(Charsets.UTF_8)
+        val rejectedJson = acceptedJson.replace(
+            "\"bleed\":{\"reason\":\"observation_unavailable\",\"state\":\"unknown\"}",
+            "\"bleed\":{\"reason\":\"observation_unavailable\",\"state\":\"not_run\"}",
+        )
+        org.junit.Assert.assertNotEquals(
+            "the perturbation must actually change the wire bytes",
+            acceptedJson,
+            rejectedJson,
+        )
+        val cases = linkedMapOf(
+            "observation-unavailable-unknown-bleed" to acceptedJson,
+            "observation-unavailable-notrun-bleed" to rejectedJson,
+        )
+        val recordsFile = Files.createTempFile("android-delta-records", ".jsonl").toFile()
+        val probe = File(recordsFile.parentFile, "probe_worker_intake.mjs")
+        probe.writeBytes(javaClass.classLoader!!.getResourceAsStream("worker-parity/probe_worker_intake.mjs")!!.readBytes())
+        recordsFile.writeText(cases.entries.joinToString("\n") { (id, json) -> """{"id":"$id","record":$json}""" })
+        val process = ProcessBuilder("node", probe.absolutePath, workerRoot.absolutePath, recordsFile.absolutePath)
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().readText()
+        assertEquals("probe failed: $output", 0, process.waitFor())
+        val revisionLine = output.lines().firstOrNull { it.startsWith("# worker-revision") }
+        assertTrue(
+            "this control requires the delta intake c569b319 (got: $revisionLine)",
+            revisionLine?.contains(deltaRevision) == true,
+        )
+        val verdicts = output.lines().filter { it.isNotBlank() && !it.startsWith("#") }.associate { line ->
+            val parts = line.split('\t')
+            parts[0] to parts.drop(1).joinToString("\t")
+        }
+        assertEquals(
+            "unknown + observation_unavailable ACCEPTed by the pinned intake",
+            "ACCEPT",
+            verdicts["observation-unavailable-unknown-bleed"],
+        )
+        assertTrue(
+            "not_run + observation_unavailable REJECTed by the pinned intake: ${verdicts["observation-unavailable-notrun-bleed"]}",
+            verdicts["observation-unavailable-notrun-bleed"]?.startsWith("REJECT") == true,
+        )
+        println("DELTA-OBSERVATION-UNAVAILABLE-VERDICTS")
+        verdicts.forEach { (id, v) -> println("  $id -> $v") }
     }
 
     /**

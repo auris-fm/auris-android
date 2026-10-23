@@ -32,8 +32,17 @@ class TransportBytesParityTest {
     private fun cloudWorkerRoot(): File = System.getenv("AURIS_CLOUD_WORKER_ROOT")?.let(::File)
         ?: File("/Users/dev/code/auris/core/cloud-voice-uploads/worker")
 
-    /** Pinned intake revision; advancing it is a deliberate, reviewable edit - never incidental. */
-    private val approvedWorkerRevision = "d8fe823cbe43ebb310d632b482312c7b282ef018"
+    // Pinned intake revision; advancing it is a deliberate, reviewable edit - never incidental.
+
+    /**
+     * Approved pinned authorities (advancing is a deliberate, reviewable edit):
+     * d8fe823c pre-delta intake-guard baseline; c569b319 delta736d3180 strict intake (pushed
+     * source for fixture/intake parity, NOT a deployed live intake).
+     */
+    private val approvedWorkerRevisions = setOf(
+        "d8fe823cbe43ebb310d632b482312c7b282ef018",
+        "c569b319e19b5971ada44a0f53245630688c1305",
+    )
 
     private fun sha256Hex(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
@@ -192,10 +201,9 @@ class TransportBytesParityTest {
             ?: error("probe did not report its Worker revision; refusing to claim parity")
         val parts = provenance.substringAfter("\t").split("\t")
         assertEquals("INTEGRITY: the authority must be a clean checkout: $provenance", "CLEAN", parts.getOrNull(2))
-        assertEquals(
-            "INTEGRITY: parity ran against '${parts[0]}' but the approved authority is $approvedWorkerRevision",
-            approvedWorkerRevision,
-            parts[0],
+        assertTrue(
+            "INTEGRITY: parity ran against '${parts[0]}' but the approved authorities are $approvedWorkerRevisions",
+            parts[0] in approvedWorkerRevisions,
         )
 
         val verdicts = output.lines().filter { it.isNotBlank() && !it.startsWith("#") }.map { it.split('\t') }

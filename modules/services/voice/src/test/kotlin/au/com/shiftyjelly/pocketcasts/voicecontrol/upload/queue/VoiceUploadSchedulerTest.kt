@@ -110,13 +110,17 @@ class VoiceUploadSchedulerTest {
     /**
      * FACTORY EVIDENCE, SOURCE LEVEL ONLY (reviewer request).
      *
-     * What this proves: the drain worker is constructible from the WorkManager input data through an
-     * explicit factory, and running it invokes the module's own drain rather than a stand-in.
+     * What this proves, exactly: the drain worker is constructible from real WorkerParameters through
+     * an explicit WorkerFactory, and doWork() delegates to its VoiceUploadDrain dependency.
      *
-     * What this does NOT prove, stated plainly: the literal production `HiltWorkerFactory` graph is
-     * never executed here. That requires a device or an instrumented (HiltAndroidTest) run, which this
-     * source-only lane does not do. Construction through the app's real factory is therefore
-     * COMPILATION evidence only, and it is marked unverified rather than implied.
+     * What it does NOT prove, corrected after review: the drain injected here is an ANONYMOUS
+     * COUNTING implementation of the interface, not the module's production drain. So this evidences
+     * worker CONSTRUCTION and delegation to the seam - not that production drain logic runs, and not
+     * that a given capture would upload.
+     *
+     * Also unproven: the literal production `HiltWorkerFactory` graph is never executed anywhere in
+     * this lane. That needs a device or an instrumented (HiltAndroidTest) run. App-level Hilt wiring
+     * is therefore COMPILATION evidence only, marked unverified rather than implied.
      */
     @Test
     fun `the drain worker is constructible through an explicit factory and invokes the module drain`() {

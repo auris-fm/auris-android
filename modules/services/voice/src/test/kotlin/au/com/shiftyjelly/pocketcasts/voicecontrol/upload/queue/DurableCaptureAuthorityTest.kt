@@ -124,6 +124,79 @@ class DurableCaptureAuthorityTest {
     }
 
     @Test
+    fun `a sidecar with JSON-special characters in the account survives the round-trip exactly`() {
+        val root = tmp.newFolder("escape")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root)
+        // The identity is arbitrary text: quotes, backslashes, braces must be escaped by the
+        // writer and restored exactly by the strict parser - never able to forge structure.
+        val tricky = "weird \"account\"\n{nested}:ok"
+        val pcm = listOf(ShortArray(1600) { i -> i.toShort() } to 1600)
+        val expected = java.io.ByteArrayOutputStream()
+        WavWriter.writeHeader(expected, 1600)
+        for ((chunk, valid) in pcm) WavWriter.writePcm(expected, chunk, valid)
+        val audio = expected.toByteArray()
+        val block = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.AudioBlock(
+            sha256 = sha256HexForTest(audio),
+            byteCount = audio.size.toLong(),
+            retainedSamples = 1600,
+            originalFormat = "pcm_s16le",
+            conversionVersion = "v1",
+            truncated = false,
+            droppedSpans = emptyList(),
+        )
+        val metadata = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson.canonicalBytes(
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ContributionRecordBuilder(id, "epoch-1", "42")
+                .model("vad", au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("silero-vad", "4.0"))
+                .model("wakeword", au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("auris-wake", "1.2"))
+                .model("asr", au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("whisper-small", "2024-11"))
+                .model("translation", au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None)
+                .model("router", au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("lfm-intent", "0.3"))
+                .stage(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName.Wake, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState.Completed, mapOf("decision" to RecordNode.Str("detected"))))
+                .stage(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName.Bleed, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState.Completed, mapOf("decision" to RecordNode.Str("no_overlap"))))
+                .stage(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName.Asr, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState.Completed, mapOf("text" to RecordNode.Str("skip this ad"))))
+                .stage(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName.Translation, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text"))))
+                .stage(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName.Routing, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates"))))
+                .stage(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName.Execution, au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState.NotRun, mapOf("reason" to RecordNode.Str("outcome_wait_expired"))))
+                .build(platform = "android", appVersion = "8.20", build = "12345", audio = block),
+        )
+        val admission = store.admitForTest(1600, metadata.size)
+        val generation = store.fence.currentGeneration()
+        assertNotNull(store.prepareAt(generation, admission, id, "epoch-1", pcm, metadata, tricky, 7L))
+        val capture = store.durableCapture(id)!!
+        assertEquals(tricky, capture.enrollmentAccount)
+        // And the tamper shape: an account containing \"session\" cannot forge a second field.
+        ownerFile(root, id).writeText("{\"account\":\"x\\\"},\"session\":1,\"b\":\"\",\"session\":7,\"epoch\":\"e\"}")
+        assertNull("forged structure refuses", store.durableCapture(id))
+    }
+
+    @Test
+    fun `duplicate, unknown, missing keys and trailing content all refuse`() {
+        val root = tmp.newFolder("strict")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root)
+        prepare(store, root, id)
+        val ownerF = ownerFile(root, id)
+        val original = ownerF.readText()
+        val bad = listOf(
+            original.replace("\"session\":7,", "\"session\":7,\"session\":8,"), // duplicate
+            "{\"account\":\"a@x\",\"session\":7,\"epoch\":\"epoch-1\",\"extra\":1}", // unknown key
+            "{\"account\":\"a@x\",\"session\":7}", // missing epoch
+            "{\"account\":\"\",\"session\":7,\"epoch\":\"epoch-1\"}", // empty account
+            original + " trailing", // trailing content
+            "", // empty (EOF at 0)
+        )
+        for (content in bad) {
+            ownerF.writeText(content)
+            assertNull("refuses: ${content.take(40)}", store.durableCapture(id))
+        }
+        assertTrue("each refusal is accounted", store.sidecarRefusals >= bad.size)
+        // Restore: the capture is servable again - the refusals never mutated anything.
+        ownerF.writeText(original)
+        assertNotNull(store.durableCapture(id))
+    }
+
+    @Test
     fun `an OVERSIZE owner sidecar refuses to serve`() {
         val root = tmp.newFolder("oversize")
         val id = UUID.randomUUID().toString()

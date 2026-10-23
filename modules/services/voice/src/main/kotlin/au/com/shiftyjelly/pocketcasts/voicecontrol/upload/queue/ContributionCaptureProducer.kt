@@ -82,6 +82,12 @@ class ContributionCaptureProducer(
         if (pcmChunks.any { (chunk, valid) -> valid <= 0 || valid > chunk.size }) return null
         val sessionId = captureSessionId()
         if (sessionId.isEmpty()) return null
+        // REQUIRED IDENTITY BEFORE ANY RESERVATION (spec fc035523): the admitted account/session are
+        // read and validated BEFORE store.admit, so an invalid identity can neither leak a
+        // reservation nor reduce queue capacity.
+        val account = enrollmentAccount()
+        val session = enrollmentSession()
+        if (account.isEmpty() || session <= 0) return null
         // The record's audio block describes EXACTLY the bytes WavWriter will produce.
         val expected = ByteArrayOutputStream()
         WavWriter.writeHeader(expected, Math.toIntExact(samples))
@@ -112,9 +118,6 @@ class ContributionCaptureProducer(
         )
         val metadata = CanonicalJson.canonicalBytes(record)
         val admission = store.admit(samples, metadata.size) ?: return null
-        val account = enrollmentAccount()
-        val session = enrollmentSession()
-        if (account.isEmpty() || session <= 0) return null // no admitted identity, no publication
         return store.prepare(admission, captureId, enrollmentEpoch, pcmChunks, metadata, account, session)
     }
 

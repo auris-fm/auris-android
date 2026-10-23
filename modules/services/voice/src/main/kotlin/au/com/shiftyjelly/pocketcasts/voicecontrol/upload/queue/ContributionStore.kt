@@ -194,6 +194,10 @@ class ContributionStore(
     // finds; deletion stays the recovery sweep's job, so admission never destroys on partial knowledge.
     private var coverageEstablished = false
 
+    /** Ownership-refusal accounting (spec 8adcfd01): durableCapture refusing for sidecar reasons. */
+    var sidecarRefusals: Int = 0
+        private set
+
     private fun establishCoverage() {
         if (coverageEstablished) return
         // A FRESH install has no directory yet; without this, the first listing would fail with
@@ -214,7 +218,7 @@ class ContributionStore(
         // Account every on-disk capture this instance holds no charge for, grouped by derived capture id
         // but measured at the CONCRETE discovered paths. Deriving an id and charging canonical paths only
         // charged zero for raw or staging debris (reviewer 7a47fff8): the bytes live where they live.
-        val suffixes = listOf(SUFFIX_READY, SUFFIX_PART, SUFFIX_ATTEMPTS, SUFFIX_RETRY, SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp")
+        val suffixes = listOf(SUFFIX_READY, SUFFIX_PART, SUFFIX_ATTEMPTS, SUFFIX_RETRY, SUFFIX_WAV, SUFFIX_META, SUFFIX_DIGEST, SUFFIX_OWNER, SUFFIX_ATTEMPTS + ".tmp", SUFFIX_RETRY + ".tmp")
         synchronized(lock) {
             files.groupBy { f ->
                 val hit = suffixes.firstOrNull { f.name.endsWith(it) }
@@ -366,7 +370,10 @@ class ContributionStore(
         // sidecar refuses to serve the capture at all - it retains on disk but can never be sent,
         // because an unvouched identity must not silently degrade to an epoch-only check that a
         // removed or damaged sidecar could bypass.
-        val owner = readOwnerSidecar(captureId) ?: return null
+        val owner = readOwnerSidecar(captureId) ?: run {
+            sidecarRefusals++
+            return null
+        }
         DurableCapture(record, audio, entry.enrollmentEpoch, owner.first, owner.second)
     }
 
@@ -437,6 +444,69 @@ class ContributionStore(
     )
 
     /**
+     * Serialize the owner sidecar through an ESCAPING JSON writer (reviewer 30b1c817): the account
+     * name is arbitrary text and must never be able to forge sidecar structure.
+     */
+    private fun ownerSidecarJson(account: String?, session: Long?, epoch: String): String {
+        val buffer = okio.Buffer()
+        val writer = com.squareup.moshi.JsonWriter.of(buffer)
+        writer.beginObject()
+        writer.name("account").value(account)
+        writer.name("session").value(session)
+        writer.name("epoch").value(epoch)
+        writer.endObject()
+        writer.close()
+        return buffer.readUtf8()
+    }
+
+    /**
+     * STRICT parse of the owner sidecar (reviewer 30b1c817): a real JSON parser with EXACT required
+     * schema - object with exactly account(string, nonempty)/session(integer)/epoch(string), no
+     * duplicates, no unknown keys, no trailing content. Null on ANY deviation; the caller fails closed.
+     */
+    private fun parseOwnerSidecar(text: String): Pair<String, Long>? {
+        val reader = com.squareup.moshi.JsonReader.of(okio.Buffer().writeUtf8(text))
+        try {
+            var account: String? = null
+            var session: Long? = null
+            var sawEpoch = false
+            reader.beginObject()
+            while (reader.hasNext()) {
+                when (reader.nextName()) {
+                    "account" -> {
+                        if (account != null) return null // duplicate key
+                        account = reader.nextString().ifEmpty { return null }
+                    }
+
+                    "session" -> {
+                        if (session != null) return null // duplicate key
+                        session = reader.nextLong()
+                    }
+
+                    "epoch" -> {
+                        if (sawEpoch) return null // duplicate key
+                        sawEpoch = true
+                        reader.nextString()
+                    }
+
+                    else -> return null // unknown key
+                }
+            }
+            reader.endObject()
+            // Trailing content after the closing brace is a deviation, not decor (strict EOF check).
+            if (reader.peek() != com.squareup.moshi.JsonReader.Token.END_DOCUMENT) return null
+            account ?: return null
+            session ?: return null
+            if (!sawEpoch) return null
+            return account to session
+        } catch (_: Exception) {
+            return null
+        } finally {
+            reader.close()
+        }
+    }
+
+    /**
      * STRICT bounded variable-length read of the admitted-ownership sidecar (reviewer 0081c95f):
      * the file is ordinary JSON of ANY length up to the cap - the read demands the file's ACTUAL
      * size, never a fixed width, and the parser is exact (no trailing junk, both fields present).
@@ -445,23 +515,21 @@ class ContributionStore(
     private fun readOwnerSidecar(captureId: String): Pair<String, Long>? {
         val f = File(dir, "$captureId$SUFFIX_OWNER")
         if (!f.isFile) return null
-        val len = f.length()
-        if (len <= 0L || len > 512L) return null
-        val bytes = ByteArray(len.toInt())
+        // The cap holds DURING the read (spec 8adcfd01): read at most CAP+1 bytes and refuse when a
+        // byte beyond the cap exists - a file growing concurrently cannot smuggle oversize content.
+        val cap = 512
+        val bytes = ByteArray(cap + 1)
+        var read = 0
         java.io.FileInputStream(f).use { input ->
-            var read = 0
             while (read < bytes.size) {
                 val n = input.read(bytes, read, bytes.size - read)
-                if (n < 0) return null
+                if (n < 0) break
                 read += n
             }
         }
-        val text = String(bytes, Charsets.UTF_8)
-        // Exact shape: {"account":"<nonempty>","session":<long>,"epoch":...} and NOTHING after.
-        if (!text.startsWith("{") || !text.trimEnd().endsWith("}")) return null
-        val account = Regex("\u0022account\u0022\\s*:\\s*\u0022([^\u0022]+)\u0022").find(text)?.groupValues?.get(1) ?: return null
-        val session = Regex("\u0022session\u0022\\s*:\\s*(-?\\d+)").find(text)?.groupValues?.get(1)?.toLongOrNull() ?: return null
-        return account to session
+        // A full CAP+1 read means the file is at or beyond the cap: refuse either way.
+        if (read == 0 || read > cap) return null
+        return parseOwnerSidecar(String(bytes, 0, read, Charsets.UTF_8))
     }
 
     // The identity of the attempt most recently ADMITTED for captureId: the generation it was admitted
@@ -911,7 +979,7 @@ class ContributionStore(
             // sidecar (older entries) = epoch-only admissions, and the identity check degrades to
             // the epoch path - never to "no check".
             if (enrollmentAccount != null || enrollmentSession != null) {
-                val ownerJson = """{"account":${enrollmentAccount?.let { "\"" + it + "\"" } ?: "null"},"session":$enrollmentSession,"epoch":"$enrollmentEpoch"}"""
+                val ownerJson = ownerSidecarJson(enrollmentAccount, enrollmentSession, enrollmentEpoch)
                 val ownerFile = File(dir, "$captureId$SUFFIX_OWNER")
                 FileOutputStream(ownerFile).use { out ->
                     out.write(ownerJson.toByteArray(Charsets.UTF_8))

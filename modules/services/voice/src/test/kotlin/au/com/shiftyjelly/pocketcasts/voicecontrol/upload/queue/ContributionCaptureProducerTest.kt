@@ -33,15 +33,21 @@ class ContributionCaptureProducerTest {
 
     private val pcm = listOf(ShortArray(1600) { i -> i.toShort() } to 1600)
 
-    private fun producer(store: ContributionStore, format: String = "pcm_s16le", version: String = "v1") = ContributionCaptureProducer(
+    private fun producer(
+        store: ContributionStore,
+        format: String = "pcm_s16le",
+        version: String = "v1",
+        account: () -> String = { "a@x" },
+        session: () -> Long = { 7L },
+    ) = ContributionCaptureProducer(
         store,
         originalFormat = format,
         conversionVersion = version,
         appVersion = "8.20",
         appBuild = "12345",
         captureSessionId = { "00000000-0000-4000-8000-000000000000" },
-        enrollmentAccount = { "a@x" },
-        enrollmentSession = { 7L },
+        enrollmentAccount = account,
+        enrollmentSession = session,
     )
 
     private val models = listOf(

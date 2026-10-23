@@ -17,14 +17,21 @@ object IdentityRevocationWatchers {
 
     fun production(
         binding: VoiceSharingAccountAuthBinding,
+        accountState: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountState,
         snapshot: () -> AuthoritySnapshot?,
         epoch: () -> String?,
         store: ContributionStore,
     ): suspend kotlinx.coroutines.CoroutineScope.() -> Unit = {
-        binding.authorityMovedListener = {
+        val cancel: () -> Unit = {
             val snap = snapshot()
             store.cancelLaunchesIdentityMismatch(snap?.accountName, snap?.session, epoch(), "account-transition")
         }
+        // AUTHORITY-SESSION tail: login/logout/removal inside the owner transaction.
+        binding.authorityMovedListener = cancel
+        // PROJECTION tail (reviewer dde0905a): same-session enrollment/withdrawal/GET/401 epoch
+        // changes apply through the state fence and fire here - an epoch-1 call cannot survive an
+        // epoch retirement just because no login happened.
+        accountState.projectionInvalidatedListener = { _, _ -> cancel() }
         awaitCancellation()
     }
 }

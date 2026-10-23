@@ -28,6 +28,12 @@ import okio.Buffer
 class VoiceSharingAccountState {
     /** Post-commit notification hook (applied session + projection); mirror bookkeeping only. */
     var onProjectionApplied: ((VoiceSharingAccountProjection, Long) -> Unit)? = null
+
+    /** Additional post-apply observer (reviewer dde0905a): same-session enrollment/withdrawal/401
+     *  projection moves never pass through the owner binding, so the revocation connector
+     *  subscribes HERE as well - an epoch retirement inside a live session still fires. */
+    @Volatile
+    var projectionInvalidatedListener: ((VoiceSharingAccountProjection, Long) -> Unit)? = null
     private val state = MutableStateFlow<VoiceSharingAccountProjection?>(null)
 
     /** Observed under [fence]; guards the issued session and revision currency. */
@@ -127,6 +133,7 @@ class VoiceSharingAccountState {
         val projection = parseProjection(json) ?: return false
         state.value = projection
         onProjectionApplied?.invoke(projection, ownerSession)
+        projectionInvalidatedListener?.invoke(projection, ownerSession)
         true
     }
 

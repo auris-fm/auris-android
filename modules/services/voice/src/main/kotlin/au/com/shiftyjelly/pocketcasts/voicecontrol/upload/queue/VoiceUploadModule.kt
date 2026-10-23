@@ -146,6 +146,7 @@ object VoiceUploadModule {
             POLL_INTERVAL_MS,
             IdentityRevocationWatchers.production(
                 binding = accountStartup.binding,
+                accountState = accountStartup.state,
                 snapshot = { accountStartup.authoritySnapshot() },
                 epoch = { accountStartup.state.projection.value?.enrollmentEpoch },
                 store = store,

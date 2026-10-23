@@ -46,6 +46,9 @@ dependencies {
     implementation(libs.coroutines.rx2)
     // onnxruntime .so provided by sherpa-onnx JNI libs in jniLibs/; headers are bundled in src/main/cpp/
     implementation(libs.timber)
+    // Platform deferred-transfer scheduling for the upload drain (spec: reuse existing scheduler).
+    implementation(libs.work.runtime)
+    implementation(libs.hilt.work)
     implementation(libs.mlkit.translate)
 
     implementation(libs.moshi)
@@ -71,6 +74,7 @@ dependencies {
     testImplementation(libs.mockito.kotlin)
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.robolectric)
+    testImplementation(libs.work.test)
     // Plain-JVM org.json implementation so unit tests exercise real JSON parsing (the
     // android.jar org.json classes throw 'not mocked' without Robolectric).
     testImplementation("org.json:json:20240303")

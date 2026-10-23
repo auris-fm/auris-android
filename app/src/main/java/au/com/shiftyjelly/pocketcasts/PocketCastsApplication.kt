@@ -122,6 +122,8 @@ class PocketCastsApplication :
 
     @Inject lateinit var voiceUploadTrigger: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploadTrigger
 
+    @Inject lateinit var voiceUploadScheduler: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadScheduler
+
     @Inject lateinit var analyticsController: AnalyticsController
 
     @Inject lateinit var downloadStatisticsReporter: DownloadStatisticsReporter
@@ -254,6 +256,12 @@ class PocketCastsApplication :
                 // Upload poll loop: compiled-off (policy disabled by default, blank endpoint), so
                 // starting it puts nothing on the network until every eligibility gate opens.
                 voiceUploadTrigger.start()
+                // Platform deferred-transfer scheduling (spec voice-recording-uploads.md): ONE
+                // unique periodic drain under the validated `upload_network` constraint; no
+                // foreground microphone service and no continuous background timer is added.
+                voiceUploadScheduler.schedule(
+                    au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.UploadNetwork.compiledDefault(),
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

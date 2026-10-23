@@ -158,6 +158,20 @@ object VoiceUploadModule {
         )
     }
 
+    /**
+     * THE DEFERRED-TRANSFER DRAIN (spec voice-recording-uploads.md §scheduling): the scheduled
+     * worker's one operation is the assembly's own poll — every gate re-evaluated per attempt, the
+     * durable queue is the only state. No separate path into the transport exists.
+     */
+    @Provides
+    @Singleton
+    fun provideVoiceUploadDrain(assembly: ContributionUploadAssembly): VoiceUploadDrain = VoiceUploadDrain { assembly.poll() }
+
+    /** THE platform scheduler; the cadence is the compiled default (no remote interval). */
+    @Provides
+    @Singleton
+    fun provideVoiceUploadScheduler(@ApplicationContext context: Context): VoiceUploadScheduler = VoiceUploadScheduler(androidx.work.WorkManager.getInstance(context))
+
     /** THE missing binding (reviewer 13eeec80): the trigger's scope, delegated to the app's scope. */
     @Provides
     @Singleton

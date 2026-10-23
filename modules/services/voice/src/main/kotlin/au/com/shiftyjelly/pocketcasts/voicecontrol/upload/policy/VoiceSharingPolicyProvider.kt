@@ -96,6 +96,16 @@ class VoiceSharingPolicyProvider(
     /** Raw published state WITHOUT lease evaluation: lets deadline consumers read the stamp. */
     val publishedPolicy: StateFlow<PolicySnapshot> get() = state
 
+    /**
+     * TEST SEAM: install an explicitly enabled snapshot without a remote fetch. Controls use this to
+     * exercise the OPEN path; production can only reach an enabled snapshot through a validated
+     * fetch/activation (the compiled default is disabled).
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun applySnapshotForTest(snapshot: PolicySnapshot) {
+        state.value = snapshot
+    }
+
     fun snapshot(): PolicySnapshot {
         val value = state.value
         val now = nowMs()
@@ -290,3 +300,30 @@ data class PolicySnapshot(
     val activatedAtMonotonicMs: Long,
     val activationGeneration: Long,
 )
+
+/**
+ * THE allowed upload networks (`upload_network`, spec voice-recording-uploads.md §73/§152).
+ *
+ * A CLOSED set on purpose: the validated policy may only express constraints this client already
+ * implements, so activation cannot strand the queue behind a network rule nobody honours. The
+ * compiled default is [ANY]; nothing stricter is invented here (spec 89b4760b — in particular no
+ * charging or unmetered requirement unless the validated policy says so).
+ */
+enum class UploadNetwork {
+    /** Any connected network. */
+    ANY,
+
+    /** Unmetered networks only (a validated policy may require this). */
+    UNMETERED,
+    ;
+
+    companion object {
+        /**
+         * The compiled default when the snapshot expresses no network restriction. NOTE: the
+         * published snapshot does not yet carry an `upload_network` field (it is a validated local
+         * default, not a remote key — spec §73), so callers use THIS value until activation defines
+         * one; the closed set above is what that value may ever be.
+         */
+        fun compiledDefault(): UploadNetwork = ANY
+    }
+}

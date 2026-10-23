@@ -76,6 +76,9 @@ class WorkerIntakeParityE2ETest {
     private val approvedWorkerRevisions = setOf(
         "d8fe823cbe43ebb310d632b482312c7b282ef018",
         "c569b319e19b5971ada44a0f53245630688c1305",
+        // 862c7ed3 is the c6 empty_result intake pin, independently cleared by Reviewer. It is a
+        // strict superset of c569b319, so every rule proven against the delta is still measured here.
+        "862c7ed3fdc540eccc9fdacd6819c97a9e679536",
     )
 
     /** Reads the probe's provenance line and returns the revision it actually loaded. */

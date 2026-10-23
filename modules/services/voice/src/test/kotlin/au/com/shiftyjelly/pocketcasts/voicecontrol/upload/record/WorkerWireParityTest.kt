@@ -60,9 +60,14 @@ class WorkerWireParityTest {
      *  - c569b319: delta736d3180 strict intake (observation_unavailable with state unknown).
      * c569b319 is pushed source for fixture/intake parity — NOT a deployed live intake (spec).
      */
+    private val emptyResultRevision = "862c7ed3fdc540eccc9fdacd6819c97a9e679536"
+
     private val approvedWorkerRevisions = setOf(
         "d8fe823cbe43ebb310d632b482312c7b282ef018",
         "c569b319e19b5971ada44a0f53245630688c1305",
+        // 862c7ed3 is the c6 `empty_result` intake pin, independently cleared by Reviewer (42 schema
+        // tests, both typechecks, explicit text:null/router_input:null negatives).
+        "862c7ed3fdc540eccc9fdacd6819c97a9e679536",
     )
 
     private fun requireAuthority(root: File) {
@@ -290,8 +295,9 @@ class WorkerWireParityTest {
         assertEquals("probe failed: $output", 0, process.waitFor())
         val revisionLine = output.lines().firstOrNull { it.startsWith("# worker-revision") }
         assertTrue(
-            "this control requires the delta intake $deltaRevision (got: $revisionLine)",
-            revisionLine?.contains(deltaRevision) == true,
+            "this control requires an intake that implements delta736d3180 — $deltaRevision or the " +
+                "later $emptyResultRevision, which contains it (got: $revisionLine)",
+            revisionLine?.contains(deltaRevision) == true || revisionLine?.contains(emptyResultRevision) == true,
         )
         assertAuthorityPinsReported(output, deltaRevision)
         val verdict = output.lines().firstOrNull { it.startsWith("joined-emitted") }
@@ -331,9 +337,101 @@ class WorkerWireParityTest {
      * in ContributionRecordTest), so the wire-level variant is the only way to ask the Worker.
      */
     @Test
+    fun `the pinned Worker accepts exactly the empty_result bytes the builder emits`() {
+        // ACTUAL EMITTED-BYTE PARITY (spec 20:08Z, c6f3bdf7 / pin 862c7ed3).
+        //
+        // This is the half I previously could not prove: no intake revision implemented empty_result,
+        // so I stated the gap rather than papering over it. 862c7ed3 closes it, so the control now
+        // sends the BUILDER'S OWN CANONICAL BYTES to the real Worker and asserts the verdicts.
+        val pin = "862c7ed3fdc540eccc9fdacd6819c97a9e679536"
+        val workerRoot = cloudWorkerRoot()
+        requireAuthority(workerRoot)
+
+        fun buildAsr(vararg extra: Pair<String, RecordNode>, state: StageState = StageState.Completed): String {
+            val (audio, _) = audioFor(160)
+            return CanonicalJson.canonicalBytes(
+                ContributionRecordBuilder(UUID.randomUUID().toString(), "epoch-2", "7")
+                    .model("vad", ModelRef.None)
+                    .model("wakeword", ModelRef.None)
+                    .model("asr", ModelRef.None)
+                    .model("translation", ModelRef.None)
+                    .model("router", ModelRef.None)
+                    .stage(StageName.Wake, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_wake_detected"))))
+                    .stage(StageName.Bleed, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_playback_reference"))))
+                    .stage(StageName.Asr, StageEntry(state, (mapOf("reason" to RecordNode.Str("empty_result")) + extra.toMap())))
+                    .stage(StageName.Translation, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text"))))
+                    .stage(StageName.Routing, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates"))))
+                    .stage(StageName.Execution, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("client_refused"))))
+                    .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio),
+            ).toString(Charsets.UTF_8)
+        }
+
+        // ACCEPT: the legitimate empty recognition, straight from the builder.
+        val accepted = buildAsr()
+        assertTrue(
+            "the approved bytes must actually contain the empty_result pair: $accepted",
+            accepted.contains("\"asr\":{\"reason\":\"empty_result\",\"state\":\"completed\"}"),
+        )
+
+        // REJECT: the same bytes perturbed to each contradiction. Perturb on canonical output (sorted
+        // keys, stable shape) and assert each perturbation changed the bytes, so a no-op substitution
+        // cannot make a negative pass vacuously.
+        val cases = linkedMapOf("accept-empty-result" to accepted)
+        fun perturb(id: String, from: String, to: String) {
+            val changed = accepted.replace(from, to)
+            assertNotEquals("the perturbation $id must actually change the wire bytes", accepted, changed)
+            cases["reject-$id"] = changed
+        }
+        val emptyPair = "\"asr\":{\"reason\":\"empty_result\",\"state\":\"completed\"}"
+        perturb("empty-result-with-text", emptyPair, "\"asr\":{\"reason\":\"empty_result\",\"state\":\"completed\",\"text\":\"hi\"}")
+        perturb("empty-result-with-router-input", emptyPair, "\"asr\":{\"reason\":\"empty_result\",\"state\":\"completed\",\"router_input\":\"hi\"}")
+        for (state in listOf("not_run", "unknown", "failed", "cancelled")) {
+            perturb("empty-result-$state", emptyPair, "\"asr\":{\"reason\":\"empty_result\",\"state\":\"$state\"}")
+        }
+        perturb(
+            "empty-result-on-wake",
+            "\"wake\":{\"reason\":\"no_wake_detected\",\"state\":\"not_run\"}",
+            "\"wake\":{\"reason\":\"empty_result\",\"state\":\"completed\"}",
+        )
+
+        val recordsFile = Files.createTempFile("android-empty-result", ".jsonl").toFile()
+        val probe = File(recordsFile.parentFile, "probe_worker_intake.mjs")
+        probe.writeBytes(javaClass.classLoader!!.getResourceAsStream("worker-parity/probe_worker_intake.mjs")!!.readBytes())
+        recordsFile.writeText(cases.entries.joinToString("\n") { (id, json) -> """{"id":"$id","record":$json}""" })
+        val process = ProcessBuilder("node", probe.absolutePath, workerRoot.absolutePath, recordsFile.absolutePath)
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().readText()
+        assertEquals("probe failed: $output", 0, process.waitFor())
+        val revisionLine = output.lines().firstOrNull { it.startsWith("# worker-revision") }
+        assertTrue(
+            "this control requires the empty_result intake pin $pin (got: $revisionLine)",
+            revisionLine?.contains(pin) == true,
+        )
+        assertAuthorityPinsReported(output, pin)
+        val verdicts = output.lines().filter { it.isNotBlank() && !it.startsWith("#") }.associate { line ->
+            val parts = line.split('\t')
+            parts[0] to parts.drop(1).joinToString("\t")
+        }
+        assertEquals(
+            "the approved empty_result bytes must be ACCEPTed by the pinned Worker: ${verdicts["accept-empty-result"]}",
+            "ACCEPT",
+            verdicts["accept-empty-result"],
+        )
+        for (id in cases.keys - "accept-empty-result") {
+            assertTrue(
+                "$id must be REFUSED by the pinned Worker, got: ${verdicts[id]}",
+                verdicts[id]?.startsWith("REJECT") == true,
+            )
+        }
+    }
+
+    @Test
     fun `observation_unavailable is accepted only with unknown on every stage by the pinned Worker`() {
-        // The rule exists only at the delta revision; the pre-delta head would (correctly) refuse the
-        // unknown pair, so this control pins c569b319 itself and fails if pointed elsewhere.
+        // The rule exists only from the delta revision onward; the pre-delta head would (correctly)
+        // refuse the unknown pair, so this control pins the delta and fails if pointed elsewhere.
+        // The LATER empty_result pin contains the delta, so it is an equally valid authority here and
+        // running against it keeps both rules measured on one checkout.
         val deltaRevision = "c569b319e19b5971ada44a0f53245630688c1305"
         val workerRoot = cloudWorkerRoot()
         requireAuthority(workerRoot)
@@ -395,10 +493,11 @@ class WorkerWireParityTest {
         assertEquals("probe failed: $output", 0, process.waitFor())
         val revisionLine = output.lines().firstOrNull { it.startsWith("# worker-revision") }
         assertTrue(
-            "this control requires the delta intake $deltaRevision (got: $revisionLine)",
-            revisionLine?.contains(deltaRevision) == true,
+            "this control requires an intake that implements delta736d3180 — $deltaRevision or the " +
+                "later $emptyResultRevision, which contains it (got: $revisionLine)",
+            revisionLine?.contains(deltaRevision) == true || revisionLine?.contains(emptyResultRevision) == true,
         )
-        assertAuthorityPinsReported(output, deltaRevision)
+        assertAuthorityPinsReported(output, revisionLine?.substringAfter('\t')?.substringBefore(' ')?.trim() ?: "")
         val verdicts = output.lines().filter { it.isNotBlank() && !it.startsWith("#") }.associate { line ->
             val parts = line.split('\t')
             parts[0] to parts.drop(1).joinToString("\t")

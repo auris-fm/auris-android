@@ -42,6 +42,7 @@ console.log(`# worker-revision\t${provenance(workerRoot)}`);
 const PINS = [
   ["d8fe823cbe43ebb310d632b482312c7b282ef018", "pre-delta intake guard and record schema fixtures"],
   ["c569b319e19b5971ada44a0f53245630688c1305", "delta736d3180 strict intake: observation_unavailable with state unknown"],
+  ["862c7ed3fdc540eccc9fdacd6819c97a9e679536", "c6f3bdf7 strict intake: ASR empty_result, the one completed-with-reason shape"],
 ];
 for (const [revision, purpose] of PINS) console.log(`# authority-pin\t${revision}\t${purpose}`);
 

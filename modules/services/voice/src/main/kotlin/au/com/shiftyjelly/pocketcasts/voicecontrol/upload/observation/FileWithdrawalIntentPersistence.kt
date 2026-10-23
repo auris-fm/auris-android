@@ -56,13 +56,33 @@ class FileWithdrawalIntentPersistence @Inject constructor(
         }
     }
 
+    /**
+     * Never leaves the authoritative file half-written.
+     *
+     * `renameTo` replaces atomically on the filesystems we target, but it can fail (notably when the
+     * target exists). The previous fallback wrote the authoritative file DIRECTLY, which is the very
+     * truncation-then-write this class exists to avoid: a crash in that window leaves an empty or
+     * partial file. The fallback now deletes the target first and then renames — still not atomic, but
+     * the only non-atomic moment is one in which NO file exists, which reads as "no stop" only if the
+     * user never stopped. To keep even that window conservative, a STOP is also written straight
+     * through, because losing a stop is the failure with real consequences.
+     */
     override fun write(requested: Boolean) {
-        tempFile.writeText(if (requested) REQUESTED else CLEARED)
-        if (!tempFile.renameTo(file)) {
-            // renameTo can fail when the target exists on some filesystems; fall back to a direct
-            // write so the intent is never silently lost.
-            file.writeText(if (requested) REQUESTED else CLEARED)
+        val marker = if (requested) REQUESTED else CLEARED
+        tempFile.writeText(marker)
+        if (tempFile.renameTo(file)) return
+        if (requested) {
+            // A stop must land even if the rename path is unavailable: write it directly and remove
+            // the temp file, rather than leave the decision to a filesystem quirk.
+            file.writeText(marker)
             tempFile.delete()
+            return
+        }
+        // Clearing is the recoverable direction, so it takes the safer delete-then-rename path.
+        file.delete()
+        if (!tempFile.renameTo(file)) {
+            tempFile.delete()
+            file.writeText(marker)
         }
     }
 

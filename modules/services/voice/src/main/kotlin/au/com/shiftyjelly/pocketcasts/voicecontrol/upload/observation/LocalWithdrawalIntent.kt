@@ -42,12 +42,24 @@ class LocalWithdrawalIntentStore(private val persistence: WithdrawalIntentPersis
     }
 
     /**
-     * The server now reflects the withdrawal. Clearing the intent is safe: the projection itself is
-     * withdrawn, so nothing can be collected on the strength of clearing it. Keeping it would mean a
-     * later legitimate re-enrollment could not take effect without a restart.
+     * The server now reflects the withdrawal. See the body: the intent is KEPT, not cleared.
+     *
+     * My first version cleared here on the reasoning that a withdrawn projection cannot be collected
+     * against. That is true only while the projection stays withdrawn — and projections go stale, so
+     * a later enrolled read would have resumed collection with nothing left to veto it. The
+     * composition control caught it.
      */
     fun onServerAgrees() {
-        persistence.write(false)
+        // DELIBERATELY DOES NOT CLEAR. Clearing on server agreement re-opens the exact window this
+        // store exists to close: the server can serve a STALE "enrolled" projection after applying a
+        // withdrawal, and with the flag gone that projection would resume collection on its own. Only
+        // an explicit new opt-in (clearOnUserEnrollment) may release the stop, because that is a fresh
+        // statement of consent rather than an inference from server state.
+        //
+        // The stop is already durable and correct while the withdrawal stands; keeping it costs
+        // nothing, and clearing it would be a belief about the server that this class has no way to
+        // verify.
+        persistence.write(true)
     }
 
     /**

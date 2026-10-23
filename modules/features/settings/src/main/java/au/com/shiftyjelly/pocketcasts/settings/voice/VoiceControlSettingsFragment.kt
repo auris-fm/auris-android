@@ -56,6 +56,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.service.VoiceControlCaptureSt
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAccountStartup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.DeletionState
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentOutcome
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ContributionStore
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
@@ -80,6 +81,8 @@ class VoiceControlSettingsFragment : BaseFragment() {
     @Inject lateinit var voiceSharingAccountStartup: VoiceSharingAccountStartup
 
     @Inject lateinit var contributionStore: ContributionStore
+
+    @Inject lateinit var localWithdrawalIntent: LocalWithdrawalIntentStore
 
     private fun Context.isRecordAudioGranted() = ContextCompat.checkSelfPermission(
         this,
@@ -215,13 +218,32 @@ class VoiceControlSettingsFragment : BaseFragment() {
                     // there is no window in which we keep collecting after the user said stop. No
                     // confirmation dialog here, for exactly that reason.
                     if (!checked) locallySharing = false
+                    // THE USER'S STOP IS RECORDED HERE, not inside the request. This is the only
+                    // place the actual tap reaches durable state, so without it the collection gate
+                    // consults a flag nobody ever sets. Written BEFORE the coroutine launches, so no
+                    // scheduling window exists in which collection could still admit a capture.
+                    if (!checked) localWithdrawalIntent.recordWithdrawalRequested()
                     scope.launch {
                         val outcome = if (checked) {
                             enrollmentController.enroll(acceptedDisclosureVersion = localDisclosureVersion())
                         } else {
                             enrollmentController.withdraw()
                         }
-                        if (checked && outcome is EnrollmentOutcome.Applied) locallySharing = true
+                        when {
+                            checked && outcome is EnrollmentOutcome.Applied -> {
+                                // A fresh explicit opt-in releases the local stop - but only once the
+                                // server has actually applied it, so a failed enroll cannot silently
+                                // re-permit collection.
+                                localWithdrawalIntent.clearOnUserEnrollment()
+                                locallySharing = true
+                            }
+
+                            !checked && outcome is EnrollmentOutcome.Applied -> localWithdrawalIntent.onServerAgrees()
+
+                            // A failed withdrawal deliberately leaves the stop in place: a network
+                            // failure is not consent to resume.
+                            !checked -> localWithdrawalIntent.onWithdrawalFailed()
+                        }
                     }
                 },
                 onDeleteSharedData = { confirmDelete = true },

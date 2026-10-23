@@ -5,6 +5,7 @@ import android.content.Context
 import au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot
 import au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner
 import au.com.shiftyjelly.pocketcasts.servers.di.SyncServiceRetrofit
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.enrollment.EnrollmentController
 import dagger.Lazy
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -56,6 +57,35 @@ class VoiceSharingAccountStartup @Inject constructor(
             onCredentialInvalid = { credentials.publish(null) },
         )
     }
+
+    /**
+     * The enrollment UI's seam (plan Task 2 + UI shell). Built here because every piece it drives —
+     * the operations, the state fence, the local purge — is owned by this startup.
+     *
+     * [clearLocalPending] is wired to the QUEUE's own revocation transaction rather than a bare file
+     * sweep, so "stop everything now" uses the same ownership-locked path as every other revocation.
+     * The caller supplies it because the store belongs to the upload composition; when nothing has
+     * composed the queue yet, the no-op is correct — there is no pending work to stop.
+     */
+    fun enrollmentController(clearLocalPending: () -> Unit): EnrollmentController = EnrollmentController(
+        enrollOperation = { acceptedDisclosureVersion ->
+            val token = currentToken() ?: return@EnrollmentController VoiceSharingMutationResult.Failure
+            operations.enroll(token, acceptedDisclosureVersion)
+        },
+        withdrawOperation = {
+            val token = currentToken() ?: return@EnrollmentController VoiceSharingMutationResult.Failure
+            // The epoch is captured from the fresh projection inside the owner transaction.
+            operations.withdraw(token)
+        },
+        deleteOperation = {
+            val token = currentToken() ?: return@EnrollmentController null
+            operations.deleteData(token)
+        },
+        clearLocalPending = clearLocalPending,
+    )
+
+    /** The live session token, or null when no session is current (nothing may be mutated). */
+    private fun currentToken(): SessionToken? = state.currentSessionTokenForTest()
 
     /** Called once from the application's onCreate; idempotent. */
     fun initializeOnAppStart() {

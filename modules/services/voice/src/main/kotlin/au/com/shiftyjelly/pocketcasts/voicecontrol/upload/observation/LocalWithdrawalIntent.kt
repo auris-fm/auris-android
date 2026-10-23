@@ -7,7 +7,15 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalStat
 interface WithdrawalIntentPersistence {
     fun read(): Boolean
 
-    fun write(requested: Boolean)
+    /**
+     * Persist the marker. Returns TRUE only when the marker is durably in place.
+     *
+     * The result is not decoration (reviewer 60647af3): a write that reports nothing lets the caller
+     * believe a stop landed when it did not, so a first withdrawal whose write fails leaves the old
+     * PERMITTED marker behind and collection resumes on restart. Callers MUST treat false as
+     * "the durable stop is unknown" and fail closed.
+     */
+    fun write(requested: Boolean): Boolean
 }
 
 /**
@@ -26,10 +34,13 @@ interface WithdrawalIntentPersistence {
  */
 class LocalWithdrawalIntentStore(private val persistence: WithdrawalIntentPersistence) {
 
-    /** Recorded BEFORE the network call, so no window exists in which collection could resume. */
-    fun recordWithdrawalRequested() {
-        persistence.write(true)
-    }
+    /**
+     * Recorded BEFORE the network call, so no window exists in which collection could resume.
+     *
+     * Returns false when the marker could not be durably written. The caller must then keep the
+     * collection gate closed anyway: the user asked to stop, and an unwritten stop is still a stop.
+     */
+    fun recordWithdrawalRequested(): Boolean = persistence.write(true)
 
     /**
      * Collection is permitted locally only when the user has NOT asked to stop. The server
@@ -49,7 +60,7 @@ class LocalWithdrawalIntentStore(private val persistence: WithdrawalIntentPersis
      * a later enrolled read would have resumed collection with nothing left to veto it. The
      * composition control caught it.
      */
-    fun onServerAgrees() {
+    fun onServerAgrees(): Boolean {
         // DELIBERATELY DOES NOT CLEAR. Clearing on server agreement re-opens the exact window this
         // store exists to close: the server can serve a STALE "enrolled" projection after applying a
         // withdrawal, and with the flag gone that projection would resume collection on its own. Only
@@ -59,20 +70,18 @@ class LocalWithdrawalIntentStore(private val persistence: WithdrawalIntentPersis
         // The stop is already durable and correct while the withdrawal stands; keeping it costs
         // nothing, and clearing it would be a belief about the server that this class has no way to
         // verify.
-        persistence.write(true)
+        return persistence.write(true)
     }
 
     /**
      * A failed server withdrawal leaves the intent in place. The user asked to stop; a network
      * failure is not consent to resume, and collection stays stopped until they opt in again.
      */
-    fun onWithdrawalFailed() {
+    fun onWithdrawalFailed(): Boolean {
         // Deliberately a no-op with a name, so deleting this does not read as tightening a screen.
-        persistence.write(true)
+        return persistence.write(true)
     }
 
     /** An explicit new opt-in is a fresh user action and releases the local stop. */
-    fun clearOnUserEnrollment() {
-        persistence.write(false)
-    }
+    fun clearOnUserEnrollment(): Boolean = persistence.write(false)
 }

@@ -38,6 +38,47 @@ class WorkerWireParityTest {
     private fun cloudWorkerRoot(): File = System.getenv("AURIS_CLOUD_WORKER_ROOT")?.let(::File)
         ?: File("/Users/dev/code/auris/core/cloud-voice-uploads/worker")
 
+    /**
+     * Records the EXACT Worker revision and Android source head this run compared, so a result
+     * archive identifies its own authority instead of leaving a reader to infer it (reviewer
+     * fd258849, spec cc56440e).
+     *
+     * The test source permits any revision in [approvedWorkerRevisions] because each later pin is a
+     * strict superset of the earlier ones. That is a convenience for not re-editing five call sites
+     * on every clearance, and it is exactly why the run has to WRITE DOWN which pin it actually
+     * checked: "some approved pin" is not a receipt.
+     *
+     * Written to build/worker-parity-receipt.txt, which the commit archives alongside the XML. Best
+     * effort - a failure to write never fails the control, because a missing receipt is a reporting
+     * gap and not a reason to red a passing comparison.
+     */
+    private fun recordRunReceipt(workerRoot: File, reportedRevision: String?, ruleScope: String) {
+        try {
+            val head = ProcessBuilder("git", "rev-parse", "HEAD")
+                .directory(File(".").absoluteFile)
+                .redirectErrorStream(true)
+                .start()
+                .inputStream.bufferedReader().readText().trim()
+            val workerHead = ProcessBuilder("git", "-C", workerRoot.absolutePath, "rev-parse", "HEAD")
+                .redirectErrorStream(true)
+                .start()
+                .inputStream.bufferedReader().readText().trim()
+            val out = File("build/worker-parity-receipt.txt")
+            out.parentFile?.mkdirs()
+            out.writeText(
+                buildString {
+                    appendLine("android_source_head=$head")
+                    appendLine("worker_root=${workerRoot.absolutePath}")
+                    appendLine("worker_head=$workerHead")
+                    appendLine("worker_reported_revision=${reportedRevision?.trim()}")
+                    appendLine("rule_scope=$ruleScope")
+                },
+            )
+        } catch (e: Exception) {
+            // Never fail the comparison over receipt bookkeeping.
+        }
+    }
+
     //
     // The Worker revision these controls compare against, and the SCOPE of that comparison.
     //
@@ -456,6 +497,14 @@ class WorkerWireParityTest {
             revisionLine?.contains(pin) == true,
         )
         assertAuthorityPinsReported(output, pin)
+        // The receipt names the pin this run actually checked, so the archived result identifies its
+        // own authority rather than leaving a reader to infer it from a permitted-set check.
+        recordRunReceipt(
+            workerRoot = workerRoot,
+            reportedRevision = revisionLine,
+            ruleScope = "combined c6f3bdf7/f8cac147/4d10275f intake: empty_result, completed-stage " +
+                "reason rule, translation skip reasons - emitted-byte parity only",
+        )
         val verdicts = output.lines().filter { it.isNotBlank() && !it.startsWith("#") }.associate { line ->
             val parts = line.split('\t')
             parts[0] to parts.drop(1).joinToString("\t")

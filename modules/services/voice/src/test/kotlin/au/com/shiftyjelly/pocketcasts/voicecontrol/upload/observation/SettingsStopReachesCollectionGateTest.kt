@@ -24,8 +24,9 @@ class SettingsStopReachesCollectionGateTest {
     /** Stands in for the file-backed persistence, with the same fail-closed contract. */
     private class RecordingPersistence(var stopped: Boolean = false) : WithdrawalIntentPersistence {
         override fun read(): Boolean = stopped
-        override fun write(requested: Boolean) {
+        override fun write(requested: Boolean): Boolean {
             stopped = requested
+            return true
         }
     }
 

@@ -97,6 +97,91 @@ class FileWithdrawalIntentPersistenceTest {
     }
 
     @Test
+    fun `a stop whose atomic write fails does NOT leave the previous permitted marker behind`() {
+        // Reviewer 60647af3. The rename used to fail silently and the caller believed the stop landed.
+        // The dangerous sequence: a permitted marker is on disk, the user stops, the rename fails, and
+        // reading back still says PERMITTED - so collection resumes on the next launch.
+        val subject = persistence()
+        subject.write(requested = false)
+        assertFalse("precondition: the marker starts as PERMITTED", subject.read())
+
+        // Force the atomic path to fail by making the temp path unusable: a DIRECTORY at the temp
+        // location cannot be opened for writing, and cannot be renamed over the target.
+        val temp = File(context.filesDir, "voice-sharing-local-stop.tmp")
+        temp.delete()
+        assertTrue("precondition: the blocking directory must be creatable", temp.mkdirs())
+        try {
+            val reported = subject.write(requested = true)
+
+            assertTrue(
+                "the injected failure must actually reach the non-atomic path, otherwise this " +
+                    "control proves nothing about it",
+                reported.not(),
+            )
+            assertFalse(
+                "write(true) must report failure when it could not install the marker durably",
+                reported,
+            )
+            assertTrue(
+                "after a failed stop write the marker must NOT still read as PERMITTED - an " +
+                    "unchanged permitted marker resumes collection for a user who asked to stop",
+                subject.read(),
+            )
+        } finally {
+            temp.delete()
+        }
+    }
+
+    @Test
+    fun `a write that cannot complete atomically still reports that it did not`() {
+        // The reviewer's defect was that a failed atomic path reported SUCCESS, so the caller believed
+        // a stop had landed. The directory-at-temp injection above exercises one failure mode; this
+        // covers the contract itself, at the layer callers consume: when the atomic path does not
+        // complete, write() must say so.
+        //
+        // COVERAGE, stated precisely because it is partial: this injects an EXCEPTION from the temp
+        // path (a directory cannot be opened as a file stream), and mutation-proof confirms all three
+        // failure-path controls go red when that exception is swallowed as success. A REFUSED RENAME
+        // is NOT reachable by this injection under Robolectric - renameTo consumes the directory onto
+        // the target instead of returning false - so that distinct branch is covered only by the
+        // shared return contract, not by a control that reaches it. Recorded rather than claimed.
+        val subject = persistence()
+        subject.write(requested = false)
+        val temp = File(context.filesDir, "voice-sharing-local-stop.tmp")
+        temp.delete()
+        assertTrue(temp.mkdirs())
+        try {
+            assertFalse(
+                "an unwritable temp path must be reported as a failed write",
+                subject.write(requested = true),
+            )
+        } finally {
+            temp.delete()
+        }
+    }
+
+    @Test
+    fun `a failed clear reports failure rather than claiming the stop was released`() {
+        val subject = persistence()
+        subject.write(requested = true)
+        val temp = File(context.filesDir, "voice-sharing-local-stop.tmp")
+        temp.delete()
+        assertTrue(temp.mkdirs())
+        try {
+            assertFalse(
+                "a clear that could not be installed must report failure",
+                subject.write(requested = false),
+            )
+            assertTrue(
+                "a failed clear must leave the user STOPPED - the safe direction",
+                subject.read(),
+            )
+        } finally {
+            temp.delete()
+        }
+    }
+
+    @Test
     fun `a missing file means no stop was ever requested`() {
         assertFalse(
             "a fresh install must not be treated as already stopped",

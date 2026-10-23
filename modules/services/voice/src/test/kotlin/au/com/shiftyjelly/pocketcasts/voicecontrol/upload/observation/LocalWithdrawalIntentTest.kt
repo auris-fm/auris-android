@@ -113,7 +113,8 @@ class InMemoryIntentPersistence : WithdrawalIntentPersistence {
 
     override fun read(): Boolean = stored
 
-    override fun write(requested: Boolean) {
+    override fun write(requested: Boolean): Boolean {
         stored = requested
+        return true
     }
 }

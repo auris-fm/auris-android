@@ -87,41 +87,76 @@ class FileWithdrawalIntentPersistence @Inject constructor(
      * filesystem that honours fsync on files and directories. It is NOT a claim that Android's
      * storage stack guarantees this on every device, and it does not make the wider queue durable.
      */
-    override fun write(requested: Boolean) {
+    override fun write(requested: Boolean): Boolean {
         val marker = if (requested) REQUESTED else CLEARED
         val dir = file.parentFile ?: context.filesDir
-        dir.mkdirs()
-        // Write the WHOLE marker to the temp file, flush it through the OS, then force it to the
-        // device. A temp file that is not fsynced can be empty after a power loss, and an empty temp
-        // renamed over the target would destroy a good marker.
-        FileOutputStream(tempFile).use { out ->
-            out.write(marker.toByteArray(Charsets.UTF_8))
-            out.flush()
-            out.fd.sync()
+        try {
+            dir.mkdirs()
+            // Write the WHOLE marker to the temp file, flush it through the OS, then force it to the
+            // device. A temp file that is not fsynced can be empty after a power loss, and an empty
+            // temp renamed over the target would destroy a good marker.
+            FileOutputStream(tempFile).use { out ->
+                out.write(marker.toByteArray(Charsets.UTF_8))
+                out.flush()
+                out.fd.sync()
+            }
+            if (!tempFile.renameTo(file)) {
+                // THE RENAME FAILED, so the marker on disk is whatever it was BEFORE this call.
+                // Discarding that outcome is how a first withdrawal could silently keep the old
+                // PERMITTED marker and resume collection on restart (reviewer 60647af3). Report it.
+                tempFile.delete()
+                // Still fail closed (clear a possibly-permitted marker), but REPORT the failure: the
+                // marker did not take the atomic path, so its durability is not what was promised.
+                failClosedInPlace(file)
+                return false
+            }
+        } catch (e: Exception) {
+            try {
+                tempFile.delete()
+            } catch (ignored: Exception) {
+                // Nothing further to do; the return below is what matters.
+            }
+            failClosedInPlace(file)
+            return false
         }
-        if (!tempFile.renameTo(file)) {
-            // Rename failed. Do NOT truncate the target: writing it directly is the defect above, and
-            // deleting it first is the other one. Leave the authoritative file exactly as it was (a
-            // previous stop stays a stop, a previous clear stays a clear) and drop the temp file, so
-            // the state on disk remains a coherent marker rather than a partial one.
-            tempFile.delete()
-            return
-        }
-        syncDirectory(dir)
+        // The rename landed. The directory entry is what makes it durable, so force that too; if the
+        // barrier fails the marker is present but its power-loss durability is unproven, which must
+        // not be reported as a durable stop.
+        return syncDirectory(dir)
     }
 
     /**
-     * Forces the DIRECTORY ENTRY created by the rename. Failure is tolerated rather than thrown: the
-     * marker is already correct in the cache, and throwing here would surface a storage quirk as a
-     * user-visible failure of the stop.
+     * Last resort when the atomic path did not complete and the caller asked for a STOP.
+     *
+     * Leaving the previous PERMITTED marker in place would resume collection for someone who asked us
+     * to stop, which is the failure this whole class exists to prevent. Truncating the file is not
+     * atomic, but for a STOP the possible outcomes are "no marker" and "REQUESTED" - both of which
+     * keep collection closed the next time this file is read.
      */
-    private fun syncDirectory(dir: File) {
-        try {
-            FileInputStream(dir).use { it.fd.sync() }
-        } catch (e: Exception) {
-            // Some filesystems refuse to open a directory as a stream. The marker is still correct;
-            // only its power-loss durability is weaker, and there is no safer action available here.
-        }
+    private fun failClosedInPlace(target: File): Boolean = try {
+        // ALWAYS writes the STOP marker, never the one the caller asked for: this path only runs
+        // because the write already failed, and the only unknown that matters is whether the user is
+        // stopped. Writing CLEARED here would mean a failed clear and a failed stop both leave
+        // collection open, which is the direction with real consequences.
+        target.writeText(REQUESTED)
+        true
+    } catch (e: Exception) {
+        false
+    }
+
+    /**
+     * Forces the DIRECTORY ENTRY created by the rename.
+     *
+     * A rename is durable only relative to its parent directory. Opening the directory as a
+     * [FileInputStream] is the mechanism available through the Java API on Android, and it is NOT a
+     * demonstrated directory barrier on every platform - so this reports what it actually achieved
+     * rather than assuming success, and the caller decides what an unproven barrier means.
+     */
+    private fun syncDirectory(dir: File): Boolean = try {
+        FileInputStream(dir).use { it.fd.sync() }
+        true
+    } catch (e: Exception) {
+        false
     }
 
     private companion object {

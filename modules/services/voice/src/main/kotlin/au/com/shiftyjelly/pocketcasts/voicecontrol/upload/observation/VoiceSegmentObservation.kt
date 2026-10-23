@@ -37,6 +37,8 @@ data class TranslationProvenance(
     val model: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef,
     /** True only when a translated result was actually produced for this capture. */
     val producedResult: Boolean,
+    /** The OBSERVED translated text (the result itself), when a result exists. */
+    val translatedText: String? = null,
     /** The target language the result is in (observed), when a result exists. */
     val targetLanguage: String?,
 )

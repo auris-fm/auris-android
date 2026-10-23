@@ -40,6 +40,49 @@ import org.junit.rules.TemporaryFolder
  */
 class EngineToProducerPublishTest {
 
+    /** REAL owner-transaction semantics: one lock, snapshot reads inside it (see WiringTest). */
+    private class WatchOwner(startAccount: String, startSession: Long) : au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner {
+        override val collectionSharedLock = Any()
+
+        @Volatile
+        var snap = au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot(
+            startAccount,
+            startSession,
+            startSession,
+            au.com.shiftyjelly.pocketcasts.preferences.AccessToken("Bearer-A"),
+        )
+
+        override fun authoritySnapshot() = snap
+        override fun sessionGeneration(): Long = snap.session
+        override fun <T> transaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
+        override fun installOwnershipBinding(binding: au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipBinding?) = snap
+        override fun beginRefresh(observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot) = null
+        override fun publishRefresh(
+            lease: au.com.shiftyjelly.pocketcasts.repositories.sync.RefreshLease,
+            refreshToken: au.com.shiftyjelly.pocketcasts.preferences.RefreshToken,
+            accessToken: au.com.shiftyjelly.pocketcasts.preferences.AccessToken,
+        ) = false
+        override fun publishCredentials(
+            observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot,
+            refreshToken: au.com.shiftyjelly.pocketcasts.preferences.RefreshToken,
+            accessToken: au.com.shiftyjelly.pocketcasts.preferences.AccessToken,
+        ) = false
+        override fun invalidateIfCurrent(
+            observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot,
+            transaction: () -> Boolean,
+        ) = transaction()
+        override fun reconcileExternalState() = snap
+
+        fun switchTo(account: String, session: Long) = synchronized(collectionSharedLock) {
+            snap = au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot(
+                account,
+                session,
+                session,
+                au.com.shiftyjelly.pocketcasts.preferences.AccessToken("Bearer-B"),
+            )
+        }
+    }
+
     @get:Rule
     val tmp = TemporaryFolder()
 
@@ -501,15 +544,127 @@ class EngineToProducerPublishTest {
         val candidate = sink.retainedCandidateForTest(ctx.captureId)!!
         // No observation yet: translation is honest UNKNOWN (not an invented not_run reason).
         assertEquals(StageState.Unknown, EngineStageProvenance.stagesFor(candidate).toMap().getValue(StageName.Translation).state)
-        // An OBSERVED produced result is completed with the observed target language.
+        // An OBSERVED produced result completes with BOTH schema fields from their OWN
+        // observations (reviewer 57719ad2): translated_text is the result text, target_language
+        // the language — DISTINCT values so a cross-write cannot pass this control.
         assertTrue(
             sink.noteTranslation(
                 ctx.captureId,
-                TranslationProvenance(ModelRef.Named("canary-flash-model", "sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8"), producedResult = true, targetLanguage = "en"),
+                TranslationProvenance(
+                    ModelRef.Named("canary-flash-model", "sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8"),
+                    producedResult = true,
+                    translatedText = "the shelves are empty",
+                    targetLanguage = "en",
+                ),
             ),
         )
         val observed = EngineStageProvenance.stagesFor(candidate).toMap().getValue(StageName.Translation)
         assertEquals(StageState.Completed, observed.state)
-        assertEquals("en", (observed.fields.getValue("translated_text") as RecordNode.Str).value)
+        assertEquals("the shelves are empty", (observed.fields.getValue("translated_text") as RecordNode.Str).value)
+        assertEquals("en", (observed.fields.getValue("target_language") as RecordNode.Str).value)
+    }
+
+    @Test
+    fun `a produced translation missing either observed half is not a completed record`() {
+        // The schema needs translated_text AND target_language (reviewer 57719ad2): a provenance
+        // that claims a result but observed only the language must NOT serialize the language as
+        // the text -- it degrades to not_run/no_text, never an invented field.
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val ctx = context()
+        retainCapture(sink, ctx)
+        val candidate = sink.retainedCandidateForTest(ctx.captureId)!!
+        assertTrue(
+            sink.noteTranslation(
+                ctx.captureId,
+                TranslationProvenance(ModelRef.None, producedResult = true, targetLanguage = "en"),
+            ),
+        )
+        val observed = EngineStageProvenance.stagesFor(candidate).toMap().getValue(StageName.Translation)
+        assertEquals(StageState.NotRun, observed.state)
+        assertEquals("no_text", (observed.fields.getValue("reason") as RecordNode.Str).value)
+    }
+
+    @Test
+    fun `an owner transition attempted between validation and prepare cannot interleave - real owner transaction`() {
+        // THE ATOMICITY CONTROL (reviewer 57719ad2): the frozen/live comparison and the producer's
+        // identity reads + prepare run inside ONE real CredentialOwnershipOwner transaction. A
+        // transition attempted at the interleaving point (after validation, before prepare) needs
+        // the SAME owner lock, so it cannot complete until the section -- commit included -- is
+        // done: the producer reads the OLD owner and the record is published under the owner the
+        // frozen tuple was validated against. A check-then-use shape (validation OUTSIDE the
+        // transaction) fails this control: the flip completes during the barrier and the commit
+        // publishes under the NEW owner.
+        val root = tmp.newFolder("interleave")
+        val store = newStore(root)
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val ctx = context()
+        retainCapture(sink, ctx)
+        val owner = WatchOwner("a@x", 7L)
+        val seenAccounts = java.util.concurrent.ConcurrentLinkedQueue<String>()
+        val flipGate = java.util.concurrent.CountDownLatch(1)
+        val flipDone = java.util.concurrent.CountDownLatch(1)
+        // Reads NOT bound to the owner transaction (an unlocked mirror) — what the flip thread
+        // publishes so the control can distinguish section-bound reads from check-then-use reads.
+        val unlockedLive = java.util.concurrent.atomic.AtomicReference("a@x")
+        val flipThread = Thread {
+            flipGate.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            // The unlocked mirror moves WITHOUT the owner lock: anything reading identity from it
+            // can be split from the section, which is exactly the defect class this control pins.
+            unlockedLive.set("b@y")
+            owner.switchTo("b@y", 9L)
+            flipDone.countDown()
+        }
+        flipThread.start()
+        // The producer's identity reads run INSIDE the section, like production wiring; every
+        // observed read is recorded so the control can prove WHOSE owner prepared the record.
+        val producer1 = ContributionCaptureProducer(
+            store,
+            appVersion = "8.20",
+            appBuild = "12345",
+            captureSessionId = { "00000000-0000-4000-8000-000000000000" },
+            enrollmentAccount = {
+                val a = owner.authoritySnapshot().accountName ?: "<null>"
+                seenAccounts.add(a)
+                a
+            },
+            enrollmentSession = { owner.authoritySnapshot().session },
+        )
+        val frozen = RetentionPublishTrigger.LiveIdentity("a@x", 7L, "epoch-1")
+        val entry = owner.transaction {
+            val snap = owner.authoritySnapshot()
+            // VALIDATION inside the section...
+            val valid = snap.accountName == frozen.account && snap.session == frozen.session
+            // ...THE INTERLEAVING POINT: release the flip attempt BEFORE prepare...
+            flipGate.countDown()
+            // ...and hold until the flip thread is demonstrably BLOCKED on this lock, proving it
+            // cannot complete while the section (validate -> prepare -> commit) is running.
+            val deadline = System.currentTimeMillis() + 5000
+            while (flipThread.state != Thread.State.BLOCKED && System.currentTimeMillis() < deadline) Thread.sleep(5)
+            assertEquals(Thread.State.BLOCKED, flipThread.state)
+            // ...then PREPARE+COMMIT still inside the SAME section.
+            if (valid) {
+                producer1.publish(
+                    ctx.captureId.toString(),
+                    frozen.enrollmentEpoch!!,
+                    16000,
+                    listOf(ShortArray(16) to 16),
+                    fixedModels + listOf("asr" to asrModel, "translation" to ModelRef.None),
+                    stages,
+                )
+            } else {
+                null
+            }
+        }
+        assertTrue("the section must accept and commit", entry != null)
+        assertTrue("the flip must complete only after the section", flipDone.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        flipThread.join(5000)
+        assertEquals("the live owner moved after the section", "b@y", owner.authoritySnapshot().accountName)
+        // The record was published under the owner the frozen tuple was validated against.
+        val entries = store.readyEntries()
+        assertEquals("exactly one record", 1, entries.size)
+        assertTrue(
+            "every producer identity read saw the frozen owner (saw=$seenAccounts)",
+            seenAccounts.all { it == "a@x" },
+        )
     }
 }

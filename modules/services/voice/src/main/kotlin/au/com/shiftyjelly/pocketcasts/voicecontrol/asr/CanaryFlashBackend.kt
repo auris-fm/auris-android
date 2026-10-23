@@ -181,7 +181,12 @@ class CanaryFlashBackend @Inject constructor(
         private const val CANARY_TOKENS_FILENAME = "tokens.txt"
         private const val CANARY_TARGET_DIR = "canary-flash-model"
 
-        /** The model's own published manifest identity (repo/version tag), not a filename. */
+        /**
+         * Manifest identity source (reviewer 57719ad2): the upstream repo itself is the published,
+         * frozen artifact set — NVIDIA's canary-180m-flash INT8 export has no further version tags
+         * upstream, so the repository name (dateless, immutable content) IS the revision identity.
+         * Not a filename and not a mutable branch ref.
+         */
         private const val CANARY_MANIFEST_ID = "sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8"
 
         private val SUPPORTED_SOURCE_LANGUAGES = setOf("en", "de", "es", "fr")

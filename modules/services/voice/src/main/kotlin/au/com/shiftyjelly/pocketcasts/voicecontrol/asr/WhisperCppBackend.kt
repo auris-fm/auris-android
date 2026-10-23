@@ -106,10 +106,14 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
     override val requiredModel: ModelSpec = ModelSpec(
         files = listOf(
             ModelFile(
-                url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin",
+                // PINNED REVISION (reviewer 57719ad2): resolve/main is mutable, so the artifact
+                // URL and the manifest identity both name the exact repo revision the file was
+                // verified at (ggerganov/whisper.cpp @ 5359861c739e955e79d9a303bcbc70fb988958b1,
+                // lastModified 2024-10-29), never a moving branch.
+                url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small-q5_1.bin",
                 filename = "ggml-small-q5_1.bin",
                 sha256 = "",
-                manifestId = "whisper.cpp-ggml-small-q5_1",
+                manifestId = "whisper.cpp-ggml-small-q5_1@5359861c739e955e79d9a303bcbc70fb988958b1",
             ),
         ),
         targetDir = "whisper-model",

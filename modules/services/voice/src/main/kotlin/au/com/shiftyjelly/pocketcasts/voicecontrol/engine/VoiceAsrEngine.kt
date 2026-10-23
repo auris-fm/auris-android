@@ -707,7 +707,7 @@ class VoiceAsrEngine @Inject constructor(
                 dropWithError = false,
                 // The BACKEND itself produced English: its model identity IS the translation
                 // provenance, and a result was produced by definition of this path.
-                translation = requestTranslationProvenance(backend),
+                translation = requestTranslationProvenance(backend, translatedText = trimmed.text),
             )
         }
         if (detected == "en") {
@@ -767,18 +767,26 @@ class VoiceAsrEngine @Inject constructor(
             translation = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance(
                 model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
                 producedResult = true,
+                // The OBSERVED result text and the target language travel as SEPARATE fields
+                // (reviewer 57719ad2): the record schema has translated_text AND target_language.
+                translatedText = translated,
                 targetLanguage = "en",
             ),
         )
     }
 
     /** The selected backend's manifest identity, when it is the component translating. */
-    private fun requestTranslationProvenance(backend: AsrBackend) = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance(
+    private fun requestTranslationProvenance(
+        backend: AsrBackend,
+        translatedText: String,
+    ) = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance(
         model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named(
             backend.requiredModel.targetDir,
             backend.requiredModel.files.firstOrNull { it.manifestId.isNotEmpty() }?.manifestId ?: "",
         ),
         producedResult = true,
+        // The backend's English output IS the translated text: observed, not assumed.
+        translatedText = translatedText,
         targetLanguage = "en",
     )
 

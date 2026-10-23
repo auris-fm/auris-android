@@ -52,14 +52,20 @@ object EngineStageProvenance {
             // TRANSLATION: only OBSERVED truth (reviewer 8288ac15). A produced result is
             // completed with the observed target language; no observation at all is UNKNOWN —
             // a missing observation never justifies an invented not_run reason.
+            // BOTH schema fields, from SEPARATE observations (reviewer 57719ad2): translated_text
+            // is the result text itself, target_language the language it was produced in. A
+            // produced result missing either observed half is not a completable record.
             StageName.Translation to when {
-                candidate.translation?.producedResult == true -> {
-                    val target = candidate.translation?.targetLanguage
+                candidate.translation?.producedResult == true &&
+                    candidate.translation?.translatedText != null &&
+                    candidate.translation?.targetLanguage != null ->
                     StageEntry(
                         StageState.Completed,
-                        if (target != null) mapOf("translated_text" to RecordNode.Str(target)) else emptyMap(),
+                        mapOf(
+                            "translated_text" to RecordNode.Str(candidate.translation!!.translatedText!!),
+                            "target_language" to RecordNode.Str(candidate.translation!!.targetLanguage!!),
+                        ),
                     )
-                }
 
                 candidate.translation != null -> StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text")))
 

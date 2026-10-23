@@ -7,6 +7,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName
 import java.util.UUID
+import kotlinx.coroutines.Job
 
 /**
  * THE ENGINE→PRODUCER PUBLISH TRIGGER (task73 final wiring): the ONE guarded bridge between
@@ -17,28 +18,40 @@ import java.util.UUID
  * GUARDS, in order:
  *  1. Fires only on the TERMINAL [CollectionOutcome.Executed] join (the sink only invokes the
  *     hook for that outcome with retained PCM) — routing/recognition alone never publish.
- *  2. Requires the authority FROZEN at capture start (`context.issuedAuthority`) with a
- *     non-null account AND enrollment epoch. A capture captured before any account existed is
- *     DISCARDED (record-less), never published with a guessed identity.
- *  3. The producer independently re-reads the LIVE admitted identity and refuses (null) when
- *     it disagrees — the frozen authority authorizes the trigger, the live identity authorizes
- *     the record. A refusal ends retention with NO record.
+ *  2. Requires the authority FROZEN at capture start (account + session + epoch) AND the ONE
+ *     COHERENT live identity read ([coherentLiveIdentity], taken under the owner transaction)
+ *     to match the frozen tuple on ALL THREE fields. Logout, A→B account move, session-only
+ *     move and epoch rotation each refuse the capture record-less.
+ *  3. Requires OBSERVED model provenance: the frozen [RetainedCandidate.context.asrModel] must
+ *     be a Named ref — a capture with no observed ASR model is not publishable (honest absence,
+ *     never a fixed label).
+ *  4. The producer independently re-reads the live identity and refuses on disagreement — a
+ *     refusal ends retention with NO record.
  *
- * The publish attempt always ends retention exactly once ([ContributionRetentionSink.releaseRetained])
- * whether it produced a prepared entry or was refused, so retained charges can never pin.
- * Dispatch is injected: production hands a coroutine scope so the synchronous outcome join on
- * the pipeline thread never blocks on audio encoding or disk I/O.
+ * Retention ends EXACTLY ONCE on every path: the publish body's `finally`, dispatch rejection
+ * (synchronous throw), AND Job-bound cleanup — if the dispatching scope cancels the job before
+ * or during the body, [Job.invokeOnCompletion] releases the charge (reviewer 54635caa: a
+ * cancelled `scope.launch` never runs its body, so a `finally` inside the body is not enough).
+ * [ContributionRetentionSink.releaseRetained] is idempotent, so the paths cannot double-release.
  */
 class RetentionPublishTrigger(
     private val sink: ContributionRetentionSink,
     private val producer: ContributionCaptureProducer,
-    /** The models that actually ran for engine captures (bound provenance). */
-    private val models: List<Pair<String, ModelRef>>,
+    /** The models that did NOT vary per capture (fixed app deployments: vad/wake/router). */
+    private val fixedModels: List<Pair<String, ModelRef>>,
     /** Stage outcomes for THIS candidate, supplied by the pipeline at publish time. */
     private val stagesProvider: (RetainedCandidate) -> List<Pair<StageName, StageEntry>>,
-    /** Dispatch body; defaults to synchronous for tests, production passes a worker scope. */
-    private val dispatch: (() -> Unit) -> Unit = { it() },
+    /**
+     * THE one coherent live identity read (account, session, enrollment-epoch), taken under the
+     * owner transaction by the composition; null when no live identity exists at all.
+     */
+    private val coherentLiveIdentity: () -> LiveIdentity?,
+    /** Dispatch body; returns the Job (or null for synchronous test dispatch). */
+    private val dispatch: (() -> Unit) -> Job?,
 ) {
+
+    /** One coherent identity read: all three fields from ONE owner-transaction snapshot. */
+    data class LiveIdentity(val account: String, val session: Long, val enrollmentEpoch: String?)
 
     /** Attach this trigger to the sink. Calling twice is refused (one owner, one trigger). */
     fun attach() {
@@ -48,38 +61,53 @@ class RetentionPublishTrigger(
 
     private fun onCandidate(candidate: RetainedCandidate) {
         val id = candidate.context.captureId
-        // REJECTION/CANCEL-BEFORE-START (reviewer e2fe2056): if the dispatch itself throws
-        // synchronously (rejected executor, closed scope), the body's finally never runs - the
-        // release happens HERE instead. If the body is ACCEPTED but its scope is cancelled
-        // before execution, the candidate is still in the sink's deque, so the ordinary loss
-        // paths (purgeAllForRevocation on account move/withdrawal) release it; this trigger
-        // therefore requires a scope that is not cancelled during ordinary operation.
-        try {
+        // REJECTION/CANCEL-BEFORE-START: if the dispatch itself throws synchronously (rejected
+        // executor, closed scope), the body never runs — release HERE and surface the failure.
+        val job = try {
             dispatch { publishBody(candidate, id) }
         } catch (t: Throwable) {
             sink.releaseRetained(id)
             throw t
         }
+        if (job == null) return
+        if (job.isCancelled) {
+            // Cancel-before-start: the body will never run; release NOW.
+            sink.releaseRetained(id)
+            return
+        }
+        // Cancel/failure DURING the body: the body's finally may itself be cut short; bind the
+        // release to Job completion (idempotent with the finally path).
+        job.invokeOnCompletion { cause -> if (cause != null) sink.releaseRetained(id) }
     }
 
     private fun publishBody(candidate: RetainedCandidate, id: UUID) {
         try {
             val issued = candidate.context.issuedAuthority
             val pcm = candidate.pcm
-            // GUARD 1+2: terminal executed outcome with retained audio and FROZEN full identity.
+            // GUARD 1: terminal executed outcome with retained audio.
             if (candidate.outcome !is CollectionOutcome.Executed || pcm == null) return
-            if (issued?.accountName == null || issued.enrollmentEpoch == null) return
+            // GUARD 2: FULL frozen tuple vs ONE coherent live read — every field must match.
+            if (issued == null || issued.enrollmentEpoch == null) return
+            val live = coherentLiveIdentity() ?: return
+            if (live.account != issued.accountName ||
+                live.session != issued.sessionGeneration ||
+                live.enrollmentEpoch != issued.enrollmentEpoch
+            ) {
+                return
+            }
+            // GUARD 3: observed per-capture model provenance is record truth.
+            val asrModel = candidate.context.asrModel as? ModelRef.Named ?: return
+            val translationModel = candidate.context.translationModel
             val chunks = listOf(pcm to pcm.size)
             producer.publish(
                 id.toString(),
                 issued.enrollmentEpoch,
                 candidate.sampleRateHz,
                 chunks,
-                models,
+                fixedModels + listOf("asr" to asrModel, "translation" to translationModel),
                 stagesProvider(candidate),
             )
-            // null return = store/producer refused (budget, epoch, live identity): the capture
-            // ends record-less by design. Either way retention ends EXACTLY ONCE below.
+            // null return = store/producer refused: the capture ends record-less by design.
         } finally {
             sink.releaseRetained(id)
         }

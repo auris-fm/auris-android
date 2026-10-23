@@ -67,14 +67,22 @@ class SegmentObserver(
     // opened — release never depends on "the currently open context".
     data class AdmissionHandle(val context: CaptureContext, val initialToken: ReservationToken?)
 
-    fun speechStartedAdmitting(captureSession: Long, routeClass: String, producerSize: Int): AdmissionHandle? = fenceGate.gate {
+    fun speechStartedAdmitting(
+        captureSession: Long,
+        routeClass: String,
+        producerSize: Int,
+        asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef =
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
+        translationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef =
+            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
+    ): AdmissionHandle? = fenceGate.gate {
         val issued = issueAuthority() // under the shared primitive, no observer lock yet
         val permitted = gate.accepts(authority()) // same: decision read before the monitor
-        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted)?.let { AdmissionHandle(it, admissionToken) }
+        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted, asrModel, translationModel)?.let { AdmissionHandle(it, admissionToken) }
     }
 
-    private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int, issued: IssuedAuthority, permitted: Boolean): CaptureContext? {
-        val context = CaptureContext(UUID.randomUUID(), captureSession, routeClass, issued)
+    private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int, issued: IssuedAuthority, permitted: Boolean, asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef, translationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef): CaptureContext? {
+        val context = CaptureContext(UUID.randomUUID(), captureSession, routeClass, issued, asrModel, translationModel)
         return synchronized(lock) {
             if (open != null || !permitted) return@speechStartedAdmittingLocked null
             cumulativeAccounted = 0

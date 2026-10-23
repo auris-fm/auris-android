@@ -28,9 +28,11 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
 object EngineStageProvenance {
 
     fun stagesFor(candidate: RetainedCandidate): List<Pair<StageName, StageEntry>> {
-        val outcome = candidate.outcome
-        val recognized = outcome as? CollectionOutcome.Recognized
-        val routed = outcome as? CollectionOutcome.Routed
+        // HISTORY, not [outcome] (reviewer 54635caa): the terminal Executed join overwrites
+        // [outcome]; the Recognized/Routed joins are read from the retained join history.
+        val history = candidate.stageOutcomes + listOfNotNull(candidate.outcome)
+        val recognized = history.filterIsInstance<CollectionOutcome.Recognized>().firstOrNull()
+        val routed = history.filterIsInstance<CollectionOutcome.Routed>().firstOrNull()
         return listOf(
             StageName.Wake to when (candidate.wakeState) {
                 SegmentObservation.WakeState.Detected ->

@@ -135,6 +135,7 @@ object VoiceUploadModule {
         store: ContributionStore,
         accountStartup: VoiceSharingAccountStartup,
         @UploadTriggerScope scope: CoroutineScope,
+        publishTrigger: RetentionPublishTrigger,
     ): UploadTrigger {
         // THE production watcher (reviewer f4d85031): EVENT-DRIVEN on the authoritative binding tail -
         // no polling. Every real login/logout/removal fires binding.onSessionStarted/Ended exactly
@@ -151,6 +152,7 @@ object VoiceUploadModule {
                 epoch = { accountStartup.state.projection.value?.enrollmentEpoch },
                 store = store,
             ),
+            publishTrigger = publishTrigger,
         )
     }
 
@@ -199,25 +201,38 @@ object VoiceUploadModule {
     fun provideRetentionPublishTrigger(
         sink: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink,
         producer: ContributionCaptureProducer,
+        accountStartup: VoiceSharingAccountStartup,
         @UploadTriggerScope scope: CoroutineScope,
     ): RetentionPublishTrigger {
-        val trigger = RetentionPublishTrigger(
+        // NOT attached here (reviewer 54635caa: a lazy @Singleton nobody requests establishes
+        // nothing): attachment happens in [UploadTrigger.start], the actual startup consumer.
+        return RetentionPublishTrigger(
             sink,
             producer,
-            models = ENGINE_MODEL_PROVENANCE,
+            fixedModels = ENGINE_FIXED_MODEL_PROVENANCE,
             stagesProvider = EngineStageProvenance::stagesFor,
+            // ONE coherent identity read under the REAL owner transaction: account/session from
+            // the ownership snapshot, epoch from the projection — all inside the same block.
+            coherentLiveIdentity = {
+                accountStartup.validateUnderOwnerTransaction { snap ->
+                    RetentionPublishTrigger.LiveIdentity(
+                        snap.accountName ?: "",
+                        snap.session,
+                        accountStartup.state.projection.value?.enrollmentEpoch,
+                    )
+                }
+            },
             dispatch = { body -> scope.launch { body() } },
         )
-        trigger.attach()
-        return trigger
     }
 
-    /** The REAL deployed backend set (record schema requires vad+wakeword+asr present). */
-    private val ENGINE_MODEL_PROVENANCE = listOf(
+    /**
+     * The FIXED app-deployment models (these do not vary per capture). The per-capture ASR and
+     * translation refs travel WITH the frozen capture context — never fixed labels here.
+     */
+    private val ENGINE_FIXED_MODEL_PROVENANCE = listOf(
         "vad" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("silero-vad", "4.0"),
         "wakeword" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("auris-wake", "1.2"),
-        "asr" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("sensevoice-small", "sherpa-onnx"),
-        "translation" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
         "router" to au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("lfm-intent", "0.3"),
     )
 }
@@ -239,6 +254,13 @@ class UploadTrigger(
      * future pre-registration checks.
      */
     private val identityRevocationWatcher: (suspend kotlinx.coroutines.CoroutineScope.() -> Unit)? = null,
+    /**
+     * THE engine→producer bridge (task73): requested through THIS constructor, so the Hilt
+     * binding is consumed by the actual startup path and [RetentionPublishTrigger.attach]
+     * happens at real start() — runtime attachment established by consumption, not by a lazy
+     * provider nobody calls (reviewer 54635caa).
+     */
+    private val publishTrigger: RetentionPublishTrigger? = null,
 ) {
     @Volatile
     private var started = false
@@ -249,6 +271,7 @@ class UploadTrigger(
     fun start() {
         if (started) return
         started = true
+        publishTrigger?.attach()
         identityRevocationWatcher?.let { watcher -> scope.launch { runCatching { watcher() } } }
         scope.launch {
             while (true) {

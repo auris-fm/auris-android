@@ -18,6 +18,16 @@ data class CaptureContext(
      * is ever refreshed from a newer projection or a later account.
      */
     val issuedAuthority: IssuedAuthority? = null,
+    /**
+     * THE ASR backend actually selected for THIS capture, frozen at issuance (reviewer
+     * 54635caa/spec: per-capture backend provenance is record truth). [ModelRef.None] is the
+     * honest absence — a capture with no observed ASR model is not publishable.
+     */
+    val asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef =
+        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
+    /** The translation provenance: the backend itself when it translates, else honest absence. */
+    val translationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef =
+        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
 )
 
 /**

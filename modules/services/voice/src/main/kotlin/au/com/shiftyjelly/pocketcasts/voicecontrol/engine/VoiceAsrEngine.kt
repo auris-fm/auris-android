@@ -182,7 +182,24 @@ class VoiceAsrEngine @Inject constructor(
                             // ownership then transfers to the sink. Refusal allocates NOTHING and
                             // leaves the recognition buffer untouched.
                             val initialSize = voiceAudioProcessor.speechPcmSize()
-                            val admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize)
+                            // PER-CAPTURE MODEL PROVENANCE (reviewer 54635caa): the ACTUAL
+                            // selected backend's model identity, frozen with the context. The
+                            // translation provenance is the backend itself when it translates,
+                            // ML Kit when the standalone stage will run, honest None otherwise.
+                            val spec = backend.requiredModel
+                            val asrRef = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named(
+                                spec.targetDir,
+                                spec.files.firstOrNull()?.filename ?: "",
+                            )
+                            // ML Kit's per-language model version is NOT observed at capture
+                            // time — the honest value is absence (None), never a fixed label.
+                            val translationRef =
+                                if (backend.capabilities.canTranslateToEnglish) {
+                                    asrRef
+                                } else {
+                                    au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None
+                                }
+                            val admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef, translationRef)
                             openContext = admission?.context
                             if (admission != null) {
                                 // Lease-protected initial allocation (reviewers 23cae70e b4 /

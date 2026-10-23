@@ -61,6 +61,13 @@ class RetainedCandidate internal constructor(val context: CaptureContext) {
     var sampleRateHz: Int = 16000
     var wakeState: SegmentObservation.WakeState = SegmentObservation.WakeState.NotDetected
     var outcome: CollectionOutcome? = null
+
+    /**
+     * EVERY joined outcome in join order (reviewer 54635caa): stage provenance reads the
+     * Recognized/Routed joins from THIS history, not from [outcome], which the terminal
+     * Executed join overwrites. Terminal joins are still refused after Executed/NotCollected.
+     */
+    val stageOutcomes = mutableListOf<CollectionOutcome>()
     var incrementalSamplesAccounted: Long = 0L
     var bytesCharged: Long = 0L
 }
@@ -482,6 +489,7 @@ class ContributionRetentionSink(
                 return false // terminal outcome already recorded
             }
             candidate.outcome = outcome
+            candidate.stageOutcomes.add(outcome)
             fired =
                 if (outcome is CollectionOutcome.Executed && candidate.pcm != null) candidate else null
         }

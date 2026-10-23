@@ -267,6 +267,49 @@ class RecordValidatorNegativeTest {
         build()
     }
 
+    /**
+     * THE PAIRING RULE MUST HOLD FOR A RECORD COMING BACK IN (reviewer 3180d15d).
+     *
+     * `RecordValidator` is the authority for a PERSISTED record, not the builder: a record written by
+     * an older build, another client, or a corrupted file arrives here as raw JSON. Since
+     * `observation_unavailable` was added to every stage's general reason set, a validator that only
+     * consulted `StageReasons.isAllowed` would ACCEPT `failed`/`not_run`/`cancelled` paired with it —
+     * exactly the pair both the builder and the Cloud intake refuse. So every stage x known state is
+     * exercised through the raw decoder, never through the builder.
+     */
+    @Test
+    fun `raw records pairing observation_unavailable with a known state are refused on every stage`() {
+        val stages = listOf("wake", "bleed", "asr", "translation", "routing", "execution")
+        val knownStates = listOf("not_run", "failed", "cancelled")
+        for (stage in stages) {
+            for (state in knownStates) {
+                val record = baseRecord()
+
+                @Suppress("UNCHECKED_CAST")
+                val observations = record["observations"] as MutableMap<String, Any?>
+                observations[stage] = mutableMapOf<String, Any?>(
+                    "state" to state,
+                    "reason" to "observation_unavailable",
+                )
+                val result = RecordValidator.validate(toNode(record))
+                assertTrue(
+                    "$stage/$state + observation_unavailable must be REFUSED by RecordValidator, got: $result",
+                    result is RecordValidator.Result.Rejected,
+                )
+            }
+        }
+        // And the legal pair must still be accepted on the same path, so this is not "refuse more".
+        for (stage in stages) {
+            val record = baseRecord()
+
+            @Suppress("UNCHECKED_CAST")
+            val observations = record["observations"] as MutableMap<String, Any?>
+            observations[stage] = mutableMapOf<String, Any?>("state" to "unknown", "reason" to "observation_unavailable")
+            val result = RecordValidator.validate(toNode(record))
+            assertTrue("$stage/unknown + observation_unavailable must stay ACCEPTED, got: $result", result is RecordValidator.Result.Ok)
+        }
+    }
+
     @Test
     fun `the baseline fixture stays accepted after the fixes`() {
         // Guards against "fix by refusing everything": the negative controls above must not have made

@@ -61,7 +61,10 @@ object StageFieldAllowlist {
 /** Enumerated per-stage reasons: an arbitrary sentence is refused (spec: enumerated reason). */
 object StageReasons {
     private val reasons: Map<StageName, Set<String>> = mapOf(
-        StageName.Wake to setOf("no_wake_detected", "below_threshold", "detector_disabled", "outcome_wait_expired", "observation_unavailable"),
+        // `detector_error` (spec 15:46Z): the wake detector THREW — a known failure, valid only with
+        // state failed. `below_threshold` and `detector_disabled` describe different known outcomes and
+        // must not be substituted for it.
+        StageName.Wake to setOf("no_wake_detected", "below_threshold", "detector_disabled", "detector_error", "outcome_wait_expired", "observation_unavailable"),
         StageName.Bleed to setOf("no_playback_reference", "reference_unavailable", "bleed_detector_disabled", "outcome_wait_expired", "observation_unavailable"),
         StageName.Asr to setOf("local_only_action", "rejected_by_wake", "provider_error", "outcome_wait_expired", "cancelled_by_user", "observation_unavailable"),
         StageName.Translation to setOf("source_language_target_language", "no_text", "provider_error", "outcome_wait_expired", "observation_unavailable"),
@@ -197,6 +200,10 @@ class ContributionRecordBuilder(
             // cancelled / timeout records keep their specific reasons.
             require(reason != "observation_unavailable" || entry.state == StageState.Unknown) {
                 "reason 'observation_unavailable' is only valid with state unknown (stage ${stage.wire})"
+            }
+            // spec 15:46Z: a detector throw is a KNOWN failure, so it must be recorded as one.
+            require(reason != "detector_error" || entry.state == StageState.Failed) {
+                "reason 'detector_error' is only valid with state failed (stage ${stage.wire})"
             }
             require(StageReasons.isAllowed(stage, reason)) { "reason '$reason' is not enumerated for ${stage.wire}" }
         } else {

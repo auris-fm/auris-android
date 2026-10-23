@@ -108,16 +108,44 @@ class ContributionRecordTest {
 
     private fun complete(b: ContributionRecordBuilder) = allStagesNotRun(allModelsNone(b))
 
+    //
+    // IDENTITY FIELDS ARE REQUIRED, NOT BLANK-TOLERATED (real-engine finding).
+    //
+    // The joined-path control submitted the record the engine actually emits and the Cloud intake
+    // refused it: `invalid_type app_version`. The cause is production wiring — `versionName` is null
+    // in some builds, `?: ""` wrote an empty string into a REQUIRED field, and the producer then
+    // returned null, so those captures were lost silently with nothing reported anywhere. A required
+    // identity field must be refused at construction with a clear message, not emitted blank and
+    // rejected remotely after the audio has been retained and queued.
+    //
+
     /**
-     * IDENTITY FIELDS ARE REQUIRED, NOT BLANK-TOLERATED (real-engine finding).
+     * DETECTOR_FAILURE IS A KNOWN FAILURE (spec 15:46Z, reviewer 6d68ac4a).
      *
-     * The joined-path control submitted the record the engine actually emits and the Cloud intake
-     * refused it: `invalid_type app_version`. The cause is production wiring — `versionName` is null
-     * in some builds, `?: ""` wrote an empty string into a REQUIRED field, and the producer then
-     * returned null, so those captures were lost silently with nothing reported anywhere. A required
-     * identity field must be refused at construction with a clear message, not emitted blank and
-     * rejected remotely after the audio has been retained and queued.
+     * The wake observer knows its detector threw, so the record must say `failed`, never `unknown`.
+     * `detector_error` is valid ONLY with state failed, and the two adjacent known reasons must not be
+     * substituted for it (they describe different outcomes).
      */
+    @Test
+    fun `detector_error is valid only with state failed and refused with every other state`() {
+        fun record(state: StageState) = runCatching {
+            complete(builder()).replaceStage(
+                StageName.Wake,
+                StageEntry(state, mapOf("reason" to RecordNode.Str("detector_error"))),
+            ).build(platform = "android", appVersion = "8.20", build = "1", audio = audio())
+        }
+        val accepted = record(StageState.Failed)
+        assertTrue("detector_error + failed must be accepted: ${accepted.exceptionOrNull()}", accepted.isSuccess)
+        for (state in listOf(StageState.Unknown, StageState.NotRun, StageState.Cancelled)) {
+            val refused = record(state)
+            assertTrue("detector_error must be refused with state ${state.wire}", refused.isFailure)
+            assertTrue(
+                "the refusal for ${state.wire} must name the pairing rule, was: ${refused.exceptionOrNull()?.message}",
+                refused.exceptionOrNull()?.message.orEmpty().contains("only valid with state failed"),
+            )
+        }
+    }
+
     @Test
     fun `blank app_version and build are refused at build time`() {
         for (blank in listOf("", "   ")) {

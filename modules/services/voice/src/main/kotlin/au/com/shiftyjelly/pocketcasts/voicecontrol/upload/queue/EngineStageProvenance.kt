@@ -41,8 +41,11 @@ object EngineStageProvenance {
                 SegmentObservation.WakeState.NotDetected ->
                     StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("no_wake_detected")))
 
+                // The observer KNOWS the detector threw, so this is a known failure — never unknown.
+                // Recording it as observation_unavailable would launder a known outcome into an
+                // unavailable observation (reviewer 6d68ac4a, spec 15:46Z).
                 SegmentObservation.WakeState.DetectorFailed ->
-                    StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable")))
+                    StageEntry(StageState.Failed, mapOf("reason" to RecordNode.Str("detector_error")))
             },
             // delta736d3180: honest unknown WITH the enumerated reason the schema requires —
             // the candidate carries no bleed observation at finalization; no specific cause claimed.

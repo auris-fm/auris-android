@@ -255,6 +255,15 @@ object RecordValidator {
         } else {
             val reason = (reasonNode as? RecordNode.Str)?.value ?: return null
             if (!StageReasons.isAllowed(stage, reason)) return null
+            // delta736d3180 pairing rule, enforced on the RECOVERY path too (reviewer 3180d15d):
+            // `observation_unavailable` means "normal execution supplied no trustworthy observation",
+            // so it is only meaningful with state unknown. Because the reason is in every stage's
+            // general set, checking membership alone would accept it beside not_run/failed/cancelled
+            // — pairs both the builder and the Cloud intake refuse. A persisted record must not be
+            // trusted locally in a shape it could never be uploaded in.
+            if (reason == "observation_unavailable" && state != StageState.Unknown) return null
+            // spec 15:46Z: a detector that THREW is a known failure, not an unavailable observation.
+            if (reason == "detector_error" && state != StageState.Failed) return null
         }
         // Per-stage value rules that the enum/scalar typing cannot express on its own.
         when (stage) {

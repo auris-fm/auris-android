@@ -95,11 +95,17 @@ class ContributionUploadWriterTerminationTest {
         return file
     }
 
-    private fun transport(port: Int, budgetMs: Long, maxConcurrent: Int = 2) = ContributionUploadTransport(
+    private fun transport(
+        port: Int,
+        budgetMs: Long,
+        maxConcurrent: Int = 2,
+        progress: AtomicInteger? = null,
+    ) = ContributionUploadTransport(
         endpoint = "http://127.0.0.1:$port/v1/contributions",
         authorization = { "Bearer test-token" },
         callTimeoutMs = budgetMs,
         maxConcurrentCalls = maxConcurrent,
+        onBodyProgressForTest = progress?.let { counter -> { counter.incrementAndGet() } },
     )
 
     @Test
@@ -109,11 +115,27 @@ class ContributionUploadWriterTerminationTest {
         val revoked = AtomicBoolean(false)
         val writerExited = CountDownLatch(1)
         val copyStarted = CountDownLatch(1)
+        // REAL backpressure: count emitted chunks and revoke only after writes have STALLED - a fixed
+        // sleep assumes the buffer filled, which is not evidence and proved flaky under load.
+        val writes = AtomicInteger(0)
+        val stalled = CountDownLatch(1)
 
         val file = File(tmp.root, "$id.recording.wav").also { it.writeBytes(ByteArray(8 * 1024 * 1024) { b -> (b % 251).toByte() }) }
+        val watcher = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }
+        watcher.submit {
+            var lastSeen = -1
+            var stallSamples = 0
+            while (stallSamples < 3) {
+                val now = writes.get()
+                stallSamples = if (now == lastSeen && now > 0) stallSamples + 1 else 0
+                lastSeen = now
+                if (stallSamples >= 3) stalled.countDown() else Thread.sleep(100)
+            }
+        }
+
         val result = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }.submit<ContributionUploadTransport.Response> {
             try {
-                transport(port, budgetMs = 60_000).upload(
+                transport(port, budgetMs = 60_000, progress = writes).upload(
                     id,
                     record(id),
                     file,
@@ -127,9 +149,10 @@ class ContributionUploadWriterTerminationTest {
                 writerExited.countDown()
             }
         }
-        // Wait until the writer is genuinely inside the transfer, then withdraw from another thread.
+        // Withdraw only when writes STALLED: chunks were emitted and stopped growing - the write is
+        // genuinely blocked against a peer that never reads.
         assertTrue("the writer entered the transfer", copyStarted.await(10, TimeUnit.SECONDS))
-        Thread.sleep(500) // let the socket buffer fill so the write is truly blocked
+        assertTrue("writes actually stalled (real backpressure)", stalled.await(30, TimeUnit.SECONDS))
         val withdrawnAt = System.nanoTime()
         revoked.set(true)
 

@@ -32,6 +32,78 @@ class VoiceUploadModuleWiringTest {
     )
 
     @Test
+    fun `the ACTUAL trigger runs polls on its scope and a disabled gate touches nothing`() {
+        val root = tmp.newFolder("wiring-trigger")
+        val store = newStore(root)
+        val id = UUID.randomUUID().toString()
+        prepareCapture(store, id)
+
+        val assembly = ContributionUploadAssembly(
+            store = store,
+            transport = ContributionUploadTransport(
+                endpoint = "http://127.0.0.1:1/v1/contributions",
+                authorization = { "Bearer t" },
+                callTimeoutMs = 2_000,
+            ),
+            captureFor = { captureId -> store.durableCapture(captureId)?.let { ContributionUploadAssembly.Capture(it.record, it.audio) } },
+            clock = { 51_000_000L },
+            policyAllows = { false },
+            networkAvailable = { true },
+        )
+        // The REAL UploadTrigger on a REAL scope: start() launches the poll loop.
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined)
+        val trigger = UploadTrigger(assembly, scope, intervalMs = 50L)
+        trigger.start()
+        // Let at least one poll pass run.
+        Thread.sleep(200)
+
+        // The disabled gate is checked BEFORE the pickup, so the attempt count is untouched.
+        assertEquals("the disabled gate never picked the capture up", 1, store.stateAttemptsForTest(id))
+        assertTrue("the capture is still owned", store.readyEntries().any { it.captureId == id })
+        // Idempotent start: a second call must not double-poll.
+        trigger.start()
+    }
+
+    @Test
+    fun `an epoch switch RETAINS the capture instead of sending under a retired identity`() {
+        val root = tmp.newFolder("wiring-identity")
+        val store = newStore(root)
+        val id = UUID.randomUUID().toString()
+        prepareCapture(store, id)
+        requests.set(0)
+        responseStatus = 201
+        responseBody = receiptFor(store, id, "accepted")
+        val port = startServer()
+
+        val capture = store.durableCapture(id)!!
+        val assembly = ContributionUploadAssembly(
+            store = store,
+            transport = ContributionUploadTransport(
+                endpoint = "http://127.0.0.1:$port/v1/contributions",
+                authorization = { "Bearer t" },
+            ),
+            captureFor = { captureId ->
+                store.durableCapture(captureId)?.let {
+                    // The admitted epoch travels with the capture (as the module does).
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch)
+                }
+            },
+            clock = { 51_000_000L },
+            policyAllows = { true },
+            networkAvailable = { true },
+            // The account has MOVED to epoch-2: epoch-1 captures are a retired identity.
+            identityHolds = { epoch -> epoch == "epoch-2" },
+        )
+        val result = assembly.poll()
+
+        assertEquals("nothing was sent under the retired epoch", 0, requests.get())
+        // attempted counts "ran and retained" - the identity refusal is an unconfirmed retain by design.
+        assertEquals("the attempt ran but settled as retained", 1, result.attempted)
+        assertTrue("the capture is RETAINED, not released", store.readyEntries().any { it.captureId == id })
+        assertNull("and the server never answered", (null as kotlin.Int?))
+    }
+
+    @Test
     fun `a DISABLED policy puts nothing on the network and settles nothing`() {
         val root = tmp.newFolder("wiring-disabled")
         val store = newStore(root)

@@ -33,9 +33,15 @@ class ContributionUploadAssembly(
     networkAvailable: () -> Boolean,
     /** Called after a VALIDATED acceptance releases the entry; never on an unvalidated one. */
     private val onAccepted: (generation: Long, captureId: String) -> Unit = { _, _ -> },
+    /**
+     * IDENTITY BINDING (reviewer 13eeec80): the admitted entry's enrollment epoch must still be the
+     * account's current epoch at send time. A switch - including during credential await, which the
+     * fence revocation covers - retains the capture instead of sending it under a retired identity.
+     */
+    private val identityHolds: ((epoch: String) -> Boolean)? = null,
 ) {
-    /** A durable capture plus the record that claims it. */
-    data class Capture(val record: RecordNode.Obj, val audio: File)
+    /** A durable capture plus the record that claims it, and the epoch the store admitted it under. */
+    data class Capture(val record: RecordNode.Obj, val audio: File, val enrollmentEpoch: String? = null)
 
     /**
      * The last transport answer per capture id. The caller's seams are synchronous and read-after-attempt;
@@ -63,6 +69,12 @@ class ContributionUploadAssembly(
             if (capture == null) {
                 // A local "nothing to send" is not a transport answer: the caller settles the thrown
                 // attempt as ambiguous (retain), which is what a missing capture deserves.
+                throw CaptureUnavailable(captureId)
+            }
+            // IDENTITY BINDING: an admitted epoch that is no longer the account's current epoch is a
+            // retired identity - the capture is RETAINED, never sent under it. This holds across the
+            // credential lookup too, because the check runs against the epoch at send time.
+            if (capture.enrollmentEpoch != null && identityHolds?.invoke(capture.enrollmentEpoch) == false) {
                 throw CaptureUnavailable(captureId)
             }
             if (isRevoked()) {

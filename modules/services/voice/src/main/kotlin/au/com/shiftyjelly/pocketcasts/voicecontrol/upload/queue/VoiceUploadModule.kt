@@ -22,10 +22,9 @@ import kotlinx.coroutines.launch
  * - the transport can produce credentials from the account startup's owner-published state;
  * - the store's own ownership fence still validates the generation the poll captured.
  *
- * The upload endpoint is deliberately NOT invented here: the pinned worker does not yet mount the
- * contributions route, so the transport is built blank and its authorization supplier returns null until
- * a real route is published. Wiring a guessed URL would be an activation change, which this module
- * explicitly does not do.
+ * The upload endpoint is deliberately blank until the route contract is confirmed with the cloud lane -
+ * the endpoint actually in service is not decidable from this repo, and wiring a guessed URL would be an
+ * activation change, which this module explicitly does not do.
  */
 @Module
 @InstallIn(SingletonComponent::class)
@@ -48,13 +47,25 @@ object VoiceUploadModule {
     fun provideUploadTransport(
         accountStartup: VoiceSharingAccountStartup,
     ): ContributionUploadTransport = ContributionUploadTransport(
-        // Blank until the contributions route is published; a blank endpoint cannot be requested.
+        // Blank until the route contract is confirmed with the cloud lane; a blank endpoint cannot be
+        // requested.
         endpoint = "",
-        // Bearer comes ONLY from the owner-published credential state, resolved per attempt.
+        // Bearer comes ONLY from the owner-published credential state, resolved per attempt. The epoch
+        // binding happens in [provideUploadAssembly]: a credential is only CONSULTED for a capture whose
+        // admitted epoch is still the account's current epoch.
         authorization = {
             accountStartup.credentials.current()?.bearer?.takeIf { it.isNotBlank() }
         },
     )
+
+    /** The account's current enrollment epoch, or null when no owner-published epoch is in force. */
+    @Provides
+    @Singleton
+    fun provideCurrentEnrollmentEpoch(
+        accountStartup: VoiceSharingAccountStartup,
+    ): () -> String? = {
+        accountStartup.state.projection.value?.enrollmentEpoch
+    }
 
     /**
      * The production assembly: eligibility gates compose the published policy and network availability;
@@ -75,9 +86,12 @@ object VoiceUploadModule {
             transport = transport,
             captureFor = { captureId ->
                 store.durableCapture(captureId)?.let {
-                    ContributionUploadAssembly.Capture(it.record, it.audio)
+                    // The admitted epoch travels WITH the capture so the assembly can bind the
+                    // credential lookup to the identity the entry was admitted under.
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch)
                 }
             },
+            identityHolds = { epoch -> accountStartup.state.projection.value?.enrollmentEpoch == epoch },
             clock = System::currentTimeMillis,
             // THE compiled-off gate: the remote-config snapshot is disabled by default, so the loop
             // below wakes, finds the gate closed, and touches nothing.
@@ -97,6 +111,14 @@ object VoiceUploadModule {
         assembly: ContributionUploadAssembly,
         @UploadTriggerScope scope: CoroutineScope,
     ): UploadTrigger = UploadTrigger(assembly, scope, POLL_INTERVAL_MS)
+
+    /** THE missing binding (reviewer 13eeec80): the trigger's scope, delegated to the app's scope. */
+    @Provides
+    @Singleton
+    @UploadTriggerScope
+    fun provideUploadTriggerScope(
+        @au.com.shiftyjelly.pocketcasts.coroutines.di.ApplicationScope appScope: CoroutineScope,
+    ): CoroutineScope = appScope
 }
 
 /** Distinct qualifier so the upload loop never shares a scope whose failure cancels unrelated work. */

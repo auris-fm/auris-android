@@ -71,10 +71,12 @@ class AndroidPlatformTtsEngineTest {
         // REVIEWER 486205ae: speak() used to return true after playSynthesized() even when the WAV
         // decode failed -- a file was synthesized, no audio was heard, and the caller still released
         // the delivery hold as clean. The typed incomplete failure is the truthful outcome.
-        // The fake opts out of writing a WAV, so the platform "succeeds" while the file the
-        // playback path reads is missing/undecodable -- the decode-failure half of the gap.
+        // The fake writes GARBAGE bytes for this utterance, so the platform "succeeds" while the
+        // file the playback path reads is undecodable -- the decode-failure half of the gap.
+        // (Corrupting the file itself, rather than omitting it, keeps the control deterministic:
+        // a leftover WAV from another test must not make the decode succeed.)
         val (wired, fake, _) = engineWithFakeSynthesizer()
-        fake.emitRealWav = false
+        fake.corruptNext = true
         fake.onInitialized?.invoke(true)
 
         val scope = CoroutineScope(Dispatchers.Default)
@@ -127,9 +129,11 @@ class AndroidPlatformTtsEngineTest {
         fake.listener?.onDone(fake.lastUtteranceId)
         runBlocking { job.join() }
         scope.cancel()
+        val incomplete = failure as? TtsPlaybackIncompleteException
         assertTrue(
-            "an unplayable synthesis must fail the utterance, not report success (got ${failure?.javaClass?.simpleName})",
-            failure is TtsPlaybackIncompleteException,
+            "an unplayable synthesis must fail the utterance with zero frames played " +
+                "(got ${failure?.javaClass?.simpleName}: ${failure?.message})",
+            incomplete != null && incomplete.message.orEmpty().contains("0 of 0 frames"),
         )
     }
 
@@ -512,6 +516,10 @@ class AndroidPlatformTtsEngineTest {
         @Volatile
         var refuseNext = false
         var emitRealWav = false
+
+        /** When set, the synthesis writes GARBAGE bytes instead of a WAV: decode must fail. */
+        @Volatile
+        var corruptNext = false
         var synthesizeCount = 0
             private set
         var lastUtteranceId: String = ""
@@ -537,6 +545,12 @@ class AndroidPlatformTtsEngineTest {
             synthesizeCount += 1
             if (refuseNext) {
                 return android.speech.tts.TextToSpeech.ERROR
+            }
+            if (corruptNext) {
+                file?.writeBytes(byteArrayOf(0x00, 0x01))
+                onSynthesize(utteranceId ?: "")
+                synthesizeQueued = true
+                return android.speech.tts.TextToSpeech.SUCCESS
             }
             // Write a real WAV only when a test asks for the write path to be reached: an empty file
             // makes speak() return before the write loop, so without this the truncation case would

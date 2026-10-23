@@ -139,34 +139,110 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
-    fun `a Combined reply whose synthesis failed falls back to the error earcon too`() = runTest {
+    fun `a Combined reply whose synthesis failed falls back and releases the hold as NOT delivered`() = runTest {
         // REVIEWER follow-up: the Combined branch used to discard speak()'s outcome -- it recorded
         // spoken_submitted and released as delivered even when synthesis never happened. The shared
-        // rule must cover BOTH branches.
-        whenever(earconPlayer.play(org.mockito.kotlin.any())).thenAnswer { inv ->
-            if (inv.getArgument<EarconId>(0) == EarconId.ERROR) EarconPlayer.AdmissionToken(9L) else null
-        }
+        // rule must cover BOTH branches. Here the fallback ERROR cue itself is REFUSED: the hold
+        // must release cancelled, and the submission must read spoken_failed.
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
+        signal.onWakeWordDetected()
+        val requestId = "6f9619ff-8b86-d011-b42d-00c04fc964fe"
+        signal.transferHoldToOutput(requestId, signal.holdCloudTurn(owner = 11L)!!)
+        assertTrue("precondition: the transferred hold must be registered", signal.hasOutputHold(requestId))
+        val localRenderer = AudioFeedbackRenderer(earconPlayer, ttsEngine, signal)
+        // BOTH cues refused: the fallback ERROR attempt itself cannot be admitted either, so the
+        // hold must release cancelled immediately (no cue will ever observe consumption).
+        whenever(earconPlayer.play(org.mockito.kotlin.any())).thenReturn(null)
         whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
         ttsEngine.speakResult = false
 
-        renderer.render(VoiceResponse.Combined(EarconId.SUCCESS, "the answer"))
-        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(2_500))
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture().use { capture ->
+            localRenderer.render(VoiceResponse.Combined(EarconId.SUCCESS, "the answer"), requestId = requestId)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(2_500))
 
-        // The refused SUCCESS cue is not delivered either; the fallback ERROR cue is.
-        verify(earconPlayer).play(EarconId.ERROR)
+            // The refused SUCCESS cue is not delivered either; the fallback ERROR cue is attempted.
+            verify(earconPlayer).play(EarconId.ERROR)
+            // The SUCCESS cue's own refusal also records a TurnFeedbackRendered line, so the
+            // submission predicate must name the fallback's spoken_failed kind.
+            val rendered = awaitLine(
+                capture,
+                { it.contains("reason=TurnFeedbackRendered") && it.contains(requestId) && it.contains("spoken_failed") },
+                "combined spoken_failed",
+            )
+            assertTrue("the failed synthesis must record spoken_failed: $rendered", rendered.contains("spoken_failed"))
+            // The hold release is recorded by the async render body right after the submission:
+            // poll rather than snapshot, or the check races the release.
+            val cancelledRelease = kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeoutOrNull(3_000) {
+                    var f: String? = null
+                    while (f == null) {
+                        f = capture.lines().firstOrNull {
+                            it.contains("event=Hold") && it.contains("reason=HoldCancelled") && it.contains(requestId)
+                        }
+                        if (f == null) kotlinx.coroutines.delay(10)
+                    }
+                    f
+                }
+            }
+            assertTrue(
+                "the hold must release CANCELLED when the fallback cue is refused (rendered=$rendered) " +
+                    "stillHeld=${signal.hasOutputHold(requestId)}",
+                cancelledRelease != null,
+            )
+        }
+        assertTrue("hold must be gone after the refused fallback", !signal.hasOutputHold(requestId))
+        localRenderer.release()
     }
 
     @Test
-    fun `a Combined reply with a consumed earcon but failed synthesis still falls back`() = runTest {
+    fun `a Combined reply with a consumed fallback error releases the hold as delivered`() = runTest {
+        // Mirror of the refused case with the ERROR cue CONSUMED: spoken_failed is still the
+        // submission (the spoken half never sounded), but the fallback delivered, so the hold
+        // releases as a completed output, not a cancellation.
+        val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
+        signal.onWakeWordDetected()
+        val requestId = "6f9619ff-8b86-d011-b42d-00c04fc964fd"
+        signal.transferHoldToOutput(requestId, signal.holdCloudTurn(owner = 12L)!!)
+        assertTrue("precondition: the transferred hold must be registered", signal.hasOutputHold(requestId))
+        val localRenderer = AudioFeedbackRenderer(earconPlayer, ttsEngine, signal)
         whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(3L))
         whenever(earconPlayer.play(EarconId.ERROR)).thenReturn(EarconPlayer.AdmissionToken(4L))
         whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
         ttsEngine.speakResult = false
 
-        renderer.render(VoiceResponse.Combined(EarconId.SUCCESS, "the answer"))
-        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(2_500))
+        au.com.shiftyjelly.pocketcasts.voicecontrol.diagnostics.LifecycleLogCapture().use { capture ->
+            localRenderer.render(VoiceResponse.Combined(EarconId.SUCCESS, "the answer"), requestId = requestId)
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(2_500))
 
-        verify(earconPlayer).play(EarconId.ERROR)
+            verify(earconPlayer).play(EarconId.ERROR)
+            // The SUCCESS cue's own refusal also records a TurnFeedbackRendered line, so the
+            // submission predicate must name the fallback's spoken_failed kind.
+            val rendered = awaitLine(
+                capture,
+                { it.contains("reason=TurnFeedbackRendered") && it.contains(requestId) && it.contains("spoken_failed") },
+                "combined spoken_failed",
+            )
+            assertTrue("the failed synthesis must record spoken_failed: $rendered", rendered.contains("spoken_failed"))
+            val releasedHold = kotlinx.coroutines.runBlocking {
+                kotlinx.coroutines.withTimeoutOrNull(3_000) {
+                    var f: String? = null
+                    while (f == null) {
+                        f = capture.lines().firstOrNull {
+                            it.contains("event=Hold") && it.contains("reason=HoldReleased") && it.contains(requestId)
+                        }
+                        if (f == null) kotlinx.coroutines.delay(10)
+                    }
+                    f
+                }
+            }
+            assertTrue("a consumed fallback must release the hold as delivered (rendered=$rendered)", releasedHold != null)
+            assertTrue(
+                "a consumed fallback must NOT cancel the hold",
+                capture.lines().none { it.contains("event=Hold") && it.contains("reason=HoldCancelled") && it.contains(requestId) },
+            )
+        }
+        assertTrue("hold must be gone after the consumed fallback", !signal.hasOutputHold(requestId))
+        localRenderer.release()
     }
 
     @Test

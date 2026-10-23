@@ -31,7 +31,9 @@ import kotlinx.coroutines.launch
 object VoiceUploadModule {
 
     private const val CAPTURES_ROOT = "voice-contributions"
-    private const val POLL_INTERVAL_MS = 60_000L
+
+    /** The production poll cadence; tests pin it so a control can observe a second poll. */
+    internal const val POLL_INTERVAL_MS = 60_000L
 
     @Provides
     @Singleton

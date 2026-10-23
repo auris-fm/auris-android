@@ -6,6 +6,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.RetainedCa
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName
+import java.util.UUID
 
 /**
  * THE ENGINE→PRODUCER PUBLISH TRIGGER (task73 final wiring): the ONE guarded bridge between
@@ -45,14 +46,29 @@ class RetentionPublishTrigger(
         sink.onReadyForPublication = ::onCandidate
     }
 
-    private fun onCandidate(candidate: RetainedCandidate) = dispatch {
+    private fun onCandidate(candidate: RetainedCandidate) {
         val id = candidate.context.captureId
+        // REJECTION/CANCEL-BEFORE-START (reviewer e2fe2056): if the dispatch itself throws
+        // synchronously (rejected executor, closed scope), the body's finally never runs - the
+        // release happens HERE instead. If the body is ACCEPTED but its scope is cancelled
+        // before execution, the candidate is still in the sink's deque, so the ordinary loss
+        // paths (purgeAllForRevocation on account move/withdrawal) release it; this trigger
+        // therefore requires a scope that is not cancelled during ordinary operation.
+        try {
+            dispatch { publishBody(candidate, id) }
+        } catch (t: Throwable) {
+            sink.releaseRetained(id)
+            throw t
+        }
+    }
+
+    private fun publishBody(candidate: RetainedCandidate, id: UUID) {
         try {
             val issued = candidate.context.issuedAuthority
             val pcm = candidate.pcm
             // GUARD 1+2: terminal executed outcome with retained audio and FROZEN full identity.
-            if (candidate.outcome !is CollectionOutcome.Executed || pcm == null) return@dispatch
-            if (issued?.accountName == null || issued.enrollmentEpoch == null) return@dispatch
+            if (candidate.outcome !is CollectionOutcome.Executed || pcm == null) return
+            if (issued?.accountName == null || issued.enrollmentEpoch == null) return
             val chunks = listOf(pcm to pcm.size)
             producer.publish(
                 id.toString(),

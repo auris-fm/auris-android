@@ -12,6 +12,8 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageName
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageState
 import java.util.UUID
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -176,31 +178,151 @@ class EngineToProducerPublishTest {
     }
 
     @Test
-    fun `dispatch is asynchronous-safe - the hook invocation itself does not run under the sink lock`() {
-        // Re-entrancy guard: a dispatch body that touches the sink (retainedCount) must not
-        // deadlock. Direct dispatch on the joinOutcome thread with a sink query inside proves
-        // the hook is invoked OUTSIDE the lock.
-        val root = tmp.newFolder("reentrant")
+    fun `the hook runs outside the sink lock - proven across threads with a barrier`() {
+        // JVM monitors are REENTRANT: a same-thread retainedCount() inside the dispatch body
+        // cannot distinguish "under the lock" from "outside". Proof: the body starts on a
+        // SECOND thread and waits for the main thread to successfully query the sink (latch A);
+        // the main thread only counts down latch A after joinOutcome has RETURNED. If the hook
+        // still ran under the sink lock, the main thread's query could not complete and both
+        // latches would time out — the test fails instead of deadlocking silently.
+        val root = tmp.newFolder("cross-thread")
         val store = newStore(root)
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
         val id = UUID.randomUUID()
         retainCapture(sink, CaptureContext(id, captureSession = 1L, routeClass = "Bluetooth", issuedAuthority = issued))
-        val captured = mutableListOf<UUID>()
+        val mainPastJoin = java.util.concurrent.CountDownLatch(1)
+        val bodySawMainProgress = java.util.concurrent.CountDownLatch(1)
+        val futures = java.util.concurrent.CopyOnWriteArrayList<java.util.concurrent.Future<*>>()
         val trigger = RetentionPublishTrigger(
             sink,
             producer(store),
             models = models,
             stagesProvider = { stages },
             dispatch = { body ->
-                sink.retainedCount()
-                body()
-                captured.add(id)
+                // Fire-and-forget submission: a production scope never blocks the joiner.
+                futures.add(
+                    java.util.concurrent.Executors.newSingleThreadExecutor().submit {
+                        assertTrue(mainPastJoin.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                        body()
+                        bodySawMainProgress.countDown()
+                    },
+                )
             },
         )
         trigger.attach()
 
         assertTrue(sink.joinOutcome(CollectionOutcome.Executed(id, dispatchedWithoutThrowing = true)))
-        assertEquals(listOf(id), captured)
-        assertNotNull(store.readyEntries().singleOrNull())
+        // joinOutcome has RETURNED here; query the sink while the body is blocked on latch A.
+        assertEquals(1, sink.retainedCount())
+        mainPastJoin.countDown()
+        assertTrue(bodySawMainProgress.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        futures.forEach { it.get(5, java.util.concurrent.TimeUnit.SECONDS) }
+        assertEquals(1, store.readyEntries().size)
+    }
+
+    @Test
+    fun `a synchronously rejected dispatch releases the retained charge and surfaces the failure`() {
+        val root = tmp.newFolder("rejected-dispatch")
+        val store = newStore(root)
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val id = UUID.randomUUID()
+        retainCapture(sink, CaptureContext(id, captureSession = 1L, routeClass = "Bluetooth", issuedAuthority = issued))
+        val trigger = RetentionPublishTrigger(
+            sink,
+            producer(store),
+            models = models,
+            stagesProvider = { stages },
+            dispatch = { _ -> throw java.util.concurrent.RejectedExecutionException("scope closed") },
+        )
+        trigger.attach()
+
+        var thrown: Throwable? = null
+        try {
+            sink.joinOutcome(CollectionOutcome.Executed(id, dispatchedWithoutThrowing = true))
+        } catch (t: Throwable) {
+            thrown = t
+        }
+        assertTrue("dispatch rejection must surface to the joiner", thrown is java.util.concurrent.RejectedExecutionException)
+        // Rejected BEFORE the body ever ran: the charge is released by the trigger itself.
+        assertEquals(0, store.readyEntries().size)
+        assertEquals(0L, sink.retainedBytes())
+        assertEquals(0, sink.retainedCount())
+    }
+
+    @Test
+    fun `composition with a real worker scope publishes off the joiner thread`() {
+        // The REAL dispatch shape (scope.launch on a worker dispatcher): joinOutcome returns
+        // immediately; the publish completes asynchronously on the worker.
+        val root = tmp.newFolder("worker-scope")
+        val store = newStore(root)
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val id = UUID.randomUUID()
+        retainCapture(sink, CaptureContext(id, captureSession = 1L, routeClass = "Bluetooth", issuedAuthority = issued))
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO)
+        val trigger = RetentionPublishTrigger(
+            sink,
+            producer(store),
+            models = models,
+            stagesProvider = { stages },
+            dispatch = { body -> scope.launch { body() } },
+        )
+        trigger.attach()
+        try {
+            val start = System.currentTimeMillis()
+            assertTrue(sink.joinOutcome(CollectionOutcome.Executed(id, dispatchedWithoutThrowing = true)))
+            // The joiner thread does not wait for encoding/IO.
+            assertTrue(System.currentTimeMillis() - start < 2000)
+            val deadline = start + 10_000
+            while (store.readyEntries().isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(20)
+            assertEquals(1, store.readyEntries().size)
+            val settle = start + 10_000
+            while (sink.retainedCount() > 0 && System.currentTimeMillis() < settle) Thread.sleep(20)
+            assertEquals(0, sink.retainedCount())
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `an identity transition between capture and publish refuses the record record-less`() {
+        // The owner's live account disappears (logout) after the capture was frozen: the
+        // trigger is authorized by the frozen identity, but the producer's LIVE read refuses.
+        val root = tmp.newFolder("identity-move")
+        val store = newStore(root)
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val id = UUID.randomUUID()
+        retainCapture(sink, CaptureContext(id, captureSession = 1L, routeClass = "Bluetooth", issuedAuthority = issued))
+        val liveAccount = arrayOf("a@x")
+        val trigger = RetentionPublishTrigger(
+            sink,
+            producer(store, account = { liveAccount[0] }),
+            models = models,
+            stagesProvider = { stages },
+            dispatch = { it() },
+        )
+        trigger.attach()
+        // Logout AFTER capture, BEFORE publish: the frozen authority no longer matches live.
+        liveAccount[0] = ""
+        assertTrue(sink.joinOutcome(CollectionOutcome.Executed(id, dispatchedWithoutThrowing = true)))
+        assertEquals(0, store.readyEntries().size)
+        assertEquals(0L, sink.retainedBytes())
+        assertEquals(0, sink.retainedCount())
+    }
+
+    @Test
+    fun `stage provenance derives only from actually observed values and keeps execution unverified`() {
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val id = UUID.randomUUID()
+        retainCapture(sink, CaptureContext(id, captureSession = 1L, routeClass = "Bluetooth", issuedAuthority = issued))
+        val candidate = sink.retainedCandidateForTest(id)!!
+        // Executed-only join (no Routed join retained): routing is honestly not_run.
+        sink.joinOutcome(CollectionOutcome.Executed(id, dispatchedWithoutThrowing = true))
+        val byName = EngineStageProvenance.stagesFor(candidate).toMap()
+        assertEquals(StageState.Completed, byName.getValue(StageName.Wake).state)
+        assertEquals(StageState.Unknown, byName.getValue(StageName.Bleed).state)
+        assertEquals(StageState.NotRun, byName.getValue(StageName.Asr).state)
+        assertEquals(StageState.NotRun, byName.getValue(StageName.Routing).state)
+        // THE UNVERIFIED RULE: a dispatch observation never becomes completed execution.
+        assertEquals(StageState.Unknown, byName.getValue(StageName.Execution).state)
     }
 }

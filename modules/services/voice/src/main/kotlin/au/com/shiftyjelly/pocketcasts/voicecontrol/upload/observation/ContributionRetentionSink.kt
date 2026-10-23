@@ -507,6 +507,9 @@ class ContributionRetentionSink(
 
     fun retainedCount(): Int = synchronized(lock) { candidates.size }
 
+    /** Test visibility: the live candidate for a retained capture, WITHOUT copying its PCM. */
+    fun retainedCandidateForTest(captureId: UUID): RetainedCandidate? = synchronized(lock) { candidates.firstOrNull { it.context.captureId == captureId } }
+
     /** Test/diagnostic: total bytes currently charged to this sink across all captures. */
     fun totalChargedBytesForTest(): Long = synchronized(lock) {
         candidates.sumOf { it.bytesCharged } + (openPrefix?.chargedBytes ?: 0L) + tokens.values.sumOf { it.bytes }

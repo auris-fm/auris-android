@@ -82,6 +82,15 @@ class ContributionRetentionSink(
     /** Invoked when the sink ends retention for a capture (budget/cap refusal), post-terminal. */
     var onRetentionEnded: ((CaptureContext) -> Unit)? = null
 
+    /**
+     * THE GUARDED PUBLISH HOOK (task73): invoked ONCE outside the sink lock when a retained
+     * capture records its TERMINAL Executed outcome with retained PCM. The engine's execution
+     * join is the only signal that reaches publication; Routed/Recognized-only captures never
+     * fire it. The receiver owns the candidate snapshot (re-reads [RetainedCandidate.pcm],
+     * finishes with [releaseRetained]); invocations are dispatched, never run under `lock`.
+     */
+    var onReadyForPublication: ((RetainedCandidate) -> Unit)? = null
+
     private val lock = Any()
     private var openPrefix: OpenPrefix? = null
     private val candidates = ArrayDeque<RetainedCandidate>()
@@ -466,14 +475,34 @@ class ContributionRetentionSink(
 
     /** Join an outcome by the FROZEN capture id; unknown/evicted ids are refused, never guessed. */
     fun joinOutcome(outcome: CollectionOutcome): Boolean {
+        var fired: RetainedCandidate? = null
         synchronized(lock) {
             val candidate = candidates.find { it.context.captureId == outcome.captureId } ?: return false
             if (candidate.outcome is CollectionOutcome.Executed || candidate.outcome is CollectionOutcome.NotCollected) {
                 return false // terminal outcome already recorded
             }
             candidate.outcome = outcome
-            return true
+            fired =
+                if (outcome is CollectionOutcome.Executed && candidate.pcm != null) candidate else null
         }
+        // HOOK OUTSIDE THE LOCK (dispatched, never re-entrant): receiver re-validates state.
+        if (fired != null) onReadyForPublication?.invoke(fired)
+        return true
+    }
+
+    /**
+     * Ends retention for one capture after the publish attempt: releases the retained charge
+     * EXACTLY ONCE, drops the PCM, and removes the candidate. Idempotent by capture id.
+     */
+    fun releaseRetained(captureId: UUID): Boolean {
+        synchronized(lock) {
+            val removed = candidates.firstOrNull { it.context.captureId == captureId } ?: return false
+            candidates.remove(removed)
+            budget.release(removed.bytesCharged)
+            removed.bytesCharged = 0L
+            removed.pcm = null
+        }
+        return true
     }
 
     fun retainedCount(): Int = synchronized(lock) { candidates.size }

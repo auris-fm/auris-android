@@ -446,10 +446,20 @@ class EngineToProducerPublishTest {
     /**
      * A THROWN DETECTOR REACHES THE PRODUCED RECORD AS A KNOWN FAILURE (reviewer 0ee062be, spec 15:46Z).
      *
-     * The mapping control alone would only prove an in-memory decision. This drives the whole path —
-     * engine observation with WakeState.DetectorFailed, join, engine provenance, real producer — and
-     * then RE-DECODES the persisted record, so what is asserted is the record a recovery would read,
-     * not the object still in memory.
+     * The mapping control alone would only prove an in-memory decision. This drives the path — an
+     * INJECTED engine observation with WakeState.DetectorFailed, join, engine provenance, real
+     * producer — and then RE-DECODES the persisted record.
+     *
+     * SCOPE, stated so nobody reads more into it: this control injects the engine OBSERVATION. It does
+     * not exercise the detector's own throw site, i.e. it does not prove the real detector actually
+     * emits DetectorFailed when speech detection fails. It proves that the state, once observed,
+     * survives into the record a recovery would read.
+     *
+     * The assertion reads the DECODED record, never the in-memory candidate (reviewer b5ed5d2c):
+     * recomputing provenance from the candidate would re-read the same input the mapping came from, so
+     * a producer that persisted `wake=unknown` would still pass. Verified by mutation — making the
+     * producer persist the wrong pair fails this assertion with
+     * "the PERSISTED wake state must be a known failure" (receipt: detector-error-mutant.log).
      */
     @Test
     fun `a failed wake detector is persisted as wake failed with detector_error`() {
@@ -499,9 +509,17 @@ class EngineToProducerPublishTest {
             "the persisted record must be ACCEPTED by the recovery validator, got: $decoded",
             decoded is RecordValidator.Result.Ok,
         )
-        val afterRecovery = EngineStageProvenance.stagesFor(candidate).toMap().getValue(StageName.Wake)
-        assertEquals(StageState.Failed, afterRecovery.state)
-        assertEquals("detector_error", (afterRecovery.fields.getValue("reason") as RecordNode.Str).value)
+        // THE ASSERTION MUST READ THE DECODED RECORD, NOT THE IN-MEMORY CANDIDATE (reviewer b5ed5d2c).
+        // Recomputing `EngineStageProvenance.stagesFor(candidate)` here would re-read the same candidate
+        // the mapping came from, so a producer that persisted `wake=unknown` would still pass. The
+        // decoded observation is the only place the persisted pair is actually observed.
+        val decodedWake = (decoded as RecordValidator.Result.Ok).record.observations.getValue(StageName.Wake)
+        assertEquals("the PERSISTED wake state must be a known failure", StageState.Failed, decodedWake.state)
+        assertEquals(
+            "the PERSISTED wake reason must be detector_error",
+            "detector_error",
+            (decodedWake.fields.getValue("reason") as RecordNode.Str).value,
+        )
     }
 
     @Test

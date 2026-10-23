@@ -120,6 +120,8 @@ class PocketCastsApplication :
 
     @Inject lateinit var voiceCollectionStartup: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionStartup
 
+    @Inject lateinit var voiceUploadTrigger: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.UploadTrigger
+
     @Inject lateinit var analyticsController: AnalyticsController
 
     @Inject lateinit var downloadStatisticsReporter: DownloadStatisticsReporter
@@ -249,6 +251,9 @@ class PocketCastsApplication :
                 voiceSharingAccountStartup.initializeOnAppStart()
                 // Loss subscriptions (accounts/enrollment/policy/lease-deadline) + sink wiring.
                 voiceCollectionStartup.initializeOnAppStart()
+                // Upload poll loop: compiled-off (policy disabled by default, blank endpoint), so
+                // starting it puts nothing on the network until every eligibility gate opens.
+                voiceUploadTrigger.start()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

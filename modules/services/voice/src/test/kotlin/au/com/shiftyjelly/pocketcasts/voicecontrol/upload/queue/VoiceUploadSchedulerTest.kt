@@ -107,6 +107,46 @@ class VoiceUploadSchedulerTest {
         )
     }
 
+    /**
+     * FACTORY EVIDENCE, SOURCE LEVEL ONLY (reviewer request).
+     *
+     * What this proves: the drain worker is constructible from the WorkManager input data through an
+     * explicit factory, and running it invokes the module's own drain rather than a stand-in.
+     *
+     * What this does NOT prove, stated plainly: the literal production `HiltWorkerFactory` graph is
+     * never executed here. That requires a device or an instrumented (HiltAndroidTest) run, which this
+     * source-only lane does not do. Construction through the app's real factory is therefore
+     * COMPILATION evidence only, and it is marked unverified rather than implied.
+     */
+    @Test
+    fun `the drain worker is constructible through an explicit factory and invokes the module drain`() {
+        var drains = 0
+        val factory = object : androidx.work.WorkerFactory() {
+            override fun createWorker(
+                appContext: android.content.Context,
+                workerClassName: String,
+                workerParameters: androidx.work.WorkerParameters,
+            ): androidx.work.ListenableWorker? {
+                // Only the registered drain type is produced here; anything else would be a
+                // misconfiguration this control wants to fail on, not silently satisfy.
+                if (workerClassName != VoiceUploadDrainWorker::class.java.name) return null
+                // The MODULE seam, not a stand-in: VoiceUploadDrain is what production injects.
+                val drain = object : VoiceUploadDrain {
+                    override fun drainOnce() {
+                        drains += 1
+                    }
+                }
+                return VoiceUploadDrainWorker(appContext, workerParameters, drain)
+            }
+        }
+        val worker = androidx.work.testing.TestListenableWorkerBuilder<VoiceUploadDrainWorker>(
+            ApplicationProvider.getApplicationContext(),
+        ).setWorkerFactory(factory).build()
+        val expected = worker.doWork()
+        assertEquals("the worker must report success so it is not rescheduled by failure", androidx.work.ListenableWorker.Result.success(), expected)
+        assertEquals("running the worker must invoke the module drain exactly once", 1, drains)
+    }
+
     @Test
     fun `the periodic cadence cannot go below the platform floor`() {
         var refused = false

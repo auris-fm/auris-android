@@ -18,13 +18,30 @@ import kotlinx.coroutines.CoroutineScope
 @InstallIn(SingletonComponent::class)
 object VoiceObservationModule {
 
+    /**
+     * The durable local stop (reviewer 9156a8ea). File-backed so the user's decision survives a
+     * process restart; the authority consults it at every decision, so a pending or failed
+     * withdrawal cannot silently resume collection.
+     */
+    @Provides
+    @Singleton
+    fun provideLocalWithdrawalIntent(
+        persistence: FileWithdrawalIntentPersistence,
+    ): LocalWithdrawalIntentStore = LocalWithdrawalIntentStore(persistence)
+
     @Provides
     @Singleton
     fun provideCollectionAuthority(
         policyProvider: VoiceSharingPolicyProvider,
         accountStartup: VoiceSharingAccountStartup,
         collectionTx: CollectionAuthorityTransaction,
-    ): CollectionAuthority = CollectionAuthority(policyProvider, accountStartup, collectionTx)
+        localWithdrawalIntent: LocalWithdrawalIntentStore,
+    ): CollectionAuthority = CollectionAuthority(
+        policyProvider,
+        accountStartup,
+        collectionTx,
+        localWithdrawalIntent,
+    )
 
     /** Aggregate collection-retention budget: one shared cap across open/ready/queued owners. */
     @Provides

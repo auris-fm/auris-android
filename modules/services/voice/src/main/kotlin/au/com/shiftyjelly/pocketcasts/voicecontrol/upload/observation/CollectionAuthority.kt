@@ -26,6 +26,13 @@ class CollectionAuthority @Inject constructor(
     private val policyProvider: VoiceSharingPolicyProvider,
     private val accountStartup: VoiceSharingAccountStartup,
     private val collectionTx: CollectionAuthorityTransaction,
+    /**
+     * THE LOCAL STOP (reviewer 9156a8ea). Durable, not derived: a user who turns sharing off has
+     * decided, and that decision must hold while the withdrawal request is in flight and after it
+     * fails. Without this the authority kept reading the server projection, which still says
+     * enrolled, so the next capture admitted itself under the new queue generation.
+     */
+    private val localWithdrawalIntent: LocalWithdrawalIntentStore,
 ) {
 
     // Enrollment evidence bound to ONE owner session; any session change clears it fail-closed.
@@ -142,13 +149,19 @@ class CollectionAuthority @Inject constructor(
         val ownership = accountStartup.authoritySnapshot()
         val hasSession = ownership.accountName != null && ownership.session > 0L
         val projection = accountStartup.state.projection.value
+        // THE LOCAL STOP OVERRIDES THE SERVER'S STALE VIEW. Every other condition here reads
+        // server-derived state; this one reads what the user actually asked for, which is why it is
+        // checked first and independently. A pending or failed withdrawal leaves the projection
+        // saying enrolled, and without this clause collection would silently resume.
+        val localIntentPermits = localWithdrawalIntent.collectionPermittedByLocalIntent(projection)
         val enrolledThisSession =
             hasSession && establishedSession == ownership.session &&
                 projection != null &&
                 projection.voiceSharingEnrolled &&
                 projection.enrollmentEpoch != null &&
                 projection.acceptedDisclosureVersion != null &&
-                projection.withdrawalState == WithdrawalState.ACTIVE
+                projection.withdrawalState == WithdrawalState.ACTIVE &&
+                localIntentPermits
         // Full revocation covers: no policy, no session, OR enrollment not established for this
         // session (missing composition fails closed — flag+login alone cannot authorize retention).
         val fullRevocation = !permitted || !hasSession || !enrolledThisSession

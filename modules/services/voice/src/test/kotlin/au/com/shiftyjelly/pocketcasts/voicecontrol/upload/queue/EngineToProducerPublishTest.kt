@@ -142,8 +142,8 @@ class EngineToProducerPublishTest {
 
     private fun producer(store: ContributionStore, account: () -> String = { "a@x" }, session: () -> Long = { 7L }) = ContributionCaptureProducer(
         store,
-        appVersion = "8.20",
-        appBuild = "12345",
+        appVersion = { "8.20" },
+        appBuild = { "12345" },
         captureSessionId = { "00000000-0000-4000-8000-000000000000" },
         enrollmentAccount = account,
         enrollmentSession = session,
@@ -618,8 +618,8 @@ class EngineToProducerPublishTest {
         // under the SAME lock the transaction holds.
         val producer1 = ContributionCaptureProducer(
             store,
-            appVersion = "8.20",
-            appBuild = "12345",
+            appVersion = { "8.20" },
+            appBuild = { "12345" },
             captureSessionId = { "00000000-0000-4000-8000-000000000000" },
             enrollmentAccount = {
                 val a = owner.authoritySnapshot().accountName ?: "<null>"

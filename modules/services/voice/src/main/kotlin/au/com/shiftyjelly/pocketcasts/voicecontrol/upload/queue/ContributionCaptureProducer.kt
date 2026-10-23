@@ -31,9 +31,12 @@ class ContributionCaptureProducer(
     private val originalFormat: String = "pcm_s16le",
     /** Which converter produced the WAV the store persists. Bump when the pipeline changes. */
     private val conversionVersion: String = "v1",
-    /** The REAL binary provenance: the app version and build that produced the audio. */
-    private val appVersion: String,
-    private val appBuild: String,
+    /**
+     * The REAL binary provenance: the app version and build that produced the audio, resolved when the
+     * record is built (a null versionName at construction must not be frozen into an empty wire field).
+     */
+    private val appVersion: () -> String,
+    private val appBuild: () -> String,
     /**
      * The capture session's REAL identity, supplied by the session that owns the recording - never
      * derived from the capture id, which is a capture-scoped value, not a session-scoped one.
@@ -110,10 +113,21 @@ class ContributionCaptureProducer(
         )
         for ((name, ref) in models) builder.model(name, ref)
         for ((stage, entry) in stages) builder.stage(stage, entry)
+        // A blank identity is a WIRING defect, not a bad capture: the Cloud intake refuses an empty
+        // app_version/build, so returning null here would drop the capture silently after its audio
+        // was retained and queued, with nothing reported anywhere. Fail loudly instead, and name the
+        // field, so the defect surfaces where it is introduced.
+        val version = appVersion()
+        val buildNumber = appBuild()
+        check(version.isNotBlank() && buildNumber.isNotBlank()) {
+            "capture identity is incomplete (app_version='$version', build='$buildNumber'): the " +
+                "producer was constructed without real binary provenance, and the Cloud intake would " +
+                "refuse this record"
+        }
         val record = builder.build(
             platform = "android",
-            appVersion = appVersion,
-            build = appBuild,
+            appVersion = version,
+            build = buildNumber,
             audio = block,
         )
         val metadata = CanonicalJson.canonicalBytes(record)

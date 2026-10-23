@@ -23,20 +23,51 @@ class ContributionRecordTest {
      */
     @Test
     fun `observation_unavailable is accepted only with state unknown and refused with every other state`() {
-        fun record(state: StageState) = runCatching {
-            // A complete otherwise-valid record, with ONLY the bleed stage set to the delta pair.
+        // ALL SIX STAGES (spec 52e0f608): the rule is a shared reason, so applying it to bleed alone
+        // would leave five stages where an unenumerated reason could be silently admitted.
+        fun record(stage: StageName, state: StageState) = runCatching {
             complete(builder()).replaceStage(
-                StageName.Bleed,
+                stage,
                 StageEntry(state, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
             ).build(platform = "android", appVersion = "8.20", build = "1", audio = audio())
         }
 
-        assertTrue("unknown + observation_unavailable is accepted", record(StageState.Unknown).isSuccess)
-        for (state in listOf(StageState.NotRun, StageState.Failed, StageState.Cancelled)) {
+        val stages = listOf(
+            StageName.Wake,
+            StageName.Bleed,
+            StageName.Asr,
+            StageName.Translation,
+            StageName.Routing,
+            StageName.Execution,
+        )
+        for (stage in stages) {
+            val accepted = record(stage, StageState.Unknown)
             assertTrue(
-                "observation_unavailable refused with state " + state.wire,
-                record(state).isFailure,
+                "unknown + observation_unavailable must be accepted on ${stage.wire}: ${accepted.exceptionOrNull()}",
+                accepted.isSuccess,
             )
+            for (state in listOf(StageState.Completed, StageState.NotRun, StageState.Failed, StageState.Cancelled)) {
+                val refused = record(stage, state)
+                assertTrue(
+                    "observation_unavailable must be refused with state ${state.wire} on ${stage.wire}",
+                    refused.isFailure,
+                )
+                // The refusal must come from the RULE, not from an incidental rejection a validator
+                // lacking the reason entirely would also produce. A completed stage is refused for a
+                // separate reason — a completed stage may not carry a reason at all — so that cell
+                // asserts THAT rule; every known non-completed state must name the pairing rule.
+                val message = refused.exceptionOrNull()?.message.orEmpty()
+                val expected = if (state == StageState.Completed) {
+                    "reason must be absent"
+                } else {
+                    "only valid with state unknown"
+                }
+                assertTrue(
+                    "the refusal on ${stage.wire}/${state.wire} must come from the rule " +
+                        "(expected \"$expected\"), was: $message",
+                    message.contains(expected),
+                )
+            }
         }
     }
 
@@ -76,6 +107,38 @@ class ContributionRecordTest {
         .stage(StageName.Execution, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("client_refused"))))
 
     private fun complete(b: ContributionRecordBuilder) = allStagesNotRun(allModelsNone(b))
+
+    /**
+     * IDENTITY FIELDS ARE REQUIRED, NOT BLANK-TOLERATED (real-engine finding).
+     *
+     * The joined-path control submitted the record the engine actually emits and the Cloud intake
+     * refused it: `invalid_type app_version`. The cause is production wiring — `versionName` is null
+     * in some builds, `?: ""` wrote an empty string into a REQUIRED field, and the producer then
+     * returned null, so those captures were lost silently with nothing reported anywhere. A required
+     * identity field must be refused at construction with a clear message, not emitted blank and
+     * rejected remotely after the audio has been retained and queued.
+     */
+    @Test
+    fun `blank app_version and build are refused at build time`() {
+        for (blank in listOf("", "   ")) {
+            val badVersion = runCatching {
+                complete(builder()).build(platform = "android", appVersion = blank, build = "1", audio = audio())
+            }
+            assertTrue("app_version '$blank' must be refused", badVersion.isFailure)
+            assertTrue(
+                "the refusal must name app_version, was: ${badVersion.exceptionOrNull()?.message}",
+                badVersion.exceptionOrNull()?.message.orEmpty().contains("app_version"),
+            )
+            val badBuild = runCatching {
+                complete(builder()).build(platform = "android", appVersion = "8.20", build = blank, audio = audio())
+            }
+            assertTrue("build '$blank' must be refused", badBuild.isFailure)
+            assertTrue(
+                "the refusal must name build, was: ${badBuild.exceptionOrNull()?.message}",
+                badBuild.exceptionOrNull()?.message.orEmpty().contains("build"),
+            )
+        }
+    }
 
     @Test
     fun `canonical form sorts keys and carries the pinned wire shape`() {

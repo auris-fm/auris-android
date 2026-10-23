@@ -234,8 +234,14 @@ object VoiceUploadModule {
         val pkg = context.packageManager.getPackageInfo(context.packageName, 0)
         return ContributionCaptureProducer(
             store,
-            appVersion = pkg.versionName ?: "",
-            appBuild = pkg.longVersionCode.toString(),
+            // SUPPLIER, not a captured value: `versionName` is null in builds without a version (and
+            // in some test/embedded runtimes), and the old `?: ""` wrote an EMPTY string into a
+            // required wire field, which the Cloud intake refuses — the producer then dropped every
+            // capture silently. Resolving lazily means a build that gains a version is picked up
+            // without depending on when this singleton happened to be constructed, and the producer's
+            // own precondition reports the defect loudly if it is still blank.
+            appVersion = { context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "" },
+            appBuild = { context.packageManager.getPackageInfo(context.packageName, 0).longVersionCode.toString() },
             captureSessionId = { accountStartup.authoritySnapshot().session.toString() },
             enrollmentAccount = { accountStartup.authoritySnapshot().accountName ?: "" },
             enrollmentSession = { accountStartup.authoritySnapshot().session },

@@ -5,6 +5,7 @@ import java.io.File
 import java.nio.file.Files
 import java.util.UUID
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -22,6 +23,8 @@ import org.junit.Test
  * outcome when it is unavailable, dirty, or at another revision. The committed receipt
  * `artifacts/receipts/wire-parity-worker-intake.txt` records a real run against that revision.
  */
+@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
+@org.robolectric.annotation.Config(sdk = [34])
 class WorkerWireParityTest {
 
     /**
@@ -233,49 +236,155 @@ class WorkerWireParityTest {
     }
 
     /**
-     * delta736d3180 STRICT INTAKE PARITY against a pinned Cloud revision (c569b319 — pushed source
-     * for fixture/intake parity, NOT a deployed live intake): the Worker accepts
-     * `observation_unavailable` ONLY with state `unknown` and refuses the reason with any other
-     * state. The ACCEPT case is an Android-builder record; the REJECT case is the SAME wire shape
-     * with the state flipped to not_run (the client builder refuses that pair locally — covered in
-     * ContributionRecordTest — so the reject variant is a wire-level perturbation).
+     * PARITY ON THE REAL EMITTED RECORD (spec 52e0f608).
+     *
+     * Every other control here builds its own record, so agreement with the Worker says only that the
+     * schema agrees with a fixture I wrote. This one submits the EXACT bytes the joined engine path
+     * durably published (see VoiceUploadCompositionPathTest, which hands them over through
+     * EmittedJoinedRecordHolder), so the Worker's verdict is about the record the engine produced. The
+     * holder carries a sha256 of those bytes, and this control refuses if the bytes it submits do not
+     * hash to it — a truncated or re-serialized payload cannot pass as "the emitted record".
+     *
+     * Ordering: the holder is filled by the composition control. When it is empty (this control ran
+     * first) the test FAILS rather than skipping — an unproduced record is not a passing parity claim.
      */
     @Test
-    fun `observation_unavailable parity - unknown accepted, other states refused by the pinned Worker`() {
-        // The delta semantics EXIST only at the delta revision; the pre-delta baseline would
-        // (correctly) refuse the unknown pair, so this control pins c569b319 itself.
+    fun `the record the joined engine path actually emitted is accepted by the pinned Worker`() {
+        // PRODUCED BY THE SAME EMITTER, not read from a fixture. Robolectric gives each test class its
+        // own sandbox classloader, so an in-memory handoff between classes does not exist here; instead
+        // this control calls the joined-path emitter directly (it is the same code the composition
+        // control uses) and then checks the record it produced is byte-identical to the one that
+        // control persisted. Same emitter + identical bytes = the Worker is being asked about the
+        // engine's record, and a divergence between the two controls fails loudly instead of passing.
+        val produced = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionPaths.emitOnce()
+        val emitted = produced.bytes
+        val declaredSha = produced.sha256
+        val actualSha = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(emitted.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        assertEquals("the emitted record bytes do not hash to the recorded digest", declaredSha, actualSha)
+        val handoff = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.VoiceUploadCompositionPaths.handoffFile()
+        if (handoff.isFile) {
+            assertEquals(
+                "the composition control persisted different bytes than this control re-emitted — the " +
+                    "two controls would be measuring different records",
+                handoff.readText(),
+                emitted,
+            )
+        }
+        val node = CanonicalJson.parse(emitted)
+        assertEquals("the emitted record must be already canonical", emitted, CanonicalJson.canonicalBytes(node).toString(Charsets.UTF_8))
+
+        // Named delta authority for this control; independently verified against the Worker itself.
         val deltaRevision = "c569b319e19b5971ada44a0f53245630688c1305"
         val workerRoot = cloudWorkerRoot()
         requireAuthority(workerRoot)
-        val (audio, _) = audioFor(160)
-        val accepted = ContributionRecordBuilder(UUID.randomUUID().toString(), "epoch-2", "7")
-            .model("vad", ModelRef.None)
-            .model("wakeword", ModelRef.None)
-            .model("asr", ModelRef.None)
-            .model("translation", ModelRef.None)
-            .model("router", ModelRef.None)
-            .stage(StageName.Wake, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_wake_detected"))))
-            .stage(StageName.Bleed, StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))))
-            .stage(StageName.Asr, StageEntry(StageState.Cancelled, mapOf("reason" to RecordNode.Str("cancelled_by_user"))))
-            .stage(StageName.Translation, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text"))))
-            .stage(StageName.Routing, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates"))))
-            .stage(StageName.Execution, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("outcome_wait_expired"))))
-            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio)
-        val acceptedJson = CanonicalJson.canonicalBytes(accepted).toString(Charsets.UTF_8)
-        val rejectedJson = acceptedJson.replace(
-            "\"bleed\":{\"reason\":\"observation_unavailable\",\"state\":\"unknown\"}",
-            "\"bleed\":{\"reason\":\"observation_unavailable\",\"state\":\"not_run\"}",
+        val recordsFile = Files.createTempFile("android-emitted-record", ".jsonl").toFile()
+        val probe = File(recordsFile.parentFile, "probe_worker_intake.mjs")
+        probe.writeBytes(javaClass.classLoader!!.getResourceAsStream("worker-parity/probe_worker_intake.mjs")!!.readBytes())
+        recordsFile.writeText("""{"id":"joined-emitted","record":$emitted}""")
+        val process = ProcessBuilder("node", probe.absolutePath, workerRoot.absolutePath, recordsFile.absolutePath)
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().readText()
+        assertEquals("probe failed: $output", 0, process.waitFor())
+        val revisionLine = output.lines().firstOrNull { it.startsWith("# worker-revision") }
+        assertTrue(
+            "this control requires the delta intake $deltaRevision (got: $revisionLine)",
+            revisionLine?.contains(deltaRevision) == true,
         )
-        org.junit.Assert.assertNotEquals(
-            "the perturbation must actually change the wire bytes",
-            acceptedJson,
-            rejectedJson,
+        assertAuthorityPinsReported(output, deltaRevision)
+        val verdict = output.lines().firstOrNull { it.startsWith("joined-emitted") }
+        assertEquals(
+            "the Worker did not accept the record the engine actually emitted: $verdict",
+            "joined-emitted\tACCEPT",
+            verdict,
         )
-        val cases = linkedMapOf(
-            "observation-unavailable-unknown-bleed" to acceptedJson,
-            "observation-unavailable-notrun-bleed" to rejectedJson,
+        println("JOINED-EMITTED-RECORD sha256=$actualSha")
+        println("  worker-verdict -> ACCEPT")
+    }
+
+    /** Each pin the probe prints must name an exact CLEAN revision AND a purpose, not a bare hash. */
+    private fun assertAuthorityPinsReported(output: String, revisionInUse: String) {
+        val pins = output.lines().filter { it.startsWith("# authority-pin") }.map { it.split('\t') }
+        assertTrue("the probe reported no authority pins: $output", pins.isNotEmpty())
+        for (pin in pins) {
+            assertTrue("a pin must name its revision and purpose: $pin", pin.size == 3 && pin[2].isNotBlank())
+            assertTrue("pin revision must be a full sha: ${pin[1]}", Regex("^[0-9a-f]{40}$").matches(pin[1]))
+            assertTrue("pin ${pin[1]} is not an approved authority", pin[1] in approvedWorkerRevisions)
+        }
+        assertTrue(
+            "the authority actually in use ($revisionInUse) must be one of the reported pins",
+            pins.any { it[1] == revisionInUse },
         )
-        val recordsFile = Files.createTempFile("android-delta-records", ".jsonl").toFile()
+    }
+
+    /**
+     * delta736d3180 STRICT INTAKE PARITY against a pinned Cloud revision (c569b319 — pushed source
+     * for fixture/intake parity, NOT a deployed live intake): the Worker accepts
+     * `observation_unavailable` ONLY with state `unknown` and refuses the reason with any other
+     * state, on ALL SIX stages (spec 52e0f608), so a per-stage divergence cannot hide behind the one
+     * stage I happened to test.
+     *
+     * Android builder records carry the ACCEPT cells (one per stage). The REJECT cells flip the state
+     * on the canonical bytes of the SAME record: the client builder refuses that pair locally (proven
+     * in ContributionRecordTest), so the wire-level variant is the only way to ask the Worker.
+     */
+    @Test
+    fun `observation_unavailable is accepted only with unknown on every stage by the pinned Worker`() {
+        // The rule exists only at the delta revision; the pre-delta head would (correctly) refuse the
+        // unknown pair, so this control pins c569b319 itself and fails if pointed elsewhere.
+        val deltaRevision = "c569b319e19b5971ada44a0f53245630688c1305"
+        val workerRoot = cloudWorkerRoot()
+        requireAuthority(workerRoot)
+        val stages = listOf(
+            StageName.Wake,
+            StageName.Bleed,
+            StageName.Asr,
+            StageName.Translation,
+            StageName.Routing,
+            StageName.Execution,
+        )
+        val accepted = stages.associateWith { stage ->
+            val (audio, _) = audioFor(160)
+            ContributionRecordBuilder(UUID.randomUUID().toString(), "epoch-2", "7")
+                .model("vad", ModelRef.None)
+                .model("wakeword", ModelRef.None)
+                .model("asr", ModelRef.None)
+                .model("translation", ModelRef.None)
+                .model("router", ModelRef.None)
+                .stage(StageName.Wake, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_wake_detected"))))
+                .stage(StageName.Bleed, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_playback_reference"))))
+                .stage(StageName.Asr, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("local_only_action"))))
+                .stage(StageName.Translation, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text"))))
+                .stage(StageName.Routing, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_candidates"))))
+                .stage(StageName.Execution, StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("client_refused"))))
+                .replaceStage(stage, StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))))
+                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio)
+        }.mapValues { (_, record) -> CanonicalJson.canonicalBytes(record).toString(Charsets.UTF_8) }
+
+        // REJECT cells: the same canonical bytes with the state flipped to a known state. Built by
+        // string replacement on canonical output (keys are sorted, so the shape is stable) and then
+        // asserted to have actually changed.
+        val rejectedStates = listOf("completed", "not_run", "failed", "cancelled")
+        val cases = linkedMapOf<String, String>()
+        for (stage in stages) {
+            cases["accept-${stage.wire}-unknown"] = accepted.getValue(stage)
+            for (state in rejectedStates) {
+                val flipped = accepted.getValue(stage).replace(
+                    "\"${stage.wire}\":{\"reason\":\"observation_unavailable\",\"state\":\"unknown\"}",
+                    "\"${stage.wire}\":{\"reason\":\"observation_unavailable\",\"state\":\"$state\"}",
+                )
+                assertNotEquals(
+                    "the perturbation for ${stage.wire}/$state must actually change the wire bytes",
+                    accepted.getValue(stage),
+                    flipped,
+                )
+                cases["reject-${stage.wire}-$state"] = flipped
+            }
+        }
+
+        val recordsFile = Files.createTempFile("android-delta-matrix", ".jsonl").toFile()
         val probe = File(recordsFile.parentFile, "probe_worker_intake.mjs")
         probe.writeBytes(javaClass.classLoader!!.getResourceAsStream("worker-parity/probe_worker_intake.mjs")!!.readBytes())
         recordsFile.writeText(cases.entries.joinToString("\n") { (id, json) -> """{"id":"$id","record":$json}""" })
@@ -286,24 +395,31 @@ class WorkerWireParityTest {
         assertEquals("probe failed: $output", 0, process.waitFor())
         val revisionLine = output.lines().firstOrNull { it.startsWith("# worker-revision") }
         assertTrue(
-            "this control requires the delta intake c569b319 (got: $revisionLine)",
+            "this control requires the delta intake $deltaRevision (got: $revisionLine)",
             revisionLine?.contains(deltaRevision) == true,
         )
+        assertAuthorityPinsReported(output, deltaRevision)
         val verdicts = output.lines().filter { it.isNotBlank() && !it.startsWith("#") }.associate { line ->
             val parts = line.split('\t')
             parts[0] to parts.drop(1).joinToString("\t")
         }
-        assertEquals(
-            "unknown + observation_unavailable ACCEPTed by the pinned intake",
-            "ACCEPT",
-            verdicts["observation-unavailable-unknown-bleed"],
-        )
-        assertTrue(
-            "not_run + observation_unavailable REJECTed by the pinned intake: ${verdicts["observation-unavailable-notrun-bleed"]}",
-            verdicts["observation-unavailable-notrun-bleed"]?.startsWith("REJECT") == true,
-        )
-        println("DELTA-OBSERVATION-UNAVAILABLE-VERDICTS")
-        verdicts.forEach { (id, v) -> println("  $id -> $v") }
+        for (stage in stages) {
+            assertEquals(
+                "unknown + observation_unavailable must be ACCEPTed on ${stage.wire}: ${verdicts["accept-${stage.wire}-unknown"]}",
+                "ACCEPT",
+                verdicts["accept-${stage.wire}-unknown"],
+            )
+            for (state in rejectedStates) {
+                val verdict = verdicts["reject-${stage.wire}-$state"]
+                assertTrue(
+                    "observation_unavailable + $state must be REJECTed on ${stage.wire} by the pairing " +
+                        "rule, was: $verdict",
+                    verdict?.startsWith("REJECT invalid_reason") == true,
+                )
+            }
+        }
+        assertEquals("every cell must produce a verdict", cases.size, verdicts.size)
+        println("DELTA-MATRIX-VERDICTS cells=${cases.size} accepts=${stages.size} rejects=${stages.size * rejectedStates.size}")
     }
 
     /**

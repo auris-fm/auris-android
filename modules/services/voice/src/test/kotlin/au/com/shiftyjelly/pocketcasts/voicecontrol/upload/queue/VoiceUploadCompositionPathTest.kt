@@ -14,6 +14,7 @@ import javax.inject.Provider
 import kotlinx.coroutines.cancel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -29,52 +30,14 @@ import org.robolectric.RobolectricTestRunner
 @RunWith(RobolectricTestRunner::class)
 @org.robolectric.annotation.Config(sdk = [34])
 class VoiceUploadCompositionPathTest {
+    private fun moduleStartup(): VoiceSharingAccountStartup = VoiceUploadCompositionFixtures.startup(androidx.test.core.app.ApplicationProvider.getApplicationContext())
+    private fun authenticatedProjection(epoch: String): String = VoiceUploadCompositionFixtures.authenticatedProjection(epoch)
 
     @get:Rule
     val tmp = TemporaryFolder()
 
-    /** The app's owner authority: one lock, snapshots read inside it. No account is signed in. */
-    private class AppContextOwner(private val app: android.content.Context) : au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipOwner {
-        override val collectionSharedLock = Any()
-
-        @Volatile
-        private var snap = au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot(
-            null,
-            0L,
-            0L,
-            au.com.shiftyjelly.pocketcasts.preferences.AccessToken(""),
-        )
-        override fun authoritySnapshot() = snap
-        override fun sessionGeneration(): Long = 0L
-        override fun <T> transaction(block: () -> T): T = synchronized(collectionSharedLock) { block() }
-        override fun installOwnershipBinding(binding: au.com.shiftyjelly.pocketcasts.repositories.sync.CredentialOwnershipBinding?) = snap
-        override fun beginRefresh(observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot) = null
-        override fun publishRefresh(
-            lease: au.com.shiftyjelly.pocketcasts.repositories.sync.RefreshLease,
-            refreshToken: au.com.shiftyjelly.pocketcasts.preferences.RefreshToken,
-            accessToken: au.com.shiftyjelly.pocketcasts.preferences.AccessToken,
-        ) = false
-        override fun publishCredentials(
-            observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot,
-            refreshToken: au.com.shiftyjelly.pocketcasts.preferences.RefreshToken,
-            accessToken: au.com.shiftyjelly.pocketcasts.preferences.AccessToken,
-        ) = false
-        override fun invalidateIfCurrent(
-            observed: au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot,
-            transaction: () -> Boolean,
-        ) = transaction()
-        override fun reconcileExternalState() = snap
-
-        /** The account/session/token published by the REAL owner under its lock. */
-        fun publish(account: String, session: Long, bearer: String) = synchronized(collectionSharedLock) {
-            snap = au.com.shiftyjelly.pocketcasts.repositories.sync.AuthoritySnapshot(
-                account,
-                session,
-                session,
-                au.com.shiftyjelly.pocketcasts.preferences.AccessToken(bearer),
-            )
-        }
-    }
+    // (The owner authority fixture moved to VoiceUploadCompositionFixtures so the shared joined-path
+    // emitter can use the same one.)
 
     /** Loopback "cloud" that records every request that reaches it. */
     private fun loopback(bodyFor: () -> Pair<Int, String> = { 500 to "" }): Pair<HttpServer, AtomicInteger> {
@@ -92,20 +55,9 @@ class VoiceUploadCompositionPathTest {
         return server to hits
     }
 
-    /**
-     * The REAL startup object (its own production state/credentials/coordinator/binding). Only its
-     * constructor inputs differ from the app's: no account is signed in (owner snapshot empty) and
-     * the retrofit is never called by this path.
-     */
-    private fun moduleStartup(): VoiceSharingAccountStartup {
-        val app = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.app.Application>()
-        val retrofit = retrofit2.Retrofit.Builder().baseUrl("http://127.0.0.1:1/").build()
-        return VoiceSharingAccountStartup(
-            AppContextOwner(app),
-            app,
-            dagger.Lazy { retrofit },
-        )
-    }
+    // `moduleStartup()` above builds the REAL startup object (production state/credentials/coordinator/
+    // binding); only its constructor inputs differ from the app's (no account signed in, retrofit never
+    // called on this path).
 
     /**
      * COMPILED-OFF, through the module's OWN trigger: with the published policy disabled, the real
@@ -254,7 +206,7 @@ class VoiceUploadCompositionPathTest {
             val startup = moduleStartup()
             // Publish the admitted identity exactly as the real account stack would: epoch projection
             // plus the owner snapshot (account, session, bearer) under the owner lock.
-            val owner = startup.ownerForHandoff() as AppContextOwner
+            val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
             owner.publish("a@x", 7L, "Bearer-fixture")
             // The credential mirror the network gate reads (the production 401 path publishes the
             // SAME way through `credentials.publish`).
@@ -346,90 +298,16 @@ class VoiceUploadCompositionPathTest {
         var body = ""
         val (server, hits) = loopback { status to body }
         try {
-            val root = tmp.newFolder("joined-path")
-            // Fast retry so the publish→drain sequence needs no wall-clock backoff.
-            val store = ContributionStore(
-                root,
-                QueueLimits.defaults().copy(retryInitialS = 1, retryMaxS = 1),
-                clock = System::currentTimeMillis,
-                jitter = { 0L },
-            )
-            val startup = moduleStartup()
-            val owner = startup.ownerForHandoff() as AppContextOwner
-            owner.publish("a@x", 7L, "Bearer-fixture")
-            startup.credentials.publish("Bearer-fixture")
-            val token = startup.state.sessionStarted(7L)
-            val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
-            assertTrue(startup.state.applyOutcome(token, ticket, authenticatedProjection("epoch-1"), ownerSession = 7L))
-            val policy = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.VoiceSharingPolicyModule.provideVoiceSharingPolicyProvider(
-                remoteConfig = org.mockito.kotlin.mock(),
-                featureProvider = org.mockito.kotlin.mock(),
-                ownership = owner,
-                scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Job().apply { cancel() }),
-            )
-            policy.applySnapshotForTest(
-                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.policy.PolicySnapshot(
-                    enabled = true,
-                    activatedAtMonotonicMs = 1L,
-                    activationGeneration = 1L,
-                ),
-            )
-            val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined + kotlinx.coroutines.SupervisorJob())
+            // The ENGINE side is produced once per JVM by [emitJoinedRecord] (the same producer the
+            // Worker parity control draws from), so both controls measure the SAME emitted bytes.
+            val emitted = VoiceUploadCompositionPaths.emitOnce()
+            val store = emitted.store
+            val captureId = emitted.captureId
+            val startup = emitted.startup
+            val owner = emitted.owner
+            val policy = emitted.policy
+            val scope = emitted.scope
             try {
-                // 1. ENGINE side: real observation events into the real sink (frozen authority
-                //    matching the published owner identity), then the Executed join.
-                val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
-                val captureId = java.util.UUID.randomUUID()
-                val ctx = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CaptureContext(
-                    captureId,
-                    captureSession = 1L,
-                    routeClass = "Bluetooth",
-                    issuedAuthority = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuthority(
-                        accountName = "a@x",
-                        sessionGeneration = 7L,
-                        credentialIncarnation = 1L,
-                        enrollmentEpoch = "epoch-1",
-                        acceptedDisclosureVersion = "1",
-                        policyEnabledAtIssue = true,
-                    ),
-                    asrModel = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named("whisper-model", "ggml-small-q5_1.bin"),
-                )
-                assertTrue(sink.started(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation.Started(ctx, ShortArray(800) { it.toShort() }, validSamples = 800)))
-                sink.completed(
-                    au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation.Completed(
-                        ctx,
-                        frames = listOf(ShortArray(800) { (it + 1).toShort() }),
-                        sampleRateHz = 16000,
-                        speechOnsetSample = 0,
-                        speechEndSample = 1600,
-                        wakeState = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation.WakeState.Detected,
-                    ),
-                )
-                // 2. PRODUCER side: the module's own trigger/producer (real owner transaction).
-                val producer = VoiceUploadModule.provideContributionCaptureProducer(
-                    context = androidx.test.core.app.ApplicationProvider.getApplicationContext(),
-                    store = store,
-                    accountStartup = startup,
-                )
-                val publishTrigger = VoiceUploadModule.provideRetentionPublishTrigger(
-                    sink = sink,
-                    producer = producer,
-                    accountStartup = startup,
-                    scope = scope,
-                )
-                publishTrigger.attach()
-                // Real pipeline join order: the transcript join carries the Asr stage, the
-                // Executed join is the terminal dispatch observation.
-                assertTrue(sink.joinOutcome(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome.Recognized(captureId, transcript = "skip this ad", detectedLanguage = "en")))
-                assertTrue(sink.joinOutcome(au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.CollectionOutcome.Executed(captureId, dispatchedWithoutThrowing = true)))
-                assertTrue(
-                    "RED (spec checkpoint): the REAL EngineStageProvenance output cannot build a record - " +
-                        "Unknown stages (bleed/translation/execution) carry no enumerated reason, so " +
-                        "ContributionRecordBuilder.stage throws and every real engine publish dies " +
-                        "record-less in the dispatched coroutine",
-                    store.readyEntries().any { it.captureId == captureId.toString() },
-                )
-
                 // 3. DRAIN side: the module-built assembly uploads and the VALIDATED receipt settles.
                 val assembly = VoiceUploadModule.provideUploadAssembly(
                     store = store,
@@ -447,6 +325,8 @@ class VoiceUploadCompositionPathTest {
                 assembly.poll()
                 assertTrue("the joined path reached the transport", hits.get() >= 1)
                 org.junit.Assert.assertNull("the durable record settled through the joined path", store.durableCapture(captureId.toString()))
+                // The emitted bytes are the store's own, re-verified by the store before it serves them.
+                assertTrue("the emitted record must be the store's servable capture", emitted.bytes.isNotEmpty())
             } finally {
                 scope.cancel()
             }
@@ -483,7 +363,7 @@ class VoiceUploadCompositionPathTest {
             )
             val id = prepareVerifiedCapture(store)
             val startup = moduleStartup()
-            val owner = startup.ownerForHandoff() as AppContextOwner
+            val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
             owner.publish("a@x", 7L, "Bearer-fixture")
             val token = startup.state.sessionStarted(7L)
             val ticket = startup.state.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
@@ -588,7 +468,7 @@ class VoiceUploadCompositionPathTest {
             )
             val id = prepareVerifiedCapture(store)
             val startup = moduleStartup()
-            val owner = startup.ownerForHandoff() as AppContextOwner
+            val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
             owner.publish("a@x", 7L, "Bearer-fixture")
             startup.credentials.publish("Bearer-fixture")
             val token = startup.state.sessionStarted(7L)
@@ -666,7 +546,7 @@ class VoiceUploadCompositionPathTest {
             )
             val id = prepareVerifiedCapture(store)
             val startup = moduleStartup()
-            val owner = startup.ownerForHandoff() as AppContextOwner
+            val owner = startup.ownerForHandoff() as VoiceUploadCompositionFixtures.AppContextOwner
             owner.publish("a@x", 7L, "Bearer-fixture")
             startup.credentials.publish("Bearer-fixture")
             val token = startup.state.sessionStarted(7L)
@@ -720,8 +600,4 @@ class VoiceUploadCompositionPathTest {
             server.stop(0)
         }
     }
-
-    private fun authenticatedProjection(epoch: String): String = "{\"schema_version\":1,\"membership_revision\":\"rev-1\",\"plan\":\"free\"," +
-        "\"voice_sharing_enrolled\":true,\"enrollment_epoch\":\"$epoch\"," +
-        "\"accepted_disclosure_version\":\"1\",\"withdrawal_state\":\"active\"}"
 }

@@ -35,6 +35,16 @@ function provenance(root) {
 }
 console.log(`# worker-revision\t${provenance(workerRoot)}`);
 
+// Authority pins: each entry names an exact, CLEAN revision and the single behaviour scope it is
+// approved for. Printing the full set lets a receipt show which authorities exist and which one the
+// run actually measured, instead of a bare revision string whose purpose lives only in a comment.
+// An UNKNOWN unpinned checkout is reported as such; it matches no pin and no test accepts it.
+const PINS = [
+  ["d8fe823cbe43ebb310d632b482312c7b282ef018", "pre-delta intake guard and record schema fixtures"],
+  ["c569b319e19b5971ada44a0f53245630688c1305", "delta736d3180 strict intake: observation_unavailable with state unknown"],
+];
+for (const [revision, purpose] of PINS) console.log(`# authority-pin\t${revision}\t${purpose}`);
+
 const moduleUrl = pathToFileURL(`${workerRoot}/src/contributions/record_schema.ts`).href;
 const { validateContributionRecord } = await import(moduleUrl);
 

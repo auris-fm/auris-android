@@ -239,6 +239,12 @@ class ContributionRecordBuilder(
 
     fun build(platform: String, appVersion: String, build: String, audio: AudioBlock, links: Map<String, RecordNode>? = null): RecordNode.Obj {
         require(platform == "ios" || platform == "android") { "platform must be ios|android" }
+        // Required identity fields are refused HERE rather than emitted blank: the Cloud intake
+        // refuses an empty app_version/build (`invalid_type`), so a blank value means the capture is
+        // lost after its audio was retained and queued. The producer's `versionName` can be null in
+        // some builds, which made this reachable in production.
+        require(appVersion.isNotBlank()) { "app_version is required and must not be blank" }
+        require(build.isNotBlank()) { "build is required and must not be blank" }
         // Absence is a CLAIM: every model key and every stage must be present, declaring
         // not-run/unknown explicitly rather than being omitted.
         for (key in MODEL_KEYS) require(modelEntries.containsKey(key)) { "models.$key must be present (use ModelRef.None when not run)" }

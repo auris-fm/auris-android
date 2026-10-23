@@ -139,6 +139,37 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `a Combined reply whose synthesis failed falls back to the error earcon too`() = runTest {
+        // REVIEWER follow-up: the Combined branch used to discard speak()'s outcome -- it recorded
+        // spoken_submitted and released as delivered even when synthesis never happened. The shared
+        // rule must cover BOTH branches.
+        whenever(earconPlayer.play(org.mockito.kotlin.any())).thenAnswer { inv ->
+            if (inv.getArgument<EarconId>(0) == EarconId.ERROR) EarconPlayer.AdmissionToken(9L) else null
+        }
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        ttsEngine.speakResult = false
+
+        renderer.render(VoiceResponse.Combined(EarconId.SUCCESS, "the answer"))
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(2_500))
+
+        // The refused SUCCESS cue is not delivered either; the fallback ERROR cue is.
+        verify(earconPlayer).play(EarconId.ERROR)
+    }
+
+    @Test
+    fun `a Combined reply with a consumed earcon but failed synthesis still falls back`() = runTest {
+        whenever(earconPlayer.play(EarconId.SUCCESS)).thenReturn(EarconPlayer.AdmissionToken(3L))
+        whenever(earconPlayer.play(EarconId.ERROR)).thenReturn(EarconPlayer.AdmissionToken(4L))
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Consumed)
+        ttsEngine.speakResult = false
+
+        renderer.render(VoiceResponse.Combined(EarconId.SUCCESS, "the answer"))
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(2_500))
+
+        verify(earconPlayer).play(EarconId.ERROR)
+    }
+
+    @Test
     fun `superseding a NEVER-STARTED render releases its transferred hold instead of orphaning it`() {
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
         signal.onWakeWordDetected()

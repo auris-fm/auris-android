@@ -67,6 +67,73 @@ class AndroidPlatformTtsEngineTest {
     }
 
     @Test
+    fun `synthesized audio that cannot be decoded is an incomplete delivery, not success`() {
+        // REVIEWER 486205ae: speak() used to return true after playSynthesized() even when the WAV
+        // decode failed -- a file was synthesized, no audio was heard, and the caller still released
+        // the delivery hold as clean. The typed incomplete failure is the truthful outcome.
+        // The fake opts out of writing a WAV, so the platform "succeeds" while the file the
+        // playback path reads is missing/undecodable -- the decode-failure half of the gap.
+        val (wired, fake, _) = engineWithFakeSynthesizer()
+        fake.emitRealWav = false
+        fake.onInitialized?.invoke(true)
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        var failure: Throwable? = null
+        val job = scope.launch {
+            try {
+                wired.speak("hello", "en")
+            } catch (t: Throwable) {
+                failure = t
+            }
+        }
+        val queued = (0 until 50).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            fake.synthesizeCount > 0
+        }
+        assertTrue("precondition: the synthesis must actually be queued", queued)
+        fake.listener?.onDone(fake.lastUtteranceId)
+        runBlocking { job.join() }
+        scope.cancel()
+        assertTrue(
+            "an undecodable synthesis must fail the utterance, not report success (got ${failure?.javaClass?.simpleName})",
+            failure is TtsPlaybackIncompleteException,
+        )
+    }
+
+    @Test
+    fun `synthesized audio with no playable track is an incomplete delivery, not success`() {
+        // The track-creation half of the same gap: buildTrack() == null used to be a silent return
+        // that speak() reported as delivered.
+        val (wired, fake, _) = engineWithFakeSynthesizer()
+        fake.onInitialized?.invoke(true)
+        wired.trackFactoryForTest = { null }
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        var failure: Throwable? = null
+        val job = scope.launch {
+            try {
+                wired.speak("hello", "en")
+            } catch (t: Throwable) {
+                failure = t
+            }
+        }
+        val queued = (0 until 50).any {
+            org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            fake.synthesizeCount > 0
+        }
+        assertTrue("precondition: the synthesis must actually be queued", queued)
+        fake.listener?.onDone(fake.lastUtteranceId)
+        runBlocking { job.join() }
+        scope.cancel()
+        assertTrue(
+            "an unplayable synthesis must fail the utterance, not report success (got ${failure?.javaClass?.simpleName})",
+            failure is TtsPlaybackIncompleteException,
+        )
+    }
+
+    @Test
     fun `release is idempotent`() {
         engine.release()
         engine.release()
@@ -118,7 +185,14 @@ class AndroidPlatformTtsEngineTest {
 
         val scope = CoroutineScope(Dispatchers.Default)
         repeat(2) { attempt ->
-            val job = scope.launch { wired.speak("hello", "en") }
+            var failure: Throwable? = null
+            val job = scope.launch {
+                try {
+                    wired.speak("hello", "en")
+                } catch (t: Throwable) {
+                    failure = t
+                }
+            }
             val queued = (0 until 50).any {
                 org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
                 Thread.sleep(20)
@@ -128,6 +202,14 @@ class AndroidPlatformTtsEngineTest {
             // Complete it the way the platform does, so the call resumes normally.
             fake.listener?.onDone(fake.lastUtteranceId)
             runBlocking { job.join() }
+            // The fake writes no WAV, so playback now fails TRUTHFULLY (reviewer 486205ae); the
+            // failure must not cancel the scope -- a later utterance must still run, which is the
+            // property this test exists to prove.
+            assertTrue(
+                "utterance ${attempt + 1} without audio must fail truthfully, not silently succeed " +
+                    "(failure=${failure?.javaClass?.simpleName})",
+                failure is TtsPlaybackIncompleteException,
+            )
         }
         assertEquals(
             "both utterances must have reached synthesis without a cancellation",
@@ -221,7 +303,15 @@ class AndroidPlatformTtsEngineTest {
         fake.onInitialized?.invoke(true)
         val scope = CoroutineScope(Dispatchers.Default)
 
-        val first = scope.launch { wired.speak("first", "en") }
+        // B (and A, had it completed) now ends in TtsPlaybackIncompleteException under Robolectric,
+        // which cannot audibly drain a track (reviewer 486205ae): the launches catch so the typed
+        // failure stays local -- these tests are about utterance-id routing, not playback.
+        val first = scope.launch {
+            try {
+                wired.speak("first", "en")
+            } catch (_: TtsPlaybackIncompleteException) {
+            }
+        }
         assertTrue("precondition: A reached synthesis", awaitSynthesize(fake, 1))
         val aId = fake.lastUtteranceId
 
@@ -229,7 +319,12 @@ class AndroidPlatformTtsEngineTest {
         runBlocking { first.cancelAndJoin() }
 
         // B starts on the shared engine: its listener is now the one installed.
-        val second = scope.launch { wired.speak("second", "en") }
+        val second = scope.launch {
+            try {
+                wired.speak("second", "en")
+            } catch (_: TtsPlaybackIncompleteException) {
+            }
+        }
         assertTrue("precondition: B reached synthesis", awaitSynthesize(fake, 2))
         val bId = fake.lastUtteranceId
         assertNotEquals("each synthesis needs its own utterance id", aId, bId)
@@ -265,12 +360,22 @@ class AndroidPlatformTtsEngineTest {
         fake.onInitialized?.invoke(true)
         val scope = CoroutineScope(Dispatchers.Default)
 
-        val first = scope.launch { wired.speak("first", "en") }
+        val first = scope.launch {
+            try {
+                wired.speak("first", "en")
+            } catch (_: TtsPlaybackIncompleteException) {
+            }
+        }
         assertTrue(awaitSynthesize(fake, 1))
         val aId = fake.lastUtteranceId
         runBlocking { first.cancelAndJoin() }
 
-        val second = scope.launch { wired.speak("second", "en") }
+        val second = scope.launch {
+            try {
+                wired.speak("second", "en")
+            } catch (_: TtsPlaybackIncompleteException) {
+            }
+        }
         assertTrue(awaitSynthesize(fake, 2))
         val bId = fake.lastUtteranceId
 
@@ -371,6 +476,12 @@ class AndroidPlatformTtsEngineTest {
         onSynthesize: (utteranceId: String) -> Unit = {},
     ): Triple<AndroidPlatformTtsEngine, FakeSynthesizer, PlaybackBufferRecorder> {
         val fake = FakeSynthesizer(onSynthesize)
+        // ON BY DEFAULT since reviewer 486205ae: speak() now reports a synthesized-but-unplayable
+        // utterance as TtsPlaybackIncompleteException instead of a silent success, so a fake that
+        // writes no WAV would turn every onDone-completing test into an uncaught failure. Tests
+        // that specifically exercise the no-audio paths opt OUT (emitRealWav = false). The drain
+        // wait is zeroed so the now-decodable clips do not slow every completion down.
+        fake.emitRealWav = true
         val recorder = PlaybackBufferRecorder(FingerprintPcmTap())
         lateinit var engineRef: AndroidPlatformTtsEngine
         engineRef = AndroidPlatformTtsEngine(

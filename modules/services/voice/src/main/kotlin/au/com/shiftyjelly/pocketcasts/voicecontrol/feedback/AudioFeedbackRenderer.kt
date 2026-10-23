@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -275,21 +276,13 @@ class AudioFeedbackRenderer(
                         // The awaited call returns only after playback drained — this IS the
                         // output terminal, not mere acceptance. No earcon component.
                         val delivered = speakWithHeartbeat(response.text, language)
-                        if (delivered) {
+                        // ONE SHARED SPEECH-OUTCOME RULE (reviewer 4356625551 + follow-up): the
+                        // synthesis-failure fallback lives in ONE helper so the Spoken and Combined
+                        // branches cannot drift -- a Combined reply with a failed synthesis used to
+                        // still record spoken_submitted and release as delivered.
+                        if (!thisCall.onSynthesisFailed(requestId, delivered, pendingEarcon = null)) {
                             if (requestId != null) recordSubmitted(requestId, "spoken_submitted")
                             releaseOutputHold(requestId, cancelled = false)
-                        } else {
-                            // The user heard NOTHING: fall back to the error earcon rather than
-                            // counting the turn as delivered (reviewer 4356625551).
-                            if (requestId != null) recordSubmitted(requestId, "spoken_failed")
-                            val admitted = playEarcon(EarconId.ERROR)
-                            thisCall.earconAdmission = lastEarconAdmission
-                            if (admitted) {
-                                val consumed = thisCall.awaitEarconOutput()
-                                releaseOutputHold(requestId, cancelled = !consumed)
-                            } else {
-                                releaseOutputHold(requestId, cancelled = true)
-                            }
                         }
                     }
 
@@ -305,12 +298,14 @@ class AudioFeedbackRenderer(
                         } else {
                             null
                         }
-                        speakWithHeartbeat(response.spokenText, language)
-                        if (requestId != null) recordSubmitted(requestId, "spoken_submitted")
-                        earconChild?.join()
-                        // The combined output ends when BOTH halves end; the release is cancelled
-                        // unless the earcon was actually observed consumed.
-                        releaseOutputHold(requestId, cancelled = earconAdmitted && !thisCall.earconConsumed)
+                        val delivered = speakWithHeartbeat(response.spokenText, language)
+                        if (!thisCall.onSynthesisFailed(requestId, delivered, pendingEarcon = earconChild)) {
+                            if (requestId != null) recordSubmitted(requestId, "spoken_submitted")
+                            earconChild?.join()
+                            // The combined output ends when BOTH halves end; the release is cancelled
+                            // unless the earcon was actually observed consumed.
+                            releaseOutputHold(requestId, cancelled = earconAdmitted && !thisCall.earconConsumed)
+                        }
                     }
                 }
             } catch (e: TtsPlaybackIncompleteException) {
@@ -826,6 +821,32 @@ class AudioFeedbackRenderer(
         // REVIEWER 4356625551: false means the engine never synthesized (uninitialized, refused
         // queue, onError) -- the caller must not count the reply as delivered.
         synthesized
+    }
+
+    /**
+     * ONE TRUTHFUL SPEECH OUTCOME (reviewer 4356625551, follow-up 58d1f1b9): when the TTS engine
+     * never synthesized the utterance, the user heard NOTHING — the response must fall back to the
+     * error earcon and the hold release as not-delivered, in BOTH the Spoken and Combined branches.
+     * Shared here so the two branches cannot drift again.
+     *
+     * Returns true when the failure fallback handled the outcome end to end (submission recorded,
+     * fallback cue awaited or refused, hold released); false when the caller proceeds with the
+     * delivered path.
+     */
+    private suspend fun RenderInvocation.onSynthesisFailed(
+        requestId: String?,
+        delivered: Boolean,
+        pendingEarcon: Job?,
+    ): Boolean {
+        if (delivered) return false
+        // The original cue's observation is dead weight now: its half of the combined output will
+        // never be joined, so stop it before the fallback cue takes the admission slot.
+        pendingEarcon?.cancelAndJoin()
+        if (requestId != null) recordSubmitted(requestId, "spoken_failed")
+        val admitted = playEarcon(EarconId.ERROR)
+        earconAdmission = lastEarconAdmission
+        releaseOutputHold(requestId, cancelled = !(admitted && awaitEarconOutput()))
+        return true
     }
 
     /**

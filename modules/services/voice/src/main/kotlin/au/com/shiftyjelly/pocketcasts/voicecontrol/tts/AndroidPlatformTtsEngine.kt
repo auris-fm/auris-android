@@ -21,6 +21,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -315,13 +316,19 @@ class AndroidPlatformTtsEngine @Inject constructor(
         superseded: () -> Boolean,
     ) = withContext(Dispatchers.IO) {
         playbackIncomplete = false
+        // TRUTHFUL PLAYBACK OUTCOME (reviewer 486205ae): speak() reports delivery to a caller that
+        // releases output holds on it, so "synthesized a file but played nothing" must NOT be a
+        // silent success. Decode failure, track-creation failure, and a zero-sample clip all throw
+        // the typed incomplete exception the renderer already treats as a drop/failure boundary.
         val clip = runCatching {
             wav.inputStream().use { EarconAudio.decodeWavToMono(it) }
-        }.onFailure { Timber.w(it, "TTS: failed to decode synthesized audio") }.getOrNull() ?: return@withContext
+        }.onFailure { Timber.w(it, "TTS: failed to decode synthesized audio") }.getOrNull()
+            ?: throw TtsPlaybackIncompleteException(framesWritten = 0, framesPlayed = 0)
+        if (clip.samples.isEmpty()) throw TtsPlaybackIncompleteException(framesWritten = 0, framesPlayed = 0)
 
         val track = buildTrack(clip.sampleRateHz) ?: run {
             Timber.w("TTS: could not create AudioTrack")
-            return@withContext
+            throw TtsPlaybackIncompleteException(framesWritten = 0, framesPlayed = 0)
         }
         // Published under the SAME lock that compares-and-clears it: a locked cleanup cannot protect
         // against an unlocked successor write, so the publication and the clear must share one
@@ -452,6 +459,10 @@ class AndroidPlatformTtsEngine @Inject constructor(
             // Surface the truncation through the same channel the cloud path uses, so a caller can
             // avoid reporting a completed answer that was actually cut short.
             if (writeRefused) {
+                // A caller that already cancelled this utterance has lost it either way: rethrowing
+                // the cancellation (not the incomplete failure) keeps the outcome honest for live
+                // callers while a cancelled job surfaces as cancellation, not stray noise.
+                coroutineContext.ensureActive()
                 throw TtsPlaybackIncompleteException(
                     framesWritten = framesWritten,
                     framesPlayed = framesPlayedAtReturn,
@@ -462,6 +473,8 @@ class AndroidPlatformTtsEngine @Inject constructor(
             // audio is still outstanding.
             if (framesPlayedAtReturn < framesWritten) {
                 playbackIncomplete = true
+                // Same rule as the refused write above: a cancelled caller reports no outcome.
+                coroutineContext.ensureActive()
                 // Throw rather than only warn: a diagnostic flag cannot stop a caller reporting
                 // success, and this outcome must reach the failure path.
                 throw TtsPlaybackIncompleteException(

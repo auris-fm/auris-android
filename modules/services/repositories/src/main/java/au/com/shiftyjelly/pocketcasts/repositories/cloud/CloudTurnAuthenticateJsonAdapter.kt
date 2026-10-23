@@ -4,7 +4,7 @@ import com.squareup.moshi.JsonAdapter
 import com.squareup.moshi.JsonReader
 import com.squareup.moshi.JsonWriter
 import com.squareup.moshi.Moshi
-import okio.Buffer
+import java.util.UUID
 
 /**
  * Serialises the authentication frame, the first message on a turn.
@@ -15,29 +15,22 @@ import okio.Buffer
  * than sent empty, which the server accepts.
  */
 internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<CloudTurnFrame.Authenticate>() {
-    private val contextAdapter = moshi.adapter(CloudRouteContext::class.java)
     private val hintAdapter = moshi.adapter(CloudRouteHint::class.java)
-    private val options = JsonReader.Options.of(
-        "type",
-        "access_token",
-        "request_id",
-        "request",
-        "context",
-        "capabilities",
-        "codecs",
-        "route_hint",
-    )
 
     override fun toJson(writer: JsonWriter, value: CloudTurnFrame.Authenticate?) {
         if (value == null) {
             writer.nullValue()
             return
         }
+        require(runCatching { UUID.fromString(value.conversationId).toString() == value.conversationId.lowercase() }.getOrDefault(false)) {
+            "conversation_id must be a UUID"
+        }
         writer.beginObject()
         writer.name("type").value("authenticate")
         writer.name("access_token").value(value.accessToken)
         writer.name("request_id").value(value.requestId)
         writer.name("request").value(value.request)
+        value.sourceLanguage?.let { writer.name("source_language").value(it) }
         // Write context as a raw nested JSON object (not an escaped string).
         // Serialize context with its own adapter and emit the resulting JSON
         // object verbatim. The context adapter uses snake_case field names
@@ -61,33 +54,28 @@ internal class CloudTurnAuthenticateJsonAdapter(moshi: Moshi) : JsonAdapter<Clou
             writer.name("route_hint")
             hintAdapter.toJson(writer, hint)
         }
+        writer.name("conversation_id").value(value.conversationId)
+        writer.name("conversation_mode").value(value.conversationMode.wireValue)
         writer.endObject()
     }
 
     /** Emit a [CloudRouteContext] as a raw nested JSON object. */
     private fun writeContextAsRaw(writer: JsonWriter, context: CloudRouteContext) {
         writer.beginObject()
-        if (context.recentConversation != null && context.recentConversation.isNotEmpty()) {
-            writer.name("recent_conversation")
-            writer.beginArray()
-            for (entry in context.recentConversation) {
-                writer.beginObject()
-                writer.name("role").value(entry.role)
-                writer.name("text").value(entry.text)
-                writer.endObject()
-            }
-            writer.endArray()
-        }
-        if (context.episodeId.isNotEmpty()) {
+        // Cloud history belongs to the server; only current playback context is written here.
+        // Each field is written only when it HAS a value. An absent episode, podcast, position or
+        // reference is omitted rather than defaulted: a zero position is a real instant (the very
+        // start) and an empty id claims a subject, so neither can stand in for "none".
+        if (context.episodeId?.isNotEmpty() == true) {
             writer.name("episode_id").value(context.episodeId)
         }
         if (context.podcastId?.isNotEmpty() == true) {
             writer.name("podcast_id").value(context.podcastId)
         }
-        if (context.referencePositionMs != 0L) {
+        if (context.referencePositionMs != null) {
             writer.name("reference_position_ms").value(context.referencePositionMs)
         }
-        if (context.clientPositionMs != 0L) {
+        if (context.clientPositionMs != null) {
             writer.name("client_position_ms").value(context.clientPositionMs)
         }
         if (context.recentReferencePositions.isNotEmpty()) {

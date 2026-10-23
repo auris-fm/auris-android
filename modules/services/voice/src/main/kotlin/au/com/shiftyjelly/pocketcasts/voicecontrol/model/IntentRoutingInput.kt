@@ -2,8 +2,8 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.model
 
 /**
  * Immutable ASR/translation → intent-routing envelope.
- * Current `english_v1` releases consume [routerTranscript] only; source fields
- * must still survive unchanged for later format selection.
+ * Local `english_v1` matching consumes [routerTranscript] only. Cloud dispatch preserves
+ * [sourceTranscript] when available and [sourceLanguage] independently of that translation.
  */
 data class IntentRoutingInput(
     val sourceTranscript: String?,

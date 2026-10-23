@@ -2,6 +2,7 @@
 
 package au.com.shiftyjelly.pocketcasts.voicecontrol.gate.conditions
 
+import au.com.shiftyjelly.pocketcasts.voicecontrol.feedback.AudioFeedbackRenderer
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleGroup
 import au.com.shiftyjelly.pocketcasts.voicecontrol.gate.VoiceControlRuleState
 import kotlinx.coroutines.delay
@@ -13,6 +14,130 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OtherAppPlayingConditionTest {
+
+    @Test
+    fun `a successor's unresolved observation does not inherit the previous cue's timeout`() {
+        // @spec's specific check. Cue A is unresolved long enough to consume most of its hold; a SECOND
+        // cue then becomes unresolved. If the anchor were kept across cues, B would inherit A's elapsed
+        // time and expire almost immediately -- a hold that never actually covered B.
+        var now = 0L
+        // CUE A PUBLISHED AT 0. Its hold runs from that instant, not from this consumer's first poll.
+        val observation = MutableStateFlow<AudioFeedbackRenderer.PublishedObservation?>(
+            AudioFeedbackRenderer.PublishedObservation(
+                cueId = 1L,
+                observation = AudioFeedbackRenderer.CueObservation.Unknown,
+                publishedAtMs = 0L,
+            ),
+        )
+        val condition = OtherAppPlayingCondition(
+            hostIsPlaying = MutableStateFlow(false),
+            hasEmittedAudio = MutableStateFlow(true),
+            lastEmittedAtMs = MutableStateFlow(0L),
+            lastCueObservation = observation,
+            nowMs = { now },
+            transitionWindowMs = 5_000,
+        )
+
+        // CUE A: unresolved for most of the hold.
+        condition.otherAppPlaying(isMusicActive = true)
+        now = 25_000L
+        assertFalse(condition.otherAppPlaying(isMusicActive = true))
+
+        // CUE B PUBLISHES ITS OWN UNKNOWN WITH A DISTINCT IDENTITY. THE CONSUMER DOES NOT POLL AGAIN
+        // UNTIL LONG AFTER THAT PUBLICATION -- which is what makes this case discriminate: a hold
+        // anchored to the consumer's first sight would start counting at 40_000, while one anchored to
+        // the RENDERER'S instant has already expired.
+        now = 26_000L
+        observation.value = AudioFeedbackRenderer.PublishedObservation(
+            cueId = 2L,
+            observation = AudioFeedbackRenderer.CueObservation.Unknown,
+            publishedAtMs = 26_000L,
+        )
+
+        // THE CONSUMER'S FIRST SIGHT OF B IS 40_000, but B's observation is 14_000 ms old and its hold is
+        // 30_000 -- still within it, so the attribution remains ours. Had B inherited A's anchor (0),
+        // it would be 40_000 old and would wrongly expire here.
+        now = 40_000L
+        assertFalse(
+            "the hold runs from the renderer's publication, so a late first poll does not expire it early",
+            condition.otherAppPlaying(isMusicActive = true),
+        )
+
+        // AND IT DOES EXPIRE, from its OWN publication: 26_000 + 30_000 = 56_000.
+        now = 57_000L
+        assertTrue(
+            "the successor's hold expires from ITS OWN publication instant, and the app listens again",
+            condition.otherAppPlaying(isMusicActive = true),
+        )
+    }
+
+    @Test
+    fun `an unresolved observation does NOT hold the attribution open forever`() {
+        // @reviewer's second finding: Unknown bypassed the window with NO TIME LIMIT, so after the cue
+        // ended every later active-music reading stayed attributed to us. A hold is a BOUND, not a state
+        // change of ownership.
+        var now = 0L
+        val observation = MutableStateFlow<AudioFeedbackRenderer.PublishedObservation?>(
+            AudioFeedbackRenderer.PublishedObservation(
+                cueId = 1L,
+                observation = AudioFeedbackRenderer.CueObservation.Unknown,
+                publishedAtMs = 0L,
+            ),
+        )
+        val condition = OtherAppPlayingCondition(
+            hostIsPlaying = MutableStateFlow(false),
+            hasEmittedAudio = MutableStateFlow(true),
+            lastEmittedAtMs = MutableStateFlow(0L),
+            lastCueObservation = observation,
+            nowMs = { now },
+            transitionWindowMs = 5_000,
+        )
+
+        // THE HOLD IS ACTIVE while the observation is fresh.
+        assertFalse(
+            "an unresolved observation holds our own audio open",
+            condition.otherAppPlaying(isMusicActive = true),
+        )
+
+        // LONG AFTER, the hold EXPIRES and foreign audio is a foreign app again -- otherwise the app
+        // would never listen again for the rest of the process.
+        now = 10 * 60_000L
+        assertTrue(
+            "the hold must EXPIRE: an unresolved cue cannot own all later audio indefinitely",
+            condition.otherAppPlaying(isMusicActive = true),
+        )
+    }
+
+    @Test
+    fun `an unresolved cue observation holds our own audio open past the window`() {
+        // @spec's 96a3831c: the renderer's typed per-cue observation must have a PRODUCTION consumer.
+        // Beyond the bounded self-emission window, an UNKNOWN observation means we could not establish
+        // that our cue stopped sounding -- so its audio is still OURS, and reading expiry as "ended"
+        // would hand it to a foreign app and cut the microphone mid-cue.
+        assertFalse(
+            "an unresolved cue past the window is still our own audio, not a foreign app",
+            otherAppPlaying(
+                isMusicActive = true,
+                hostCurrentlyPlaying = false,
+                msSinceHostPlaying = 10_000,
+                msSinceSelfEmitted = 10_000,
+                transitionWindowMs = 5_000,
+                selfEmissionUnresolved = true,
+            ),
+        )
+        // CONTROL: the same inputs with a RESOLVED observation are a foreign app, so the case is decided
+        // by the observation and not by the timings.
+        assertTrue(
+            otherAppPlaying(
+                isMusicActive = true,
+                hostCurrentlyPlaying = false,
+                msSinceHostPlaying = 10_000,
+                msSinceSelfEmitted = 10_000,
+                transitionWindowMs = 5_000,
+                selfEmissionUnresolved = false,
+            ),
+        )
+    }
 
     @Test
     fun `initial state is unknown`() {

@@ -2,8 +2,8 @@ package au.com.shiftyjelly.pocketcasts.repositories.cloud
 
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ProducerScope
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.flow.Flow
@@ -27,6 +27,7 @@ import timber.log.Timber
 class WebSocketCloudTurnTransport(
     private val baseUrl: String,
     private val okHttpClient: OkHttpClient,
+    private val observer: CloudTurnTransportObserver? = null,
 ) : CloudTurnTransport {
 
     override fun exchange(frame: CloudTurnFrame): Flow<CloudRouteEvent> = callbackFlow {
@@ -36,33 +37,69 @@ class WebSocketCloudTurnTransport(
         // bounded channel, we either deliver or fail the turn explicitly.
         val channel = Channel<CloudRouteEvent>(4096)
 
-        // The requested codec is a fallback; the server's auth response supplies the
-        // negotiated codec that binary frames should carry.
-        val requestedCodec = (frame as CloudTurnFrame.Authenticate).codecs.firstOrNull().orEmpty()
-        val negotiatedCodec = AtomicReference<String>(requestedCodec)
+        val offeredCodecs = (frame as CloudTurnFrame.Authenticate).codecs
+        val negotiatedCodec = AtomicReference<String?>(null)
         val request = Request.Builder()
             .url(baseUrl.trimEnd('/') + ROUTE_PATH)
             .build()
 
         val listener = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                val requestId = frame.requestId
                 if (response.code != 101) {
                     Timber.w("Cloud route WebSocket rejected: %d %s", response.code, response.message)
-                    emitOrFail(
+                    // Handshake rejected — socket opened but upgrade refused. Not a send rejection
+                    // because send was never attempted.
+                    observer?.onConnectionFailed(requestId)
+                    emitTerminal(
                         channel,
                         CloudRouteEvent.Error(
                             code = CloudRouteErrorCodes.CONNECTION_LOST,
                             message = "",
                         ),
                     )
-                    close()
                     return
                 }
-                webSocket.send(frame.toJson())
+                observer?.onSocketOpened(requestId)
+                val json: String
+                try {
+                    json = frame.toJson()
+                } catch (encodeFailure: Exception) {
+                    // Encode failure — send was never attempted. Record bounded outcome and propagate.
+                    Timber.w(encodeFailure, "Cloud route auth frame encode failed")
+                    observer?.onSendResult(requestId, CloudTurnTransportObserver.SendOutcome.ENCODE_FAILED)
+                    emitTerminal(
+                        channel,
+                        CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
+                    )
+                    return
+                }
+                val sent: Boolean
+                try {
+                    observer?.onSendAttempted(requestId)
+                    sent = webSocket.send(json)
+                } catch (sendThrow: Exception) {
+                    // Send threw — distinct from encode failure and false-return rejection.
+                    Timber.w(sendThrow, "Cloud route auth frame send threw")
+                    observer?.onSendResult(requestId, CloudTurnTransportObserver.SendOutcome.SEND_THREW)
+                    emitTerminal(
+                        channel,
+                        CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
+                    )
+                    return
+                }
+                observer?.onSendResult(
+                    requestId,
+                    if (sent) CloudTurnTransportObserver.SendOutcome.ACCEPTED else CloudTurnTransportObserver.SendOutcome.REJECTED,
+                )
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 val codec = negotiatedCodec.get()
+                if (codec == null) {
+                    emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""))
+                    return
+                }
                 emitOrFail(channel, CloudRouteEvent.AudioFrame(codec = codec, bytes = bytes.toByteArray()))
             }
 
@@ -70,24 +107,62 @@ class WebSocketCloudTurnTransport(
                 val event = CloudRouteEvents.decode(text)
                 if (event == null) {
                     Timber.w("Cloud route frame could not be decoded")
-                    emitOrFail(channel, CloudRouteEvent.Error(code = CloudRouteErrorCodes.INVALID_RESPONSE, message = ""))
+                    emitTerminal(
+                        channel,
+                        CloudRouteEvent.Error(code = CloudRouteErrorCodes.INVALID_RESPONSE, message = ""),
+                    )
                 } else if (event is CloudRouteEvent.Connected) {
                     // The handshake is where the negotiated codec arrives; binary frames carry it.
-                    negotiatedCodec.set(event.codec.ifBlank { requestedCodec })
-                    emitOrFail(channel, event)
+                    if (event.codec !in offeredCodecs || !negotiatedCodec.compareAndSet(null, event.codec)) {
+                        emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""))
+                    } else {
+                        emitOrFail(channel, event)
+                    }
+                } else if (negotiatedCodec.get() == null && event !is CloudRouteEvent.Error) {
+                    emitTerminal(channel, CloudRouteEvent.Error(CloudRouteErrorCodes.INVALID_RESPONSE, ""))
                 } else {
-                    emitOrFail(channel, event)
+                    // Server-originated terminal: record at actual decode point.
+                    if (event is CloudRouteEvent.Done) {
+                        val outcome = if (event.outcome == CloudRouteEvent.Outcome.Completed) "done" else "interrupted"
+                        observer?.onTerminalReceived(
+                            frame.requestId,
+                            CloudTurnTransportObserver.TerminalOrigin.SERVER_DONE,
+                            outcome,
+                        )
+                    } else if (event is CloudRouteEvent.Error) {
+                        observer?.onTerminalReceived(
+                            frame.requestId,
+                            CloudTurnTransportObserver.TerminalOrigin.SERVER_ERROR,
+                            event.code,
+                        )
+                    }
+                    // ONLY a server terminal ends the turn: Done/Error enqueue then finish the
+                    // channel so the consumer drains in order and the flow completes. emitOrFail
+                    // alone would leave the channel open and the collector suspended forever (the
+                    // sink hangs after selection); closing on a NONterminal frame would truncate a
+                    // healthy streamed answer mid-flight, so those keep emitOrFail.
+                    if (event is CloudRouteEvent.Done || event is CloudRouteEvent.Error) {
+                        emitTerminal(channel, event)
+                    } else {
+                        emitOrFail(channel, event)
+                    }
                 }
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                val requestId = frame.requestId
                 Timber.w(t, "Cloud route socket failed")
-                emitOrFail(channel, CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""))
-                close()
+                observer?.onConnectionFailed(requestId)
+                emitTerminal(
+                    channel,
+                    CloudRouteEvent.Error(code = CloudRouteErrorCodes.CONNECTION_LOST, message = ""),
+                )
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                close()
+                // A clean server close ends the turn with no error event: finish the channel so the
+                // consumer drains what it has and then ends the flow.
+                channel.close()
             }
         }
 
@@ -115,6 +190,11 @@ class WebSocketCloudTurnTransport(
                         )
                     }
                 }
+                // The channel is finished (a terminal event ended the turn, or the socket closed):
+                // every buffered frame has now been forwarded, so the flow can end. Closing here
+                // rather than from the listener is what keeps the terminal event from being
+                // cancelled before the consumer forwards it.
+                close()
             } catch (_: CancellationException) {
                 // Normal cancellation — the flow was cancelled.
             } catch (e: Exception) {
@@ -139,6 +219,40 @@ class WebSocketCloudTurnTransport(
      * If even the error can't be delivered, we close the channel to signal
      * termination to any pending receivers.
      */
+    // End the turn: enqueue [event] behind everything already sent, then let the SINGLE consumer
+    // forward it in order and close the flow once the channel drains.
+    //
+    // The terminal event must not be sent straight to the flow: it would jump ahead of frames still
+    // sitting in the channel, and the sink would see an error before the audio that preceded it.
+    // It also must not rely on close() alone: close() cancels the consumer, so an event merely
+    // buffered before it can be cancelled undelivered and the turn completes with NO error in it --
+    // which the sink renders as silence. Enqueuing it and finishing the channel gives both ordering
+    // and delivery, because the consumer, not the caller, decides when the flow ends.
+    private fun ProducerScope<CloudRouteEvent>.emitTerminal(
+        channel: Channel<CloudRouteEvent>,
+        event: CloudRouteEvent,
+    ) {
+        val result = channel.trySend(event)
+        if (result.isFailure) {
+            // The terminal event could not be enqueued, so closing normally would end the turn with
+            // the reason for ending it lost -- the sink turns a missing error into silence. Close
+            // with the CAUSE instead: the consumer surfaces it as a thrown failure, which the sink
+            // can act on, and correctness no longer depends on which buffer filled first.
+            Timber.w(
+                "Cloud route: terminal event could not be enqueued, failing the turn — %s",
+                event::class.simpleName,
+            )
+            channel.close(
+                IllegalStateException(
+                    "Cloud route: channel full, could not deliver terminal " +
+                        "${event::class.simpleName}",
+                ),
+            )
+            return
+        }
+        channel.close()
+    }
+
     private fun emitOrFail(channel: Channel<CloudRouteEvent>, event: CloudRouteEvent) {
         val result = channel.trySend(event)
         if (result.isFailure) {

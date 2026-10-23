@@ -28,8 +28,13 @@
         <!-- The edge mints these two with user-facing prose in `message`, which the client
              never speaks. These lines keep the reason instead of collapsing it into the
              generic one; the numbers in the server's own sentence are not available here. -->
-        <item>cloud_error_limit_exceeded|You\'ve reached today\'s free limit.</item>
         <item>cloud_error_budget_exceeded|The assistant has reached its limit right now.</item>
         <item>pipeline.unclear_command|I didn\'t catch that.</item>
     </string-array>
+    <!-- Daily-limit feedback (task: localized refusal). Per cloud-assistant.md the template must
+         name Auris and its daily allowance exactly once and must not be the generic line. It is a
+         dedicated string so each values-* locale can override this ONE key without redefining the
+         whole template array; SpokenTemplateResolver overlays it onto the resolved map. A missing
+         locale entry is a client gap, not a silent fallback to the generic line. -->
+    <string name="voice_cloud_error_limit_exceeded" translatable="true">You have reached your Auris free daily limit. Please try again tomorrow.</string>
 </resources>

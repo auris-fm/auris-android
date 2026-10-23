@@ -40,25 +40,34 @@ class CloudTurnRoute(
     private val okHttpClient: OkHttpClient = defaultOkHttpClient(),
     /** Socket seam: the unit suite has no WebSocket upgrade, so the transport is injectable. */
     private val transport: CloudTurnTransport? = null,
+    private val observer: CloudTurnTransportObserver? = null,
 ) {
     fun route(turn: CloudRouteTurn): Flow<CloudRouteEvent> = flow {
         // Fail closed, and fail loudly: no token means no request is attempted.
         val token = tokenProvider.currentToken()
         if (token.isNullOrBlank()) {
+            observer?.onAuthResolved(turn.requestId, CloudTurnTransportObserver.AuthOutcome.MISSING_TOKEN)
             emit(CloudRouteEvent.Error(code = CloudRouteErrorCodes.UNAUTHORIZED, message = ""))
             return@flow
         }
+        observer?.onAuthResolved(turn.requestId, CloudTurnTransportObserver.AuthOutcome.RESOLVED)
 
         val frame = CloudTurnFrame.Authenticate(
             accessToken = token,
             requestId = turn.requestId,
             request = turn.request,
+            sourceLanguage = turn.sourceLanguage,
             context = turn.context,
             capabilities = turn.capabilities,
             codecs = CloudRouteCodecs.advertised,
             routeHint = turn.routeHint,
+            // Carried from the turn the caller prepared, not derived here: a route that looked up
+            // "the current conversation" at send time would let a retry or a superseded origin borrow
+            // whichever handle happened to be current.
+            conversationId = turn.conversationId,
+            conversationMode = turn.conversationMode,
         )
-        val socket = transport ?: WebSocketCloudTurnTransport(baseUrl, okHttpClient)
+        val socket = transport ?: WebSocketCloudTurnTransport(baseUrl, okHttpClient, observer)
         // Everything the socket reports is the turn's outcome — including a refused upgrade, which
         // arrives as `connection_lost` and ends the turn rather than being retried elsewhere.
         emitAll(socket.exchange(frame))

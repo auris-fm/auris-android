@@ -17,6 +17,8 @@ data class RouterStageDiagnostic(
     /** Allowlisted stage durations in ms (only stages that ran). */
     val stageLatencyMs: Map<String, Long>,
     val totalLatencyMs: Long,
+    /** The admitted utterance UUID this routing record belongs to; never minted here (spec 3b1def9). */
+    val requestId: String,
 ) {
     companion object {
         const val OUTCOME_INTENT = "intent"

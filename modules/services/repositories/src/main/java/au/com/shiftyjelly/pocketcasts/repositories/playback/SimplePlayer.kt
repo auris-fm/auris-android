@@ -22,6 +22,7 @@ import androidx.media3.ui.WearUnsuitableOutputPlaybackSuppressionResolverListene
 import au.com.shiftyjelly.pocketcasts.models.entity.Podcast
 import au.com.shiftyjelly.pocketcasts.models.to.PlaybackEffects
 import au.com.shiftyjelly.pocketcasts.preferences.Settings
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.EpisodeReferenceEligibility
 import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.FingerprintPcmTap
 import au.com.shiftyjelly.pocketcasts.repositories.stats.PlaybackStatsCollector
 import au.com.shiftyjelly.pocketcasts.repositories.user.StatsManager
@@ -44,6 +45,7 @@ class SimplePlayer(
     private val context: Context,
     private val dataSourceFactory: ExoPlayerDataSourceFactory,
     private val fingerprintPcmTap: FingerprintPcmTap? = null,
+    private val episodeReferenceEligibility: EpisodeReferenceEligibility? = null,
     private val fingerprintDecodePolicy: FingerprintDecodePolicy,
     override val onPlayerEvent: (au.com.shiftyjelly.pocketcasts.repositories.playback.Player, PlayerEvent) -> Unit,
 ) : LocalPlayer(onPlayerEvent) {
@@ -372,10 +374,18 @@ class SimplePlayer(
             statsManager = statsManager,
             boostVolume = playbackEffects?.isVolumeBoosted ?: false,
             fingerprintPcmTap = fingerprintPcmTap,
+            episodeReferenceEligibility = episodeReferenceEligibility,
             fingerprintTapEnabled = {
-                FeatureFlag.isEnabled(Feature.SYNCED_TRANSCRIPTS) &&
-                    Util.getAppPlatform(context) == AppPlatform.Phone &&
-                    fingerprintDecodePolicy.current() != FingerprintPolicy.DISABLED
+                // REFERENCE ELIGIBILITY IS INDEPENDENT OF THE TRANSCRIPT TOGGLE (4235652501): while
+                // a voice-capture session is active the episode reference is required for bleed
+                // rejection, so an active capture session qualifies on its own; the transcript path
+                // keeps its flag/platform/decode constraints.
+                EpisodeReferenceEligibility.tapEnabled(
+                    captureActive = episodeReferenceEligibility?.isCaptureActive() == true,
+                    transcriptsEligible = FeatureFlag.isEnabled(Feature.SYNCED_TRANSCRIPTS) &&
+                        Util.getAppPlatform(context) == AppPlatform.Phone &&
+                        fingerprintDecodePolicy.current() != FingerprintPolicy.DISABLED,
+                )
             },
             audioLevelMeterEnabled = { isTv },
         )

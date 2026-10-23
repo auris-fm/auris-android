@@ -12,7 +12,6 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.model.RouterInputFormat
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognitionContext
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizeResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.model.VoiceRecognizer
-import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
@@ -84,6 +83,7 @@ class LfmIntentRouter internal constructor(
     override suspend fun recognize(
         input: IntentRoutingInput,
         context: VoiceRecognitionContext,
+        logicalRequestId: String,
     ): VoiceRecognizeResult = withContext(Dispatchers.IO) {
         // Hold one lock across tokenize→classify→generate so KV-cache continuity
         // cannot be poisoned by a concurrent recognize/ensureReady caller.
@@ -101,8 +101,10 @@ class LfmIntentRouter internal constructor(
                 startedAt = startedAt,
                 stageLatencyMs = stageLatencyMs,
                 monoMs = monoMs,
-                // Carried to the export so a routing record can be paired with its turn (see finish()).
-                requestId = UUID.randomUUID().toString(),
+                // THE ADMITTED UTTERANCE IDENTITY, passed in by the engine -- never a second mint here.
+                // Carried to the export so a routing record pairs with its turn by ONE identity
+                // (spec 3b1def9), and to the log line the support bundle exports.
+                requestId = logicalRequestId,
                 transcript = input.routerTranscript,
             )
 
@@ -205,9 +207,10 @@ class LfmIntentRouter internal constructor(
                             transcript = routerText,
                             generated = generated,
                             call = repaired,
+                            admittedId = logicalRequestId,
                         )
                     } else {
-                        dialogManager.resolve(repaired)
+                        dialogManager.resolve(repaired, admittedId = logicalRequestId)
                     }
                 }
                 if (intent == null) {
@@ -349,6 +352,7 @@ class LfmIntentRouter internal constructor(
                     reason = reason,
                     stageLatencyMs = stageLatencyMs.toMap(),
                     totalLatencyMs = (monoMs() - startedAt).coerceAtLeast(0L),
+                    requestId = requestId,
                 ),
             ),
             requestId = requestId,
@@ -373,6 +377,7 @@ class LfmIntentRouter internal constructor(
                     reason = null,
                     stageLatencyMs = stageLatencyMs.toMap(),
                     totalLatencyMs = (monoMs() - startedAt).coerceAtLeast(0L),
+                    requestId = requestId,
                 ),
             ),
             requestId = requestId,

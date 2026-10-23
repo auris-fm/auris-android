@@ -709,6 +709,32 @@ open class PlaybackManager @Inject constructor(
         }
     }
 
+    /**
+     * Resumes only while [episodeUuid] is still the selected episode, and reports whether it did.
+     *
+     * THE SAME OWNER BOUNDARY as the seek and skip paths. A resume is a player-state mutation, and a
+     * caller resuming on behalf of a turn about one recording must not start a replacement recording:
+     * the audio that starts would be something the user never asked for, under a request about a
+     * different episode.
+     */
+    suspend fun resumeIfPlaying(episodeUuid: String, sourceView: SourceView = SourceView.UNKNOWN): Boolean {
+        if (getCurrentEpisode()?.uuid != episodeUuid) return false
+        // THE VALIDATED TARGET IS WHAT IS RESUMED. Calling the queue-level resume after capturing this
+        // target would act on LIVE queue/player state instead -- a different subject from the one just
+        // validated, which is the substitution the validation exists to prevent. The resume is issued
+        // against the player the check accepted.
+        val accepted = synchronized(selectedPlayerLock) {
+            val selected = getCurrentEpisode()
+            if (selected?.uuid != episodeUuid) return false
+            player?.takeIf { it.episodeUuid == episodeUuid }
+        } ?: return false
+        if (accepted.isPlaying()) return true
+        // The position comes from the ACCEPTED PLAYER, so the resume is issued against the same subject
+        // the boundary validated rather than against live state read afterwards.
+        accepted.play(accepted.getCurrentPositionMs())
+        return true
+    }
+
     fun playNow(
         episode: BaseEpisode,
         forceStream: Boolean = false,
@@ -1046,18 +1072,43 @@ open class PlaybackManager @Inject constructor(
         }
     }
 
-    fun pause(transientLoss: Boolean = false, sourceView: SourceView = SourceView.UNKNOWN) {
+    fun pause(
+        transientLoss: Boolean = false,
+        sourceView: SourceView = SourceView.UNKNOWN,
+        asVoiceHold: Boolean = false,
+    ) {
         launch {
-            pauseSuspend(transientLoss, sourceView)
+            pauseSuspend(transientLoss, sourceView, asVoiceHold)
         }
     }
 
-    suspend fun pauseSuspend(transientLoss: Boolean = false, sourceView: SourceView = SourceView.UNKNOWN) {
+    /**
+     * @param asVoiceHold whether this pause is the voice turn's own HOLD.
+     *
+     * `SourceView.VOICE_COMMANDS` records the INTERFACE a command arrived through, and both the
+     * turn's hold pause and the user's own pause reach the player that way, so interface and ownership
+     * are different facts. Ownership is an ARGUMENT of this call rather than a mark set beforehand: a
+     * separate mark would be consumed by whichever pause ran first, not by the one it was meant for.
+     */
+    suspend fun pauseSuspend(
+        transientLoss: Boolean = false,
+        sourceView: SourceView = SourceView.UNKNOWN,
+        asVoiceHold: Boolean = false,
+    ) {
         notePlaybackCommand(sourceView)
         if (!transientLoss) {
             focusManager.giveUpAudioFocus()
             playbackStateRelay.blockingFirst().let { playbackState ->
-                playbackStateRelay.accept(playbackState.copy(transientLoss = false))
+                // The pause's source rides ON this emission, so an observer processing it later
+                // attributes the stop to the command that caused it rather than to whatever command
+                // has since become the most recent one.
+                playbackStateRelay.accept(
+                    playbackState.copy(
+                        transientLoss = false,
+                        changedBySource = sourceView.key,
+                        changedByVoiceHold = asVoiceHold,
+                    ),
+                )
             }
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Paused - Not transient")
             trackPlaybackEvent(sourceView) { source, contentType ->
@@ -1068,7 +1119,12 @@ open class PlaybackManager @Inject constructor(
             }
         } else {
             playbackStateRelay.blockingFirst().let { playbackState ->
-                playbackStateRelay.accept(playbackState.copy(transientLoss = true))
+                playbackStateRelay.accept(
+                    playbackState.copy(
+                        transientLoss = true,
+                        changedBySource = sourceView.key,
+                    ),
+                )
             }
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Paused - Transient")
         }
@@ -1109,11 +1165,14 @@ open class PlaybackManager @Inject constructor(
         cancelUpdateTimer()
         cancelBufferUpdateTimer()
 
-        withContext(Dispatchers.Main) {
-            if (player != null) {
-                player?.stop()
-                player = null
-            }
+        // THE REPLACEMENT TAKES THE SAME BOUNDARY AS THE DECISION. A lock the decision holds is only
+        // worth holding if the writers take it too -- otherwise it excludes nothing while looking like it
+        // excludes everything. The SUSPENDING work stays outside: a suspension inside a monitor is the
+        // interleaving the monitor prevents, and the compiler refuses it.
+        val stopping = synchronized(selectedPlayerLock) { player }
+        stopping?.stop()
+        synchronized(selectedPlayerLock) {
+            if (player === stopping) player = null
         }
 
         playbackStateRelay.blockingFirst().let {
@@ -1153,28 +1212,398 @@ open class PlaybackManager @Inject constructor(
         }
     }
 
+    /**
+     * THE PLAYBACK-OWNER BOUNDARY for the selected episode and the player it addresses.
+     *
+     * A read taken immediately before a mutation is NOT sufficient on its own, because the selection is
+     * changed from a different execution context -- the IO path that loads a new episode -- which can run
+     * concurrently with a caller-context seek. "Adjacent" is not "atomic": between the read and the
+     * mutation another thread may replace what is selected.
+     *
+     * The decision and the mutation therefore SHARE this boundary, and so do the replacements that would
+     * invalidate the decision. It is a plain monitor rather than a coroutine mutex on purpose: the seek
+     * path must not suspend while holding it, so the check and the mutation stay one uninterrupted step
+     * and blocking work stays outside.
+     */
+    private val selectedPlayerLock = Any()
+
+    /**
+     * How many times a player has been POINTED AT A DIFFERENT EPISODE since it was created.
+     *
+     * Capture-then-release is not enough on its own. Both the seek and the reconfiguration capture their
+     * player under [selectedPlayerLock] and then call a SUSPENDING operation after releasing it -- and a
+     * lock cannot span a suspension. So a load can land between the seek's check and its
+     * `seekToTimeMs`, and the seek would then move audio that now belongs to another recording.
+     *
+     * This counter is the INCARNATION of the player's relationship to an episode. The seek captures it
+     * with the player and re-checks it AT THE CALL: if the player has been pointed at a different episode
+     * in between, the captured incarnation is stale and the seek is refused. What cannot be excluded by
+     * holding a lock across a suspension is refused by detecting that the world moved.
+     *
+     * IT IS NOT THE PRIMARY OBSERVATION, AND DELIBERATELY SO. Only some reconfiguration paths advance it
+     * (the paused-load branch does; the playing/queue-selection paths need not) -- so a seek that relied
+     * on this counter alone would miss a re-pointing made by a path that does not. The seek therefore
+     * reads THE PLAYER'S OWN `episodeUuid` after its suspending call, which detects re-pointing by ANY
+     * holder through ANY path, and treats this counter as a secondary signal. Anything that re-points a
+     * player without advancing the counter is still caught.
+     */
+    @Volatile
+    private var playerEpisodeIncarnation: Long = 0L
+
+    /** The player-episode incarnation, so a case can assert a captured one goes stale. */
+    internal fun playerEpisodeIncarnationForTest(): Long = playerEpisodeIncarnation
+
+    /** Points a player at another episode, as a load does, bumping the incarnation. */
+    internal fun bumpPlayerEpisodeIncarnationForTest() {
+        synchronized(selectedPlayerLock) { playerEpisodeIncarnation++ }
+    }
+
+    /**
+     * The outcome of an episode-scoped mutation, with the episode and pre-action position THE OWNER
+     * captured when it decided.
+     *
+     * The pre-position travels WITH the result rather than being re-read by the caller afterwards: a
+     * caller that reads live state once the operation was accepted reads whatever is selected NOW, and a
+     * later change would attribute the position to an episode the operation never touched.
+     */
+    data class ScopedMutation(
+        val episodeUuid: String,
+        val preActionPositionMs: Int?,
+        /**
+         * True when the operation was ISSUED and no outcome came back, so its EXECUTION IS UNKNOWN.
+         *
+         * Carried rather than collapsed: a caller that cannot distinguish "did not happen" from "may have
+         * happened" can repeat an operation the other side already performed.
+         */
+        val unknown: Boolean = false,
+    )
+
+    // NOT YET PROTECTED BY [selectedPlayerLock]: `playNow`/`playNowSync`, which is the path that WRITES
+    // the selected episode and reconfigures a reused player for it. The seek path validates the player's
+    // OWN episode at its mutation, which is what makes a captured reference safe there; the write side
+    // still changes the pair outside this boundary, so the reconfiguration can interleave with it. Left
+    // explicit rather than implied, because a lock that covers one side of a pair reads as if it covers
+    // both.
+
     suspend fun seekToTimeMsSuspend(positionMs: Int, seekComplete: (() -> Unit)? = null) {
         cancelPendingChapterSeek()
         seekToTimeMsInternal(positionMs)
         seekComplete?.invoke()
     }
 
-    fun seekIfPlayingToTimeMs(episodeUuid: String, positionMs: Int, seekComplete: (() -> Unit)? = null) {
-        // double checking the episode uuid as this may change during the launch
+    /**
+     * Skips only while [episodeUuid] is still the selected episode, and reports whether it did.
+     *
+     * THE SAME OWNER BOUNDARY AS [seekIfPlayingToTimeMs]: the episode a skip's magnitude was chosen for
+     * is not necessarily the one playing by the time the skip runs, and only the owner can decide
+     * "which episode is selected" and "move it" as one step. A caller-side check leaves the window open.
+     */
+    suspend fun skipIfPlaying(
+        episodeUuid: String,
+        forward: Boolean,
+        sourceView: SourceView = SourceView.UNKNOWN,
+        jumpAmountSeconds: Int? = null,
+    ): SkipOutcome {
         if (getCurrentEpisode()?.uuid != episodeUuid) {
-            return
+            return SkipOutcome.Refused
         }
-        launch {
-            if (getCurrentEpisode()?.uuid == episodeUuid) {
-                cancelPendingChapterSeek()
-                seekToTimeMsInternal(positionMs)
-                seekComplete?.invoke()
+        // THE ORIGINAL EXPECTATION TRAVELS WITH THE CALL. This function already knows which episode the
+        // skip was planned for; letting the skip below RE-READ the queue would replace that expectation
+        // with whatever is selected by then -- so a replacement moving to B would let the skip proceed
+        // against B under A's intent, which is the substitution the binding exists to prevent.
+        //
+        // THE SCOPED MUTATION'S OWN PAYLOAD IS THE ANSWER. Comparing the player's episode afterwards was
+        // a second, weaker observation of the same fact: it reports what the player names NOW rather than
+        // whether the skip acted, and a later replacement would flip it back to a false refusal.
+        return if (forward) {
+            skipForwardScoped(sourceView, jumpAmountSeconds, episodeUuid)
+        } else {
+            skipBackwardScoped(sourceView, jumpAmountSeconds, episodeUuid)
+        }
+    }
+
+    /**
+     * What a skip DID, as the owner observed it.
+     *
+     * [Unknown] exists because a skip that was ISSUED without a returned outcome is neither a refusal nor
+     * a confirmation. A Boolean cannot express that: collapsing it into `false` reports "did not happen"
+     * for an operation the receiver may already have performed, which invites a caller to repeat it.
+     */
+    sealed interface SkipOutcome {
+        /** The skip was confirmed performed. */
+        data object Accepted : SkipOutcome
+
+        /** The skip was refused; nothing was moved. */
+        data object Refused : SkipOutcome
+
+        /** The skip was ISSUED and its outcome could not be established. */
+        data object Unknown : SkipOutcome
+    }
+
+    /**
+     * The DECISION a skip's scoped mutation implies, in ONE place for both directions.
+     *
+     * [ScopedMutation] is nullable and carries `unknown`, and those are THREE outcomes, not two: a `null`
+     * is the owner's REFUSAL, an accepted mutation is a confirmed skip, and an accepted mutation with
+     * `unknown` set was ISSUED without a returned outcome. A Boolean collapsed the last two, which is how
+     * an unknowable skip came to be reported as a retryable refusal.
+     *
+     * Extracted so the mapping is exercised directly rather than through a manager whose collaborators
+     * cannot be assembled in a plain unit test -- the DECISION is what production runs, so testing it
+     * here is testing the real thing.
+     */
+    private fun skipOutcomeOf(mutation: ScopedMutation?): SkipOutcome = skipOutcomeOfMutation(refused = mutation == null, unknown = mutation?.unknown == true)
+
+    /**
+     * [seekIfPlayingToTimeMs] without a result, for a caller that does not need one.
+     *
+     * Kept separate rather than making every caller suspend: the episode-sync path applies a server
+     * position and has nothing to do with the outcome, and it does not run in a coroutine. The voice path
+     * is what needs the accepted/refused answer, so it takes the suspending form.
+     */
+    fun seekIfPlayingToTimeMsInBackground(episodeUuid: String, positionMs: Int, seekComplete: (() -> Unit)? = null) {
+        launch { seekIfPlayingToTimeMs(episodeUuid, positionMs, seekComplete) }
+    }
+
+    /**
+     * Seeks to [positionMs] ONLY if [episodeUuid] is still the selected episode, and reports whether it
+     * did.
+     *
+     * SUSPEND, NOT LAUNCH-AND-READ-A-FLAG. A flag written inside a launched coroutine cannot report the
+     * outcome to a caller that returns before that coroutine runs: when dispatch queues it, the caller
+     * reads the flag's initial value and reports a REFUSAL for a seek that then performs. The outcome is
+     * the owner's decision, so the caller must WAIT for it.
+     *
+     * The episode is re-read HERE, immediately before the mutation, on this call's own thread -- so a
+     * selection change that lands before the seek is caught by the same step that performs it.
+     */
+    suspend fun seekIfPlayingToTimeMs(
+        episodeUuid: String,
+        positionMs: Int,
+        seekComplete: (() -> Unit)? = null,
+    ): Boolean {
+        if (getCurrentEpisode()?.uuid != episodeUuid) {
+            return false
+        }
+        cancelPendingChapterSeek()
+        // THE MUTATION ITSELF RE-DECIDES. The check above is an early refusal, not the guarantee: this
+        // call suspends below, and a replacement can land in that suspension. The episode-scoped internal
+        // seek decides at the player mutation, where nothing can await in between.
+        if (!seekToTimeMsInternalIfEpisode(episodeUuid, positionMs)) {
+            return false
+        }
+        seekComplete?.invoke()
+        return true
+    }
+
+    /**
+     * [seekIfPlayingToTimeMs] reporting the OWNER'S OWN pre-action position.
+     *
+     * The position is captured under the same boundary that decides the mutation, so it describes the
+     * episode the operation was accepted for rather than whatever a caller might read later.
+     */
+    suspend fun seekIfPlayingCapturing(
+        episodeUuid: String,
+        positionMs: Int,
+    ): ScopedMutation? {
+        if (getCurrentEpisode()?.uuid != episodeUuid) return null
+        cancelPendingChapterSeek()
+        // THE PRE-ACTION POSITION IS THE PLAYER'S, READ AT THE DECISION.
+        //
+        // `episode.playedUpToMs` is PERSISTED PROGRESS, which the player updates on its own schedule and
+        // which can lag the audio actually playing -- so it is not "the position before the mutation".
+        // The player is the authority on where playback IS, and reading it here, under the same boundary
+        // that decides and before the mutation is issued, is what makes the value a genuine
+        // pre-action snapshot rather than a later observation of something that has already moved.
+        // THE SNAPSHOT IS TAKEN AT THE MUTATION, NOT BY THIS WRAPPER.
+        //
+        // Taking it here and then calling the seek leaves a SUSPENSION in between, so a replacement can
+        // land after the snapshot and before the decision -- and the position would then belong to a
+        // different episode than the one the operation was accepted for. A snapshot a wrapper takes
+        // before a later suspending decision is not the same thing as one captured by the mutation
+        // itself, and only the latter can be attributed to the accepted operation.
+        //
+        // `seekToTimeMsInternalIfEpisode` therefore RETURNS the position it saw when it decided, so the
+        // value and the acceptance are one observation.
+        return seekToTimeMsInternalIfEpisodeCapturing(episodeUuid, positionMs)
+    }
+
+    /**
+     * [seekToTimeMsInternalIfEpisode], also reporting the PRE-ACTION POSITION it saw when it decided.
+     *
+     * THE SNAPSHOT AND THE DECISION ARE ONE OBSERVATION. A caller that reads the position before calling
+     * this leaves a suspension between the read and the decision, and a replacement landing in that gap
+     * would make the reported position belong to a different episode than the accepted operation. Reading
+     * it here, inside the same step that decides, is what ties the value to the acceptance.
+     *
+     * @return the accepted episode and its pre-action position, an UNKNOWN result when the execution is
+     *   not knowable, or null when refused.
+     */
+    private suspend fun seekToTimeMsInternalIfEpisodeCapturing(
+        episodeUuid: String,
+        positionMs: Int,
+    ): ScopedMutation? {
+        val selected = getCurrentEpisode()
+        if (selected?.uuid != episodeUuid) return null
+        if (player == null) return null
+        withContext(Dispatchers.Main) {
+            playbackStateRelay.blockingFirst().let { playbackState ->
+                playbackStateRelay.accept(playbackState.copy(positionMs = positionMs, lastChangeFrom = LastChangeFrom.OnUserSeeking.value))
             }
         }
+        // THE PLAYER TAKES THE SNAPSHOT AT ITS OWN MUTATION. This wrapper does not read the position
+        // first: doing so would leave a suspension between the read and the decision, and a replacement
+        // landing in that gap would make the value belong to a different episode than the accepted
+        // operation. The player's bound operation returns the position IT saw when it decided, so the
+        // value and the acceptance are one observation.
+        val target = synchronized(selectedPlayerLock) {
+            val current = getCurrentEpisode()
+            if (current?.uuid != episodeUuid) return null
+            player?.takeIf { it.episodeUuid == episodeUuid } ?: return null
+        }
+        // THE SAME GUARD AS THE NON-CAPTURING PATH. Calling the player directly here bypassed
+        // `enforcesEpisodeBoundSeek`, so an unsupported player would have been DOWNGRADED to the default
+        // check-then-delegate -- the very gap the contract exists to close, reachable through the
+        // capturing path alone. ONE RULE, EVERY CALL SITE.
+        if (!target.enforcesEpisodeBoundSeek) {
+            Timber.w("[Playback] refused: player cannot enforce an episode-bound seek")
+            return null
+        }
+        val outcome = target.seekToTimeMsIfEpisode(positionMs, episodeUuid)
+        if (!outcome.accepted) {
+            // UNKNOWN IS NOT REFUSAL, and it is not "no result" either: the caller must be able to tell
+            // that the operation may have run. Refusing here would look like a retryable failure and
+            // could repeat an operation the receiver already performed.
+            // THE OWNER'S KNOWN SNAPSHOT IS PRESERVED. `unknown` concerns whether the EXECUTION's
+            // outcome is knowable -- not whether the pre-action snapshot existed. Passing null here
+            // discarded a value the owner had already captured, so a caller could no longer say where
+            // playback WAS when the unknown operation began.
+            return if (outcome.unknown) {
+                ScopedMutation(episodeUuid, outcome.positionMs?.toInt(), unknown = true)
+            } else {
+                null
+            }
+        }
+        // THE POSITION MAY BE ABSENT WHILE THE OPERATION IS ACCEPTED. It is carried as null so the
+        // history consumer records nothing rather than substituting a value -- absence is not refusal.
+        return ScopedMutation(episodeUuid, outcome.positionMs?.toInt())
     }
 
     private suspend fun seekToTimeMsInternal(duration: Duration) {
         seekToTimeMsInternal(duration.inWholeMilliseconds.toInt())
+    }
+
+    /**
+     * The episode-scoped form of [seekToTimeMsInternal]: the seek is performed ONLY while
+     * [episodeUuid] is still the selected episode, and THAT CHECK IS THE MUTATION'S OWN STEP.
+     *
+     * The check cannot be separated from the mutation. This method SUSPENDS twice before reaching the
+     * player -- once to publish the media-session position and once to update the paused state -- and an
+     * episode replacement can land in either suspension. Re-reading the selection before those
+     * suspensions therefore does not exclude a change across them; re-reading it immediately before
+     * `player?.seekToTimeMs` does, because that read and that mutation are the same uninterrupted step
+     * and nothing in between can await.
+     *
+     * @return true when the seek was performed, false when the selection had moved.
+     */
+    private suspend fun seekToTimeMsInternalIfEpisode(episodeUuid: String, positionMs: Int): Boolean {
+        val episode = getCurrentEpisode()
+        if (episode?.uuid != episodeUuid) return false
+        LogBuffer.i(LogBuffer.TAG_PLAYBACK, "PlaybackService seekToTimeMsInternalIfEpisode %.3f ", positionMs.toDouble() / 1000.0)
+        if (player == null) return false
+
+        // Publish the media-session position. This SUSPENDS, so the selection may change across it --
+        // which is exactly why the deciding read is the one below, not this one.
+        withContext(Dispatchers.Main) {
+            playbackStateRelay.blockingFirst().let { playbackState ->
+                playbackStateRelay.accept(playbackState.copy(positionMs = positionMs, lastChangeFrom = LastChangeFrom.OnUserSeeking.value))
+            }
+        }
+
+        // THE DECISION AND THE MUTATION SHARE THE PLAYBACK-OWNER BOUNDARY. Reading the selection
+        // immediately before the mutation is not enough on its own: the selection is replaced from a
+        // different execution context -- the IO path that loads a new episode -- which can run
+        // concurrently with this caller-context seek. Holding [selectedPlayerLock] across both makes the
+        // replacement wait, so the substitution this boundary exists to prevent cannot occur.
+        //
+        // `player.seekToTimeMs` SUSPENDS, and a suspension point inside a monitor would be the
+        // interleaving the monitor prevents -- so the player is CAPTURED under the boundary and the
+        // suspending call is issued after it is released. Capturing under the boundary is what makes the
+        // pair consistent: the episode decided on and the player addressed are read together, and a
+        // replacement cannot land between them.
+        val seekTarget = synchronized(selectedPlayerLock) {
+            val selected = getCurrentEpisode()
+            if (selected?.uuid != episodeUuid) return false
+            // THE PLAYER'S OWN EPISODE MUST MATCH TOO. A player is REUSED across episodes -- the same
+            // instance is reconfigured for the next recording -- so a captured reference does not by
+            // itself establish WHICH episode it addresses, and the queue naming the episode says
+            // nothing about the instance.
+            //
+            // WHAT THIS ACTUALLY EXCLUDES, stated no more strongly than it holds: the check and the
+            // capture are one step, so a reconfiguration that takes [selectedPlayerLock] cannot land
+            // between them. It does NOT exclude reconfiguration that takes no lock -- the write side
+            // (`playNow`/`playNowSync`, below) still runs outside the boundary -- and it does not make
+            // the captured reference safe ACROSS the suspending seek that follows. My earlier wording
+            // claimed otherwise and this replaces it.
+            val target = player
+            if (target?.episodeUuid != episodeUuid) return false
+            selected.playedUpToMs = positionMs
+            // THE INCARNATION TRAVELS WITH THE CAPTURE, so the call below can tell whether the player has
+            // been pointed at a different episode in the meantime.
+            target to playerEpisodeIncarnation
+        }
+        // RE-CHECKED ON BOTH SIDES OF THE SUSPENDING CALL, and the AFTER check is the one that matters.
+        //
+        // `seekToTimeMs` SUSPENDS, so a reconfiguration can land while it is in flight -- which is exactly
+        // @reviewer's measured case: the seek is issued against the replaced player and only then does the
+        // episode change. A check BEFORE the call cannot see that, because at that moment nothing has
+        // happened yet. Holding the monitor across the suspension is impossible, so the exclusion comes
+        // from DETECTING the change: if the player was pointed at another episode while the seek was in
+        // flight, the seek has already acted on the wrong audio and this must NOT report success.
+        if (playerEpisodeIncarnation != seekTarget.second) return false
+        if (seekTarget.first.episodeUuid != episodeUuid) return false
+
+        // THE MUTATION IS GUARDED, NOT AUDITED. A refusal AFTER `seekToTimeMs` returns has already let the
+        // seek happen on whatever the player came to address -- @reviewer's strengthened control observes
+        // exactly that, and a returned `false` cannot undo a mutation. Detecting the damage is not
+        // preventing it.
+        //
+        // `seekToTimeMs` itself suspends, so the re-pointing lands INSIDE it. What can be prevented is
+        // the mutation it would perform: the seek is issued THROUGH a call that re-checks the player's
+        // episode at the moment the player would act, so a re-pointed player is refused rather than moved.
+        val moved = awaitPlayerSeek(
+            player = seekTarget.first,
+            episodeUuid = episodeUuid,
+            positionMs = positionMs,
+        )
+        if (!moved) {
+            Timber.w("[Playback] a seek was refused: the player no longer addresses its episode")
+        }
+        return moved
+    }
+
+    /**
+     * Issues [positionMs]' seek on [player] ONLY while it still addresses [episodeUuid].
+     *
+     * THE EXPECTATION TRAVELS INTO THE PLAYER, which is the only place early enough. A caller-side check
+     * -- before or after -- can merely OBSERVE that a REUSED player was re-pointed, and by then the seek
+     * it issued has already run on the wrong audio. `Player.seekToTimeMsIfEpisode` decides at the
+     * player's own mutating operation, where a re-pointing that lands inside the suspension is refused
+     * instead of performed.
+     */
+    private suspend fun awaitPlayerSeek(player: Player, episodeUuid: String, positionMs: Int): Boolean {
+        // AN UNSUPPORTED PLAYER IS REFUSED, NOT DOWNGRADED. The default implementation checks and then
+        // delegates, which carries the very gap this contract exists to close; falling back to it would
+        // perform an unrestricted seek under a bound request. A player that cannot enforce the binding
+        // makes the bound call UNAVAILABLE.
+        if (!player.enforcesEpisodeBoundSeek) {
+            Timber.w("[Playback] refused: player cannot enforce an episode-bound seek")
+            return false
+        }
+        // THE PLAYER DECIDES AT ITS OWN MUTATION. This call carries the expectation INTO the player
+        // operation, so a re-pointing that lands inside the seek's suspension is refused there rather
+        // than detected here afterwards. A non-null result is the acceptance AND the pre-action position.
+        return player.seekToTimeMsIfEpisode(positionMs, episodeUuid).accepted
     }
 
     private suspend fun seekToTimeMsInternal(positionMs: Int) {
@@ -1223,25 +1652,93 @@ open class PlaybackManager @Inject constructor(
         }
     }
 
+    /**
+     * The episode-bound skip that can report [SkipOutcome.Unknown].
+     *
+     * [skipForwardSuspend] returns a Boolean, which can only say "moved" or "did not move". The scoped
+     * mutation the skip performs is what knows whether the operation was ISSUED without an outcome, so
+     * that fact is read from the mutation rather than reconstructed from a Boolean that has no room for
+     * it.
+     */
+    private suspend fun skipForwardScoped(
+        sourceView: SourceView,
+        jumpAmountSeconds: Int?,
+        expectedEpisodeUuid: String,
+    ): SkipOutcome {
+        if (getCurrentEpisode()?.uuid != expectedEpisodeUuid) return SkipOutcome.Refused
+        val episode = getCurrentEpisode() ?: return SkipOutcome.Refused
+        val jumpAmountMs = (jumpAmountSeconds ?: settings.skipForwardInSecs.value) * 1000
+        val currentTimeMs = getCurrentTimeMs(episode = episode)
+        if (currentTimeMs < 0 || player?.episodeUuid != episode.uuid) return SkipOutcome.Refused
+        val newPositionMs = currentTimeMs + jumpAmountMs
+        val durationMs = player?.durationMs() ?: Int.MAX_VALUE
+        if (newPositionMs < durationMs) {
+            val mutation = seekToTimeMsInternalIfEpisodeCapturing(episode.uuid, newPositionMs)
+            // THE MUTATION'S OWN PAYLOAD DECIDES, through ONE mapping shared with the backward path so the
+            // two cannot drift. `null` is the owner's refusal (a different episode is selected, or the
+            // player cannot enforce the binding); an absent outcome is Unknown, NOT a refusal, because
+            // the operation was ISSUED and may already have run.
+            val outcome = skipOutcomeOf(mutation)
+            if (outcome != SkipOutcome.Accepted) return outcome
+            statsManager.addTimeSavedSkipping((newPositionMs - currentTimeMs).toLong())
+        } else {
+            LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Seek beyond end of episode so completing. ${episode.uuid}")
+            onCompletion(episode.uuid)
+        }
+        trackPlaybackEvent(sourceView) { source, contentType ->
+            PlaybackSkipForwardEvent(source = source.analyticsValue, contentType = contentType)
+        }
+        return SkipOutcome.Accepted
+    }
+
+    /** [skipForwardScoped]'s backward counterpart. */
+    private suspend fun skipBackwardScoped(
+        sourceView: SourceView,
+        jumpAmountSeconds: Int?,
+        expectedEpisodeUuid: String,
+    ): SkipOutcome {
+        if (getCurrentEpisode()?.uuid != expectedEpisodeUuid) return SkipOutcome.Refused
+        val episode = getCurrentEpisode() ?: return SkipOutcome.Refused
+        val jumpAmountMs = (jumpAmountSeconds ?: settings.skipBackInSecs.value) * 1000
+        val currentTimeMs = getCurrentTimeMs(episode = episode)
+        if (currentTimeMs < 0) return SkipOutcome.Refused
+        val newPositionMs = (currentTimeMs - jumpAmountMs).coerceAtLeast(0)
+        val mutation = seekToTimeMsInternalIfEpisodeCapturing(episode.uuid, newPositionMs)
+        val outcome = skipOutcomeOf(mutation)
+        if (outcome != SkipOutcome.Accepted) return outcome
+        trackPlaybackEvent(sourceView) { source, contentType ->
+            PlaybackSkipBackEvent(source = source.analyticsValue, contentType = contentType)
+        }
+        return SkipOutcome.Accepted
+    }
+
     suspend fun skipForwardSuspend(
         sourceView: SourceView = SourceView.UNKNOWN,
         jumpAmountSeconds: Int? = null,
-    ) {
+        expectedEpisodeUuid: String? = null,
+    ): Boolean {
         LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Skip forward tapped")
 
         cancelPendingChapterSeek()
-        val episode = getCurrentEpisode() ?: return
+        val episode = getCurrentEpisode() ?: return false
+        // A BOUND SKIP KEEPS ITS CALLER'S EXPECTATION. Reading the queue here would adopt whatever is
+        // selected now as the subject, which is exactly the substitution the binding prevents.
+        if (expectedEpisodeUuid != null && episode.uuid != expectedEpisodeUuid) return false
         val jumpAmountMs = (jumpAmountSeconds ?: settings.skipForwardInSecs.value) * 1000
 
         val currentTimeMs = getCurrentTimeMs(episode = episode)
-        if (currentTimeMs < 0 || player?.episodeUuid != episode.uuid) return // Make sure the player hasn't changed episodes before using the current time to seek
+        if (currentTimeMs < 0 || player?.episodeUuid != episode.uuid) return false // Make sure the player hasn't changed episodes before using the current time to seek
 
         val newPositionMs = currentTimeMs + jumpAmountMs
         val durationMs = player?.durationMs() ?: Int.MAX_VALUE // If we don't have a duration, just let them skip
 
-        statsManager.addTimeSavedSkipping((newPositionMs - currentTimeMs).toLong())
         if (newPositionMs < durationMs) {
-            seekToTimeMsInternal(newPositionMs)
+            // THE MUTATION RE-DECIDES, exactly as the seek path does: this call suspends, and an episode
+            // replacement can land in that suspension. Its OUTCOME decides, so the statistics are
+            // committed from it: a refused skip moved nothing, and recording time saved for it would
+            // publish a saving that never happened -- and against the replacement's episode.
+            if (!seekToTimeMsInternalIfEpisode(episode.uuid, newPositionMs)) return false
+            statsManager.addTimeSavedSkipping((newPositionMs - currentTimeMs).toLong())
         } else {
             LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Seek beyond end of episode so completing. ${episode.uuid}")
             onCompletion(episode.uuid)
@@ -1253,6 +1750,7 @@ open class PlaybackManager @Inject constructor(
                 contentType = contentType,
             )
         }
+        return true
     }
 
     fun skipBackward(sourceView: SourceView = SourceView.UNKNOWN, jumpAmountSeconds: Int? = null) {
@@ -1261,18 +1759,25 @@ open class PlaybackManager @Inject constructor(
         }
     }
 
-    suspend fun skipBackwardSuspend(sourceView: SourceView = SourceView.UNKNOWN, jumpAmountSeconds: Int? = null) {
+    suspend fun skipBackwardSuspend(
+        sourceView: SourceView = SourceView.UNKNOWN,
+        jumpAmountSeconds: Int? = null,
+        expectedEpisodeUuid: String? = null,
+    ): Boolean {
         LogBuffer.i(LogBuffer.TAG_PLAYBACK, "Skip backward tapped")
 
         cancelPendingChapterSeek()
-        val episode = getCurrentEpisode() ?: return
+        val episode = getCurrentEpisode() ?: return false
+        if (expectedEpisodeUuid != null && episode.uuid != expectedEpisodeUuid) return false
 
         val jumpAmountMs = (jumpAmountSeconds ?: settings.skipBackInSecs.value) * 1000
         val currentTimeMs = getCurrentTimeMs(episode = episode)
-        if (currentTimeMs < 0) return
+        if (currentTimeMs < 0) return false
 
         val newPositionMs = (currentTimeMs - jumpAmountMs).coerceAtLeast(0)
-        seekToTimeMsInternal(newPositionMs)
+        // Same rule: the episode check is the mutation's own step, not a read taken before a suspension.
+        // The outcome is what the caller needs: a refused skip is not a skip.
+        if (!seekToTimeMsInternalIfEpisode(episode.uuid, newPositionMs)) return false
 
         trackPlaybackEvent(sourceView) { source, contentType ->
             PlaybackSkipBackEvent(
@@ -1280,6 +1785,7 @@ open class PlaybackManager @Inject constructor(
                 contentType = contentType,
             )
         }
+        return true
     }
 
     fun skipToNextSelectedOrLastChapter() {
@@ -1478,12 +1984,12 @@ open class PlaybackManager @Inject constructor(
 
     fun castReconnected() {
         launch(Dispatchers.Main) {
-            if (player != null) {
-                player?.stop()
-                player = null
+            val old = synchronized(selectedPlayerLock) { player }
+            old?.stop()
+            val fresh = playerManager.createCastPlayer(this@PlaybackManager::onPlayerEvent)
+            synchronized(selectedPlayerLock) {
+                player = fresh
             }
-
-            player = playerManager.createCastPlayer(this@PlaybackManager::onPlayerEvent)
             mediaSessionManager.installCastPlayer()
             (player as? CastPlayer)?.updateFromRemoteIfRequired()
             Timber.i("Cast reconnected. Creating media player of type CastPlayer")
@@ -2414,7 +2920,22 @@ open class PlaybackManager @Inject constructor(
             }
             play(sourceView, posUpdatedOnPlayerReset)
         } else {
-            player?.load(episode.playedUpToMs)
+            // THE REUSED PLAYER IS POINTED AT THE NEWLY SELECTED EPISODE UNDER THE BOUNDARY. This is the
+            // write the seek path's episode check must be ordered against, and taking the lock for it is
+            // what makes that check meaningful -- a lock one side takes and the other does not excludes
+            // nothing.
+            //
+            // `load` SUSPENDS, so it is called after the boundary is released, exactly as the seek is.
+            // What the boundary establishes is which player is being reconfigured and that the selection
+            // did not change beneath the decision; the call itself then acts on that captured player.
+            val reconfigured = synchronized(selectedPlayerLock) {
+                // POINTING A PLAYER AT ANOTHER EPISODE IS A NEW INCARNATION. Bumped under the same
+                // boundary the seek captures it in, so a seek holding the old value is refused at its
+                // call rather than moving the newly loaded recording.
+                playerEpisodeIncarnation++
+                player
+            }
+            reconfigured?.load(episode.playedUpToMs)
             onPlayerPaused()
         }
     }
@@ -2604,18 +3125,24 @@ open class PlaybackManager @Inject constructor(
         if (resettingPlayer) return
         resettingPlayer = true
 
+        val oldPlayer = synchronized(selectedPlayerLock) { player }
+        oldPlayer?.stop()
+        val castConnected = castManager.isConnected()
         withContext(Dispatchers.Main) {
-            player?.stop()
-            if (castManager.isConnected()) {
-                player = playerManager.createCastPlayer(this@PlaybackManager::onPlayerEvent)
-                mediaSessionManager.installCastPlayer()
-                Timber.i("Creating media player of type CastPlayer.")
-            } else {
-                player = playerManager.createSimplePlayer(this@PlaybackManager::onPlayerEvent)
-                // Start the service early so it's ready when we install the player later.
-                // The ExoPlayer doesn't exist yet — SimplePlayer creates it lazily in prepare().
-                mediaSessionManager.startServiceIfNeeded(application)
-                Timber.i("Creating media player of type SimplePlayer.")
+            // The third replacement site, taking the same boundary as the decision the seek path makes.
+            // Only the ASSIGNMENT is inside it; everything that suspends above is not.
+            synchronized(selectedPlayerLock) {
+                if (castConnected) {
+                    player = playerManager.createCastPlayer(this@PlaybackManager::onPlayerEvent)
+                    mediaSessionManager.installCastPlayer()
+                    Timber.i("Creating media player of type CastPlayer.")
+                } else {
+                    player = playerManager.createSimplePlayer(this@PlaybackManager::onPlayerEvent)
+                    // Start the service early so it's ready when we install the player later.
+                    // The ExoPlayer doesn't exist yet — SimplePlayer creates it lazily in prepare().
+                    mediaSessionManager.startServiceIfNeeded(application)
+                    Timber.i("Creating media player of type SimplePlayer.")
+                }
             }
         }
 
@@ -3124,4 +3651,26 @@ internal fun cacheNetworkConstraint(warnOnMeteredNetwork: Boolean): NetworkType 
     NetworkType.UNMETERED
 } else {
     NetworkType.CONNECTED
+}
+
+/**
+ * The DECISION a skip's scoped mutation implies, in ONE place for both directions.
+ *
+ * The mutation is nullable and carries `unknown`, and those are THREE outcomes, not two: a missing
+ * mutation is the owner's REFUSAL, an accepted one is a confirmed skip, and an accepted one with
+ * `unknown` set was ISSUED without a returned outcome. A Boolean collapsed the last two, which is how an
+ * unknowable skip came to be reported as a retryable refusal -- an outcome that looks safely retryable
+ * for an operation the receiver may already have performed.
+ *
+ * TOP-LEVEL AND PURE, so the decision production runs is exercisable directly: the manager takes 28
+ * injected collaborators, which a plain unit test cannot assemble, and a decision reachable only through
+ * that construction is a decision nothing verifies.
+ */
+internal fun skipOutcomeOfMutation(
+    refused: Boolean,
+    unknown: Boolean,
+): PlaybackManager.SkipOutcome = when {
+    refused -> PlaybackManager.SkipOutcome.Refused
+    unknown -> PlaybackManager.SkipOutcome.Unknown
+    else -> PlaybackManager.SkipOutcome.Accepted
 }

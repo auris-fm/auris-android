@@ -47,7 +47,9 @@ object VoiceUploadModule {
     fun provideUploadTransport(
         accountStartup: VoiceSharingAccountStartup,
     ): ContributionUploadTransport = ContributionUploadTransport(
-        // Blank until the route contract is confirmed with the cloud lane; a blank endpoint cannot be
+        // Route contract from cloud-voice-uploads 476feadc: POST /api/v1/voice-recordings, server-issued
+// staged key; the HOST stays a deployment-time input (no verified live host), so the endpoint is
+// blank until deployment provides one. A blank endpoint cannot be
         // requested.
         endpoint = "",
         // Bearer comes ONLY from the owner-published credential state, resolved per attempt. The epoch
@@ -92,6 +94,17 @@ object VoiceUploadModule {
                 }
             },
             identityHolds = { epoch -> accountStartup.state.projection.value?.enrollmentEpoch == epoch },
+            // ONE account+epoch-bound credential authority (spec 6480d0c5): account identity, session,
+            // credential and the owner-published token are read under the REAL owner lock in a single
+            // transaction, together with the epoch projection - not two separate reads labelled
+            // atomic. The assembly revalidates the returned epoch against the admitted one and freezes
+            // the bearer for the attempt, so a switch inside acquisition cannot swap identity.
+            credentialFor = { admittedEpoch ->
+                UploadIdentityAuthority(
+                    state = accountStartup.state,
+                    underOwnerTransaction = { block -> accountStartup.validateUnderOwnerTransaction(block) },
+                ).credentialFor(admittedEpoch)
+            },
             clock = System::currentTimeMillis,
             // THE compiled-off gate: the remote-config snapshot is disabled by default, so the loop
             // below wakes, finds the gate closed, and touches nothing.
@@ -134,11 +147,15 @@ class UploadTrigger(
     @Volatile
     private var started = false
 
+    /** Deterministic poll counter for controls: a second start() must NOT grow this. */
+    val pollsStarted = java.util.concurrent.atomic.AtomicInteger(0)
+
     fun start() {
         if (started) return
         started = true
         scope.launch {
             while (true) {
+                pollsStarted.incrementAndGet()
                 runCatching { assembly.poll() }
                 delay(intervalMs)
             }

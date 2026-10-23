@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.cancel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -50,18 +51,30 @@ class VoiceUploadModuleWiringTest {
             policyAllows = { false },
             networkAvailable = { true },
         )
-        // The REAL UploadTrigger on a REAL scope: start() launches the poll loop.
-        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined)
-        val trigger = UploadTrigger(assembly, scope, intervalMs = 50L)
-        trigger.start()
-        // Let at least one poll pass run.
-        Thread.sleep(200)
+        // The REAL UploadTrigger on an OWNED scope: start() launches the poll loop; finally cancels it.
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Unconfined + kotlinx.coroutines.SupervisorJob())
+        try {
+            val trigger = UploadTrigger(assembly, scope, intervalMs = 20L)
+            trigger.start()
+            // Deterministic barrier: at least one poll has STARTED.
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+            while (trigger.pollsStarted.get() < 1 && System.nanoTime() < deadline) Thread.sleep(10)
+            val afterFirst = trigger.pollsStarted.get()
+            org.junit.Assert.assertTrue("at least one poll started", afterFirst >= 1)
 
-        // The disabled gate is checked BEFORE the pickup, so the attempt count is untouched.
-        assertEquals("the disabled gate never picked the capture up", 1, store.stateAttemptsForTest(id))
-        assertTrue("the capture is still owned", store.readyEntries().any { it.captureId == id })
-        // Idempotent start: a second call must not double-poll.
-        trigger.start()
+            // IDEMPOTENCE with a deterministic assertion: a second start() must not grow the poll
+            // counter beyond what the running loop itself produces - specifically, a second LOOP would
+            // double the growth rate; verify no second job was launched.
+            trigger.start()
+            val jobs = scope.coroutineContext[kotlinx.coroutines.Job]?.children?.toList() ?: emptyList()
+            assertEquals("exactly ONE loop job exists after two start() calls", 1, jobs.size)
+
+            // The disabled gate is checked BEFORE the pickup, so the attempt count is untouched.
+            assertEquals("the disabled gate never picked the capture up", 1, store.stateAttemptsForTest(id))
+            assertTrue("the capture is still owned", store.readyEntries().any { it.captureId == id })
+        } finally {
+            scope.cancel()
+        }
     }
 
     @Test
@@ -101,6 +114,87 @@ class VoiceUploadModuleWiringTest {
         assertEquals("the attempt ran but settled as retained", 1, result.attempted)
         assertTrue("the capture is RETAINED, not released", store.readyEntries().any { it.captureId == id })
         assertNull("and the server never answered", (null as kotlin.Int?))
+    }
+
+    @Test
+    fun `an identity switch INSIDE credential acquisition retains instead of sending the new bearer`() {
+        val root = tmp.newFolder("wiring-switch")
+        val store = newStore(root)
+        val id = UUID.randomUUID().toString()
+        prepareCapture(store, id)
+        requests.set(0)
+        responseStatus = 201
+        responseBody = receiptFor(store, id, "accepted")
+        val port = startServer()
+
+        // The account authority switches epoch DURING credential acquisition: the snapshot returns
+        // (newBearer, NEW epoch) for a capture admitted under epoch-1.
+        val assembly = ContributionUploadAssembly(
+            store = store,
+            transport = ContributionUploadTransport(
+                endpoint = "http://127.0.0.1:$port/v1/contributions",
+                authorization = { "Bearer stale-supplier" },
+            ),
+            captureFor = { captureId ->
+                store.durableCapture(captureId)?.let {
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch)
+                }
+            },
+            clock = { 51_000_000L },
+            policyAllows = { true },
+            networkAvailable = { true },
+            identityHolds = { true },
+            credentialFor = { admittedEpoch ->
+                if (admittedEpoch == "epoch-1") "Bearer new-epoch-2" to "epoch-2" else "Bearer old" to admittedEpoch
+            },
+        )
+        assembly.poll()
+
+        assertEquals("no request carried the new identity", 0, requests.get())
+        assertTrue("the capture is retained", store.readyEntries().any { it.captureId == id })
+    }
+
+    @Test
+    fun `a matched identity freezes the acquired bearer into the attempt`() {
+        val root = tmp.newFolder("wiring-frozen")
+        val store = newStore(root)
+        val id = UUID.randomUUID().toString()
+        prepareCapture(store, id)
+        requests.set(0)
+        responseStatus = 201
+        responseBody = receiptFor(store, id, "accepted")
+        val port = startServer()
+        val auths = AtomicInteger(0)
+
+        val assembly = ContributionUploadAssembly(
+            store = store,
+            transport = ContributionUploadTransport(
+                endpoint = "http://127.0.0.1:$port/v1/contributions",
+                authorization = {
+                    auths.incrementAndGet()
+                    "Bearer supplier-must-not-be-used"
+                },
+            ),
+            captureFor = { captureId ->
+                store.durableCapture(captureId)?.let {
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch)
+                }
+            },
+            clock = { 51_000_000L },
+            policyAllows = { true },
+            networkAvailable = { true },
+            credentialFor = { admittedEpoch ->
+                check(admittedEpoch == "epoch-1")
+                // The supplier switches identity IMMEDIATELY after acquisition: the frozen bearer
+                // must be the one that was validated against epoch-1.
+                "Bearer admitted" to "epoch-1"
+            },
+        )
+        val result = assembly.poll()
+
+        assertEquals("the frozen bearer sent exactly one request", 1, requests.get())
+        assertEquals("the transport's own supplier was NOT consulted", 0, auths.get())
+        assertEquals("the valid receipt released the entry", 0, store.readyEntries().count { it.captureId == id })
     }
 
     @Test

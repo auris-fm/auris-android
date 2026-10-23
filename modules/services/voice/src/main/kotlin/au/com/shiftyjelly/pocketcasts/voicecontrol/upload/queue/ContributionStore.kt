@@ -27,7 +27,7 @@ import java.util.EnumMap
 // QueueFence generation wiring into these paths is still pending (reviewer f003b49f finding 5).
 class ContributionStore(
     private val root: File,
-    private val limits: QueueLimits,
+    internal val limits: QueueLimits,
     private val clock: () -> Long = System::currentTimeMillis,
     /**
      * Full-jitter source for the retry policy: given the exclusive backoff bound in ms, returns the drawn

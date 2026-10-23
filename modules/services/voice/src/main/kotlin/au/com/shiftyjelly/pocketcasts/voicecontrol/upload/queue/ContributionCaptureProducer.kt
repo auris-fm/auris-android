@@ -31,6 +31,14 @@ class ContributionCaptureProducer(
     private val originalFormat: String = "pcm_s16le",
     /** Which converter produced the WAV the store persists. Bump when the pipeline changes. */
     private val conversionVersion: String = "v1",
+    /** The REAL binary provenance: the app version and build that produced the audio. */
+    private val appVersion: String,
+    private val appBuild: String,
+    /**
+     * The capture session's REAL identity, supplied by the session that owns the recording - never
+     * derived from the capture id, which is a capture-scoped value, not a session-scoped one.
+     */
+    private val captureSessionId: () -> String,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
 
@@ -56,6 +64,13 @@ class ContributionCaptureProducer(
     ): ContributionStore.Entry? {
         if (!captureId.matches(UUID_RE)) return null
         val samples = pcmChunks.sumOf { it.second.toLong() }
+        // BOUNDED VALIDATION BEFORE ALLOCATION (reviewer 064d5a00): refuse over-budget input with the
+        // same arithmetic the store will apply, so no unbounded buffer is ever constructed.
+        if (samples <= 0 || store.projectedBytesFor(samples, 0) > store.limits.maxClipBytes) return null
+        if (samples * 1000L / SAMPLE_RATE > store.limits.maxClipMs) return null
+        require(sampleRateHz == 16000) { "record audio is 16 kHz mono" }
+        val sessionId = captureSessionId()
+        if (sessionId.isEmpty()) return null
         // The record's audio block describes EXACTLY the bytes WavWriter will produce.
         val expected = ByteArrayOutputStream()
         WavWriter.writeHeader(expected, Math.toIntExact(samples))
@@ -64,6 +79,7 @@ class ContributionCaptureProducer(
         val block = AudioBlock(
             sha256 = sha256Hex(audioBytes),
             byteCount = audioBytes.size.toLong(),
+            sampleRateHz = sampleRateHz,
             retainedSamples = samples,
             originalFormat = originalFormat,
             conversionVersion = conversionVersion,
@@ -73,15 +89,14 @@ class ContributionCaptureProducer(
         val builder = ContributionRecordBuilder(
             captureId,
             enrollmentEpoch,
-            // The session incarnation is the capture id scoped to this producer: opaque on the wire.
-            "session-$captureId",
+            sessionId,
         )
         for ((name, ref) in models) builder.model(name, ref)
         for ((stage, entry) in stages) builder.stage(stage, entry)
         val record = builder.build(
             platform = "android",
-            appVersion = APP_VERSION,
-            build = APP_BUILD,
+            appVersion = appVersion,
+            build = appBuild,
             audio = block,
         )
         val metadata = CanonicalJson.canonicalBytes(record)
@@ -93,9 +108,6 @@ class ContributionCaptureProducer(
 
     private companion object {
         val UUID_RE = Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-
-        // Compiled provenance, not settings: the record describes the binary that produced the audio.
-        const val APP_VERSION = "8.20"
-        const val APP_BUILD = "12345"
+        private const val SAMPLE_RATE = 16_000L
     }
 }

@@ -96,6 +96,12 @@ class ContributionUploadTransport(
         remainingMs: Long? = null,
         /** Receives the handle of the registered call, so the revoker can cancel THAT call directly. */
         onRegistered: (Long) -> Unit = {},
+        /**
+         * When present, used INSTEAD of the authorization supplier for THIS attempt only. The caller
+         * acquires the credential bound to the admitted identity snapshot and freezes it here, so an
+         * account switch after acquisition cannot swap the bearer mid-attempt (reviewer 064d5a00).
+         */
+        authorizationOverride: String? = null,
     ): Response {
         // BEFORE THE FIRST BYTE. Admission and this call are not atomic, so a withdrawal that landed
         // between them must not put a request on the network.
@@ -106,7 +112,8 @@ class ContributionUploadTransport(
         // EVERYTHING after the permit is under release cleanup, so a missing file, a malformed URL or any
         // construction failure cannot leak a permit (reviewer d53d9c68 finding 3).
         try {
-            val credentials = authorization() ?: return Response.Unauthorized(-1)
+            // A frozen credential wins: the caller already validated it against the admitted identity.
+            val credentials = authorizationOverride ?: authorization() ?: return Response.Unauthorized(-1)
             val metadata = metadataPart(record) ?: return Response.Ambiguous(null)
             if (isCancelled()) return Response.Cancelled
             // The per-call budget is the caller's REMAINING deadline when it has one, so this exchange can

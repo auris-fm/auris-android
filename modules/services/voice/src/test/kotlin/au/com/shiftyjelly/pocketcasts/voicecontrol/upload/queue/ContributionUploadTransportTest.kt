@@ -189,6 +189,25 @@ class ContributionUploadTransportTest {
     }
 
     @Test
+    fun `an upload_pending receipt is RETAINED - staging is not acceptance`() {
+        val id = UUID.randomUUID().toString()
+        val file = wavFile(id)
+        // Cloud route contract (476feadc): this route can answer 201 with `upload_pending` until the
+        // owner-side arc completes. That must retain, never release or report success.
+        responseStatus = 201
+        responseBody = receipt(id, sha256(file), status = "upload_pending")
+
+        val result = transport().upload(id, record(id), file)
+
+        val accepted = result as ContributionUploadTransport.Response.Accepted
+        val validator = CaptureReceiptValidator { sha256(file) }
+        assertFalse(
+            "an upload_pending receipt never validates as acceptance",
+            validator.validate(id, accepted.payload, accepted.statusCode),
+        )
+    }
+
+    @Test
     fun `a real 201 also yields an acceptance`() {
         val id = UUID.randomUUID().toString()
         val file = wavFile(id)

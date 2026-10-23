@@ -43,6 +43,11 @@ class CaptureReceiptValidator(
         val receipt = runCatching { CanonicalReceipt.parse(body) }.getOrNull() ?: return false
         if (receipt.schemaVersion != SUPPORTED_SCHEMA_VERSION) return false
         if (receipt.captureId != captureId) return false
+        // CLOUD ROUTE CONTRACT (cloud-voice-uploads 476feadc): this route's receipts carry
+        // `upload_pending` until the owner-side arc completes. That is NOT acceptance: a pending
+        // receipt proves staging, not durable contribution, so it retains - it must never release
+        // the entry or be reported as a success status.
+        if (receipt.status == "upload_pending") return false
         if (receipt.status !in ACCEPTANCE_STATUSES) return false
         // The owning contract PAIRS each success status with one HTTP status: 201 for a first acceptance
         // and 200 for a duplicate. A receipt whose status disagrees with the response status it arrived on

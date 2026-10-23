@@ -39,6 +39,13 @@ class ContributionUploadAssembly(
      * fence revocation covers - retains the capture instead of sending it under a retired identity.
      */
     private val identityHolds: ((epoch: String) -> Boolean)? = null,
+    /**
+     * Acquires the credential FOR THE ADMITTED EPOCH as one atomic snapshot: returns the bearer and the
+     * epoch the account authority currently has, or null when no credential is in force. The assembly
+     * validates the returned epoch AGAINST THE ADMITTED EPOCH and freezes the bearer into the attempt,
+     * so a switch after acquisition cannot swap identity mid-flight (reviewer 064d5a00).
+     */
+    private val credentialFor: ((admittedEpoch: String) -> Pair<String, String>?)? = null,
 ) {
     /** A durable capture plus the record that claims it, and the epoch the store admitted it under. */
     data class Capture(val record: RecordNode.Obj, val audio: File, val enrollmentEpoch: String? = null)
@@ -72,10 +79,20 @@ class ContributionUploadAssembly(
                 throw CaptureUnavailable(captureId)
             }
             // IDENTITY BINDING: an admitted epoch that is no longer the account's current epoch is a
-            // retired identity - the capture is RETAINED, never sent under it. This holds across the
-            // credential lookup too, because the check runs against the epoch at send time.
+            // retired identity - the capture is RETAINED, never sent under it.
             if (capture.enrollmentEpoch != null && identityHolds?.invoke(capture.enrollmentEpoch) == false) {
                 throw CaptureUnavailable(captureId)
+            }
+            // CREDENTIAL ACQUISITION BOUND TO THE ADMITTED IDENTITY: the snapshot is taken atomically,
+            // the returned epoch is revalidated HERE, and the bearer is FROZEN for this attempt - so a
+            // switch inside the transport's own authorization path cannot swap the identity.
+            var frozenBearer: String? = null
+            if (capture.enrollmentEpoch != null && credentialFor != null) {
+                val snapshot = credentialFor(capture.enrollmentEpoch)
+                    ?: throw CaptureUnavailable(captureId) // no credential in force for this identity
+                val (bearer, currentEpoch) = snapshot
+                if (currentEpoch != capture.enrollmentEpoch) throw CaptureUnavailable(captureId)
+                frozenBearer = bearer
             }
             if (isRevoked()) {
                 throw AttemptCancelled(captureId)
@@ -90,6 +107,7 @@ class ContributionUploadAssembly(
                 capture.record,
                 capture.audio,
                 isCancelled = isRevoked,
+                authorizationOverride = frozenBearer,
                 // The REAL chain: the transport reports the registered handle, and the abort that cancels
                 // THAT call is installed on the lease which owns this attempt's authorization. A
                 // revocation then reaches a transmitting Call without anyone polling a flag.

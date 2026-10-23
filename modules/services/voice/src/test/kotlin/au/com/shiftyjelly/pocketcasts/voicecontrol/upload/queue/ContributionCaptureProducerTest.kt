@@ -33,7 +33,14 @@ class ContributionCaptureProducerTest {
 
     private val pcm = listOf(ShortArray(1600) { i -> i.toShort() } to 1600)
 
-    private fun producer(store: ContributionStore, format: String = "pcm_s16le", version: String = "v1") = ContributionCaptureProducer(store, originalFormat = format, conversionVersion = version)
+    private fun producer(store: ContributionStore, format: String = "pcm_s16le", version: String = "v1") = ContributionCaptureProducer(
+        store,
+        originalFormat = format,
+        conversionVersion = version,
+        appVersion = "8.20",
+        appBuild = "12345",
+        captureSessionId = { "00000000-0000-4000-8000-000000000000" },
+    )
 
     private val models = listOf(
         "vad" to ModelRef.Named("silero-vad", "4.0"),

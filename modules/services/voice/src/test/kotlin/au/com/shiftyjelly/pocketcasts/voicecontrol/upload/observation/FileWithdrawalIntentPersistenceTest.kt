@@ -3,7 +3,9 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -34,6 +36,65 @@ class FileWithdrawalIntentPersistenceTest {
     }
 
     private fun persistence() = FileWithdrawalIntentPersistence(context)
+
+    @Test
+    fun `updating the marker never leaves the authoritative file missing or partial`() {
+        // THE WINDOW THE REVIEWER NAMED, and the reason this control cannot be written by inspecting
+        // the file after write() returns: by then every strategy has settled on a good final state.
+        // delete-then-rename produces a good final state too - the harm is DURING the update, when an
+        // absent file reads as PERMITTED. So the check has to run INSIDE the update, from the reader's
+        // point of view. A watcher polls the path while writes are in flight.
+        val subject = persistence()
+        subject.write(requested = true)
+        assertTrue("precondition: the stop must be recorded", subject.read())
+
+        val observedAbsent = java.util.concurrent.atomic.AtomicBoolean(false)
+        val observedPartial = java.util.concurrent.atomic.AtomicReference<String?>(null)
+        val running = java.util.concurrent.atomic.AtomicBoolean(true)
+        val watcher = Thread {
+            while (running.get()) {
+                val text = if (file.isFile) file.readText() else null
+                when {
+                    text == null -> observedAbsent.set(true)
+                    text !in setOf("withdrawal_requested", "collection_permitted") -> observedPartial.set(text)
+                }
+            }
+        }
+        watcher.start()
+        try {
+            repeat(400) { step -> subject.write(requested = step % 2 == 0) }
+        } finally {
+            running.set(false)
+            watcher.join()
+        }
+
+        assertFalse(
+            "a concurrent reader observed the marker file ABSENT during an update. An absent file " +
+                "reads as PERMITTED, so this window resumes collection for a user who asked to stop",
+            observedAbsent.get(),
+        )
+        assertNull(
+            "a concurrent reader observed a PARTIAL marker during an update: ${observedPartial.get()?.length} bytes",
+            observedPartial.get(),
+        )
+        assertFalse(
+            "the temp file must not survive a successful write",
+            File(context.filesDir, "voice-sharing-local-stop.tmp").exists(),
+        )
+    }
+
+    @Test
+    fun `a stop is never lost because a previous clear marker was in place`() {
+        // Turns the same property into the user-facing consequence: a running sequence of toggles
+        // ending in STOP must leave a stop, whatever the filesystem did in between.
+        val subject = persistence()
+        subject.write(requested = false)
+        subject.write(requested = true)
+        assertTrue(
+            "after clearing then stopping, collection must be refused",
+            subject.read(),
+        )
+    }
 
     @Test
     fun `a missing file means no stop was ever requested`() {

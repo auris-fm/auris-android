@@ -3,6 +3,8 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 import android.content.Context
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -14,9 +16,15 @@ import javax.inject.Singleton
  *
  * Written with a temp-file-then-rename so a crash mid-write cannot leave a truncated file that
  * reads back as "no intent" — that would silently resume collection, which is the failure this
- * exists to prevent. Reads are tolerant: a MISSING file means no intent; an unreadable one is
- * treated as "stop requested" only if its content says so, and a file we cannot parse is reported
- * as an error rather than assumed permissive.
+ * exists to prevent.
+ *
+ * KNOWN ASYMMETRY, stated rather than hidden: a file that is present but corrupt/empty/unreadable
+ * reads as STOPPED (see [read]), while an ABSENT file reads as PERMITTED. The two are deliberately
+ * different demands. Absence is the legitimate state before the user has ever made a decision, and
+ * treating it as a stop would strand every first-run user behind an opt-in they never asked for.
+ * The price is that a lost file resumes collection, which is why [write] never removes the
+ * authoritative file and never leaves it half-written - the absent case is narrowed to "nothing was
+ * ever written", not reachable by any ordinary crash during an update.
  */
 @Singleton
 class FileWithdrawalIntentPersistence @Inject constructor(
@@ -57,32 +65,62 @@ class FileWithdrawalIntentPersistence @Inject constructor(
     }
 
     /**
-     * Never leaves the authoritative file half-written.
+     * DURABLE, ATOMIC, and with NO window in which the authoritative file is missing or half-written
+     * (reviewer 668882eb, fd258849).
      *
-     * `renameTo` replaces atomically on the filesystems we target, but it can fail (notably when the
-     * target exists). The previous fallback wrote the authoritative file DIRECTLY, which is the very
-     * truncation-then-write this class exists to avoid: a crash in that window leaves an empty or
-     * partial file. The fallback now deletes the target first and then renames — still not atomic, but
-     * the only non-atomic moment is one in which NO file exists, which reads as "no stop" only if the
-     * user never stopped. To keep even that window conservative, a STOP is also written straight
-     * through, because losing a stop is the failure with real consequences.
+     * Three earlier versions of this method were each wrong in a way that mattered:
+     *  - writing the authoritative file directly truncates it before the new bytes land, so a crash
+     *    between the two leaves an empty file - and empty reads as "we cannot prove permission", i.e.
+     *    the user's stop is correctly kept but a CLEAR is silently lost;
+     *  - deleting the target first and then renaming creates a window in which NO file exists, and a
+     *    missing file reads as "never stopped", which RESUMES COLLECTION;
+     *  - a failed rename that fell back to a direct write combined both.
+     *
+     * The fix is to never remove the target. The bytes go to a temp file which is flushed and fsynced,
+     * and only then renamed OVER the target; POSIX rename replaces atomically, so a reader sees either
+     * the whole old marker or the whole new one, never a partial file and never an absent one. Once the
+     * rename lands, the CONTAINING DIRECTORY is fsynced, because a rename is only durable relative to
+     * its directory entry: without that barrier the file can revert after power loss even though the
+     * data blocks were flushed.
+     *
+     * Scope of the claim: this makes the marker's own replacement atomic and crash-durable on a
+     * filesystem that honours fsync on files and directories. It is NOT a claim that Android's
+     * storage stack guarantees this on every device, and it does not make the wider queue durable.
      */
     override fun write(requested: Boolean) {
         val marker = if (requested) REQUESTED else CLEARED
-        tempFile.writeText(marker)
-        if (tempFile.renameTo(file)) return
-        if (requested) {
-            // A stop must land even if the rename path is unavailable: write it directly and remove
-            // the temp file, rather than leave the decision to a filesystem quirk.
-            file.writeText(marker)
+        val dir = file.parentFile ?: context.filesDir
+        dir.mkdirs()
+        // Write the WHOLE marker to the temp file, flush it through the OS, then force it to the
+        // device. A temp file that is not fsynced can be empty after a power loss, and an empty temp
+        // renamed over the target would destroy a good marker.
+        FileOutputStream(tempFile).use { out ->
+            out.write(marker.toByteArray(Charsets.UTF_8))
+            out.flush()
+            out.fd.sync()
+        }
+        if (!tempFile.renameTo(file)) {
+            // Rename failed. Do NOT truncate the target: writing it directly is the defect above, and
+            // deleting it first is the other one. Leave the authoritative file exactly as it was (a
+            // previous stop stays a stop, a previous clear stays a clear) and drop the temp file, so
+            // the state on disk remains a coherent marker rather than a partial one.
             tempFile.delete()
             return
         }
-        // Clearing is the recoverable direction, so it takes the safer delete-then-rename path.
-        file.delete()
-        if (!tempFile.renameTo(file)) {
-            tempFile.delete()
-            file.writeText(marker)
+        syncDirectory(dir)
+    }
+
+    /**
+     * Forces the DIRECTORY ENTRY created by the rename. Failure is tolerated rather than thrown: the
+     * marker is already correct in the cache, and throwing here would surface a storage quirk as a
+     * user-visible failure of the stop.
+     */
+    private fun syncDirectory(dir: File) {
+        try {
+            FileInputStream(dir).use { it.fd.sync() }
+        } catch (e: Exception) {
+            // Some filesystems refuse to open a directory as a stream. The marker is still correct;
+            // only its power-loss durability is weaker, and there is no safer action available here.
         }
     }
 

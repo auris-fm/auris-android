@@ -60,13 +60,14 @@ class WorkerWireParityTest {
      *  - c569b319: delta736d3180 strict intake (observation_unavailable with state unknown).
      * c569b319 is pushed source for fixture/intake parity — NOT a deployed live intake (spec).
      */
-    private val emptyResultRevision = "862c7ed3fdc540eccc9fdacd6819c97a9e679536"
+    private val emptyResultRevision = "a030ff31d95dd703fab6c5c976f36826ef77f499"
 
     private val approvedWorkerRevisions = setOf(
         "d8fe823cbe43ebb310d632b482312c7b282ef018",
         "c569b319e19b5971ada44a0f53245630688c1305",
-        // 862c7ed3 is the c6 `empty_result` intake pin, independently cleared by Reviewer (42 schema
+        // a030ff31 is the c6 `empty_result` intake pin, independently cleared by Reviewer (42 schema
         // tests, both typechecks, explicit text:null/router_input:null negatives).
+        "a030ff31d95dd703fab6c5c976f36826ef77f499",
         "862c7ed3fdc540eccc9fdacd6819c97a9e679536",
     )
 
@@ -338,12 +339,12 @@ class WorkerWireParityTest {
      */
     @Test
     fun `the pinned Worker accepts exactly the empty_result bytes the builder emits`() {
-        // ACTUAL EMITTED-BYTE PARITY (spec 20:08Z, c6f3bdf7 / pin 862c7ed3).
+        // ACTUAL EMITTED-BYTE PARITY (spec 20:08Z, c6f3bdf7 / pin a030ff31).
         //
         // This is the half I previously could not prove: no intake revision implemented empty_result,
-        // so I stated the gap rather than papering over it. 862c7ed3 closes it, so the control now
+        // so I stated the gap rather than papering over it. a030ff31 closes it, so the control now
         // sends the BUILDER'S OWN CANONICAL BYTES to the real Worker and asserts the verdicts.
-        val pin = "862c7ed3fdc540eccc9fdacd6819c97a9e679536"
+        val pin = "a030ff31d95dd703fab6c5c976f36826ef77f499"
         val workerRoot = cloudWorkerRoot()
         requireAuthority(workerRoot)
 

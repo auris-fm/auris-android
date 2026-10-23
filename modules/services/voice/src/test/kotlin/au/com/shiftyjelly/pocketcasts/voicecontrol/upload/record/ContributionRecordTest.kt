@@ -219,6 +219,62 @@ class ContributionRecordTest {
     }
 
     @Test
+    fun `f8cac147 - no completed stage may carry a reason, except ASR empty_result`() {
+        // The builder's half of the completed-stage reason rule (spec f8cac147). Proven separately
+        // from the recovery validator because the two are independent authorities: a record can be
+        // built here and read back there, and a rule enforced in only one of them is a rule with a
+        // hole on the other path.
+        val completedReasonFor = mapOf(
+            StageName.Wake to "no_wake_detected",
+            StageName.Bleed to "no_playback_reference",
+            StageName.Asr to "local_only_action",
+            StageName.Translation to "no_text",
+            StageName.Routing to "no_candidates",
+            StageName.Execution to "client_refused",
+        )
+
+        // POSITIVE: empty_result on completed ASR is the ONE reason a completed stage may carry.
+        val accepted = complete(builder())
+            .replaceStage(
+                StageName.Asr,
+                StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("empty_result"))),
+            )
+            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+        assertTrue(
+            "asr/completed/empty_result must remain buildable, it is the sole exception",
+            CanonicalJson.canonicalBytes(accepted).isNotEmpty(),
+        )
+
+        // NEGATIVE: every completed stage refuses its OWN non-completed reason.
+        for ((stage, ownReason) in completedReasonFor) {
+            val failure = runCatching {
+                complete(builder())
+                    .replaceStage(
+                        stage,
+                        StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str(ownReason))),
+                    )
+                    .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+            }.exceptionOrNull()
+            assertTrue(
+                "$stage/completed must refuse its own non-completed reason '$ownReason': the reason " +
+                    "table governs non-completed states, got: $failure",
+                failure != null,
+            )
+        }
+
+        // NEGATIVE: and refuses an unknown reason.
+        val unknownReason = runCatching {
+            complete(builder())
+                .replaceStage(
+                    StageName.Wake,
+                    StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("no_such_reason"))),
+                )
+                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+        }.exceptionOrNull()
+        assertTrue("a completed stage must refuse an unknown reason, got: $unknownReason", unknownReason != null)
+    }
+
+    @Test
     fun `empty_result on a non-ASR completed stage is refused`() {
         val failure = runCatching {
             complete(builder())

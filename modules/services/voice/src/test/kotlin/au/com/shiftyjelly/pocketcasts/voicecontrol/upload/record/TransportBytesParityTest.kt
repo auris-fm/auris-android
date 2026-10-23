@@ -42,8 +42,9 @@ class TransportBytesParityTest {
     private val approvedWorkerRevisions = setOf(
         "d8fe823cbe43ebb310d632b482312c7b282ef018",
         "c569b319e19b5971ada44a0f53245630688c1305",
-        // 862c7ed3 is the c6 empty_result intake pin, independently cleared by Reviewer. It is a
+        // a030ff31 is the c6 empty_result intake pin, independently cleared by Reviewer. It is a
         // strict superset of c569b319, so every rule proven against the delta is still measured here.
+        "a030ff31d95dd703fab6c5c976f36826ef77f499",
         "862c7ed3fdc540eccc9fdacd6819c97a9e679536",
     )
 

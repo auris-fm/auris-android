@@ -43,6 +43,7 @@ const PINS = [
   ["d8fe823cbe43ebb310d632b482312c7b282ef018", "pre-delta intake guard and record schema fixtures"],
   ["c569b319e19b5971ada44a0f53245630688c1305", "delta736d3180 strict intake: observation_unavailable with state unknown"],
   ["862c7ed3fdc540eccc9fdacd6819c97a9e679536", "c6f3bdf7 strict intake: ASR empty_result, the one completed-with-reason shape"],
+  ["a030ff31d95dd703fab6c5c976f36826ef77f499", "f8cac147+c6f3bdf7 combined: completed stages omit reason except ASR empty_result"],
 ];
 for (const [revision, purpose] of PINS) console.log(`# authority-pin\t${revision}\t${purpose}`);
 

@@ -439,6 +439,134 @@ class RecordValidatorNegativeTest {
         }
     }
 
+    /**
+     * f8cac147 on the RECOVERY path: a completed stage carries NO reason, with the sole exception of
+     * ASR completed/empty_result.
+     *
+     * The rule is proven on RAW persisted records, not through the builder, because a record read back
+     * from disk is the shape a hostile or corrupted device could actually supply. Each negative names
+     * its own degree of wrongness — same-stage non-completed reason, cross-stage reason, and unknown
+     * reason — because a single "rejected" would not show WHICH clause did the work.
+     */
+    @Test
+    fun `completed stages refuse every reason except ASR empty_result on the recovery path`() {
+        val completedStages = listOf(
+            "wake" to "no_wake_detected",
+            "bleed" to "no_playback_reference",
+            "asr" to "local_only_action",
+            "translation" to "no_text",
+            "routing" to "no_candidates",
+            "execution" to "client_refused",
+        )
+
+        fun recordWith(stage: String, observation: Map<String, Any?>): RecordValidator.Result {
+            val record = baseRecord()
+            @Suppress("UNCHECKED_CAST")
+            (record["observations"] as MutableMap<String, Any?>)[stage] = observation
+            return RecordValidator.validate(toNode(record))
+        }
+
+        for ((stage, ownNotRunReason) in completedStages) {
+            // POSITIVE first, so the negatives below cannot pass on a fixture that never parses.
+            //
+            // The stage must be expressible as completed at all; `translation` and `execution` are
+            // deliberately included so the positive covers the whole six, not just the easy three.
+            val fieldsForCompleted = when (stage) {
+                "wake" -> mapOf("decision" to "detected", "score" to 0.82, "threshold" to 0.5)
+
+                "bleed" -> mapOf("decision" to "no_overlap")
+
+                "asr" -> mapOf("text" to "skip this ad", "source_language" to "en")
+
+                "translation" -> mapOf("translated_text" to "ignore", "target_language" to "en")
+
+                "routing" -> mapOf(
+                    "predicted_intent" to "track.play",
+                    "validation" to "valid",
+                    "execution_disposition" to "executed",
+                    "arguments" to mapOf("track_hint" to "queen"),
+                )
+
+                else -> mapOf("outcome" to "success")
+            }
+            val positive = recordWith(stage, fieldsForCompleted + ("state" to "completed"))
+            assertTrue(
+                "$stage/completed with NO reason must be ACCEPTED, got: $positive",
+                positive is RecordValidator.Result.Ok,
+            )
+
+            // NEGATIVE: the stage's OWN non-completed reason beside state completed.
+            val ownReason = recordWith(
+                stage,
+                fieldsForCompleted + mapOf("state" to "completed", "reason" to ownNotRunReason),
+            )
+            assertTrue(
+                "$stage/completed must REFUSE its own non-completed reason '$ownNotRunReason' — the " +
+                    "reason table governs non-completed states and belonging to it does not make a " +
+                    "reason valid here, got: $ownReason",
+                ownReason !is RecordValidator.Result.Ok,
+            )
+
+            // NEGATIVE: a reason belonging to a DIFFERENT stage.
+            val otherStageReason = completedStages.first { it.first != stage }.second
+            val crossStage = recordWith(
+                stage,
+                fieldsForCompleted + mapOf("state" to "completed", "reason" to otherStageReason),
+            )
+            assertTrue(
+                "$stage/completed must REFUSE the cross-stage reason '$otherStageReason', got: $crossStage",
+                crossStage !is RecordValidator.Result.Ok,
+            )
+
+            // NEGATIVE: a reason no stage enumerates.
+            val unknownReason = recordWith(
+                stage,
+                fieldsForCompleted + mapOf("state" to "completed", "reason" to "no_such_reason"),
+            )
+            assertTrue(
+                "$stage/completed must REFUSE an unknown reason, got: $unknownReason",
+                unknownReason !is RecordValidator.Result.Ok,
+            )
+        }
+
+        // THE EXCEPTION, proven only where it is legal: ASR completed + empty_result, fields absent.
+        val emptyAsr = recordWith("asr", mapOf("state" to "completed", "reason" to "empty_result"))
+        assertTrue(
+            "asr/completed/empty_result must be ACCEPTED — it is the sole completed observation that " +
+                "carries a reason, got: $emptyAsr",
+            emptyAsr is RecordValidator.Result.Ok,
+        )
+
+        // And the exception must NOT generalise: the same reason on any other completed stage.
+        for ((stage, _) in completedStages.filter { it.first != "asr" }) {
+            val fieldsForCompleted = when (stage) {
+                "wake" -> mapOf("decision" to "detected", "score" to 0.82, "threshold" to 0.5)
+
+                "bleed" -> mapOf("decision" to "no_overlap")
+
+                "translation" -> mapOf("translated_text" to "ignore", "target_language" to "en")
+
+                "routing" -> mapOf(
+                    "predicted_intent" to "track.play",
+                    "validation" to "valid",
+                    "execution_disposition" to "executed",
+                    "arguments" to mapOf("track_hint" to "queen"),
+                )
+
+                else -> mapOf("outcome" to "success")
+            }
+            val wrongStage = recordWith(
+                stage,
+                fieldsForCompleted + mapOf("state" to "completed", "reason" to "empty_result"),
+            )
+            assertTrue(
+                "$stage/completed must REFUSE empty_result: the exception is bound to the ASR stage, " +
+                    "got: $wrongStage",
+                wrongStage !is RecordValidator.Result.Ok,
+            )
+        }
+    }
+
     @Test
     fun `the baseline fixture stays accepted after the fixes`() {
         // Guards against "fix by refusing everything": the negative controls above must not have made

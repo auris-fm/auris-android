@@ -132,8 +132,26 @@ object VoiceUploadModule {
     @Singleton
     fun provideUploadTrigger(
         assembly: ContributionUploadAssembly,
+        store: ContributionStore,
+        accountStartup: VoiceSharingAccountStartup,
         @UploadTriggerScope scope: CoroutineScope,
-    ): UploadTrigger = UploadTrigger(assembly, scope, POLL_INTERVAL_MS)
+    ): UploadTrigger {
+        // THE production watcher: every projection move recomputes the mismatch set - entries whose
+        // admitted epoch no longer matches the LIVE identity - and cancels their live launch leases
+        // (which reach the registered Call). Bytes are NOT purged: retired-identity captures are
+        // RETAINED by the ownership contract, they just never complete a send.
+        val identityRevocationWatcher: suspend kotlinx.coroutines.CoroutineScope.() -> Unit = {
+            accountStartup.state.projection.collect { projection ->
+                val liveEpoch = projection?.enrollmentEpoch
+                val mismatched = store.readyEntries()
+                    .filter { it.enrollmentEpoch != liveEpoch }
+                    .map { it.captureId }
+                    .toSet()
+                store.cancelLaunchesIdentityMismatch(mismatched, "account-transition")
+            }
+        }
+        return UploadTrigger(assembly, scope, POLL_INTERVAL_MS, identityRevocationWatcher)
+    }
 
     /** THE missing binding (reviewer 13eeec80): the trigger's scope, delegated to the app's scope. */
     @Provides
@@ -153,6 +171,14 @@ class UploadTrigger(
     private val assembly: ContributionUploadAssembly,
     private val scope: CoroutineScope,
     private val intervalMs: Long,
+    /**
+     * ACCOUNT-TRANSITION WATCHER (reviewer 0081c95f / 2b67e016, open requirement): launched alongside
+     * the poll loop on the SAME scope. The production wiring observes the account projection and
+     * calls [ContributionStore.cancelLaunchesIdentityMismatch] for entries whose admitted identity
+     * no longer matches - an account move cancels an ALREADY-REGISTERED in-flight call, not only
+     * future pre-registration checks.
+     */
+    private val identityRevocationWatcher: (suspend kotlinx.coroutines.CoroutineScope.() -> Unit)? = null,
 ) {
     @Volatile
     private var started = false
@@ -163,6 +189,7 @@ class UploadTrigger(
     fun start() {
         if (started) return
         started = true
+        identityRevocationWatcher?.let { watcher -> scope.launch { runCatching { watcher() } } }
         scope.launch {
             while (true) {
                 pollsStarted.incrementAndGet()

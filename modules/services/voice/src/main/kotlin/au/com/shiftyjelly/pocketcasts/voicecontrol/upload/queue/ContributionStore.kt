@@ -374,7 +374,13 @@ class ContributionStore(
             sidecarRefusals++
             return null
         }
-        DurableCapture(record, audio, entry.enrollmentEpoch, owner.first, owner.second)
+        // EPOCH BINDING VERIFIED, not discarded (reviewer 2b67e016): a sidecar whose epoch disagrees
+        // with the admitted entry is a corruption - refuse the capture entirely.
+        if (owner.epoch != entry.enrollmentEpoch) {
+            sidecarRefusals++
+            return null
+        }
+        DurableCapture(record, audio, entry.enrollmentEpoch, owner.account, owner.session)
     }
 
     /**
@@ -447,10 +453,11 @@ class ContributionStore(
      * Serialize the owner sidecar through an ESCAPING JSON writer (reviewer 30b1c817): the account
      * name is arbitrary text and must never be able to forge sidecar structure.
      */
-    private fun ownerSidecarJson(account: String?, session: Long?, epoch: String): String {
+    private fun ownerSidecarJson(captureId: String, account: String?, session: Long?, epoch: String): String {
         val buffer = okio.Buffer()
         val writer = com.squareup.moshi.JsonWriter.of(buffer)
         writer.beginObject()
+        writer.name("capture_id").value(captureId)
         writer.name("account").value(account)
         writer.name("session").value(session)
         writer.name("epoch").value(epoch)
@@ -464,29 +471,39 @@ class ContributionStore(
      * schema - object with exactly account(string, nonempty)/session(integer)/epoch(string), no
      * duplicates, no unknown keys, no trailing content. Null on ANY deviation; the caller fails closed.
      */
-    private fun parseOwnerSidecar(text: String): Pair<String, Long>? {
+    private fun parseOwnerSidecar(text: String, expectedCaptureId: String): OwnerRecord? {
         val reader = com.squareup.moshi.JsonReader.of(okio.Buffer().writeUtf8(text))
         try {
+            var captureId: String? = null
             var account: String? = null
             var session: Long? = null
-            var sawEpoch = false
+            var epoch: String? = null
             reader.beginObject()
             while (reader.hasNext()) {
                 when (reader.nextName()) {
+                    "capture_id" -> {
+                        if (captureId != null) return null // duplicate key
+                        // TOKEN TYPE: moshi coerces numbers to strings unless checked (reviewer 2b67e016).
+                        if (reader.peek() != com.squareup.moshi.JsonReader.Token.STRING) return null
+                        captureId = reader.nextString()
+                    }
+
                     "account" -> {
                         if (account != null) return null // duplicate key
+                        if (reader.peek() != com.squareup.moshi.JsonReader.Token.STRING) return null // numeric account refused
                         account = reader.nextString().ifEmpty { return null }
                     }
 
                     "session" -> {
                         if (session != null) return null // duplicate key
+                        if (reader.peek() != com.squareup.moshi.JsonReader.Token.NUMBER) return null // string-encoded session refused
                         session = reader.nextLong()
                     }
 
                     "epoch" -> {
-                        if (sawEpoch) return null // duplicate key
-                        sawEpoch = true
-                        reader.nextString()
+                        if (epoch != null) return null // duplicate key
+                        if (reader.peek() != com.squareup.moshi.JsonReader.Token.STRING) return null
+                        epoch = reader.nextString()
                     }
 
                     else -> return null // unknown key
@@ -495,10 +512,13 @@ class ContributionStore(
             reader.endObject()
             // Trailing content after the closing brace is a deviation, not decor (strict EOF check).
             if (reader.peek() != com.squareup.moshi.JsonReader.Token.END_DOCUMENT) return null
+            // BINDING: the sidecar belongs to exactly THIS capture (reviewer 2b67e016) - a sidecar
+            // swapped between captures is a corruption, never a serveable identity.
+            if (captureId != expectedCaptureId) return null
             account ?: return null
             session ?: return null
-            if (!sawEpoch) return null
-            return account to session
+            epoch ?: return null
+            return OwnerRecord(account, session, epoch)
         } catch (_: Exception) {
             return null
         } finally {
@@ -506,30 +526,38 @@ class ContributionStore(
         }
     }
 
+    /** The full sidecar record; epoch is kept so the entry binding can be VERIFIED, not discarded. */
+    private data class OwnerRecord(val account: String, val session: Long, val epoch: String)
+
     /**
      * STRICT bounded variable-length read of the admitted-ownership sidecar (reviewer 0081c95f):
      * the file is ordinary JSON of ANY length up to the cap - the read demands the file's ACTUAL
      * size, never a fixed width, and the parser is exact (no trailing junk, both fields present).
      * Null means absent OR corrupt; the caller fails closed.
      */
-    private fun readOwnerSidecar(captureId: String): Pair<String, Long>? {
+    private fun readOwnerSidecar(captureId: String): OwnerRecord? {
         val f = File(dir, "$captureId$SUFFIX_OWNER")
         if (!f.isFile) return null
         // The cap holds DURING the read (spec 8adcfd01): read at most CAP+1 bytes and refuse when a
         // byte beyond the cap exists - a file growing concurrently cannot smuggle oversize content.
         val cap = 512
         val bytes = ByteArray(cap + 1)
-        var read = 0
-        java.io.FileInputStream(f).use { input ->
-            while (read < bytes.size) {
-                val n = input.read(bytes, read, bytes.size - read)
-                if (n < 0) break
-                read += n
+        val read = try {
+            java.io.FileInputStream(f).use { input ->
+                var total = 0
+                while (total < bytes.size) {
+                    val n = input.read(bytes, total, bytes.size - total)
+                    if (n < 0) break
+                    total += n
+                }
+                total
             }
+        } catch (_: java.io.IOException) {
+            return null // removed/unreadable after isFile: refuse explicitly, never throw through
         }
         // A full CAP+1 read means the file is at or beyond the cap: refuse either way.
         if (read == 0 || read > cap) return null
-        return parseOwnerSidecar(String(bytes, 0, read, Charsets.UTF_8))
+        return parseOwnerSidecar(String(bytes, 0, read, Charsets.UTF_8), captureId)
     }
 
     // The identity of the attempt most recently ADMITTED for captureId: the generation it was admitted
@@ -979,7 +1007,7 @@ class ContributionStore(
             // sidecar (older entries) = epoch-only admissions, and the identity check degrades to
             // the epoch path - never to "no check".
             if (enrollmentAccount != null || enrollmentSession != null) {
-                val ownerJson = ownerSidecarJson(enrollmentAccount, enrollmentSession, enrollmentEpoch)
+                val ownerJson = ownerSidecarJson(captureId, enrollmentAccount, enrollmentSession, enrollmentEpoch)
                 val ownerFile = File(dir, "$captureId$SUFFIX_OWNER")
                 FileOutputStream(ownerFile).use { out ->
                     out.write(ownerJson.toByteArray(Charsets.UTF_8))
@@ -1504,6 +1532,31 @@ class ContributionStore(
             launchLeases.forEach { it.cancel() }
             launchLeases.clear()
         }
+    }
+
+    /**
+     * ACCOUNT-TRANSITION CANCELLATION (reviewer 0081c95f/30b1c817, open requirement): cancel ONLY the
+     * live launch leases whose admitted identity no longer matches the LIVE account identity - an
+     * account move must reach an ALREADY-REGISTERED in-flight call, not just future pre-registration
+     * checks. Selection is by capture id against the caller-computed mismatch set; bytes are NOT
+     * purged (a retired identity's capture is RETAINED by the ownership contract - it must simply
+     * never complete a send). Returns the cancelled capture ids for control observability.
+     */
+    fun cancelLaunchesIdentityMismatch(mismatchedCaptureIds: Set<String>, reason: String): Set<String> {
+        if (mismatchedCaptureIds.isEmpty()) return emptySet()
+        val cancelledIds = mutableSetOf<String>()
+        synchronized(launchLeasesLock) {
+            val iterator = launchLeases.iterator()
+            while (iterator.hasNext()) {
+                val lease = iterator.next()
+                if (lease.captureId in mismatchedCaptureIds) {
+                    iterator.remove()
+                    lease.cancel() // reaches the live CALL, not just a flag
+                    cancelledIds.add(lease.captureId)
+                }
+            }
+        }
+        return cancelledIds
     }
 
     /**

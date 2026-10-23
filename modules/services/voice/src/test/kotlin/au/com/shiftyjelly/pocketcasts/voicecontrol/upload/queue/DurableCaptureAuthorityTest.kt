@@ -118,7 +118,7 @@ class DurableCaptureAuthorityTest {
         // Rewrite the sidecar to a DIFFERENT admitted account: the store serves what is durably
         // vouched (tamper-evident downstream - the upload identity check compares it live), never
         // silently "fixes" it.
-        ownerFile(root, id).writeText("{\"account\":\"attacker@x\",\"session\":7,\"epoch\":\"epoch-1\"}")
+        ownerFile(root, id).writeText("{\"capture_id\":\"$id\",\"account\":\"attacker@x\",\"session\":7,\"epoch\":\"epoch-1\"}")
         val capture = store.durableCapture(id)!!
         assertEquals("attacker@x", capture.enrollmentAccount)
     }
@@ -168,6 +168,45 @@ class DurableCaptureAuthorityTest {
         // And the tamper shape: an account containing \"session\" cannot forge a second field.
         ownerFile(root, id).writeText("{\"account\":\"x\\\"},\"session\":1,\"b\":\"\",\"session\":7,\"epoch\":\"e\"}")
         assertNull("forged structure refuses", store.durableCapture(id))
+    }
+
+    @Test
+    fun `a SWAPPED sidecar (another capture's identity) refuses - capture binding is verified`() {
+        val root = tmp.newFolder("swap")
+        val idA = UUID.randomUUID().toString()
+        val idB = UUID.randomUUID().toString()
+        val store = newStore(root)
+        prepare(store, root, idA)
+        prepare(store, root, idB)
+        // Copy A's sidecar over B: same epoch, same account, WRONG capture binding.
+        ownerFile(root, idB).writeText(ownerFile(root, idA).readText())
+        assertNull("a sidecar bound to another capture refuses", store.durableCapture(idB))
+    }
+
+    @Test
+    fun `a sidecar whose EPOCH disagrees with the admitted entry refuses`() {
+        val root = tmp.newFolder("epochbind")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root)
+        prepare(store, root, id)
+        val original = ownerFile(root, id).readText()
+        ownerFile(root, id).writeText(original.replace("\"epoch-1\"", "\"epoch-9\""))
+        assertNull("epoch mismatch is a corruption, not an identity", store.durableCapture(id))
+    }
+
+    @Test
+    fun `coercible wrong JSON types refuse - numeric account, string-encoded session`() {
+        val root = tmp.newFolder("types")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root)
+        prepare(store, root, id)
+        val ownerF = ownerFile(root, id)
+        ownerF.writeText("{\"capture_id\":\"$id\",\"account\":42,\"session\":7,\"epoch\":\"epoch-1\"}")
+        assertNull("numeric account refuses", store.durableCapture(id))
+        ownerF.writeText("{\"capture_id\":\"$id\",\"account\":\"a@x\",\"session\":\"7\",\"epoch\":\"epoch-1\"}")
+        assertNull("string-encoded session refuses", store.durableCapture(id))
+        ownerF.writeText("{\"capture_id\":123,\"account\":\"a@x\",\"session\":7,\"epoch\":\"epoch-1\"}")
+        assertNull("numeric capture_id refuses", store.durableCapture(id))
     }
 
     @Test

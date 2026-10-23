@@ -586,14 +586,15 @@ class EngineToProducerPublishTest {
 
     @Test
     fun `an owner transition attempted between validation and prepare cannot interleave - real owner transaction`() {
-        // THE ATOMICITY CONTROL (reviewer 57719ad2): the frozen/live comparison and the producer's
-        // identity reads + prepare run inside ONE real CredentialOwnershipOwner transaction. A
-        // transition attempted at the interleaving point (after validation, before prepare) needs
-        // the SAME owner lock, so it cannot complete until the section -- commit included -- is
-        // done: the producer reads the OLD owner and the record is published under the owner the
-        // frozen tuple was validated against. A check-then-use shape (validation OUTSIDE the
-        // transaction) fails this control: the flip completes during the barrier and the commit
-        // publishes under the NEW owner.
+        // THE ATOMICITY CONTROL (reviewer 57719ad2, re-driven through the REAL publication
+        // path per reviewer 704ef15a): the actual [RetentionPublishTrigger] fires with the
+        // PRODUCTION-shaped binding -- validateUnderOwnerTransaction: ONE owner-locked
+        // section that compares the frozen tuple against the live snapshot and runs the
+        // commit inside the SAME acquisition. A flip thread attempts the transition at the
+        // interleaving point (after validation, before prepare); it needs the SAME owner
+        // lock, so it cannot complete until the section -- commit included -- is done. The
+        // producer's identity reads go through the same locked snapshot, and every read is
+        // recorded so the control proves WHOSE owner prepared the record.
         val root = tmp.newFolder("interleave")
         val store = newStore(root)
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
@@ -603,20 +604,14 @@ class EngineToProducerPublishTest {
         val seenAccounts = java.util.concurrent.ConcurrentLinkedQueue<String>()
         val flipGate = java.util.concurrent.CountDownLatch(1)
         val flipDone = java.util.concurrent.CountDownLatch(1)
-        // Reads NOT bound to the owner transaction (an unlocked mirror) — what the flip thread
-        // publishes so the control can distinguish section-bound reads from check-then-use reads.
-        val unlockedLive = java.util.concurrent.atomic.AtomicReference("a@x")
         val flipThread = Thread {
             flipGate.await(5, java.util.concurrent.TimeUnit.SECONDS)
-            // The unlocked mirror moves WITHOUT the owner lock: anything reading identity from it
-            // can be split from the section, which is exactly the defect class this control pins.
-            unlockedLive.set("b@y")
             owner.switchTo("b@y", 9L)
             flipDone.countDown()
         }
         flipThread.start()
-        // The producer's identity reads run INSIDE the section, like production wiring; every
-        // observed read is recorded so the control can prove WHOSE owner prepared the record.
+        // Production wiring shape: the producer's identity reads read the owner snapshot
+        // under the SAME lock the transaction holds.
         val producer1 = ContributionCaptureProducer(
             store,
             appVersion = "8.20",
@@ -629,33 +624,32 @@ class EngineToProducerPublishTest {
             },
             enrollmentSession = { owner.authoritySnapshot().session },
         )
-        val frozen = RetentionPublishTrigger.LiveIdentity("a@x", 7L, "epoch-1")
-        val entry = owner.transaction {
-            val snap = owner.authoritySnapshot()
-            // VALIDATION inside the section...
-            val valid = snap.accountName == frozen.account && snap.session == frozen.session
-            // ...THE INTERLEAVING POINT: release the flip attempt BEFORE prepare...
-            flipGate.countDown()
-            // ...and hold until the flip thread is demonstrably BLOCKED on this lock, proving it
-            // cannot complete while the section (validate -> prepare -> commit) is running.
-            val deadline = System.currentTimeMillis() + 5000
-            while (flipThread.state != Thread.State.BLOCKED && System.currentTimeMillis() < deadline) Thread.sleep(5)
-            assertEquals(Thread.State.BLOCKED, flipThread.state)
-            // ...then PREPARE+COMMIT still inside the SAME section.
-            if (valid) {
-                producer1.publish(
-                    ctx.captureId.toString(),
-                    frozen.enrollmentEpoch!!,
-                    16000,
-                    listOf(ShortArray(16) to 16),
-                    fixedModels + listOf("asr" to asrModel, "translation" to ModelRef.None),
-                    stages,
-                )
-            } else {
-                null
-            }
-        }
-        assertTrue("the section must accept and commit", entry != null)
+        val trig = RetentionPublishTrigger(
+            sink,
+            producer1,
+            fixedModels = fixedModels,
+            stagesProvider = { stages },
+            publishUnderOwner = { frozen, commit ->
+                // validateUnderOwnerTransaction (production shape): ONE section.
+                owner.transaction {
+                    val snap = owner.authoritySnapshot()
+                    val valid = snap.accountName == frozen.account && snap.session == frozen.session
+                    if (!valid) return@transaction false
+                    // THE INTERLEAVING POINT: release the flip attempt between validation
+                    // and prepare, then hold until the flip thread is demonstrably BLOCKED
+                    // on the owner lock -- proof the transition cannot complete while the
+                    // validate -> prepare -> commit section is running.
+                    flipGate.countDown()
+                    val deadline = System.currentTimeMillis() + 5000
+                    while (flipThread.state != Thread.State.BLOCKED && System.currentTimeMillis() < deadline) Thread.sleep(5)
+                    assertEquals(Thread.State.BLOCKED, flipThread.state)
+                    commit()
+                }
+            },
+            dispatch = directDispatch(),
+        )
+        trig.attach()
+        assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
         assertTrue("the flip must complete only after the section", flipDone.await(5, java.util.concurrent.TimeUnit.SECONDS))
         flipThread.join(5000)
         assertEquals("the live owner moved after the section", "b@y", owner.authoritySnapshot().accountName)

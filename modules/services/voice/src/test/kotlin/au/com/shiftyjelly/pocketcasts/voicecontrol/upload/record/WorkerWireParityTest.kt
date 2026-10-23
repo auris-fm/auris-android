@@ -159,9 +159,36 @@ class WorkerWireParityTest {
         val workerRoot = cloudWorkerRoot()
         requireAuthority(workerRoot)
 
+        // Completed translation with BOTH observed fields (reviewer 57719ad2): the Worker's
+        // schema owns translated_text AND target_language; this case proves strict intake
+        // accepts a record where both are present AND distinct, so the client fix is not a
+        // client-only wire field.
+        val translated = ContributionRecordBuilder(UUID.randomUUID().toString(), "epoch-1", "42")
+            .model("vad", ModelRef.Named("silero-vad", "4.0"))
+            .model("wakeword", ModelRef.Named("auris-wake", "1.2"))
+            .model("asr", ModelRef.Named("whisper-small", "2024-11"))
+            .model("translation", ModelRef.Named("whisper-translate", "2024-11"))
+            .model("router", ModelRef.Named("lfm-intent", "0.3"))
+            .stage(StageName.Wake, StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("detected"))))
+            .stage(StageName.Bleed, StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("no_overlap"))))
+            .stage(StageName.Asr, StageEntry(StageState.Completed, mapOf("text" to RecordNode.Str("les étagères sont vides"), "source_language" to RecordNode.Str("fr"))))
+            .stage(
+                StageName.Translation,
+                StageEntry(
+                    StageState.Completed,
+                    mapOf(
+                        "translated_text" to RecordNode.Str("the shelves are empty"),
+                        "target_language" to RecordNode.Str("en"),
+                    ),
+                ),
+            )
+            .stage(StageName.Routing, StageEntry(StageState.Completed, mapOf("predicted_intent" to RecordNode.Str("skip_ad"), "validation" to RecordNode.Str("valid"), "execution_disposition" to RecordNode.Str("executed"))))
+            .stage(StageName.Execution, StageEntry(StageState.Completed, mapOf("outcome" to RecordNode.Str("success"))))
+            .build("android", "8.20", "12345", audioFor(1600).first)
         val records = listOf(
             "fully-populated" to fullyPopulatedRecord(),
             "declared-absence" to minimalValidRecord(),
+            "completed-translation-both-fields" to translated,
         )
         val recordsFile = Files.createTempFile("android-records", ".jsonl").toFile()
         val probe = File(recordsFile.parentFile, "probe_worker_intake.mjs")

@@ -223,9 +223,17 @@ class ModelManager @Inject constructor(
 
     // -- Generic ModelSpec download -----------------------------------------
 
+    /**
+     * Ready means every file exists AND, where the spec declares a sha256, the CACHED bytes
+     * actually hash to it (reviewer 704ef15a): an older cached artifact must not be labeled
+     * with the pinned manifest identity. Unverified files force the ensureModel re-download.
+     */
     fun isModelReady(spec: au.com.shiftyjelly.pocketcasts.voicecontrol.asr.ModelSpec): Boolean {
         val targetDir = File(filesDir, spec.targetDir)
-        return spec.files.all { File(targetDir, it.filename).exists() }
+        return spec.files.all { file ->
+            val dest = File(targetDir, file.filename)
+            dest.exists() && (file.sha256.isEmpty() || sha256Matches(dest, file.sha256))
+        }
     }
 
     /**

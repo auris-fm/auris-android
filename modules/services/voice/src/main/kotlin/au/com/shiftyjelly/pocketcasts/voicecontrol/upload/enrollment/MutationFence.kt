@@ -46,12 +46,15 @@ class MutationFence {
      */
     fun issue(ownerSession: Long): Attempt {
         val generationAtIssue = synchronized(this) {
-            if (boundSession == null || boundSession != ownerSession) {
-                // First use of a session, or a session change: this generation belongs to it. A result
-                // issued under a superseded generation still carries the OLD session and is dropped.
-                generation += 1
-                boundSession = ownerSession
-            }
+            // EVERY issue takes a fresh generation, including within one session. An earlier version
+            // reused the generation for successive same-session attempts (reviewer d47d2326), so two
+            // queued enrolls shared one generation and the OLDER response still looked current once
+            // it returned - the newer intent lost to the older one even though both were serialized.
+            //
+            // The newest issue is authoritative by definition: it is the latest thing the user asked
+            // for. A result from any earlier issue is stale regardless of session.
+            generation += 1
+            boundSession = ownerSession
             generation
         }
         return Attempt(generationAtIssue, ownerSession)

@@ -58,6 +58,37 @@ class MutationFenceTest {
     }
 
     @Test
+    fun `a second enroll in the same session makes the first result stale`() = runTest {
+        // Reviewer d47d2326: successive same-session attempts shared one generation, so a queued
+        // older response remained "current" even though the user had since asked for something else.
+        val fence = MutationFence()
+        val first = fence.issue(ownerSession = 1L)
+        val second = fence.issue(ownerSession = 1L)
+
+        assertFalse(
+            "the earlier of two queued enrolls must be stale once the later one is issued",
+            fence.isCurrent(first, { 1L }),
+        )
+        assertTrue(
+            "the newest issue is the authoritative one and must still apply",
+            fence.isCurrent(second, { 1L }),
+        )
+    }
+
+    @Test
+    fun `the newest of three queued enrolls wins`() = runTest {
+        val fence = MutationFence()
+        val attempts = (1..3).map { fence.issue(ownerSession = 5L) }
+        val current = attempts.filter { fence.isCurrent(it, { 5L }) }
+        assertEquals(
+            "exactly one queued attempt may remain current, got: ${current.size}",
+            1,
+            current.size,
+        )
+        assertEquals("the surviving attempt must be the newest", attempts.last(), current.single())
+    }
+
+    @Test
     fun `server work is serialized so two mutations never overlap`() = runTest {
         val fence = MutationFence()
         val firstEntered = CompletableDeferred<Unit>()

@@ -146,6 +146,49 @@ class EnrollmentControllerTest {
     }
 
     @Test
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun `two queued enrolls in one session leave only the newest one applying`() = runTest {
+        // Reviewer d47d2326 asked for this at the CONTROLLER, not just the fence helper: two enroll
+        // taps in the same session must not both settle, or the older response decides the screen.
+        val gates = List(2) { CompletableDeferred<Unit>() }
+        var issued = 0
+        val subject = EnrollmentController(
+            enrollOperation = {
+                val mine = gates[issued]
+                issued += 1
+                mine.await()
+                VoiceSharingMutationResult.Failure
+            },
+            withdrawOperation = { VoiceSharingMutationResult.Failure },
+            deleteOperation = { null },
+            clearLocalPending = {},
+            ownerSession = { session },
+        )
+
+        var firstOutcome: EnrollmentOutcome? = null
+        var secondOutcome: EnrollmentOutcome? = null
+        val first = launch { firstOutcome = subject.enroll(acceptedDisclosureVersion = "2026-10-01") }
+        runCurrent()
+        val second = launch { secondOutcome = subject.enroll(acceptedDisclosureVersion = "2026-10-01") }
+        runCurrent()
+
+        // Both requests now complete, oldest first.
+        gates.forEach { it.complete(Unit) }
+        first.join()
+        second.join()
+
+        assertEquals(
+            "the superseded first enroll must report Superseded once a newer one was issued",
+            EnrollmentOutcome.Superseded,
+            firstOutcome,
+        )
+        assertTrue(
+            "the newest enroll must be the one that settles, got: $secondOutcome",
+            secondOutcome !is EnrollmentOutcome.Superseded,
+        )
+    }
+
+    @Test
     fun `an account switch mid-flight discards the previous account result`() = runTest {
         val gate = CompletableDeferred<Unit>()
         val entered = CompletableDeferred<Unit>()

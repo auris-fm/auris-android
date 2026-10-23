@@ -149,8 +149,17 @@ class VoiceControlSettingsFragment : BaseFragment() {
             var deletionFailed by remember { mutableStateOf(false) }
             // LOCAL intent, not derived from the server: once the user turns sharing off we stop
             // sending immediately, so the toggle must not wait for a round trip to move.
+            //
+            // INITIALIZATION must consult the DURABLE stop, not just the server projection. A user who
+            // turned sharing off and then relaunched would otherwise be shown "sharing on" by a stale
+            // enrolled projection while collection was in fact stopped — the screen disagreeing with
+            // the gate about the one thing the user cares about. The local stop wins here for the same
+            // reason it wins in CollectionAuthority: the user's decision, not server state.
             var locallySharing by remember(projection?.membershipRevision) {
-                mutableStateOf(projection?.voiceSharingEnrolled == true)
+                mutableStateOf(
+                    projection?.voiceSharingEnrolled == true &&
+                        localWithdrawalIntent.collectionPermittedByLocalIntent(projection),
+                )
             }
             val scope = rememberCoroutineScope()
             val sharingCopy = VoiceSharingCopy(

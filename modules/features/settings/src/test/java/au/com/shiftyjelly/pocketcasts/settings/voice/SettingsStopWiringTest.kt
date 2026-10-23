@@ -77,6 +77,23 @@ class SettingsStopWiringTest {
     }
 
     @Test
+    fun `the toggle initializes from the durable stop, not only the server projection`() {
+        val source = fragmentSource()
+        val initIndex = source.indexOf("var locallySharing by remember")
+        assertTrue("the toggle initialization must be findable", initIndex >= 0)
+        val initBlock = source.substring(initIndex, minOf(source.length, initIndex + 700))
+        assertTrue(
+            "the initial state must consult the durable stop: initializing from the server projection " +
+                "alone shows 'sharing on' to a user whose collection is actually stopped",
+            initBlock.contains("collectionPermittedByLocalIntent"),
+        )
+        assertTrue(
+            "the durable stop must gate the projection rather than replace it",
+            initBlock.contains("voiceSharingEnrolled"),
+        )
+    }
+
+    @Test
     fun `a failed withdrawal keeps the stop rather than clearing it`() {
         val source = fragmentSource()
         val failedIndex = source.indexOf("onWithdrawalFailed()")

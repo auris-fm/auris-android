@@ -82,6 +82,9 @@ class VoiceSharingAccountStartup @Inject constructor(
             operations.deleteData(token)
         },
         clearLocalPending = clearLocalPending,
+        // Results are fenced to the owner session they were issued under, so an account switch
+        // mid-flight cannot apply one account's outcome to another's screen.
+        ownerSession = { ownership.authoritySnapshot().session },
     )
 
     /** The live session token, or null when no session is current (nothing may be mutated). */

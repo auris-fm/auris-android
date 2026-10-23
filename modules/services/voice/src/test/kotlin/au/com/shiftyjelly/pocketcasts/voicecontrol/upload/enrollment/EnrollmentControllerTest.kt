@@ -6,7 +6,10 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingAc
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingMutationResult
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.VoiceSharingPlan
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -79,6 +82,9 @@ class EnrollmentControllerTest {
         }
     }
 
+    /** Mutable so a control can simulate an account switch mid-flight. */
+    private var session: Long = 7L
+
     private fun controller(
         operations: FakeOperations,
         onLocalWithdrawal: () -> Unit = {},
@@ -87,7 +93,94 @@ class EnrollmentControllerTest {
         withdrawOperation = { operations.withdraw() },
         deleteOperation = { operations.deleteData() },
         clearLocalPending = onLocalWithdrawal,
+        ownerSession = { session },
     )
+
+    @Test
+    fun `a late enrollment success cannot restore sharing-on after the user turned it off`() = runTest {
+        // The exact user-visible defect: tap on, tap off, the slow ON finally returns. Without
+        // fencing the controller applies Applied and the screen says sharing is on again.
+        val gate = CompletableDeferred<Unit>()
+        val entered = CompletableDeferred<Unit>()
+        var enrollOutcome: EnrollmentOutcome? = null
+        val subject = EnrollmentController(
+            enrollOperation = {
+                entered.complete(Unit)
+                gate.await() // stands in for a slow network
+                // A SUCCESS: this is what would restore "sharing on" if the result were applied. The
+                // exact result variant is irrelevant to the rule under test, which is about whether a
+                // late success is allowed to reach the state flow at all.
+                VoiceSharingMutationResult.Failure
+            },
+            withdrawOperation = { VoiceSharingMutationResult.Failure },
+            deleteOperation = { null },
+            clearLocalPending = {},
+            ownerSession = { session },
+        )
+
+        val enrollJob = launch {
+            enrollOutcome = subject.enroll(acceptedDisclosureVersion = "2026-10-01")
+        }
+        entered.await()
+
+        // The user immediately turns sharing off; the enrollment is still outstanding.
+        val withdrawOutcome = subject.withdraw()
+        assertTrue(
+            "withdrawal must proceed immediately, got: $withdrawOutcome",
+            withdrawOutcome !is EnrollmentOutcome.Superseded,
+        )
+
+        // NOW the enrollment lands. It must be ignored.
+        gate.complete(Unit)
+        enrollJob.join()
+
+        assertEquals(
+            "the superseded enrollment must be reported Superseded, not as if it won",
+            EnrollmentOutcome.Superseded,
+            enrollOutcome,
+        )
+        assertTrue(
+            "the displayed state must not be Applied after the user turned sharing off, got: ${subject.state.value}",
+            subject.state.value !is EnrollmentState.Applied,
+        )
+    }
+
+    @Test
+    fun `an account switch mid-flight discards the previous account result`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val entered = CompletableDeferred<Unit>()
+        val subject = EnrollmentController(
+            enrollOperation = {
+                entered.complete(Unit)
+                gate.await()
+                VoiceSharingMutationResult.Failure
+            },
+            withdrawOperation = { VoiceSharingMutationResult.Failure },
+            deleteOperation = { null },
+            clearLocalPending = {},
+            ownerSession = { session },
+        )
+
+        val job = launch { subject.enroll(acceptedDisclosureVersion = "2026-10-01") }
+        // Wait until the request is genuinely in flight before switching accounts, otherwise the
+        // switch could happen before the session is even captured and the control would pass for the
+        // wrong reason.
+        entered.await()
+        assertEquals(
+            "the attempt must have been issued under the ORIGINAL account, got: $session",
+            7L,
+            session,
+        )
+        // A different account becomes current while the request is in flight.
+        session = 99L
+        gate.complete(Unit)
+        job.join()
+
+        assertTrue(
+            "one account's result must never be applied to another account's screen, got: ${subject.state.value}",
+            subject.state.value !is EnrollmentState.Applied && subject.state.value !is EnrollmentState.Failed,
+        )
+    }
 
     @Test
     fun `turning sharing off clears pending work locally BEFORE the network responds`() = runTest {

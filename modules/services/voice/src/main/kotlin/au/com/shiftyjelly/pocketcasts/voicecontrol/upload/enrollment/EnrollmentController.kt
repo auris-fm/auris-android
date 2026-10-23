@@ -42,6 +42,13 @@ sealed interface EnrollmentOutcome {
 
     /** Refused locally before any network call (e.g. no accepted disclosure). */
     data class Refused(val reason: String) : EnrollmentOutcome
+
+    /**
+     * A newer action or an account switch made this result irrelevant. NOT an error: the operation
+     * may well have succeeded server-side, but reporting it would describe a state the user has since
+     * moved past (or does not belong to this account).
+     */
+    data object Superseded : EnrollmentOutcome
 }
 
 /**
@@ -66,6 +73,9 @@ class EnrollmentController(
     private val withdrawOperation: suspend () -> VoiceSharingMutationResult,
     private val deleteOperation: suspend () -> DeletionReceipt?,
     private val clearLocalPending: () -> Unit,
+    /** Owner session each operation is issued under; a change drops in-flight results. */
+    private val ownerSession: () -> Long,
+    private val fence: MutationFence = MutationFence(),
 ) {
     private val mutableState = MutableStateFlow<EnrollmentState>(EnrollmentState.Idle)
     val state: StateFlow<EnrollmentState> = mutableState.asStateFlow()
@@ -80,7 +90,16 @@ class EnrollmentController(
             return EnrollmentOutcome.Refused("enrollment requires an accepted disclosure version")
         }
         mutableState.value = EnrollmentState.Pending
-        val result = enrollOperation(acceptedDisclosureVersion)
+        val attempt = fence.issue(ownerSession())
+        val result = fence.serialize { enrollOperation(acceptedDisclosureVersion) }
+        // A superseded or cross-session result is DROPPED, not applied: applying it would let a slow
+        // enrollment flip the UI back to "sharing on" after the user turned sharing off, or write one
+        // account's outcome onto another's screen.
+        //
+        // Compare against the session the attempt was ISSUED under, not a fresh read: re-reading here
+        // would return the NEW account and make the check trivially true, which is exactly how this
+        // leaked one account's outcome onto another's screen the first time.
+        if (!fence.isCurrent(attempt, ownerSession)) return EnrollmentOutcome.Superseded
         val settled = when (result) {
             is VoiceSharingMutationResult.Applied -> EnrollmentState.Applied
             is VoiceSharingMutationResult.MembershipConflict -> EnrollmentState.Conflict
@@ -107,8 +126,18 @@ class EnrollmentController(
         // ORDER MATTERS: before the request, not after. A later clear would keep collecting for the
         // duration of the round trip, which is exactly the state the user just asked to leave.
         clearLocalPending()
+        // SUPERSEDE BEFORE ANYTHING ELSE. An in-flight enrollment must lose here rather than complete
+        // and restore the UI to "on"; waiting for it (or for the serialization lock it holds) would
+        // make the user's decision queue behind a request they have already changed their mind about.
         mutableState.value = EnrollmentState.Pending
+        // ONE atomic step: kill every earlier attempt and make this withdrawal the authoritative one.
+        val attempt = fence.supersedeAndIssue(ownerSession())
+        // NOT serialized behind the enrollment lock. Serializing here would make the user's stop wait
+        // for the very request they are stopping — the deadlock this control produced. The withdrawal
+        // is already the newest intent, and the fence guarantees the older enrollment cannot apply, so
+        // the two requests need not be ordered against each other.
         val result = withdrawOperation()
+        if (!fence.isCurrent(attempt, ownerSession)) return EnrollmentOutcome.Superseded
         val settled = when (result) {
             is VoiceSharingMutationResult.Applied -> EnrollmentState.Applied
             is VoiceSharingMutationResult.MembershipConflict -> EnrollmentState.Conflict

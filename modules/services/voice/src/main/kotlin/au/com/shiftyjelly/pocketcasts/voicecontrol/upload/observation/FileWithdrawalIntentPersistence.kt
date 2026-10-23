@@ -29,10 +29,26 @@ class FileWithdrawalIntentPersistence @Inject constructor(
     private val tempFile: File
         get() = File(context.filesDir, "voice-sharing-local-stop.tmp")
 
+    /**
+     * FAILS CLOSED. Only an explicit [REQUESTED] or [CLEARED] marker is honoured; anything else —
+     * truncated, empty, unrecognised or unreadable — reads as STOPPED.
+     *
+     * The asymmetry decides this: reading a corrupt file as "permitted" resumes contribution for
+     * someone who asked us to stop, while reading it as "stopped" costs a user one extra opt-in. A
+     * silently resumed upload is not a recoverable inconvenience, so the uncertain case is the
+     * stopping one.
+     */
     override fun read(): Boolean {
         if (!file.exists()) return false
         return try {
-            file.readText().trim() == REQUESTED
+            when (file.readText().trim()) {
+                CLEARED -> false
+
+                REQUESTED -> true
+
+                // Truncated, empty, or unrecognised: we cannot prove collection was permitted.
+                else -> true
+            }
         } catch (e: Exception) {
             // Cannot read our own flag: be conservative and report a stop. Claiming "no intent"
             // here would resume collection for someone who may have asked us to stop.

@@ -22,7 +22,24 @@ class PlaybackCrossCorrelator @Inject constructor() {
         micPositionMs: Long? = null,
     ): Boolean {
         val playbackBuffer = reference.samples
-        if (playbackBuffer.size < micAudio.size) return false
+        // BOUND, don't bail (reviewer 4356625095): the recorder's reference is 2 s = 32 000 samples
+        // while a minimum VAD segment is 41 x 1024 = 41 984, so declining on length would skip
+        // correlation for EVERY real segment and let the device's own answer audio be transcribed
+        // and executed. Bound the analysis window to the longest prefix that still leaves the
+        // reference room for the acoustic-delay search (ref minus maxDelay): the segment's PREFIX
+        // keeps `micPositionMs` valid for the analyzed samples, and the bounded window re-enters
+        // the ordinary window policies below instead of a special case.
+        val maxDelaySamples = (MAX_DELAY_SECONDS * reference.sampleRateHz).toInt()
+        val analysis = if (micAudio.size > playbackBuffer.size) {
+            // Only a segment LONGER than the reference needs bounding, and the bounded window must
+            // stay long enough to correlate meaningfully (>= 100 ms); a tiny reference declines
+            // exactly as the length bail-out did, without silently masking every real segment.
+            val windowBound = playbackBuffer.size - maxDelaySamples
+            if (windowBound < MIN_ANALYSIS_SAMPLES) return false
+            micAudio.copyOf(windowBound)
+        } else {
+            micAudio
+        }
 
         val sampleRate = reference.sampleRateHz
         val minDelay = (MIN_DELAY_SECONDS * sampleRate).toInt()
@@ -39,7 +56,7 @@ class PlaybackCrossCorrelator @Inject constructor() {
         //                admissible candidate; NO BLEED without correlating a fabricated offset.
         //                Matching an old waveform is not evidence of a temporally possible echo.
         //   Available    candidates exist -> correlate them.
-        val candidate = candidateOffsets(micAudio, reference, micPositionMs, sampleRate)
+        val candidate = candidateOffsets(analysis, reference, micPositionMs, sampleRate)
         val offsetRange = when (candidate) {
             is CandidateRange.Unavailable -> {
                 // 50..500 ms window is offsets [maxOffset - maxDelay, maxOffset - minDelay],
@@ -49,7 +66,7 @@ class PlaybackCrossCorrelator @Inject constructor() {
                 // no offset with a complete in-window candidate -- maxOffset < minDelay means even
                 // offset 0 implies a sub-50 ms delay -- so the comparison is DECLINED (empty range),
                 // never resolved by clamping onto fabricated offset zero.
-                val maxOffset = (playbackBuffer.size - micAudio.size).coerceAtLeast(0)
+                val maxOffset = (playbackBuffer.size - analysis.size).coerceAtLeast(0)
                 if (maxOffset < minDelay) {
                     IntRange.EMPTY
                 } else {
@@ -64,8 +81,8 @@ class PlaybackCrossCorrelator @Inject constructor() {
 
         var maxCorrelation = 0.0
         for (offset in offsetRange) {
-            if (offset < 0 || offset + micAudio.size > playbackBuffer.size) continue
-            val correlation = normalizedCrossCorrelation(micAudio, playbackBuffer, offset)
+            if (offset < 0 || offset + analysis.size > playbackBuffer.size) continue
+            val correlation = normalizedCrossCorrelation(analysis, playbackBuffer, offset)
             if (correlation > maxCorrelation) maxCorrelation = correlation
         }
 
@@ -154,6 +171,9 @@ class PlaybackCrossCorrelator @Inject constructor() {
 
     companion object {
         private const val BLEED_THRESHOLD = 0.3
+
+        /** Shortest analysis window (100 ms at 16 kHz) that a bounded bleed check will still run. */
+        private const val MIN_ANALYSIS_SAMPLES = 1_600
 
         /**
          * The acoustic-delay window, as a property of the built-in speaker path, NOT of every route.

@@ -45,10 +45,25 @@ class AndroidPlatformTtsEngineTest {
     }
 
     @Test
-    fun `speak before initialization returns without throwing`() = runTest {
-        // The engine tolerates speak before TTS is ready, which is what the renderer relies on when
-        // a reply arrives during startup.
-        engine.speak("hello", "en")
+    fun `speak before initialization reports failure instead of silent delivery`() = runTest {
+        // REVIEWER 4356625551: the engine used to swallow this case silently, so the renderer
+        // counted a reply as delivered while the user heard nothing. speak must REPORT that no
+        // synthesis happened.
+        assertFalse(engine.speak("hello", "en"))
+    }
+
+    @Test
+    fun `an accepted synthesis whose callbacks never arrive fails the utterance within the bound`() = runTest {
+        // REVIEWER 4356632247: an engine that queues SUCCESS but never delivers onDone/onError/onStop
+        // used to leave speak() suspended forever; speakWithHeartbeat kept reporting emission, so
+        // the user's next utterance was suppressed for the whole session.
+        engine.synthesisWaitMs = 200
+        engine.synthesizeToFile = { _, _, _, _ -> android.speech.tts.TextToSpeech.SUCCESS }
+        val start = android.os.SystemClock.elapsedRealtime()
+        val delivered = engine.speak("hello", "en")
+        val elapsed = android.os.SystemClock.elapsedRealtime() - start
+        assertFalse("a callback-less synthesis must not count as delivered", delivered)
+        assertTrue("the wait must be bounded (took $elapsed ms)", elapsed < 5_000)
     }
 
     @Test

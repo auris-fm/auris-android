@@ -1388,6 +1388,61 @@ class CloudRouteSinkTest {
     }
 
     @Test
+    fun `a superseding turn restores the chain's duck and stops the buffered audio even when silent`() = runTest {
+        // REVIEWER 4356625394: when turn B supersedes turn A mid-answer, A's finally is skipped
+        // (it no longer owns the audio state) and A's `ducked`/`audioPlayed` die with its frame.
+        // A user who barges in on an answer with an action-only (silent) turn was left with the
+        // podcast ducked until another app took audio focus, and A's buffered cloud audio kept
+        // playing. The duck obligation is the CHAIN's, like the pause reservation: whoever owns
+        // the chain at its finally restores it and stops the chain's player.
+        val player = mock<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.CloudAudioPlayer>()
+        whenever(player.audioWritten).thenReturn(true)
+        val firstTurnReachedFrame = CompletableDeferred<Unit>()
+        var routeCall = 0
+        val deps = TestDeps(
+            audioPlayer = player,
+            routeInvoker = { _ ->
+                if (routeCall++ == 0) {
+                    kotlinx.coroutines.flow.flow {
+                        emit(CloudRouteEvent.Connected("pcm_s16le@24k"))
+                        emit(CloudRouteEvent.AudioFrame("pcm_s16le@24k", byteArrayOf(1, 2)))
+                        firstTurnReachedFrame.complete(Unit)
+                        awaitCancellation()
+                    }
+                } else {
+                    kotlinx.coroutines.flow.flowOf(
+                        CloudRouteEvent.Connected("pcm_s16le@24k"),
+                        CloudRouteEvent.Done(1, 1),
+                    )
+                }
+            },
+        )
+        val sink = deps.sink()
+
+        val turnA = launch {
+            runCatching {
+                sink.routeToCloud("first question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId)
+            }
+        }
+        withTimeout(5_000) {
+            firstTurnReachedFrame.await()
+            kotlinx.coroutines.yield()
+        }
+        assertTrue("the predecessor ducked the host on its first frame", deps.playback.calls.contains("duck"))
+
+        // The successor: an action-only turn whose terminal is Done with no audio of its own.
+        sink.routeToCloud("second question", VoiceIntent.CloudTier.Premium, playbackContext, admitted = testWireId)
+        withTimeout(5_000) { turnA.join() }
+        turnA.cancel()
+
+        assertTrue(
+            "the successor's finally must restore the chain's duck (calls=${deps.playback.calls})",
+            deps.playback.calls.contains("restore"),
+        )
+        org.mockito.kotlin.verify(player, org.mockito.kotlin.atLeastOnce()).stop()
+    }
+
+    @Test
     fun `upstream throw during collect still restores auto pause`() = runTest {
         val deps = TestDeps(
             routeInvoker = withHold(

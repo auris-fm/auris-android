@@ -56,6 +56,15 @@ class AndroidPlatformTtsEngine @Inject constructor(
     var drainWaitMs: Long = MAX_DRAIN_WAIT_MS
 
     /**
+     * Bound on the synthesis wait (reviewer 4356632247). An engine that ACCEPTS the request but
+     * never delivers onDone/onError/onStop (engine process death, an OEM engine dropping
+     * callbacks) used to leave speak() suspended forever while speakWithHeartbeat kept reporting
+     * emission -- suppressing every later utterance for the rest of the session. Overridable for
+     * tests, like [drainWaitMs].
+     */
+    var synthesisWaitMs: Long = MAX_SYNTHESIS_WAIT_MS
+
+    /**
      * Queues [text] for synthesis to [file], returning the platform's status code. Defaults to the
      * real engine; a test can substitute one that never completes so the cancellation path is
      * exercised deterministically rather than inferred from a code reading.
@@ -167,10 +176,10 @@ class AndroidPlatformTtsEngine @Inject constructor(
         }
     }
 
-    override suspend fun speak(text: String, language: String) {
-        if (released || tts == null || !initialized) return
+    override suspend fun speak(text: String, language: String): Boolean {
+        if (released || tts == null || !initialized) return false
         speakCount++
-        val engine = tts ?: return
+        val engine = tts ?: return false
         val locale = localeForLanguageTag(language)
         withContext(Dispatchers.Main) {
             val result = engine.setLanguage(locale)
@@ -192,77 +201,89 @@ class AndroidPlatformTtsEngine @Inject constructor(
             // shared engine.
             val utteranceId = "voice-tts-" + UTTERANCE_ID_SEQ.incrementAndGet()
             var ownershipToken = -1
-            val synthesized = suspendCancellableCoroutine { continuation ->
-                // ONE-SHOT, ID-MATCHED completion (finding 4236364898). This listener is SHARED: the
-                // next speak() replaces it, so any LATE callback from THIS utterance is delivered into
-                // the SUCCESSOR's listener instance. Two guards follow.
-                // (1) The id check: a late callback carrying this utterance's id is ignored by the
-                // successor's listener, and vice versa -- a callback can only complete its OWN
-                // utterance. (2) The one-shot flag: an immediate refusal and a late callback (or two
-                // late callbacks) can both arrive at the same listener; only the first resumption wins,
-                // and the second is a no-op instead of an IllegalStateException out of a binder thread.
-                val completed = java.util.concurrent.atomic.AtomicBoolean(false)
-                fun completeOnce(value: Boolean) {
-                    if (completed.compareAndSet(false, true)) {
-                        continuation.resume(value)
-                    }
-                }
-                engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    @Deprecated("Deprecated in Java")
-                    override fun onDone(id: String?) {
-                        if (id == utteranceId) completeOnce(true)
-                    }
+            // BOUNDED WAIT (reviewer 4356632247): a SUCCESS-queued utterance whose callbacks never
+            // arrive must fail the utterance rather than suspend speak() forever. Timing out
+            // cancels the suspension, whose invokeOnCancellation stops the engine if THIS utterance
+            // still owns it -- the same cleanup a successor or an explicit cancel would run.
+            val synthesized = try {
+                kotlinx.coroutines.withTimeout(synthesisWaitMs) {
+                    suspendCancellableCoroutine { continuation ->
+                        // ONE-SHOT, ID-MATCHED completion (finding 4236364898). This listener is SHARED: the
+                        // next speak() replaces it, so any LATE callback from THIS utterance is delivered into
+                        // the SUCCESSOR's listener instance. Two guards follow.
+                        // (1) The id check: a late callback carrying this utterance's id is ignored by the
+                        // successor's listener, and vice versa -- a callback can only complete its OWN
+                        // utterance. (2) The one-shot flag: an immediate refusal and a late callback (or two
+                        // late callbacks) can both arrive at the same listener; only the first resumption wins,
+                        // and the second is a no-op instead of an IllegalStateException out of a binder thread.
+                        val completed = java.util.concurrent.atomic.AtomicBoolean(false)
+                        fun completeOnce(value: Boolean) {
+                            if (completed.compareAndSet(false, true)) {
+                                continuation.resume(value)
+                            }
+                        }
+                        engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                            @Deprecated("Deprecated in Java")
+                            override fun onDone(id: String?) {
+                                if (id == utteranceId) completeOnce(true)
+                            }
 
-                    @Deprecated("Deprecated in Java")
-                    override fun onError(id: String?) {
-                        if (id == utteranceId) {
-                            Timber.w("TTS synthesis error for utteranceId=$utteranceId")
+                            @Deprecated("Deprecated in Java")
+                            override fun onError(id: String?) {
+                                if (id == utteranceId) {
+                                    Timber.w("TTS synthesis error for utteranceId=$utteranceId")
+                                    completeOnce(false)
+                                }
+                            }
+
+                            @Deprecated("Deprecated in Java")
+                            override fun onStart(id: String?) {}
+                        })
+                        // Cancellation must stop the queued synthesis, but only while this synthesis is
+                        // still the current one. This handler is registered before the call and runs
+                        // asynchronously, so it can execute after a successor has already started on the
+                        // shared engine -- stopping then silences the successor rather than this utterance.
+                        // Claim and stop under the same boundary a successor claims under, so a successor
+                        // cannot start between the ownership check and the stop.
+                        // The token lives beyond this block: it is carried into playback as the utterance's
+                        // ownership claim.
+                        ownershipToken = synthesisLock.withLock { ++synthesisGeneration }
+                        val mine = ownershipToken
+                        continuation.invokeOnCancellation {
+                            synthesisLock.withLock {
+                                if (synthesisGeneration == mine) {
+                                    engine.stop()
+                                }
+                            }
+                        }
+                        // QUEUE_FLUSH preserves the previous single-utterance behaviour: a superseded reply
+                        // must not keep talking.
+                        val queued = synthesizeToFile?.invoke(engine, text, wav, utteranceId)
+                            ?: engine.synthesizeToFile(text, null, wav, utteranceId)
+                        if (queued != TextToSpeech.SUCCESS) {
+                            Timber.w("TTS synthesizeToFile failed with $queued")
+                            // ONE-SHOT: the refusal is this utterance's first completion; the flag makes any
+                            // late platform callback for the same id a no-op instead of a double resume.
                             completeOnce(false)
                         }
-                    }
-
-                    @Deprecated("Deprecated in Java")
-                    override fun onStart(id: String?) {}
-                })
-                // Cancellation must stop the queued synthesis, but only while this synthesis is
-                // still the current one. This handler is registered before the call and runs
-                // asynchronously, so it can execute after a successor has already started on the
-                // shared engine -- stopping then silences the successor rather than this utterance.
-                // Claim and stop under the same boundary a successor claims under, so a successor
-                // cannot start between the ownership check and the stop.
-                // The token lives beyond this block: it is carried into playback as the utterance's
-                // ownership claim.
-                ownershipToken = synthesisLock.withLock { ++synthesisGeneration }
-                val mine = ownershipToken
-                continuation.invokeOnCancellation {
-                    synthesisLock.withLock {
-                        if (synthesisGeneration == mine) {
+                        if (!continuation.isActive) {
+                            // A cancellation landed between registering the listener and the call, so stop
+                            // the queued synthesis rather than leaving it orphaned.
                             engine.stop()
                         }
                     }
                 }
-                // QUEUE_FLUSH preserves the previous single-utterance behaviour: a superseded reply
-                // must not keep talking.
-                val queued = synthesizeToFile?.invoke(engine, text, wav, utteranceId)
-                    ?: engine.synthesizeToFile(text, null, wav, utteranceId)
-                if (queued != TextToSpeech.SUCCESS) {
-                    Timber.w("TTS synthesizeToFile failed with $queued")
-                    // ONE-SHOT: the refusal is this utterance's first completion; the flag makes any
-                    // late platform callback for the same id a no-op instead of a double resume.
-                    completeOnce(false)
-                }
-                if (!continuation.isActive) {
-                    // A cancellation landed between registering the listener and the call, so stop
-                    // the queued synthesis rather than leaving it orphaned.
-                    engine.stop()
-                }
+            } catch (timeout: kotlinx.coroutines.TimeoutCancellationException) {
+                Timber.w("TTS synthesis produced no callback within %d ms; failing the utterance", synthesisWaitMs)
+                false
             }
-            if (!synthesized) return
+            if (!synthesized) return false
             // The token is the one THIS utterance claimed at synthesis -- carried forward, never
             // re-read. Re-reading at playback start would let an utterance whose successor claimed
             // the engine during synthesis ADOPT the successor's generation and believe itself the
             // owner.
             playSynthesized(wav, ownershipToken = ownershipToken)
+            return true
         } finally {
             wav.delete()
         }
@@ -655,5 +676,8 @@ class AndroidPlatformTtsEngine @Inject constructor(
 
         /** Upper bound on waiting for queued audio to drain, so a stuck sink cannot hang speak(). */
         const val MAX_DRAIN_WAIT_MS = 10_000L
+
+        /** Same order as the playback drain bound: no utterance waits unbounded. */
+        const val MAX_SYNTHESIS_WAIT_MS = 10_000L
     }
 }

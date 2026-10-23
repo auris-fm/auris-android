@@ -196,6 +196,17 @@ class CloudRouteSink internal constructor(
      */
     private var pauseReserved = false
 
+    /**
+     * True while this turn CHAIN owes the host player the restore of a duck it applied.
+     *
+     * Ownership-scoped like [pauseReserved] (reviewer 4356625394): a turn's own `ducked` flag dies
+     * with the turn, so a successor that supersedes a mid-answer turn inherits a ducked player with
+     * no one to restore it -- the user's podcast stays quiet until another app takes audio focus.
+     * The chain obligation transfers with ownership: whoever is the active turn at its finally
+     * restores it, even when that turn never played audio itself.
+     */
+    private var duckReserved = false
+
     /** The command revision in force when this turn chain took the pause. */
     private var pauseCommandRevision: Long = 0L
     private val turnCounter = AtomicLong(0)
@@ -662,6 +673,8 @@ class CloudRouteSink internal constructor(
                             audioPlayed = true
                             playbackSink.duck()
                             ducked = true
+                            // The obligation outlives this invocation: a successor inherits it.
+                            duckReserved = true
                         }
                         audioPlayer?.submitFrame(event.bytes)
                         audioPlayer?.play()
@@ -689,6 +702,7 @@ class CloudRouteSink internal constructor(
                         if (ducked) {
                             playbackSink.restore()
                             ducked = false
+                            duckReserved = false
                         }
                         // Wait for the output to be OBSERVED to have played the submitted frames.
                         // drainAndStop submitted the frames and stopped immediately -- submission is
@@ -877,16 +891,20 @@ class CloudRouteSink internal constructor(
                 withContext(NonCancellable) {
                     turnMutex.withLock {
                         if (activeTurnId == myId) {
-                            // Stop cloud audio if it was playing but the turn ended
-                            // abnormally (cancellation, timeout, error).
-                            if (audioPlayed) {
+                            // Stop cloud audio if it was playing but the turn ended abnormally
+                            // (cancellation, timeout, error). The PLAYER belongs to the chain, not
+                            // to this invocation: a silent successor must still stop a predecessor's
+                            // still-buffered answer when it takes ownership (reviewer 4356625394).
+                            if (audioPlayed || duckReserved) {
                                 audioPlayer?.stop()
                             }
-                            // Abandon duck focus if we requested it but didn't complete
-                            // normally (Done already restores).
-                            if (ducked) {
+                            // Restore the duck the CHAIN applied (Done already restores): a
+                            // predecessor ducked and was superseded before its own cleanup could
+                            // run, so this owner restores on its way out.
+                            if (ducked || duckReserved) {
                                 playbackSink.restore()
                                 ducked = false
+                                duckReserved = false
                             }
                             restoreTransientAudioState(privacyInvalidatedSince(privacyClosuresAtPause))
                             // The reservation is per turn-CHAIN, like the pause it claims: a turn that

@@ -674,10 +674,11 @@ class EarconPlayer(
             // write, so a REFUSED successor still leaves the track replaced; the stale snapshot must
             // not survive it paired with a track its admission never wrote to (719c64c8).
             currentFrontier = null
-            current.runCatching {
-                stop()
-                release()
-            }
+            // INDEPENDENT RELEASE (reviewer 4356632394): a single runCatching around both calls
+            // skips release() when stop() throws -- the pattern this file's own release()/stopAdmissionNow
+            // comments forbid. Each gets its own guard.
+            current.runCatching { stop() }
+            current.runCatching { release() }
             track = null
             // A replacement track's head starts at zero, exactly as a fresh one's does.
             acceptedFramesTotal = 0
@@ -703,7 +704,14 @@ class EarconPlayer(
                 .setBufferSizeInBytes(minBuffer)
                 .build()
         }
-        created.play()
+        try {
+            created.play()
+        } catch (t: Throwable) {
+            // The new track was never assigned to `track`, so dropping the local reference would
+            // leak the native side (reviewer 4356632394): release it before rethrowing.
+            created.runCatching { release() }
+            throw t
+        }
         track = created
         // A NEW track's head starts at zero, so the frontier restarts with it. Carrying the previous
         // track's total forward would make the first cue on the new track unreachable.

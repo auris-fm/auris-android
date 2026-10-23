@@ -51,7 +51,7 @@ class VoiceControlServiceWiringTest {
 
     private fun unreachableTts() = object : au.com.shiftyjelly.pocketcasts.voicecontrol.tts.TtsEngine {
         override suspend fun warmUp(language: String) = Unit
-        override suspend fun speak(text: String, language: String) = Unit
+        override suspend fun speak(text: String, language: String): Boolean = true
         override fun release() = Unit
     }
 }

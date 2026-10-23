@@ -6,10 +6,13 @@ interface TtsEngine {
     /**
      * Speaks [text], returning only once the audio has finished playing.
      *
+     * @return whether an utterance was actually synthesized; `false` means the engine was released,
+     *   uninitialized, or refused the queue, so the caller heard nothing and must fall back rather
+     *   than count the reply as delivered (reviewer 4356625551).
      * @throws TtsPlaybackIncompleteException when playback did not drain within the wait bound, so a
      *   caller cannot mistake an incomplete answer for a completed one.
      */
-    suspend fun speak(text: String, language: String)
+    suspend fun speak(text: String, language: String): Boolean
 
     fun release()
 }
@@ -62,14 +65,19 @@ class FakeTtsEngine : TtsEngine {
     @Volatile var clearRequested: Boolean = false
         private set
 
-    override suspend fun speak(text: String, language: String) {
+    /** When false, [speak] models an engine that never synthesized the utterance. */
+    var speakResult: Boolean = true
+
+    override suspend fun speak(text: String, language: String): Boolean {
         check(!released) { "Engine is released" }
         try {
             speakGate?.await()
             speakFailure?.let { throw it }
+            if (!speakResult) return false
             lastSpokenText = text
             lastSpokenLanguage = language
             speakReturned?.complete(Unit)
+            return true
         } finally {
             // NON-CANCELLABLE CLEANUP (reviewer 7a04a952): models a real engine's stop/clear that
             // suspends. The control asserts the hold remains while this is blocked, then releases

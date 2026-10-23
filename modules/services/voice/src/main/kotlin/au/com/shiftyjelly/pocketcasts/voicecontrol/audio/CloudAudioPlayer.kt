@@ -251,6 +251,11 @@ class CloudAudioPlayer(
         trackFrames = 0L
         submittedSamples = 0L
         audioWritten = false
+        // The failure flag is owned by THIS playback run (reviewer 4356625874): play() is called for
+        // every frame the sink submits, so clearing it there let a transient write failure last
+        // exactly one frame -- playback resumed past the gap and the sink still appended the error
+        // earcon after nearly the whole answer. Reset it here, where the run begins.
+        audioWriteFailed = false
         resampler = ChunkResampler()
         answerAdmission = playbackBufferRecorder?.openAdmission(CLOUD_ANSWER_IDENTITY_BASE + trackGeneration)
     }
@@ -264,10 +269,6 @@ class CloudAudioPlayer(
     fun play() {
         if (released) return
         ensureAudioTrack()
-        // Reset the failure flag for this run. The drain loop reads it at the end of every frame, so
-        // leaving it set after the answer it stopped would end the next answer after its first frame
-        // and report nothing -- a turn that played almost none of its audio, recorded as delivered.
-        audioWriteFailed = false
         synchronized(frameBuffer) {
             if (paused) {
                 audioTrack?.play()
@@ -519,6 +520,10 @@ class CloudAudioPlayer(
         while (true) {
             val (frame, admission) = synchronized(frameBuffer) {
                 if (!playing || paused || generation != trackGeneration || audioTrack !== track) return
+                // A failed write ENDS the answer (reviewer 4356625874): the flag is not cleared by
+                // later play() calls, so the drain must not keep consuming frames past the gap
+                // either -- an answer that failed is over, not resumable frame by frame.
+                if (audioWriteFailed) return
                 if (frameBuffer.isEmpty()) return
                 // Only the active owner renews after a route reset, before handing off this frame.
                 // A write already held at the sink keeps its old ticket and cannot renew on return.

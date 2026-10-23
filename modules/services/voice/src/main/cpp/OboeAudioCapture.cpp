@@ -255,7 +255,14 @@ int32_t OboeAudioCapture::getRoutedDeviceId() const {
     // where it is deliberately kUnspecified.
     std::lock_guard<std::mutex> lock(mStreamMutex);
     if (mStream != nullptr) {
-        return mTestReportedDeviceId;
+        // A test's placeholder cannot be interrogated (AudioStream has pure virtuals), so it reports
+        // the id its seam supplied. A REAL stream is asked LIVE -- returning the test id here is what
+        // made routedCaptureDeviceId() always null on device, classifying every wired/BLE headset as
+        // microphone-less and refusing to start voice control (reviewer 4356625267).
+        if (mTestStreamInstalled) {
+            return mTestReportedDeviceId;
+        }
+        return mStream->getDeviceId();
     }
     return mRoutedDeviceId.load(std::memory_order_acquire);
 }

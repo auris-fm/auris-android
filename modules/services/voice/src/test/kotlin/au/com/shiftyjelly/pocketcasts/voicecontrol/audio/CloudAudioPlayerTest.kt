@@ -655,6 +655,43 @@ class CloudAudioPlayerTest {
     }
 
     @Test
+    fun `a write failure holds for the whole answer, not just one frame`() {
+        // REVIEWER 4356625874: play() runs for every frame the sink submits, so clearing the
+        // failure flag there made the "stop this answer" contract last exactly one frame -- a
+        // transient failure reported once, playback resumed past the gap, and the sink still
+        // appended the error earcon after nearly the whole answer. The flag must hold until the
+        // next playback RUN begins.
+        val failures = java.util.concurrent.atomic.AtomicInteger(0)
+        val wired = CloudAudioPlayer(
+            context = org.robolectric.RuntimeEnvironment.getApplication(),
+            sampleRateHz = 16000,
+        )
+        wired.onWriteFailure = { failures.incrementAndGet() }
+        val frame = byteArrayOf(0x00, 0x01, 0x02, 0x03)
+
+        var writes = 0
+        wired.writeToSink = { _, _, _, count -> if (writes++ == 0) count else -1 }
+        wired.submitFrame(frame)
+        wired.submitFrame(frame)
+        wired.play()
+        assertEquals("the failed write reported once", 1, failures.get())
+        val writesAtFailure = writes
+
+        // The sink submits the NEXT frame; play() is called again, as the sink does per frame.
+        wired.submitFrame(frame)
+        wired.play()
+        val acceptedAfterFailure = writes - writesAtFailure
+        assertEquals(
+            "the failed answer must not resume past its gap on the next play() " +
+                "(frames written after failure=$acceptedAfterFailure)",
+            0,
+            acceptedAfterFailure,
+        )
+        assertEquals("and the failure is still the single reported one", 1, failures.get())
+        wired.release()
+    }
+
+    @Test
     fun `chunked resampling produces the same samples as resampling the whole stream`() {
         // Counting samples proves no audio is LOST; it does not prove the samples are the RIGHT ones.
         // A chunked conversion that carried the count but dropped the interpolation state would keep

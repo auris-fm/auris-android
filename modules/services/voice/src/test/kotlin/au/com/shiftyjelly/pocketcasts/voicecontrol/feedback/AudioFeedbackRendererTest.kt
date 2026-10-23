@@ -123,6 +123,22 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `a failed synthesis falls back to the error earcon instead of counting as delivered`() = runTest {
+        // REVIEWER 4356625551: when the TTS engine cannot synthesize (never initialized, queue
+        // refused, onError), the renderer used to record `spoken_submitted` and release the output
+        // hold as a clean completion -- the user heard NOTHING while the turn counted as delivered.
+        // The renderer must fall back to the error earcon instead.
+        whenever(earconPlayer.play(EarconId.ERROR)).thenReturn(EarconPlayer.AdmissionToken(7L))
+        whenever(earconPlayer.completionFor(org.mockito.kotlin.any())).thenReturn(EarconPlayer.EarconCompletion.Playing)
+        ttsEngine.speakResult = false
+
+        renderer.render(VoiceResponse.Spoken("the answer"))
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(2_500))
+
+        verify(earconPlayer).play(EarconId.ERROR)
+    }
+
+    @Test
     fun `superseding a NEVER-STARTED render releases its transferred hold instead of orphaning it`() {
         val signal = au.com.shiftyjelly.pocketcasts.voicecontrol.gate.signals.GracePeriodSignal(timeoutMs = 60_000L)
         signal.onWakeWordDetected()
@@ -901,7 +917,7 @@ class AudioFeedbackRendererTest {
         // still saw success, which is the trap this test exists to avoid.
         val failing = object : TtsEngine {
             override suspend fun warmUp(language: String) = Unit
-            override suspend fun speak(text: String, language: String) {
+            override suspend fun speak(text: String, language: String): Boolean {
                 throw TtsPlaybackIncompleteException(framesWritten = 100, framesPlayed = 40)
             }
 
@@ -931,7 +947,7 @@ class AudioFeedbackRendererTest {
         // failure whose callback raises feedback. A flag nothing reads would satisfy neither.
         val failing = object : TtsEngine {
             override suspend fun warmUp(language: String) = Unit
-            override suspend fun speak(text: String, language: String) {
+            override suspend fun speak(text: String, language: String): Boolean {
                 throw TtsPlaybackIncompleteException(framesWritten = 10, framesPlayed = 2)
             }
 
@@ -1403,6 +1419,57 @@ class AudioFeedbackRendererTest {
     }
 
     @Test
+    fun `a throwing stop still releases the replaced track, and a throwing play releases the created one`() {
+        // REVIEWER 4356632394: one runCatching around stop()+release() skipped release when stop
+        // threw (the lambda aborts), leaking the native track; and a created track whose play()
+        // threw was never assigned to `track`, so the reference drop orphaned it too.
+        val context = org.robolectric.RuntimeEnvironment.getApplication()
+        val player = EarconPlayer(context)
+
+        // Path 1: replacement where stop() throws -- release must still run.
+        player.installClipForTest(EarconId.WAKE_WORD, ShortArray(100) { 2 }, 16_000)
+        val oldTrack = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(oldTrack.sampleRate).thenReturn(16_000)
+        org.mockito.Mockito.`when`(
+            oldTrack.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        org.mockito.Mockito.doThrow(IllegalStateException("stop blew up")).`when`(oldTrack).stop()
+        player.trackFactoryForTest = { oldTrack }
+        assertTrue(player.play(EarconId.WAKE_WORD) != null)
+
+        val newTrack = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(newTrack.sampleRate).thenReturn(8_000) // forces replacement
+        org.mockito.Mockito.`when`(
+            newTrack.write(
+                org.mockito.ArgumentMatchers.any(ShortArray::class.java),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+            ),
+        ).thenAnswer { it.getArgument<Int>(2) }
+        val factory = player.trackFactoryForTest
+        player.trackFactoryForTest = { newTrack }
+        player.play(EarconId.SUCCESS)
+        player.trackFactoryForTest = factory
+        org.mockito.Mockito.verify(oldTrack).release()
+
+        // Path 2: a created track whose play() throws is released, not orphaned.
+        val doomed = org.mockito.Mockito.mock(android.media.AudioTrack::class.java)
+        org.mockito.Mockito.`when`(doomed.sampleRate).thenReturn(16_000)
+        org.mockito.Mockito.doThrow(IllegalStateException("play blew up")).`when`(doomed).play()
+        player.trackFactoryForTest = { doomed }
+        org.mockito.Mockito.doThrow(IllegalStateException("play blew up again")).`when`(newTrack).play()
+        // startOnPlayerThread reports the failure as a refusal (null); the LEAK is what this
+        // controls -- the doomed track must have been released inside ensureTrack, not orphaned.
+        assertNull(player.play(EarconId.WAKE_WORD))
+        org.mockito.Mockito.verify(doomed).release()
+        player.release()
+    }
+
+    @Test
     fun `a rate-change track replacement leaves the old cue's verdict on ITS OWN track, refused successor or not`() {
         // Reviewer 719c64c8 window: ensureTrack replaces the track on a rate change WITHOUT retiring
         // the current admission's snapshot. A then reads the NEW track's playback head against A's
@@ -1785,8 +1852,9 @@ class AudioFeedbackRendererTest {
             val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
             val blockingTts = object : TtsEngine {
                 override suspend fun warmUp(language: String) {}
-                override suspend fun speak(text: String, language: String) {
+                override suspend fun speak(text: String, language: String): Boolean {
                     gate.await()
+                    return true
                 }
                 override fun release() {}
             }
@@ -1809,7 +1877,7 @@ class AudioFeedbackRendererTest {
     fun `incomplete TTS records submission_failed, not spoken_submitted`() {
         val failing = object : TtsEngine {
             override suspend fun warmUp(language: String) {}
-            override suspend fun speak(text: String, language: String) {
+            override suspend fun speak(text: String, language: String): Boolean {
                 throw TtsPlaybackIncompleteException(framesWritten = 10, framesPlayed = 4)
             }
             override fun release() {}

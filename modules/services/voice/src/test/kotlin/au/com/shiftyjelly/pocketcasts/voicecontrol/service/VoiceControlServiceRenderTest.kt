@@ -56,7 +56,7 @@ class VoiceControlServiceRenderTest {
 
     private fun noopTts() = object : TtsEngine {
         override suspend fun warmUp(language: String) = Unit
-        override suspend fun speak(text: String, language: String) = Unit
+        override suspend fun speak(text: String, language: String): Boolean = true
         override fun release() = Unit
     }
 

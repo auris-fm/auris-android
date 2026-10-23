@@ -333,3 +333,37 @@ class PlaybackCrossCorrelatorPositionTest {
         )
     }
 }
+
+// REVIEWER 4356625095 BOUNDARY: a real VAD segment is at least 41 x 1024 = 41 984 samples while
+// the recorder's reference buffer is 2 s = 32 000 samples, so a reference-shorter-than-segment
+// bail-out would skip correlation for EVERY real segment and let the device's own answer audio
+// be transcribed and executed. The analysis window must be BOUNDED to the reference length, not
+// used to decline the comparison.
+class PlaybackCrossCorrelatorLongSegmentTest {
+
+    private val rate = 16_000
+
+    private fun tone(n: Int, freq: Double) = FloatArray(n) { i -> (0.6 * sin(2 * PI * freq * i / rate)).toFloat() }
+
+    @Test
+    fun `a minimum-length VAD segment is still checked for bleed against a full 2 s reference`() {
+        val reference = tone(32_000, 300.0)
+        // The mic hears the reference's playback delayed by 100 ms: segment[i] = 0.3 * ref[i + 1600],
+        // i.e. the matching window starts at reference offset 1_600 -- inside the searched
+        // 50..500 ms window for the bounded 24 000-sample analysis window.
+        val segment = FloatArray(41_984) { i -> if (i + 1_600 < reference.size) 0.3f * reference[i + 1_600] else 0f }
+        assertTrue(
+            "segment longer than the reference must still be bleed-checked",
+            PlaybackCrossCorrelator().isPlaybackBleed(segment, PlaybackReference(reference, rate, null)),
+        )
+    }
+
+    @Test
+    fun `a long segment of pure speech with no bleed is still accepted`() {
+        val reference = tone(32_000, 300.0)
+        val segment = tone(41_984, 97.0)
+        assertFalse(
+            PlaybackCrossCorrelator().isPlaybackBleed(segment, PlaybackReference(reference, rate, null)),
+        )
+    }
+}

@@ -274,9 +274,23 @@ class AudioFeedbackRenderer(
                     is VoiceResponse.Spoken -> {
                         // The awaited call returns only after playback drained — this IS the
                         // output terminal, not mere acceptance. No earcon component.
-                        speakWithHeartbeat(response.text, language)
-                        if (requestId != null) recordSubmitted(requestId, "spoken_submitted")
-                        releaseOutputHold(requestId, cancelled = false)
+                        val delivered = speakWithHeartbeat(response.text, language)
+                        if (delivered) {
+                            if (requestId != null) recordSubmitted(requestId, "spoken_submitted")
+                            releaseOutputHold(requestId, cancelled = false)
+                        } else {
+                            // The user heard NOTHING: fall back to the error earcon rather than
+                            // counting the turn as delivered (reviewer 4356625551).
+                            if (requestId != null) recordSubmitted(requestId, "spoken_failed")
+                            val admitted = playEarcon(EarconId.ERROR)
+                            thisCall.earconAdmission = lastEarconAdmission
+                            if (admitted) {
+                                val consumed = thisCall.awaitEarconOutput()
+                                releaseOutputHold(requestId, cancelled = !consumed)
+                            } else {
+                                releaseOutputHold(requestId, cancelled = true)
+                            }
+                        }
                     }
 
                     is VoiceResponse.Combined -> {
@@ -796,18 +810,22 @@ class AudioFeedbackRenderer(
      * window: a reply longer than it would otherwise read as a foreign app for the rest of its own
      * duration, and the microphone would be closed mid-answer.
      */
-    private suspend fun speakWithHeartbeat(text: String, language: String) = coroutineScope {
+    private suspend fun speakWithHeartbeat(text: String, language: String): Boolean = coroutineScope {
         noteEmitted()
         // The utterance runs in a child so the heartbeat can tick alongside it, but its failure must
         // propagate OUT of this function: catching it inside the launch would let the child finish
         // normally and this call return as though the reply had been delivered.
-        val utterance = launch { ttsEngine.speak(text, language) }
+        var synthesized = false
+        val utterance = launch { synthesized = ttsEngine.speak(text, language) }
         while (utterance.isActive) {
             delay(EMISSION_HEARTBEAT_MS)
             if (utterance.isActive) noteEmitted()
         }
         // Surfaces TtsPlaybackIncompleteException (or any other failure) to the caller.
         utterance.join()
+        // REVIEWER 4356625551: false means the engine never synthesized (uninitialized, refused
+        // queue, onError) -- the caller must not count the reply as delivered.
+        synthesized
     }
 
     /**

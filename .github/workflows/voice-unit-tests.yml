@@ -3,11 +3,14 @@ name: "Voice and cloud transport unit tests"
 # The voice module's Robolectric suite (47+ cases covering ASR engine, cloud route sink,
 # intent routing, spoken template resolution, and diagnostics) and the repositories
 # module's cloud transport tests (encoded frame serialization, WebSocket transport)
-# had no CI job running them. This wires both into every push and PR so regressions
-# are caught without requiring an emulator or secrets.
+# had no CI job running them. Wired for every PR and for pushes to main only
+# (owner 23d4b138/f087c34d): a branch push no longer double-runs the suite that its
+# pull_request event already covers, and main stays guarded after merge.
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   voice-unit-tests:

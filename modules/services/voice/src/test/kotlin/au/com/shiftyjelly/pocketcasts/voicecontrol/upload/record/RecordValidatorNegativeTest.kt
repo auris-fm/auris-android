@@ -567,6 +567,101 @@ class RecordValidatorNegativeTest {
         }
     }
 
+    /**
+     * 4d10275f on the RECOVERY path: translation skip reasons, valid only at translation + not_run.
+     *
+     * Proven on RAW records because that is the shape read back from disk, which never passed through
+     * the builder. The `failed` negative is the one that matters most — the blocked intake revision
+     * accepted exactly that pair, so the client must not replicate it.
+     */
+    @Test
+    fun `raw records carry translation skip reasons only at translation plus not_run`() {
+        val skips = listOf(
+            "source_language_unavailable",
+            "backend_handles_translation",
+            "translator_unavailable",
+        )
+
+        fun recordWith(observations: Map<String, Map<String, Any?>>): RecordValidator.Result {
+            val record = baseRecord()
+
+            @Suppress("UNCHECKED_CAST")
+            val obs = record["observations"] as MutableMap<String, Any?>
+            for ((stage, value) in observations) obs[stage] = value
+            return RecordValidator.validate(toNode(record))
+        }
+
+        for (skip in skips) {
+            val accepted = recordWith(
+                mapOf("translation" to mapOf<String, Any?>("state" to "not_run", "reason" to skip)),
+            )
+            assertTrue(
+                "translation/not_run + '$skip' must be ACCEPTED, got: $accepted",
+                accepted is RecordValidator.Result.Ok,
+            )
+
+            // Every other non-completed state on translation, `failed` included.
+            for (state in listOf("failed", "cancelled", "unknown")) {
+                val refused = recordWith(
+                    mapOf("translation" to mapOf<String, Any?>("state" to state, "reason" to skip)),
+                )
+                assertTrue(
+                    "translation/$state + '$skip' must be REFUSED on the recovery path: a skip reason " +
+                        "cannot describe a stage that ran, got: $refused",
+                    refused !is RecordValidator.Result.Ok,
+                )
+            }
+
+            // And on other stages.
+            val wrongStages = mapOf(
+                "wake" to mapOf<String, Any?>("state" to "not_run", "reason" to skip),
+                "bleed" to mapOf<String, Any?>("state" to "not_run", "reason" to skip),
+                "routing" to mapOf<String, Any?>("state" to "not_run", "reason" to skip),
+                "execution" to mapOf<String, Any?>("state" to "not_run", "reason" to skip),
+            )
+            for ((stage, value) in wrongStages) {
+                val refused = recordWith(mapOf(stage to value))
+                assertTrue(
+                    "$stage/not_run + '$skip' must be REFUSED: the reason belongs to translation, got: $refused",
+                    refused !is RecordValidator.Result.Ok,
+                )
+            }
+        }
+
+        // The substitution control: a completed translation cannot rescue itself with a skip reason.
+        val substituted = recordWith(
+            mapOf(
+                "translation" to mapOf<String, Any?>(
+                    "state" to "completed",
+                    "reason" to "backend_handles_translation",
+                    "translated_text" to "ignora",
+                    "target_language" to "es",
+                ),
+            ),
+        )
+        assertTrue(
+            "translation/completed must REFUSE a skip reason even with real output fields present, " +
+                "got: $substituted",
+            substituted !is RecordValidator.Result.Ok,
+        )
+
+        // And a legitimately completed translation still works, so the negatives are not passing
+        // simply because completed translation is always refused.
+        val realTranslation = recordWith(
+            mapOf(
+                "translation" to mapOf<String, Any?>(
+                    "state" to "completed",
+                    "translated_text" to "ignora este anuncio",
+                    "target_language" to "es",
+                ),
+            ),
+        )
+        assertTrue(
+            "a genuinely completed translation must stay ACCEPTED, got: $realTranslation",
+            realTranslation is RecordValidator.Result.Ok,
+        )
+    }
+
     @Test
     fun `the baseline fixture stays accepted after the fixes`() {
         // Guards against "fix by refusing everything": the negative controls above must not have made

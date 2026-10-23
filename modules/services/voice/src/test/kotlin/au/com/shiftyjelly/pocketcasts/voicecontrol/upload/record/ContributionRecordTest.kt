@@ -219,6 +219,92 @@ class ContributionRecordTest {
     }
 
     @Test
+    fun `4d10275f - translation skip reasons are valid only at translation plus not_run`() {
+        val skips = listOf(
+            "source_language_unavailable",
+            "backend_handles_translation",
+            "translator_unavailable",
+        )
+
+        // POSITIVE, asserted first: each skip reason is legal on translation/not_run.
+        for (skip in skips) {
+            val built = complete(builder())
+                .replaceStage(
+                    StageName.Translation,
+                    StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str(skip))),
+                )
+                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+            assertTrue(
+                "translation/not_run + '$skip' must be buildable, got empty bytes",
+                CanonicalJson.canonicalBytes(built).isNotEmpty(),
+            )
+        }
+
+        // NEGATIVE: the same reasons on every OTHER non-completed state must be refused. `failed`
+        // especially — a skip reason explains a stage that never ran, so it cannot describe a failure.
+        for (skip in skips) {
+            for (state in listOf(StageState.Failed, StageState.Cancelled, StageState.Unknown)) {
+                val failure = runCatching {
+                    complete(builder())
+                        .replaceStage(
+                            StageName.Translation,
+                            StageEntry(state, mapOf("reason" to RecordNode.Str(skip))),
+                        )
+                        .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+                }.exceptionOrNull()
+                assertTrue(
+                    "translation/${state.wire} + '$skip' must be REFUSED: a skip reason cannot describe " +
+                        "a stage that ran, got: $failure",
+                    failure != null,
+                )
+            }
+        }
+
+        // NEGATIVE: and on every other stage.
+        for (skip in skips) {
+            for (stage in listOf(StageName.Wake, StageName.Bleed, StageName.Asr, StageName.Routing, StageName.Execution)) {
+                val failure = runCatching {
+                    complete(builder())
+                        .replaceStage(
+                            stage,
+                            StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str(skip))),
+                        )
+                        .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+                }.exceptionOrNull()
+                assertTrue(
+                    "${stage.wire}/not_run + '$skip' must be REFUSED: the reason belongs to translation, " +
+                        "got: $failure",
+                    failure != null,
+                )
+            }
+        }
+
+        // THE SUBSTITUTION CONTROL the spec called out: a skip reason must never stand in for a
+        // completed translation. A completed translation still needs real output fields, and it may
+        // not carry a reason at all (f8cac147).
+        val completedWithSkip = runCatching {
+            complete(builder())
+                .replaceStage(
+                    StageName.Translation,
+                    StageEntry(
+                        StageState.Completed,
+                        mapOf(
+                            "reason" to RecordNode.Str("backend_handles_translation"),
+                            "translated_text" to RecordNode.Str("ignora"),
+                            "target_language" to RecordNode.Str("es"),
+                        ),
+                    ),
+                )
+                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+        }.exceptionOrNull()
+        assertTrue(
+            "a completed translation carrying a skip reason must be REFUSED: the reason would dress an " +
+                "output-less completed translation up as legitimate, got: $completedWithSkip",
+            completedWithSkip != null,
+        )
+    }
+
+    @Test
     fun `f8cac147 - no completed stage may carry a reason, except ASR empty_result`() {
         // The builder's half of the completed-stage reason rule (spec f8cac147). Proven separately
         // from the recovery validator because the two are independent authorities: a record can be

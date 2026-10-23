@@ -58,6 +58,18 @@ object StageFieldAllowlist {
     fun fieldsFor(stage: StageName): Set<String> = fields.getValue(stage)
 }
 
+/**
+ * 4d10275f: reasons that explain a skipped separate translation stage.
+ *
+ * Each explains a stage that did NOT run. None of them asserts translation happened, which is why
+ * they are not_run-only and why a completed translation must still carry real output fields.
+ */
+val TRANSLATION_SKIP_REASONS = setOf(
+    "source_language_unavailable",
+    "backend_handles_translation",
+    "translator_unavailable",
+)
+
 /** Enumerated per-stage reasons: an arbitrary sentence is refused (spec: enumerated reason). */
 object StageReasons {
     private val reasons: Map<StageName, Set<String>> = mapOf(
@@ -70,7 +82,20 @@ object StageReasons {
         // valid on a COMPLETED stage (handled separately below), because it describes a successful
         // recognition that produced no usable text — not a non-completion.
         StageName.Asr to setOf("local_only_action", "rejected_by_wake", "provider_error", "outcome_wait_expired", "cancelled_by_user", "observation_unavailable", "empty_result"),
-        StageName.Translation to setOf("source_language_target_language", "no_text", "provider_error", "outcome_wait_expired", "observation_unavailable"),
+        // 4d10275f: three ways a SEPARATE translation stage can be legitimately skipped while the
+        // capture itself succeeded. Each explains a skipped stage; none of them asserts translation
+        // happened, which is why they are not_run-only (enforced below) and why a completed
+        // translation must still carry real translated_text/target_language.
+        StageName.Translation to setOf(
+            "source_language_target_language",
+            "no_text",
+            "provider_error",
+            "outcome_wait_expired",
+            "observation_unavailable",
+            "source_language_unavailable",
+            "backend_handles_translation",
+            "translator_unavailable",
+        ),
         StageName.Routing to setOf("no_candidates", "low_confidence", "validation_failed", "outcome_wait_expired", "observation_unavailable"),
         StageName.Execution to setOf("client_refused", "precondition_failed", "action_failed", "cancelled_by_user", "outcome_wait_expired", "observation_unavailable"),
     )
@@ -215,6 +240,16 @@ class ContributionRecordBuilder(
             // contradiction the recovery validator would reject.
             require(reason != "empty_result") {
                 "reason 'empty_result' is only valid with state completed (stage ${stage.wire})"
+            }
+            // 4d10275f: the translation SKIP reasons describe a stage that did not run. They are
+            // invalid with failed/cancelled/unknown too — those states assert something happened and
+            // went wrong, which no skip reason can represent. Letting one through would dress an
+            // output-less completed translation up as legitimate.
+            if (reason in TRANSLATION_SKIP_REASONS) {
+                require(stage == StageName.Translation && entry.state == StageState.NotRun) {
+                    "reason '$reason' is only valid with translation + not_run " +
+                        "(got ${stage.wire}/${entry.state.wire})"
+                }
             }
         } else {
             // c6f3bdf7: completed ASR carrying `empty_result` is the ONE permitted completed-with-

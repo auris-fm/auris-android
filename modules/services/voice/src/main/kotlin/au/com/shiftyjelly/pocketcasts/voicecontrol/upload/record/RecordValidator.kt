@@ -277,6 +277,14 @@ object RecordValidator {
             // cancelled, none of which is "we listened and heard nothing". The completed branch above
             // accepts it; this branch must refuse it.
             if (reason == "empty_result") return null
+            // 4d10275f on the RECOVERY path: a translation SKIP reason is valid only with
+            // translation + not_run. Enforced here as well as in the builder because a persisted
+            // record arrives without ever passing through it.
+            if (reason in TRANSLATION_SKIP_REASONS &&
+                !(stage == StageName.Translation && state == StageState.NotRun)
+            ) {
+                return null
+            }
         }
         // Per-stage value rules that the enum/scalar typing cannot express on its own.
         when (stage) {

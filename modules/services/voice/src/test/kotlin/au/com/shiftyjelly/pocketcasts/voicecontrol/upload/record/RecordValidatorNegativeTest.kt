@@ -351,6 +351,94 @@ class RecordValidatorNegativeTest {
         }
     }
 
+    /**
+     * c6f3bdf7 ON THE RECOVERY PATH (raw maps, never the builder).
+     *
+     * Same reason as the previous matrix: the builder and the recovery validator are DIFFERENT
+     * authorities, and a rule implemented only in the builder leaves every persisted record trusted in
+     * a shape the Cloud intake would refuse. `empty_result` is additionally subtle because it is the
+     * one reason that is legal on a COMPLETED stage — so the check has to be narrow enough to accept
+     * exactly ASR/completed and nothing else.
+     */
+    @Test
+    fun `raw records accept completed ASR empty_result and refuse every contradiction`() {
+        // POSITIVE: completed ASR with empty_result and neither text field.
+        val accepted = baseRecord()
+        @Suppress("UNCHECKED_CAST")
+        (accepted["observations"] as MutableMap<String, Any?>)["asr"] = mutableMapOf<String, Any?>(
+            "state" to "completed",
+            "reason" to "empty_result",
+        )
+        val acceptedResult = RecordValidator.validate(toNode(accepted))
+        assertTrue("completed ASR + empty_result must be ACCEPTED, got: $acceptedResult", acceptedResult is RecordValidator.Result.Ok)
+
+        // POSITIVE: a raw wake-only transcript keeps its text with no router_input.
+        val withText = baseRecord()
+        @Suppress("UNCHECKED_CAST")
+        (withText["observations"] as MutableMap<String, Any?>)["asr"] = mutableMapOf<String, Any?>(
+            "state" to "completed",
+            "text" to "hey auris",
+        )
+        assertTrue(
+            "a completed ASR carrying the actual transcript must be ACCEPTED",
+            RecordValidator.validate(toNode(withText)) is RecordValidator.Result.Ok,
+        )
+
+        // NEGATIVE: empty_result carrying text contradicts itself.
+        val withTextContradiction = baseRecord()
+        @Suppress("UNCHECKED_CAST")
+        (withTextContradiction["observations"] as MutableMap<String, Any?>)["asr"] = mutableMapOf<String, Any?>(
+            "state" to "completed",
+            "reason" to "empty_result",
+            "text" to "skip this ad",
+        )
+        assertTrue(
+            "empty_result + text must be REFUSED on recovery",
+            RecordValidator.validate(toNode(withTextContradiction)) is RecordValidator.Result.Rejected,
+        )
+
+        // NEGATIVE: empty_result carrying router_input.
+        val withRouterInput = baseRecord()
+        @Suppress("UNCHECKED_CAST")
+        (withRouterInput["observations"] as MutableMap<String, Any?>)["asr"] = mutableMapOf<String, Any?>(
+            "state" to "completed",
+            "reason" to "empty_result",
+            "router_input" to "skip this ad",
+        )
+        assertTrue(
+            "empty_result + router_input must be REFUSED on recovery",
+            RecordValidator.validate(toNode(withRouterInput)) is RecordValidator.Result.Rejected,
+        )
+
+        // NEGATIVE: every non-completed ASR state carrying empty_result.
+        for (state in listOf("not_run", "unknown", "failed", "cancelled")) {
+            val record = baseRecord()
+            @Suppress("UNCHECKED_CAST")
+            (record["observations"] as MutableMap<String, Any?>)["asr"] = mutableMapOf<String, Any?>(
+                "state" to state,
+                "reason" to "empty_result",
+            )
+            assertTrue(
+                "asr/$state + empty_result must be REFUSED: an empty result means recognition ran",
+                RecordValidator.validate(toNode(record)) is RecordValidator.Result.Rejected,
+            )
+        }
+
+        // NEGATIVE: empty_result on a completed stage other than ASR.
+        for (stage in listOf("wake", "bleed", "translation", "routing", "execution")) {
+            val record = baseRecord()
+            @Suppress("UNCHECKED_CAST")
+            (record["observations"] as MutableMap<String, Any?>)[stage] = mutableMapOf<String, Any?>(
+                "state" to "completed",
+                "reason" to "empty_result",
+            )
+            assertTrue(
+                "$stage/completed + empty_result must be REFUSED: the reason belongs to ASR",
+                RecordValidator.validate(toNode(record)) is RecordValidator.Result.Rejected,
+            )
+        }
+    }
+
     @Test
     fun `the baseline fixture stays accepted after the fixes`() {
         // Guards against "fix by refusing everything": the negative controls above must not have made

@@ -251,7 +251,15 @@ object RecordValidator {
         // Reason rules: present-and-enumerated when not completed, absent when completed.
         val reasonNode = f["reason"]
         if (state == StageState.Completed) {
-            if (reasonNode != null) return null
+            // c6f3bdf7 on the RECOVERY path: completed ASR may carry exactly `empty_result`, the
+            // explicit observed-empty outcome. Every other completed stage must have no reason, and
+            // no completed stage may carry `empty_result` with a contradicting field.
+            val completedReason = (reasonNode as? RecordNode.Str)?.value
+            if (reasonNode != null && !(stage == StageName.Asr && completedReason == "empty_result")) return null
+            if (completedReason == "empty_result") {
+                if (f.containsKey("text")) return null
+                if (f.containsKey("router_input")) return null
+            }
         } else {
             val reason = (reasonNode as? RecordNode.Str)?.value ?: return null
             if (!StageReasons.isAllowed(stage, reason)) return null
@@ -264,6 +272,11 @@ object RecordValidator {
             if (reason == "observation_unavailable" && state != StageState.Unknown) return null
             // spec 15:46Z: a detector that THREW is a known failure, not an unavailable observation.
             if (reason == "detector_error" && state != StageState.Failed) return null
+            // c6f3bdf7: `empty_result` describes a recognition that RAN and observed nothing. On a
+            // non-completed stage it is a contradiction — the stage either did not run, failed or was
+            // cancelled, none of which is "we listened and heard nothing". The completed branch above
+            // accepts it; this branch must refuse it.
+            if (reason == "empty_result") return null
         }
         // Per-stage value rules that the enum/scalar typing cannot express on its own.
         when (stage) {
@@ -290,7 +303,13 @@ object RecordValidator {
                 // success is the exact defect the spec names, and text present on a
                 // non-completed stage contradicts the state.
                 val textPresent = "text" in f
-                if (state == StageState.Completed && !textPresent) return null
+                // c6f3bdf7: `empty_result` is the ONE completed-ASR shape allowed to omit text. It
+                // reports a recognition that genuinely produced nothing, so requiring text there
+                // would force the client to either invent a transcript or mislabel the stage as
+                // unknown — both of which the spec forbids. Every OTHER completed ASR still requires
+                // non-whitespace text.
+                val emptyResult = (f["reason"] as? RecordNode.Str)?.value == "empty_result"
+                if (state == StageState.Completed && !textPresent && !emptyResult) return null
                 if (state != StageState.Completed && textPresent) return null
                 if ((f["text"] as? RecordNode.Str)?.value?.isBlank() == true) return null
                 if ((f["router_input"] as? RecordNode.Str)?.value?.isBlank() == true) return null

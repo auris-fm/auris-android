@@ -71,6 +71,169 @@ class ContributionRecordTest {
         }
     }
 
+    /**
+     * c6f3bdf7: EMPTY ASR RESULT IS AN OBSERVATION, NOT AN ABSENCE.
+     *
+     * A recognizer that ran successfully and heard no usable text produced a real observation. The
+     * record must say so explicitly (`completed`/`empty_result`, both text fields absent) rather than
+     * pretend the stage never ran or invent a reason for a failure that did not happen.
+     */
+    @Test
+    fun `completed ASR with empty_result and no text fields is accepted`() {
+        val record = complete(builder())
+            .replaceStage(
+                StageName.Asr,
+                StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("empty_result"))),
+            )
+            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+        val asr = (record.fields.getValue("observations") as RecordNode.Obj).fields.getValue("asr") as RecordNode.Obj
+        assertEquals("completed", (asr.fields.getValue("state") as RecordNode.Str).value)
+        assertEquals("empty_result", (asr.fields.getValue("reason") as RecordNode.Str).value)
+        assertFalse("the empty result carries no text", asr.fields.containsKey("text"))
+    }
+
+    @Test
+    fun `empty_result carrying text is refused - the record would contradict itself`() {
+        val failure = runCatching {
+            complete(builder())
+                .replaceStage(
+                    StageName.Asr,
+                    StageEntry(
+                        StageState.Completed,
+                        mapOf(
+                            "reason" to RecordNode.Str("empty_result"),
+                            "text" to RecordNode.Str("skip this ad"),
+                        ),
+                    ),
+                )
+                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+        }.exceptionOrNull()
+        assertTrue(
+            "empty_result claims no text; carrying text contradicts the claim, got: $failure",
+            failure?.message?.contains("must NOT carry text") == true,
+        )
+    }
+
+    @Test
+    fun `empty_result carrying router_input is refused`() {
+        val failure = runCatching {
+            complete(builder())
+                .replaceStage(
+                    StageName.Asr,
+                    StageEntry(
+                        StageState.Completed,
+                        mapOf(
+                            "reason" to RecordNode.Str("empty_result"),
+                            "router_input" to RecordNode.Str("skip this ad"),
+                        ),
+                    ),
+                )
+                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+        }.exceptionOrNull()
+        assertTrue(
+            "empty_result means no downstream input existed, got: $failure",
+            failure?.message?.contains("must NOT carry router_input") == true,
+        )
+    }
+
+    /**
+     * EMITTED-BYTES PARITY BETWEEN BUILDER AND RECOVERY (c6f3bdf7).
+     *
+     * The full cross-process parity (Android bytes → pinned Worker) needs an intake revision that
+     * implements `empty_result`, which does not exist yet — the spec says intake catches up. What CAN
+     * be proven now, and is the half that would otherwise silently diverge, is that the bytes the
+     * builder emits are exactly the bytes the recovery validator accepts, and that both refuse the
+     * same contradictions. Asserting on the ACTUAL emitted bytes rather than on the object graph is
+     * deliberate: the builder returns a node, but the record that travels is the canonical JSON, and
+     * that is what a persisted record is re-read from.
+     */
+    @Test
+    fun `the emitted bytes for empty_result round-trip through recovery acceptance`() {
+        val node = complete(builder())
+            .replaceStage(
+                StageName.Asr,
+                StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("empty_result"))),
+            )
+            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+        val bytes = CanonicalJson.canonicalBytes(node)
+        val json = bytes.toString(Charsets.UTF_8)
+
+        assertTrue(
+            "the emitted bytes must actually contain the empty_result pair: $json",
+            json.contains("\"asr\":{\"reason\":\"empty_result\",\"state\":\"completed\"}"),
+        )
+        val decoded = RecordValidator.validate(
+            CanonicalJson.parse(json),
+        )
+        assertTrue(
+            "the bytes the builder emits must be ACCEPTED by the recovery validator, got: $decoded",
+            decoded is RecordValidator.Result.Ok,
+        )
+        val asr = (decoded as RecordValidator.Result.Ok).record.observations.getValue(StageName.Asr)
+        assertEquals(StageState.Completed, asr.state)
+        assertEquals("empty_result", (asr.fields.getValue("reason") as RecordNode.Str).value)
+        assertFalse("no text survives the round trip", asr.fields.containsKey("text"))
+    }
+
+    @Test
+    fun `empty_result on a non-completed ASR stage is refused by the builder too`() {
+        // The builder must refuse what the recovery validator refuses. Proving the rule on only one
+        // of the two authorities is exactly the gap that let a contradictory pairing through before.
+        for (state in listOf(StageState.NotRun, StageState.Unknown, StageState.Failed, StageState.Cancelled)) {
+            val failure = runCatching {
+                complete(builder())
+                    .replaceStage(
+                        StageName.Asr,
+                        StageEntry(state, mapOf("reason" to RecordNode.Str("empty_result"))),
+                    )
+                    .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+            }.exceptionOrNull()
+            assertTrue(
+                "asr/${state.wire} + empty_result must be refused: an empty result means recognition ran, " +
+                    "got: $failure",
+                failure != null,
+            )
+        }
+    }
+
+    @Test
+    fun `a raw wake-only transcript stays completed with text and no router_input`() {
+        // The spec's positive control for the OTHER shape: the recognizer DID hear something (the
+        // wake phrase), so the transcript is recorded verbatim and only router_input is omitted.
+        val record = complete(builder())
+            .replaceStage(
+                StageName.Asr,
+                StageEntry(
+                    StageState.Completed,
+                    mapOf("text" to RecordNode.Str("hey auris")),
+                ),
+            )
+            .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+        val asr = (record.fields.getValue("observations") as RecordNode.Obj).fields.getValue("asr") as RecordNode.Obj
+        assertEquals("completed", (asr.fields.getValue("state") as RecordNode.Str).value)
+        assertEquals("hey auris", (asr.fields.getValue("text") as RecordNode.Str).value)
+        assertFalse(
+            "no command input survived filtering, so router_input must be absent",
+            asr.fields.containsKey("router_input"),
+        )
+    }
+
+    @Test
+    fun `empty_result on a non-ASR completed stage is refused`() {
+        val failure = runCatching {
+            complete(builder())
+                .replaceStage(
+                    StageName.Translation,
+                    StageEntry(StageState.Completed, mapOf("reason" to RecordNode.Str("empty_result"))),
+                )
+                .build(platform = "android", appVersion = "8.20", build = "12345", audio = audio())
+        }.exceptionOrNull()
+        assertTrue(
+            "empty_result belongs to ASR only, got: $failure",
+            failure != null,
+        )
+    }
+
     private fun audio(
         truncated: Boolean = false,
         spans: List<DroppedSpan> = emptyList(),

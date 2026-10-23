@@ -66,7 +66,10 @@ object StageReasons {
         // must not be substituted for it.
         StageName.Wake to setOf("no_wake_detected", "below_threshold", "detector_disabled", "detector_error", "outcome_wait_expired", "observation_unavailable"),
         StageName.Bleed to setOf("no_playback_reference", "reference_unavailable", "bleed_detector_disabled", "outcome_wait_expired", "observation_unavailable"),
-        StageName.Asr to setOf("local_only_action", "rejected_by_wake", "provider_error", "outcome_wait_expired", "cancelled_by_user", "observation_unavailable"),
+        // c6f3bdf7: `empty_result` is the explicit observed-empty ASR outcome. It is the ONLY reason
+        // valid on a COMPLETED stage (handled separately below), because it describes a successful
+        // recognition that produced no usable text — not a non-completion.
+        StageName.Asr to setOf("local_only_action", "rejected_by_wake", "provider_error", "outcome_wait_expired", "cancelled_by_user", "observation_unavailable", "empty_result"),
         StageName.Translation to setOf("source_language_target_language", "no_text", "provider_error", "outcome_wait_expired", "observation_unavailable"),
         StageName.Routing to setOf("no_candidates", "low_confidence", "validation_failed", "outcome_wait_expired", "observation_unavailable"),
         StageName.Execution to setOf("client_refused", "precondition_failed", "action_failed", "cancelled_by_user", "outcome_wait_expired", "observation_unavailable"),
@@ -206,8 +209,33 @@ class ContributionRecordBuilder(
                 "reason 'detector_error' is only valid with state failed (stage ${stage.wire})"
             }
             require(StageReasons.isAllowed(stage, reason)) { "reason '$reason' is not enumerated for ${stage.wire}" }
+            // c6f3bdf7: `empty_result` describes a recognition that RAN and observed nothing, so it is
+            // meaningless on a non-completed stage. The completed branch accepts it; refusing it here
+            // keeps builder and recovery in agreement instead of letting the builder emit a
+            // contradiction the recovery validator would reject.
+            require(reason != "empty_result") {
+                "reason 'empty_result' is only valid with state completed (stage ${stage.wire})"
+            }
         } else {
-            require(!entry.fields.containsKey("reason")) { "stage ${stage.wire} is completed: reason must be absent" }
+            // c6f3bdf7: completed ASR carrying `empty_result` is the ONE permitted completed-with-
+            // reason shape. It means the recognizer ran and observed no non-whitespace text, which is
+            // a real observation, not a missing one — so it must not be forced into `unknown`, and it
+            // must not silently become a completed stage with no text either.
+            val reason = (entry.fields["reason"] as? RecordNode.Str)?.value
+            require(reason == null || (stage == StageName.Asr && reason == "empty_result")) {
+                "stage ${stage.wire} is completed: reason must be absent"
+            }
+            if (reason == "empty_result") {
+                // Both fields must be ABSENT. A record claiming empty text while carrying a transcript
+                // contradicts itself, and carrying `router_input` would claim downstream input that
+                // the recognizer never produced.
+                require(!entry.fields.containsKey("text")) {
+                    "ASR empty_result must NOT carry text (stage ${stage.wire})"
+                }
+                require(!entry.fields.containsKey("router_input")) {
+                    "ASR empty_result must NOT carry router_input (stage ${stage.wire})"
+                }
+            }
         }
         // routing.arguments is AUTHORIZED at build time too. A record is immutable once finalized,
         // so a payload the Worker would refuse must be refused HERE — afterwards the device holds a

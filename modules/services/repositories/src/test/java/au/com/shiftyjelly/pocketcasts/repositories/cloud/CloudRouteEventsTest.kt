@@ -32,7 +32,7 @@ class CloudRouteEventsTest {
 
     @Test
     fun `decode parses done event with nullable tokens`() {
-        val text = """{"type":"done","input_tokens":42,"output_tokens":150}"""
+        val text = """{"type":"done","outcome":"completed","usage":{"input_tokens":42,"output_tokens":150,"speech":{"amount":0,"unit":"characters"}}}"""
         val event = CloudRouteEvents.decode(text)
         assert(event is CloudRouteEvent.Done)
         val done = event as CloudRouteEvent.Done
@@ -42,12 +42,13 @@ class CloudRouteEventsTest {
 
     @Test
     fun `decode parses done event with null tokens`() {
-        val text = """{"type":"done"}"""
+        val text = """{"type":"done","outcome":"interrupted","usage":{"input_tokens":null,"output_tokens":null,"speech":{"amount":null,"unit":"unavailable"}}}"""
         val event = CloudRouteEvents.decode(text)
         assert(event is CloudRouteEvent.Done)
         val done = event as CloudRouteEvent.Done
         assertEquals(null, done.inputTokens)
         assertEquals(null, done.outputTokens)
+        assertEquals(CloudRouteEvent.Outcome.Interrupted, done.outcome)
     }
 
     @Test
@@ -59,9 +60,9 @@ class CloudRouteEventsTest {
     }
 
     @Test
-    fun `decode tolerates a connected frame without a codec`() {
+    fun `decode rejects a connected frame without a codec`() {
         val event = CloudRouteEvents.decode("""{"type":"connected"}""")
-        assertEquals(CloudRouteEvent.Connected(codec = ""), event)
+        assertEquals(null, event)
     }
 
     @Test

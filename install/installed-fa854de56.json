@@ -1,0 +1,20 @@
+{
+  "head": "fa854de569aeb207aeffcf133f311cd10c04a244",
+  "built_sha256": "d31fa6ec0a8d67ad2dab639f6cbbfe204a44a361e5821c3d8fe8261af5a66fa5",
+  "installed_base_apk_sha256": "d31fa6ec0a8d67ad2dab639f6cbbfe204a44a361e5821c3d8fe8261af5a66fa5",
+  "method": "adb install -r (streamed, in-place)",
+  "device": "48271FDJH0001N",
+  "package": "fm.auris.debug",
+  "uid_preserved": "u0_a619 (10619)",
+  "data_preserved": [
+    "sensevoice-model (model.int8.onnx 239MB, Oct 12)",
+    "databases",
+    "shared_prefs",
+    "datastore"
+  ],
+  "installed_at_local": "2026-10-21 14:47 CST",
+  "reviewer_clearance": "3a2dd4dd (source clearance for in-place update)",
+  "spec_authorization": "5a70cd4b",
+  "postinstall_log_copy": "install/debug-log-postinstall-fa854de56.log (1316 lines)",
+  "artifact_preserved_local_only": "install/app-debug-fa854de56-code-b0cd6b49.apk was committed but GitHub rejected the 327MB file (GH001, no LFS); the immutable copy lives at apk-archive/app-debug-fa854de56-code-b0cd6b49.apk in the agent workspace, sha256 b0cd6b498955f71f6ef52e81462e51a98272ff121004b922dd41104be2bedaa2. The git commit containing it was reset (4a72b6e18 is the incident-evidence head without the binary)."
+}

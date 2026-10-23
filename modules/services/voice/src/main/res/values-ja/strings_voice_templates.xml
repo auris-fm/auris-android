@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Daily-limit refusal: the ONLY key in this file. Overriding one key of the spoken-templates
+     array would drop every other line in this locale, so the limit line is a dedicated string the
+     SpokenTemplateResolver overlays onto the resolved map. -->
+<resources>
+    <string name="voice_cloud_error_limit_exceeded">Aurisの無料の1日の上限に達しました。明日もう一度お試しください。</string>
+</resources>

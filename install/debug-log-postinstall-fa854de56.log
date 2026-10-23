@@ -1,0 +1,1316 @@
+I 21/10 09:10:41.051 seq=142 elapsed_ms=411479884 unix_ms=1792545041050 pid=23463 event=Capture reason=CaptureStarted source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=34 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=Off mode=WakeWord prior_capture=false capture=true route=Headset(hasMicrophone=true) availability=Headset(hasMicrophone=true) acquiring=null dropped_before=0
+I 21/10 09:10:41.095 Running refresh from open app
+I 21/10 09:10:41.097 RefreshPodcastsTask - runNow - Start
+I 21/10 09:10:41.761 Play clicked in mini player
+I 21/10 09:10:43.469 Play clicked in mini player
+I 21/10 09:10:43.485 Trying to gain audio focus
+I 21/10 09:10:43.493 Audio focus gained
+I 21/10 09:10:43.503 Not enough time passed since this episode was last paused, no time adjustment required
+I 21/10 09:10:43.505 Play 350.008 System Player. 155. 和科沃斯钱程聊，父与子、企二代接班的样本与肌理、机器人，和我内心的追寻 Downloaded: false, Downloading: false, Audio: true, File: https://dts-api.xiaoyuzhoufm.com/track/626b46ea9cbbf0451cf5a962/6ad4dacd641ef406308d86e5/media.xyzcdn.net/626b46ea9cbbf0451cf5a962/ltpY6K_PLBv7SfR1D4RZchFHwzII.m4a, EpisodeUuid: f7cfc9c4-2416-4dd4-be99-266f6cccf6f4, PodcastUuid: 855d68d0-e50c-013a-5f24-0e94336f7152
+I 21/10 09:10:44.340 Refresh - podcasts response - 3232 ms
+I 21/10 09:10:44.344 data sync start - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:44.347 up-next sync start - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:44.349 UpNextSyncWorker - scheduled
+I 21/10 09:10:44.435 up-next sync done - 86.147787ms - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:44.435 Opening episode. 155. 和科沃斯钱程聊，父与子、企二代接班的样本与肌理、机器人，和我内心的追寻 Downloaded: false Downloading: false Audio: true File: https://dts-api.xiaoyuzhoufm.com/track/626b46ea9cbbf0451cf5a962/6ad4dacd641ef406308d86e5/media.xyzcdn.net/626b46ea9cbbf0451cf5a962/ltpY6K_PLBv7SfR1D4RZchFHwzII.m4a Uuid: f7cfc9c4-2416-4dd4-be99-266f6cccf6f4
+I 21/10 09:10:44.436 data-incremental sync start - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:44.441 UpNextSyncWorker - started
+I 21/10 09:10:44.442 request-data-incremental sync start - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:44.491 LocalPlayer seekToToTimeMs 351.213
+I 21/10 09:10:44.496 LocalPlayer onSeekComplete 351.213
+I 21/10 09:10:44.496 Trying to gain audio focus
+I 21/10 09:10:44.497 We already had audio focus
+I 21/10 09:10:44.509 Not enough time passed since this episode was last paused, no time adjustment required
+I 21/10 09:10:44.510 Play 350.008 System Player. 155. 和科沃斯钱程聊，父与子、企二代接班的样本与肌理、机器人，和我内心的追寻 Downloaded: false, Downloading: false, Audio: true, File: https://dts-api.xiaoyuzhoufm.com/track/626b46ea9cbbf0451cf5a962/6ad4dacd641ef406308d86e5/media.xyzcdn.net/626b46ea9cbbf0451cf5a962/ltpY6K_PLBv7SfR1D4RZchFHwzII.m4a, EpisodeUuid: f7cfc9c4-2416-4dd4-be99-266f6cccf6f4, PodcastUuid: 855d68d0-e50c-013a-5f24-0e94336f7152
+I 21/10 09:10:44.582 Saved time in database 351.213
+I 21/10 09:10:44.835 UpNextSyncWorker - finished - 395 ms
+I 21/10 09:10:45.650 request-data-incremental sync done - 1.207691529s - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:45.652 episode-data-incremental sync start - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:45.670 episode-data-incremental sync done - 16.330933ms - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:45.672 podcasts-data-incremental sync start - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:45.675 podcasts-data-incremental sync done - 86.67us - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:45.675 folders-data-incremental sync start - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:45.951 folders-data-incremental sync done - 274.307739ms - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:45.954 playlists-data-incremental sync start - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:45.964 playlists-data-incremental sync done - 8.257976ms - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:45.967 bookmarks-data-incremental sync start - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:45.979 bookmarks-data-incremental sync done - 9.382446ms - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:45.981 device-data-incremental sync start - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:46.037 seq=143 elapsed_ms=411484864 unix_ms=1792545046031 pid=23463 event=Window reason=Backgrounded source=Foreground window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:10:46.039 seq=144 elapsed_ms=411484871 unix_ms=1792545046037 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:10:46.859 device-data-incremental sync done - 876.242432ms - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:46.863 data-incremental sync done - 2.421588990s - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:46.865 missing-episodes sync start - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:46.873 missing-episodes sync done - 5.570760ms - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:46.875 settings sync start - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:47.715 settings sync done - 837.802409ms - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:47.718 cloud-files sync start - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:48.156 cloud-files sync done - 436.065349ms - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:48.160 playback-history sync start - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:48.171 Sync history task scheduled
+I 21/10 09:10:48.316 playback-history sync done - 152.679606ms - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:48.318 ratings sync start - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:48.327 Sync history running
+I 21/10 09:10:49.389 ratings sync done - 1.066588013s - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:49.398 data sync done - 5.051657921s - c520dd50-6662-42fc-b7f0-447334a733c4
+I 21/10 09:10:49.481 Refresh - auto archive check - 74.990194ms
+I 21/10 09:10:49.502 Refresh - unsued podcasts check - 19.369751ms
+I 21/10 09:10:49.506 Refresh - notifications check - 2.836385ms
+I 21/10 09:10:49.518 Refresh - auto download check - 8.233195ms
+I 21/10 09:10:49.520 RefreshPodcastsTask - runNow - Finished Success {mOutputData=Data {}}
+I 21/10 09:10:49.632 Sync history completed successfully
+I 21/10 09:10:49.946 Saved time in database 357.569
+I 21/10 09:10:52.933 seq=145 elapsed_ms=411491764 unix_ms=1792545052931 pid=23463 event=Window reason=RouteChanged source=ScoState window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:10:52.955 Audio device removed: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 09:10:52.957 seq=146 elapsed_ms=411491788 unix_ms=1792545052955 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:10:52.965 Audio device removed: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 09:10:52.965 seq=147 elapsed_ms=411491797 unix_ms=1792545052964 pid=23463 event=Window reason=RouteChanged source=CommunicationDevice window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:10:52.973 seq=148 elapsed_ms=411491798 unix_ms=1792545052964 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:10:52.982 seq=149 elapsed_ms=411491815 unix_ms=1792545052981 pid=23463 event=Eligibility reason=Observed source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=34 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=WakeWord mode=Off prior_capture=true capture=null route=Unknown availability=BluetoothA2dpOnly acquiring=false dropped_before=0
+I 21/10 09:10:53.179 seq=150 elapsed_ms=411492011 unix_ms=1792545053178 pid=23463 event=Capture reason=EligibilityOff source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=35 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=WakeWord mode=Off prior_capture=true capture=false route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:10:53.186 System fired 'Audio Becoming Noisy' event, pausing playback.
+I 21/10 09:10:53.189 Giving up audio focus
+I 21/10 09:10:53.190 Giving up audio focus. Request granted
+I 21/10 09:10:53.192 Paused - Not transient
+I 21/10 09:10:53.245 Saved time in database 361.529
+I 21/10 09:10:54.443 Audio device removed: AirPods Pro - Find My, Bluetooth a2dp
+I 21/10 09:10:54.439 seq=151 elapsed_ms=411493271 unix_ms=1792545054437 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:11:10.633 Set up periodic refresh
+I 21/10 09:11:10.638 seq=152 elapsed_ms=411509470 unix_ms=1792545070637 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:11:10.995 Initiating auth token sync to Wear
+I 21/10 09:11:11.001 Sending auth token to Wear Data Layer (identity: au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity$PocketCasts@c12d814)
+I 21/10 09:11:12.986 seq=153 elapsed_ms=411511818 unix_ms=1792545072985 pid=23463 event=Window reason=Backgrounded source=Foreground window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:11:12.986 seq=154 elapsed_ms=411511819 unix_ms=1792545072986 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:11:22.917 Audio device added: AirPods Pro - Find My, Bluetooth a2dp
+I 21/10 09:11:22.917 seq=155 elapsed_ms=411521749 unix_ms=1792545082915 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:11:23.187 Audio device added: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 09:11:23.189 seq=156 elapsed_ms=411522018 unix_ms=1792545083185 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:11:23.531 Audio device added: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 09:11:23.534 seq=157 elapsed_ms=411522361 unix_ms=1792545083528 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:11:25.716 Opening deep link: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x10600000 xflg=0x4 cmp=fm.auris.debug/au.com.shiftyjelly.pocketcasts.ui.MainActivity bnds=[71,1905][244,2100] }. Safe URI: null
+I 21/10 09:11:25.717 Did not find any matching deep link for: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x10600000 xflg=0x4 cmp=fm.auris.debug/au.com.shiftyjelly.pocketcasts.ui.MainActivity bnds=[71,1905][244,2100] }
+I 21/10 09:11:25.718 Set up periodic refresh
+I 21/10 09:11:25.721 seq=158 elapsed_ms=411524554 unix_ms=1792545085720 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:11:25.868 seq=159 elapsed_ms=411524701 unix_ms=1792545085868 pid=23463 event=Window reason=RouteChanged source=Acquisition window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:11:25.870 seq=160 elapsed_ms=411524703 unix_ms=1792545085870 pid=23463 event=Window reason=RouteChanged source=ScoState window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:11:25.871 seq=161 elapsed_ms=411524704 unix_ms=1792545085871 pid=23463 event=Window reason=RouteChanged source=ScoState window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:11:25.877 seq=162 elapsed_ms=411524710 unix_ms=1792545085877 pid=23463 event=Window reason=RouteChanged source=CommunicationDevice window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:11:25.883 seq=163 elapsed_ms=411524716 unix_ms=1792545085883 pid=23463 event=Eligibility reason=Observed source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=39 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=Off mode=WakeWord prior_capture=false capture=null route=Headset(hasMicrophone=true) availability=Headset(hasMicrophone=true) acquiring=false dropped_before=0
+I 21/10 09:11:25.892 seq=164 elapsed_ms=411524725 unix_ms=1792545085892 pid=23463 event=Capture reason=CaptureStarted source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=39 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=Off mode=WakeWord prior_capture=false capture=true route=Headset(hasMicrophone=true) availability=Headset(hasMicrophone=true) acquiring=null dropped_before=0
+I 21/10 09:11:26.185 Initiating auth token sync to Wear
+I 21/10 09:11:26.187 Sending auth token to Wear Data Layer (identity: au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity$PocketCasts@c12d814)
+I 21/10 09:11:26.547 Play clicked in mini player
+I 21/10 09:11:26.561 Trying to gain audio focus
+I 21/10 09:11:26.566 Audio focus gained
+I 21/10 09:11:26.571 Not enough time passed since this episode was last paused, no time adjustment required
+I 21/10 09:11:26.573 Play 361.529 System Player. 155. 和科沃斯钱程聊，父与子、企二代接班的样本与肌理、机器人，和我内心的追寻 Downloaded: false, Downloading: false, Audio: true, File: https://dts-api.xiaoyuzhoufm.com/track/626b46ea9cbbf0451cf5a962/6ad4dacd641ef406308d86e5/media.xyzcdn.net/626b46ea9cbbf0451cf5a962/ltpY6K_PLBv7SfR1D4RZchFHwzII.m4a, EpisodeUuid: f7cfc9c4-2416-4dd4-be99-266f6cccf6f4, PodcastUuid: 855d68d0-e50c-013a-5f24-0e94336f7152
+I 21/10 09:11:29.549 seq=165 elapsed_ms=411528376 unix_ms=1792545089542 pid=23463 event=Window reason=Backgrounded source=Foreground window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:11:29.556 seq=166 elapsed_ms=411528388 unix_ms=1792545089554 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:11:31.636 Saved time in database 368.091
+I 21/10 09:11:36.613 Saved time in database 374.580
+I 21/10 09:11:41.668 Saved time in database 381.091
+I 21/10 09:11:46.623 Saved time in database 387.581
+I 21/10 09:11:51.767 Saved time in database 394.097
+I 21/10 09:11:56.642 Saved time in database 400.587
+I 21/10 09:12:01.621 Saved time in database 407.084
+I 21/10 09:12:06.628 Saved time in database 413.584
+I 21/10 09:12:11.606 Saved time in database 420.061
+I 21/10 09:12:16.631 Saved time in database 426.592
+I 21/10 09:12:21.631 Saved time in database 433.098
+I 21/10 09:12:26.663 Saved time in database 439.579
+I 21/10 09:12:31.605 Saved time in database 446.076
+I 21/10 09:12:36.627 Saved time in database 452.596
+I 21/10 09:12:41.617 Saved time in database 459.084
+I 21/10 09:12:46.624 Saved time in database 465.591
+I 21/10 09:12:51.650 Saved time in database 472.098
+I 21/10 09:12:56.638 Saved time in database 478.591
+I 21/10 09:13:01.638 Saved time in database 485.085
+I 21/10 09:13:06.634 Saved time in database 491.593
+I 21/10 09:13:11.627 Saved time in database 498.086
+I 21/10 09:13:16.639 Saved time in database 504.580
+I 21/10 09:13:21.619 Saved time in database 511.087
+I 21/10 09:13:26.629 Saved time in database 517.602
+I 21/10 09:13:30.645 seq=167 elapsed_ms=411649477 unix_ms=1792545210644 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:13:30.645 Audio device removed: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 09:13:32.028 seq=168 elapsed_ms=411650860 unix_ms=1792545212026 pid=23463 event=Window reason=RouteChanged source=ScoState window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:13:32.065 Audio device removed: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 09:13:32.065 seq=169 elapsed_ms=411650897 unix_ms=1792545212064 pid=23463 event=Window reason=RouteChanged source=CommunicationDevice window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:13:32.068 seq=170 elapsed_ms=411650898 unix_ms=1792545212064 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:13:32.072 System fired 'Audio Becoming Noisy' event, pausing playback.
+I 21/10 09:13:32.075 Giving up audio focus
+I 21/10 09:13:32.076 Giving up audio focus. Request granted
+I 21/10 09:13:32.083 seq=171 elapsed_ms=411650916 unix_ms=1792545212082 pid=23463 event=Eligibility reason=Observed source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=39 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=WakeWord mode=Off prior_capture=true capture=null route=Unknown availability=BluetoothA2dpOnly acquiring=false dropped_before=0
+I 21/10 09:13:32.086 Paused - Not transient
+I 21/10 09:13:32.288 seq=172 elapsed_ms=411651110 unix_ms=1792545212277 pid=23463 event=Capture reason=EligibilityOff source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=40 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=WakeWord mode=Off prior_capture=true capture=false route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:13:32.345 Saved time in database 524.156
+I 21/10 09:13:33.367 Audio device removed: AirPods Pro - Find My, Bluetooth a2dp
+I 21/10 09:13:33.372 seq=173 elapsed_ms=411652198 unix_ms=1792545213364 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:14:49.431 Set up periodic refresh
+I 21/10 09:14:49.436 seq=174 elapsed_ms=411728269 unix_ms=1792545289435 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:14:49.969 Initiating auth token sync to Wear
+I 21/10 09:14:49.971 Sending auth token to Wear Data Layer (identity: au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity$PocketCasts@c12d814)
+I 21/10 09:14:52.395 seq=175 elapsed_ms=411731228 unix_ms=1792545292394 pid=23463 event=Window reason=Backgrounded source=Foreground window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:14:52.396 seq=176 elapsed_ms=411731228 unix_ms=1792545292395 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:14:59.530 Audio device added: AirPods Pro - Find My, Bluetooth a2dp
+I 21/10 09:14:59.540 seq=177 elapsed_ms=411738361 unix_ms=1792545299527 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:15:00.695 seq=178 elapsed_ms=411739528 unix_ms=1792545300694 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:15:00.696 Audio device added: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 09:15:00.708 Audio device added: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 09:15:07.469 Opening deep link: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x10600000 xflg=0x4 cmp=fm.auris.debug/au.com.shiftyjelly.pocketcasts.ui.MainActivity bnds=[71,1905][244,2100] }. Safe URI: null
+I 21/10 09:15:07.470 Did not find any matching deep link for: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x10600000 xflg=0x4 cmp=fm.auris.debug/au.com.shiftyjelly.pocketcasts.ui.MainActivity bnds=[71,1905][244,2100] }
+I 21/10 09:15:07.471 Set up periodic refresh
+I 21/10 09:15:07.474 seq=179 elapsed_ms=411746307 unix_ms=1792545307473 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:15:08.419 seq=180 elapsed_ms=411747252 unix_ms=1792545308418 pid=23463 event=Window reason=RouteChanged source=Acquisition window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:15:08.425 seq=181 elapsed_ms=411747257 unix_ms=1792545308424 pid=23463 event=Window reason=RouteChanged source=ScoState window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:15:08.427 Initiating auth token sync to Wear
+I 21/10 09:15:08.428 seq=182 elapsed_ms=411747259 unix_ms=1792545308425 pid=23463 event=Window reason=RouteChanged source=ScoState window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:15:08.429 seq=183 elapsed_ms=411747262 unix_ms=1792545308428 pid=23463 event=Window reason=RouteChanged source=CommunicationDevice window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:15:08.429 Sending auth token to Wear Data Layer (identity: au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity$PocketCasts@c12d814)
+I 21/10 09:15:08.451 seq=184 elapsed_ms=411747284 unix_ms=1792545308450 pid=23463 event=Eligibility reason=Observed source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=44 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=Off mode=WakeWord prior_capture=false capture=null route=Headset(hasMicrophone=true) availability=Headset(hasMicrophone=true) acquiring=false dropped_before=0
+I 21/10 09:15:08.463 seq=185 elapsed_ms=411747296 unix_ms=1792545308463 pid=23463 event=Capture reason=CaptureStarted source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=44 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=Off mode=WakeWord prior_capture=false capture=true route=Headset(hasMicrophone=true) availability=Headset(hasMicrophone=true) acquiring=null dropped_before=0
+I 21/10 09:15:08.680 Play clicked in mini player
+I 21/10 09:15:08.698 Trying to gain audio focus
+I 21/10 09:15:08.702 Audio focus gained
+I 21/10 09:15:08.705 Play 524.155 System Player. 155. 和科沃斯钱程聊，父与子、企二代接班的样本与肌理、机器人，和我内心的追寻 Downloaded: false, Downloading: false, Audio: true, File: https://dts-api.xiaoyuzhoufm.com/track/626b46ea9cbbf0451cf5a962/6ad4dacd641ef406308d86e5/media.xyzcdn.net/626b46ea9cbbf0451cf5a962/ltpY6K_PLBv7SfR1D4RZchFHwzII.m4a, EpisodeUuid: f7cfc9c4-2416-4dd4-be99-266f6cccf6f4, PodcastUuid: 855d68d0-e50c-013a-5f24-0e94336f7152
+I 21/10 09:15:11.747 seq=186 elapsed_ms=411750579 unix_ms=1792545311746 pid=23463 event=Window reason=Backgrounded source=Foreground window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:15:11.752 seq=187 elapsed_ms=411750582 unix_ms=1792545311748 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:15:13.792 Saved time in database 530.682
+I 21/10 09:15:18.759 Saved time in database 537.183
+I 21/10 09:15:23.765 Saved time in database 543.683
+I 21/10 09:15:28.783 Saved time in database 550.189
+I 21/10 09:15:33.759 Saved time in database 556.679
+I 21/10 09:15:38.754 Saved time in database 563.186
+I 21/10 09:15:43.761 Saved time in database 569.688
+I 21/10 09:15:48.760 Saved time in database 576.176
+I 21/10 09:15:53.792 Saved time in database 582.664
+I 21/10 09:15:58.747 Saved time in database 589.176
+I 21/10 09:16:03.729 Saved time in database 595.651
+I 21/10 09:16:08.755 Saved time in database 602.176
+I 21/10 09:16:13.764 Saved time in database 608.696
+I 21/10 09:16:18.803 Saved time in database 615.211
+I 21/10 09:16:23.739 Saved time in database 621.670
+I 21/10 09:16:28.770 Saved time in database 628.190
+I 21/10 09:16:33.756 Saved time in database 634.679
+I 21/10 09:16:38.757 Saved time in database 641.187
+I 21/10 09:16:43.772 Saved time in database 647.681
+I 21/10 09:16:48.770 Saved time in database 654.194
+I 21/10 09:16:53.788 Saved time in database 660.671
+I 21/10 09:16:58.766 Saved time in database 667.188
+I 21/10 09:17:03.758 Saved time in database 673.672
+I 21/10 09:17:08.763 Saved time in database 680.165
+I 21/10 09:17:13.764 Saved time in database 686.684
+I 21/10 09:17:18.760 Saved time in database 693.177
+I 21/10 09:17:23.753 Saved time in database 699.677
+I 21/10 09:17:28.764 Saved time in database 706.172
+I 21/10 09:17:33.759 Saved time in database 712.680
+I 21/10 09:17:38.746 Saved time in database 719.162
+I 21/10 09:17:43.770 Saved time in database 725.692
+I 21/10 09:17:48.749 Saved time in database 732.167
+I 21/10 09:17:53.760 Saved time in database 738.682
+I 21/10 09:17:58.758 Saved time in database 745.175
+I 21/10 09:18:03.771 Saved time in database 751.700
+I 21/10 09:18:08.778 Saved time in database 758.171
+I 21/10 09:18:13.758 Saved time in database 764.677
+I 21/10 09:18:18.766 Saved time in database 771.165
+I 21/10 09:18:23.761 Saved time in database 777.677
+I 21/10 09:18:28.758 Saved time in database 784.183
+I 21/10 09:18:33.769 Saved time in database 790.692
+I 21/10 09:18:38.748 Saved time in database 797.181
+I 21/10 09:18:43.759 Saved time in database 803.685
+I 21/10 09:18:48.789 Saved time in database 810.178
+I 21/10 09:18:53.765 Saved time in database 816.672
+I 21/10 09:18:58.893 Saved time in database 823.186
+I 21/10 09:19:03.757 Saved time in database 829.676
+I 21/10 09:19:08.925 Saved time in database 836.183
+I 21/10 09:19:13.767 Saved time in database 842.672
+I 21/10 09:19:18.772 Saved time in database 849.178
+I 21/10 09:19:23.782 Saved time in database 855.679
+I 21/10 09:19:28.752 Saved time in database 862.167
+I 21/10 09:19:33.770 Saved time in database 868.699
+I 21/10 09:19:38.768 Saved time in database 875.169
+I 21/10 09:19:43.774 Saved time in database 881.673
+I 21/10 09:19:48.800 Saved time in database 888.170
+I 21/10 09:19:49.409 seq=188 elapsed_ms=412028238 unix_ms=1792545589404 pid=23463 event=Window reason=RouteChanged source=ScoState window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:19:49.553 seq=189 elapsed_ms=412028386 unix_ms=1792545589552 pid=23463 event=Window reason=RouteChanged source=CommunicationDevice window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:19:49.556 seq=190 elapsed_ms=412028389 unix_ms=1792545589556 pid=23463 event=Eligibility reason=Observed source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=44 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=WakeWord mode=Off prior_capture=true capture=null route=Unknown availability=BluetoothA2dpOnly acquiring=false dropped_before=0
+I 21/10 09:19:49.839 seq=191 elapsed_ms=412028672 unix_ms=1792545589838 pid=23463 event=Capture reason=EligibilityOff source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=45 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=WakeWord mode=Off prior_capture=true capture=false route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:19:49.843 Audio device removed: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 09:19:49.843 seq=192 elapsed_ms=412028676 unix_ms=1792545589843 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:19:49.845 seq=193 elapsed_ms=412028678 unix_ms=1792545589845 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:19:49.845 Audio device removed: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 09:19:49.847 System fired 'Audio Becoming Noisy' event, pausing playback.
+I 21/10 09:19:49.849 Giving up audio focus
+I 21/10 09:19:49.849 Giving up audio focus. Request granted
+I 21/10 09:19:49.855 Paused - Not transient
+I 21/10 09:19:49.885 Saved time in database 889.555
+I 21/10 09:19:50.823 Audio device removed: AirPods Pro - Find My, Bluetooth a2dp
+I 21/10 09:19:50.825 seq=194 elapsed_ms=412029655 unix_ms=1792545590821 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:20:26.685 Set up periodic refresh
+I 21/10 09:20:26.690 seq=195 elapsed_ms=412065522 unix_ms=1792545626689 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:20:27.171 Initiating auth token sync to Wear
+I 21/10 09:20:27.183 Sending auth token to Wear Data Layer (identity: au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity$PocketCasts@c12d814)
+I 21/10 09:20:27.687 Running refresh from open app
+I 21/10 09:20:27.691 RefreshPodcastsTask - runNow - Start
+I 21/10 09:20:31.631 Refresh - podcasts response - 3922 ms
+I 21/10 09:20:31.632 data sync start - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:31.634 up-next sync start - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:31.635 UpNextSyncWorker - scheduled
+I 21/10 09:20:31.702 up-next sync done - 66.857422ms - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:31.702 data-incremental sync start - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:31.703 request-data-incremental sync start - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:31.716 UpNextSyncWorker - started
+I 21/10 09:20:32.322 UpNextSyncWorker - finished - 606 ms
+I 21/10 09:20:32.325 request-data-incremental sync done - 621.581380ms - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.326 episode-data-incremental sync start - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.345 episode-data-incremental sync done - 17.034994ms - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.349 podcasts-data-incremental sync start - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.351 podcasts-data-incremental sync done - 313.273us - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.352 folders-data-incremental sync start - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.425 folders-data-incremental sync done - 70.302490ms - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.427 playlists-data-incremental sync start - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.429 playlists-data-incremental sync done - 1.162557ms - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.430 bookmarks-data-incremental sync start - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.433 bookmarks-data-incremental sync done - 1.499796ms - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.434 device-data-incremental sync start - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.850 device-data-incremental sync done - 414.936401ms - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.853 data-incremental sync done - 1.149813965s - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.855 missing-episodes sync start - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.865 missing-episodes sync done - 8.306274ms - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:32.867 settings sync start - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:33.294 settings sync done - 426.803101ms - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:33.295 cloud-files sync start - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:33.798 cloud-files sync done - 502.698039ms - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:33.799 playback-history sync start - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:33.801 Sync history task scheduled
+I 21/10 09:20:33.828 playback-history sync done - 27.452555ms - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:33.837 Sync history running
+I 21/10 09:20:33.842 ratings sync start - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:34.397 ratings sync done - 552.706828ms - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:34.398 data sync done - 2.765849814s - f5458efd-044b-491f-8c49-a4b2746b9a44
+I 21/10 09:20:34.424 Refresh - auto archive check - 24.254272ms
+I 21/10 09:20:34.437 Refresh - unsued podcasts check - 11.209066ms
+I 21/10 09:20:34.440 Refresh - notifications check - 1.894002ms
+I 21/10 09:20:34.444 Refresh - auto download check - 2.744711ms
+I 21/10 09:20:34.446 RefreshPodcastsTask - runNow - Finished Success {mOutputData=Data {}}
+I 21/10 09:20:34.495 Sync history completed successfully
+I 21/10 09:21:00.866 seq=196 elapsed_ms=412099696 unix_ms=1792545660862 pid=23463 event=Window reason=Backgrounded source=Foreground window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:21:00.875 seq=197 elapsed_ms=412099705 unix_ms=1792545660872 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:50:49.921 Hibernating playback from Pause timer.
+I 21/10 09:50:49.943 Stopping playback
+I 21/10 09:50:50.422 seq=198 elapsed_ms=413889250 unix_ms=1792547450416 pid=23463 event=Gate reason=ContextLost source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=3 changed_rules=256 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 09:50:50.537 seq=199 elapsed_ms=413889369 unix_ms=1792547450536 pid=23463 event=Eligibility reason=Observed source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=48 requested_window=null request_id=- prior_gate=null gate=3 changed_rules=null prior_mode=Off mode=Off prior_capture=false capture=null route=Unknown availability=Speaker acquiring=false dropped_before=0
+I 21/10 10:20:26.995 RefreshPodcastsTask - Start
+I 21/10 10:20:30.710 Refresh - podcasts response - 3594 ms
+I 21/10 10:20:30.734 data sync start - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:30.750 up-next sync start - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:30.754 UpNextSyncWorker - scheduled
+I 21/10 10:20:30.937 up-next sync done - 183.821818ms - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:30.939 data-incremental sync start - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:30.941 request-data-incremental sync start - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:30.956 UpNextSyncWorker - started
+I 21/10 10:20:32.873 Fetching the access token, SignInType: Tokens
+I 21/10 10:20:33.883 request-data-incremental sync done - 2.940261476s - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:33.886 episode-data-incremental sync start - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:33.929 episode-data-incremental sync done - 41.723267ms - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:33.931 podcasts-data-incremental sync start - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:33.932 podcasts-data-incremental sync done - 240.438us - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:33.934 folders-data-incremental sync start - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:33.986 UpNextSyncWorker - finished - 3030 ms
+I 21/10 10:20:34.149 folders-data-incremental sync done - 214.337646ms - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:34.150 playlists-data-incremental sync start - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:34.151 playlists-data-incremental sync done - 1.117025ms - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:34.152 bookmarks-data-incremental sync start - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:34.155 bookmarks-data-incremental sync done - 2.592448ms - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:34.155 device-data-incremental sync start - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:34.486 device-data-incremental sync done - 330.606608ms - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:34.487 data-incremental sync done - 3.545751060s - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:34.487 missing-episodes sync start - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:34.488 missing-episodes sync done - 958.862us - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:34.494 settings sync start - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:34.930 settings sync done - 434.674276ms - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:34.931 cloud-files sync start - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:36.454 cloud-files sync done - 1.520070313s - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:36.458 playback-history sync start - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:36.472 Sync history task scheduled
+I 21/10 10:20:36.565 playback-history sync done - 103.548950ms - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:36.572 ratings sync start - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:36.610 Sync history running
+I 21/10 10:20:37.770 ratings sync done - 1.190381226s - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:37.774 data sync done - 7.034547123s - 6b4fca9e-ecfb-4b77-a8db-bcfff770ab03
+I 21/10 10:20:37.886 Refresh - auto archive check - 106.130412ms
+I 21/10 10:20:37.908 Refresh - unsued podcasts check - 19.844686ms
+I 21/10 10:20:37.916 Refresh - notifications check - 6.105591ms
+I 21/10 10:20:37.925 Refresh - auto download check - 7.130452ms
+I 21/10 10:20:37.927 RefreshPodcastsTask - Finished Success {mOutputData=Data {}}
+I 21/10 10:20:38.349 Sync history completed successfully
+I 21/10 10:30:16.540 Audio device added: AirPods Pro - Find My, Bluetooth a2dp
+I 21/10 10:30:16.542 seq=200 elapsed_ms=416255370 unix_ms=1792549816536 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:30:16.868 Audio device added: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 10:30:16.874 seq=201 elapsed_ms=416255700 unix_ms=1792549816866 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:30:17.278 seq=202 elapsed_ms=416256111 unix_ms=1792549817277 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:30:17.279 Audio device added: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 10:30:30.520 Set up periodic refresh
+I 21/10 10:30:30.534 seq=203 elapsed_ms=416269367 unix_ms=1792549830533 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=3 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:30:30.724 seq=204 elapsed_ms=416269557 unix_ms=1792549830723 pid=23463 event=Eligibility reason=Observed source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=49 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=Off mode=Off prior_capture=false capture=null route=Unknown availability=BluetoothA2dpOnly acquiring=false dropped_before=0
+I 21/10 10:30:31.523 Running refresh from open app
+I 21/10 10:30:31.531 RefreshPodcastsTask - runNow - Start
+I 21/10 10:30:32.140 seq=205 elapsed_ms=416270972 unix_ms=1792549832138 pid=23463 event=Window reason=RouteChanged source=ScoState window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:30:32.146 seq=206 elapsed_ms=416270979 unix_ms=1792549832146 pid=23463 event=Window reason=RouteChanged source=ScoState window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:30:32.182 seq=207 elapsed_ms=416271014 unix_ms=1792549832181 pid=23463 event=Window reason=RouteChanged source=Acquisition window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:30:32.193 seq=208 elapsed_ms=416271020 unix_ms=1792549832187 pid=23463 event=Window reason=RouteChanged source=CommunicationDevice window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:30:32.197 seq=209 elapsed_ms=416271029 unix_ms=1792549832195 pid=23463 event=Eligibility reason=Observed source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=50 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=Off mode=WakeWord prior_capture=false capture=null route=Headset(hasMicrophone=true) availability=Headset(hasMicrophone=true) acquiring=false dropped_before=0
+I 21/10 10:30:32.205 seq=210 elapsed_ms=416271038 unix_ms=1792549832205 pid=23463 event=Capture reason=CaptureStarted source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=50 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=Off mode=WakeWord prior_capture=false capture=true route=Headset(hasMicrophone=true) availability=Headset(hasMicrophone=true) acquiring=null dropped_before=0
+I 21/10 10:30:32.713 Initiating auth token sync to Wear
+I 21/10 10:30:32.718 Sending auth token to Wear Data Layer (identity: au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity$PocketCasts@c12d814)
+I 21/10 10:30:34.014 Refresh - podcasts response - 2458 ms
+I 21/10 10:30:34.018 data sync start - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:34.019 up-next sync start - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:34.020 UpNextSyncWorker - scheduled
+I 21/10 10:30:34.092 up-next sync done - 70.779134ms - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:34.093 data-incremental sync start - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:34.094 request-data-incremental sync start - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:34.098 UpNextSyncWorker - started
+I 21/10 10:30:35.236 request-data-incremental sync done - 1.140570598s - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.238 episode-data-incremental sync start - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.237 UpNextSyncWorker - finished - 1139 ms
+I 21/10 10:30:35.249 episode-data-incremental sync done - 9.031819ms - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.251 podcasts-data-incremental sync start - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.252 podcasts-data-incremental sync done - 226.115us - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.253 folders-data-incremental sync start - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.258 folders-data-incremental sync done - 4.098714ms - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.260 playlists-data-incremental sync start - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.265 playlists-data-incremental sync done - 4.902750ms - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.266 bookmarks-data-incremental sync start - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.270 bookmarks-data-incremental sync done - 2.335571ms - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.270 device-data-incremental sync start - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.612 device-data-incremental sync done - 339.945272ms - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.613 data-incremental sync done - 1.519462607s - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.614 missing-episodes sync start - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.618 missing-episodes sync done - 3.040812ms - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.620 settings sync start - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.960 settings sync done - 338.971314ms - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:35.962 cloud-files sync start - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:36.333 cloud-files sync done - 370.443808ms - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:36.334 playback-history sync start - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:36.335 Sync history task scheduled
+I 21/10 10:30:36.359 playback-history sync done - 23.517089ms - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:36.360 ratings sync start - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:36.368 Sync history running
+I 21/10 10:30:36.789 ratings sync done - 427.232219ms - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:36.790 data sync done - 2.771007489s - 5f5e6866-f66f-4233-a2ca-e3e174bcdbb5
+I 21/10 10:30:36.799 Refresh - auto archive check - 8.353597ms
+I 21/10 10:30:36.810 Refresh - unsued podcasts check - 10.577677ms
+I 21/10 10:30:36.812 Refresh - notifications check - 1.272868ms
+I 21/10 10:30:36.816 Refresh - auto download check - 3.078980ms
+I 21/10 10:30:36.817 RefreshPodcastsTask - runNow - Finished Success {mOutputData=Data {}}
+I 21/10 10:30:37.150 Sync history completed successfully
+I 21/10 10:30:37.232 Play clicked in mini player
+I 21/10 10:30:38.922 Opening episode. 155. 和科沃斯钱程聊，父与子、企二代接班的样本与肌理、机器人，和我内心的追寻 Downloaded: false Downloading: false Audio: true File: https://dts-api.xiaoyuzhoufm.com/track/626b46ea9cbbf0451cf5a962/6ad4dacd641ef406308d86e5/media.xyzcdn.net/626b46ea9cbbf0451cf5a962/ltpY6K_PLBv7SfR1D4RZchFHwzII.m4a Uuid: f7cfc9c4-2416-4dd4-be99-266f6cccf6f4
+I 21/10 10:30:38.964 seq=211 elapsed_ms=416277794 unix_ms=1792549838961 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=256 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:30:38.971 Trying to gain audio focus
+I 21/10 10:30:38.974 Audio focus gained
+I 21/10 10:30:38.992 More than 1 hour since this episode was paused, jumping back 15 seconds
+I 21/10 10:30:38.992 Play 874.555 System Player. 155. 和科沃斯钱程聊，父与子、企二代接班的样本与肌理、机器人，和我内心的追寻 Downloaded: false, Downloading: false, Audio: true, File: https://dts-api.xiaoyuzhoufm.com/track/626b46ea9cbbf0451cf5a962/6ad4dacd641ef406308d86e5/media.xyzcdn.net/626b46ea9cbbf0451cf5a962/ltpY6K_PLBv7SfR1D4RZchFHwzII.m4a, EpisodeUuid: f7cfc9c4-2416-4dd4-be99-266f6cccf6f4, PodcastUuid: 855d68d0-e50c-013a-5f24-0e94336f7152
+I 21/10 10:30:39.016 LocalPlayer onSeekComplete 874.555
+I 21/10 10:30:39.103 Saved time in database 874.555
+I 21/10 10:30:44.026 On audio focus change: AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK
+I 21/10 10:30:44.027 Audio focus lost (can duck). Delaying notification by 200ms
+I 21/10 10:30:44.232 Audio focus lost (can duck) after delay. Play over notification: NEVER, is transient: true
+I 21/10 10:30:44.233 Focus lost while playing
+I 21/10 10:30:44.242 Paused - Transient
+I 21/10 10:30:44.307 Saved time in database 874.555
+I 21/10 10:30:45.879 On audio focus change: AUDIOFOCUS_GAIN
+I 21/10 10:30:45.882 Audio focus gained. Should resume: true. Device removed: false.
+I 21/10 10:30:45.883 Focus gained, resuming playback
+I 21/10 10:30:45.906 Trying to gain audio focus
+I 21/10 10:30:45.908 We already had audio focus
+I 21/10 10:30:45.912 Not enough time passed since this episode was last paused, no time adjustment required
+I 21/10 10:30:45.913 Play 874.555 System Player. 155. 和科沃斯钱程聊，父与子、企二代接班的样本与肌理、机器人，和我内心的追寻 Downloaded: false, Downloading: false, Audio: true, File: https://dts-api.xiaoyuzhoufm.com/track/626b46ea9cbbf0451cf5a962/6ad4dacd641ef406308d86e5/media.xyzcdn.net/626b46ea9cbbf0451cf5a962/ltpY6K_PLBv7SfR1D4RZchFHwzII.m4a, EpisodeUuid: f7cfc9c4-2416-4dd4-be99-266f6cccf6f4, PodcastUuid: 855d68d0-e50c-013a-5f24-0e94336f7152
+I 21/10 10:30:47.600 seq=212 elapsed_ms=416286433 unix_ms=1792549847599 pid=23463 event=Window reason=Backgrounded source=Foreground window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:30:47.601 seq=213 elapsed_ms=416286433 unix_ms=1792549847599 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:30:53.354 Set up periodic refresh
+I 21/10 10:30:53.357 seq=214 elapsed_ms=416292190 unix_ms=1792549853356 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:31:00.048 Initiating auth token sync to Wear
+I 21/10 10:31:00.053 Sending auth token to Wear Data Layer (identity: au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity$PocketCasts@c12d814)
+E 21/10 10:31:01.571 Failed to cache episode 'f7cfc9c4-2416-4dd4-be99-266f6cccf6f4' for url 'https://dts-api.xiaoyuzhoufm.com/track/626b46ea9cbbf0451cf5a962/6ad4dacd641ef406308d86e5/media.xyzcdn.net/626b46ea9cbbf0451cf5a962/ltpY6K_PLBv7SfR1D4RZchFHwzII.m4a' worker id: '1e3f7097-4b63-4cc3-9e9b-8c6552a27594'
+java.io.InterruptedIOException
+	at androidx.media3.datasource.cache.CacheWriter.throwIfCanceled(CacheWriter.java:233)
+	at androidx.media3.datasource.cache.CacheWriter.readBlockToCache(CacheWriter.java:188)
+	at androidx.media3.datasource.cache.CacheWriter.cache(CacheWriter.java:136)
+	at au.com.shiftyjelly.pocketcasts.repositories.playback.CacheWorker.doWork(CacheWorker.kt:57)
+	at androidx.work.Worker.startWork$lambda$0(Worker.kt:64)
+	at androidx.work.Worker$$ExternalSyntheticLambda0.invoke(D8$$SyntheticClass:0)
+	at androidx.work.WorkerKt.future$lambda$2$lambda$1(Worker.kt:100)
+	at androidx.work.WorkerKt$$ExternalSyntheticLambda1.run(D8$$SyntheticClass:0)
+	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
+	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
+	at java.lang.Thread.run(Thread.java:1571)
+
+I 21/10 10:31:03.684 seq=215 elapsed_ms=416302515 unix_ms=1792549863682 pid=23463 event=Window reason=Backgrounded source=Foreground window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:31:03.690 seq=216 elapsed_ms=416302521 unix_ms=1792549863687 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:31:03.965 Saved time in database 880.364
+I 21/10 10:31:08.982 Saved time in database 886.875
+I 21/10 10:31:13.986 Saved time in database 893.378
+I 21/10 10:31:19.000 Saved time in database 899.871
+I 21/10 10:31:23.950 Saved time in database 906.362
+I 21/10 10:31:28.986 Saved time in database 912.870
+I 21/10 10:31:32.192 Caching complete for episode id: f7cfc9c4-2416-4dd4-be99-266f6cccf6f4 worker id: '1e3f7097-4b63-4cc3-9e9b-8c6552a27594'
+I 21/10 10:31:33.995 Saved time in database 919.366
+I 21/10 10:31:39.010 Saved time in database 925.881
+I 21/10 10:31:43.995 Saved time in database 932.395
+I 21/10 10:31:48.954 Saved time in database 938.858
+I 21/10 10:31:53.975 Saved time in database 945.377
+I 21/10 10:31:58.991 Saved time in database 951.874
+I 21/10 10:32:03.991 Saved time in database 958.384
+I 21/10 10:32:08.983 Saved time in database 964.871
+I 21/10 10:32:13.976 Saved time in database 971.388
+I 21/10 10:32:18.979 Saved time in database 977.859
+I 21/10 10:32:24.100 Saved time in database 984.368
+I 21/10 10:32:28.984 Saved time in database 990.875
+I 21/10 10:32:34.003 Saved time in database 997.389
+I 21/10 10:32:38.972 Saved time in database 1003.868
+I 21/10 10:32:43.988 Saved time in database 1010.385
+I 21/10 10:32:48.993 Saved time in database 1016.882
+I 21/10 10:32:53.977 Saved time in database 1023.377
+I 21/10 10:32:59.011 Saved time in database 1029.860
+I 21/10 10:33:03.981 Saved time in database 1036.386
+I 21/10 10:33:08.974 Saved time in database 1042.865
+I 21/10 10:33:13.975 Saved time in database 1049.373
+I 21/10 10:33:19.078 Saved time in database 1055.877
+I 21/10 10:33:23.977 Saved time in database 1062.370
+I 21/10 10:33:28.974 Saved time in database 1068.884
+I 21/10 10:33:34.238 Saved time in database 1075.372
+I 21/10 10:33:38.975 Saved time in database 1081.876
+I 21/10 10:33:43.974 Saved time in database 1088.373
+I 21/10 10:33:48.984 Saved time in database 1094.883
+I 21/10 10:33:53.980 Saved time in database 1101.366
+I 21/10 10:33:58.986 Saved time in database 1107.884
+I 21/10 10:34:03.973 Saved time in database 1114.368
+I 21/10 10:34:08.976 Saved time in database 1120.869
+I 21/10 10:34:13.992 Saved time in database 1127.385
+I 21/10 10:34:18.991 Saved time in database 1133.884
+I 21/10 10:34:23.974 Saved time in database 1140.371
+I 21/10 10:34:29.002 Saved time in database 1146.894
+I 21/10 10:34:34.010 Saved time in database 1153.374
+I 21/10 10:34:38.967 Saved time in database 1159.872
+I 21/10 10:34:43.981 Saved time in database 1166.370
+I 21/10 10:34:49.003 Saved time in database 1172.892
+I 21/10 10:34:53.997 Saved time in database 1179.379
+I 21/10 10:34:58.966 Saved time in database 1185.864
+I 21/10 10:35:03.977 Saved time in database 1192.336
+I 21/10 10:35:08.968 Saved time in database 1198.873
+I 21/10 10:35:13.980 Saved time in database 1205.385
+I 21/10 10:35:18.962 Saved time in database 1211.860
+I 21/10 10:35:23.972 Saved time in database 1218.370
+I 21/10 10:35:28.970 Saved time in database 1224.870
+I 21/10 10:35:33.979 Saved time in database 1231.339
+I 21/10 10:35:38.985 Saved time in database 1237.873
+I 21/10 10:35:43.983 Saved time in database 1244.341
+I 21/10 10:35:48.975 Saved time in database 1250.883
+I 21/10 10:35:53.962 Saved time in database 1257.363
+I 21/10 10:35:58.991 Saved time in database 1263.874
+I 21/10 10:36:03.983 Saved time in database 1270.376
+I 21/10 10:36:05.435 On audio focus change: AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK
+I 21/10 10:36:05.438 Audio focus lost (can duck). Delaying notification by 200ms
+I 21/10 10:36:05.646 Audio focus lost (can duck) after delay. Play over notification: NEVER, is transient: true
+I 21/10 10:36:05.653 Focus lost while playing
+I 21/10 10:36:05.663 Paused - Transient
+I 21/10 10:36:05.735 Saved time in database 1272.607
+I 21/10 10:36:07.414 On audio focus change: AUDIOFOCUS_GAIN
+I 21/10 10:36:07.419 Audio focus gained. Should resume: true. Device removed: false.
+I 21/10 10:36:07.422 Focus gained, resuming playback
+I 21/10 10:36:07.518 Trying to gain audio focus
+I 21/10 10:36:07.524 We already had audio focus
+I 21/10 10:36:07.537 Not enough time passed since this episode was last paused, no time adjustment required
+I 21/10 10:36:07.541 Play 1272.607 System Player. 155. 和科沃斯钱程聊，父与子、企二代接班的样本与肌理、机器人，和我内心的追寻 Downloaded: false, Downloading: false, Audio: true, File: https://dts-api.xiaoyuzhoufm.com/track/626b46ea9cbbf0451cf5a962/6ad4dacd641ef406308d86e5/media.xyzcdn.net/626b46ea9cbbf0451cf5a962/ltpY6K_PLBv7SfR1D4RZchFHwzII.m4a, EpisodeUuid: f7cfc9c4-2416-4dd4-be99-266f6cccf6f4, PodcastUuid: 855d68d0-e50c-013a-5f24-0e94336f7152
+I 21/10 10:36:12.618 Saved time in database 1279.222
+I 21/10 10:36:17.610 Saved time in database 1285.723
+I 21/10 10:36:22.642 Saved time in database 1292.263
+I 21/10 10:36:27.627 Saved time in database 1298.719
+I 21/10 10:36:32.621 Saved time in database 1305.234
+I 21/10 10:36:37.628 Saved time in database 1311.742
+I 21/10 10:36:42.609 Saved time in database 1318.214
+I 21/10 10:36:47.609 Saved time in database 1324.721
+I 21/10 10:36:52.650 Saved time in database 1331.227
+I 21/10 10:36:57.621 Saved time in database 1337.709
+I 21/10 10:37:02.644 Saved time in database 1344.228
+I 21/10 10:37:07.633 Saved time in database 1350.737
+I 21/10 10:37:12.620 Saved time in database 1357.224
+I 21/10 10:37:17.620 Saved time in database 1363.717
+I 21/10 10:37:22.616 Saved time in database 1370.220
+I 21/10 10:37:27.621 Saved time in database 1376.717
+I 21/10 10:37:32.754 Saved time in database 1383.252
+I 21/10 10:37:37.636 Saved time in database 1389.731
+I 21/10 10:37:42.613 Saved time in database 1396.234
+I 21/10 10:37:47.618 Saved time in database 1402.713
+I 21/10 10:37:52.619 Saved time in database 1409.218
+I 21/10 10:37:57.619 Saved time in database 1415.718
+I 21/10 10:38:02.624 Saved time in database 1422.222
+I 21/10 10:38:07.638 Saved time in database 1428.732
+I 21/10 10:38:12.847 Saved time in database 1435.228
+I 21/10 10:38:17.612 Saved time in database 1441.718
+I 21/10 10:38:22.629 Saved time in database 1448.244
+I 21/10 10:38:27.622 Saved time in database 1454.719
+I 21/10 10:38:32.620 Saved time in database 1461.223
+I 21/10 10:38:37.697 Saved time in database 1467.724
+I 21/10 10:38:42.860 Saved time in database 1474.239
+I 21/10 10:38:47.612 Saved time in database 1480.714
+I 21/10 10:38:52.627 Saved time in database 1487.222
+I 21/10 10:38:57.638 Saved time in database 1493.718
+I 21/10 10:39:02.613 Saved time in database 1500.221
+I 21/10 10:39:07.653 Saved time in database 1506.746
+I 21/10 10:39:12.630 Saved time in database 1513.228
+I 21/10 10:39:17.639 Saved time in database 1519.725
+I 21/10 10:39:22.620 Saved time in database 1526.243
+I 21/10 10:39:27.820 Saved time in database 1532.707
+I 21/10 10:39:32.624 Saved time in database 1539.230
+I 21/10 10:39:37.621 Saved time in database 1545.740
+I 21/10 10:39:42.637 Saved time in database 1552.223
+I 21/10 10:39:47.631 Saved time in database 1558.729
+I 21/10 10:39:52.619 Saved time in database 1565.228
+I 21/10 10:39:57.615 Saved time in database 1571.724
+I 21/10 10:40:02.615 Saved time in database 1578.230
+I 21/10 10:40:07.644 Saved time in database 1584.721
+I 21/10 10:40:12.620 Saved time in database 1591.229
+I 21/10 10:40:17.630 Saved time in database 1597.724
+I 21/10 10:40:22.622 Saved time in database 1604.239
+I 21/10 10:40:27.618 Saved time in database 1610.711
+I 21/10 10:40:32.630 Saved time in database 1617.213
+I 21/10 10:40:37.606 Saved time in database 1623.710
+I 21/10 10:40:42.617 Saved time in database 1630.227
+I 21/10 10:40:47.655 Saved time in database 1636.724
+I 21/10 10:40:52.624 Saved time in database 1643.237
+I 21/10 10:40:57.625 Saved time in database 1649.723
+I 21/10 10:41:02.624 Saved time in database 1656.234
+I 21/10 10:41:07.639 Saved time in database 1662.731
+I 21/10 10:41:12.627 Saved time in database 1669.230
+I 21/10 10:41:17.636 Saved time in database 1675.758
+I 21/10 10:41:22.617 Saved time in database 1682.218
+I 21/10 10:41:27.633 Saved time in database 1688.725
+I 21/10 10:41:32.644 Saved time in database 1695.259
+I 21/10 10:41:37.628 Saved time in database 1701.725
+I 21/10 10:41:42.609 Saved time in database 1708.216
+I 21/10 10:41:47.876 Saved time in database 1714.723
+I 21/10 10:41:52.642 Saved time in database 1721.219
+I 21/10 10:41:57.625 Saved time in database 1727.722
+I 21/10 10:42:02.631 Saved time in database 1734.242
+I 21/10 10:42:07.636 Saved time in database 1740.742
+I 21/10 10:42:12.632 Saved time in database 1747.239
+I 21/10 10:42:17.611 Saved time in database 1753.719
+I 21/10 10:42:22.617 Saved time in database 1760.216
+I 21/10 10:42:27.628 Saved time in database 1766.729
+I 21/10 10:42:32.863 Saved time in database 1773.233
+I 21/10 10:42:37.636 Saved time in database 1779.717
+I 21/10 10:42:42.619 Saved time in database 1786.221
+I 21/10 10:42:47.621 Saved time in database 1792.721
+I 21/10 10:42:52.620 Saved time in database 1799.243
+I 21/10 10:42:57.623 Saved time in database 1805.721
+I 21/10 10:43:02.641 Saved time in database 1812.224
+I 21/10 10:43:07.648 Saved time in database 1818.723
+I 21/10 10:43:12.634 Saved time in database 1825.213
+I 21/10 10:43:17.621 Saved time in database 1831.737
+I 21/10 10:43:22.627 Saved time in database 1838.213
+I 21/10 10:43:27.622 Saved time in database 1844.739
+I 21/10 10:43:32.631 Saved time in database 1851.226
+I 21/10 10:43:37.624 Saved time in database 1857.729
+I 21/10 10:43:42.607 Saved time in database 1864.219
+I 21/10 10:43:47.723 Saved time in database 1870.715
+I 21/10 10:43:52.628 Saved time in database 1877.222
+I 21/10 10:43:57.605 Saved time in database 1883.715
+I 21/10 10:44:02.624 Saved time in database 1890.225
+I 21/10 10:44:07.648 Saved time in database 1896.726
+I 21/10 10:44:12.857 Saved time in database 1903.206
+I 21/10 10:44:17.622 Saved time in database 1909.731
+I 21/10 10:44:22.617 Saved time in database 1916.218
+I 21/10 10:44:27.627 Saved time in database 1922.731
+I 21/10 10:44:32.636 Saved time in database 1929.242
+I 21/10 10:44:37.643 Saved time in database 1935.737
+I 21/10 10:44:42.612 Saved time in database 1942.218
+I 21/10 10:44:47.650 Saved time in database 1948.720
+I 21/10 10:44:52.601 Saved time in database 1955.205
+I 21/10 10:44:57.631 Saved time in database 1961.730
+I 21/10 10:45:02.609 Saved time in database 1968.211
+I 21/10 10:45:07.616 Saved time in database 1974.729
+I 21/10 10:45:12.609 Saved time in database 1981.219
+I 21/10 10:45:17.611 Saved time in database 1987.721
+I 21/10 10:45:22.622 Saved time in database 1994.221
+I 21/10 10:45:27.625 Saved time in database 2000.746
+I 21/10 10:45:32.640 Saved time in database 2007.247
+I 21/10 10:45:37.625 Saved time in database 2013.729
+I 21/10 10:45:42.624 Saved time in database 2020.233
+I 21/10 10:45:47.741 Saved time in database 2026.733
+I 21/10 10:45:52.621 Saved time in database 2033.235
+I 21/10 10:45:57.622 Saved time in database 2039.727
+I 21/10 10:46:02.618 Saved time in database 2046.224
+I 21/10 10:46:07.623 Saved time in database 2052.718
+I 21/10 10:46:12.628 Saved time in database 2059.242
+I 21/10 10:46:17.642 Saved time in database 2065.771
+I 21/10 10:46:22.622 Saved time in database 2072.230
+I 21/10 10:46:27.621 Saved time in database 2078.681
+I 21/10 10:46:32.627 Saved time in database 2085.240
+I 21/10 10:46:37.661 Saved time in database 2091.725
+I 21/10 10:46:42.615 Saved time in database 2098.218
+I 21/10 10:46:47.616 Saved time in database 2104.728
+I 21/10 10:46:52.733 Saved time in database 2111.224
+I 21/10 10:46:57.611 Saved time in database 2117.725
+I 21/10 10:47:02.631 Saved time in database 2124.226
+I 21/10 10:47:07.624 Saved time in database 2130.726
+I 21/10 10:47:12.638 Saved time in database 2137.214
+I 21/10 10:47:17.638 Saved time in database 2143.730
+I 21/10 10:47:22.633 Saved time in database 2150.244
+I 21/10 10:47:27.636 Saved time in database 2156.727
+I 21/10 10:47:32.621 Saved time in database 2163.235
+I 21/10 10:47:37.614 Saved time in database 2169.724
+I 21/10 10:47:42.625 Saved time in database 2176.231
+I 21/10 10:47:47.621 Saved time in database 2182.728
+I 21/10 10:47:52.631 Saved time in database 2189.230
+I 21/10 10:47:57.617 Saved time in database 2195.716
+I 21/10 10:48:02.630 Saved time in database 2202.215
+I 21/10 10:48:07.617 Saved time in database 2208.729
+I 21/10 10:48:12.612 Saved time in database 2215.218
+I 21/10 10:48:17.614 Saved time in database 2221.718
+I 21/10 10:48:22.628 Saved time in database 2228.227
+I 21/10 10:48:27.636 Saved time in database 2234.722
+I 21/10 10:48:32.623 Saved time in database 2241.230
+I 21/10 10:48:37.603 Saved time in database 2247.712
+I 21/10 10:48:42.624 Saved time in database 2254.223
+I 21/10 10:48:47.624 Saved time in database 2260.719
+I 21/10 10:48:52.612 Saved time in database 2267.226
+I 21/10 10:48:57.615 Saved time in database 2273.732
+I 21/10 10:49:02.864 Saved time in database 2280.225
+I 21/10 10:49:07.632 Saved time in database 2286.725
+I 21/10 10:49:12.609 Saved time in database 2293.223
+I 21/10 10:49:17.633 Saved time in database 2299.726
+I 21/10 10:49:22.631 Saved time in database 2306.218
+I 21/10 10:49:27.618 Saved time in database 2312.730
+I 21/10 10:49:32.614 Saved time in database 2319.224
+I 21/10 10:49:37.616 Saved time in database 2325.696
+I 21/10 10:49:42.617 Saved time in database 2332.220
+I 21/10 10:49:47.634 Saved time in database 2338.721
+I 21/10 10:49:52.588 Saved time in database 2345.203
+I 21/10 10:49:57.646 Saved time in database 2351.728
+I 21/10 10:50:02.629 Saved time in database 2358.220
+I 21/10 10:50:07.692 Saved time in database 2364.715
+I 21/10 10:50:12.645 Saved time in database 2371.229
+I 21/10 10:50:17.633 Saved time in database 2377.704
+I 21/10 10:50:22.639 Saved time in database 2384.219
+I 21/10 10:50:27.654 Saved time in database 2390.713
+I 21/10 10:50:32.787 Saved time in database 2397.226
+I 21/10 10:50:37.630 Saved time in database 2403.721
+I 21/10 10:50:42.624 Saved time in database 2410.222
+I 21/10 10:50:47.627 Saved time in database 2416.716
+I 21/10 10:50:52.635 Saved time in database 2423.236
+I 21/10 10:50:57.649 Saved time in database 2429.733
+I 21/10 10:51:02.625 Saved time in database 2436.229
+I 21/10 10:51:07.726 Saved time in database 2442.716
+I 21/10 10:51:12.644 Saved time in database 2449.215
+I 21/10 10:51:17.624 Saved time in database 2455.714
+I 21/10 10:51:22.635 Saved time in database 2462.232
+I 21/10 10:51:27.624 Saved time in database 2468.717
+I 21/10 10:51:32.629 Saved time in database 2475.237
+I 21/10 10:51:37.640 Saved time in database 2481.725
+I 21/10 10:51:42.633 Saved time in database 2488.238
+I 21/10 10:51:47.662 Saved time in database 2494.718
+I 21/10 10:51:52.624 Saved time in database 2501.222
+I 21/10 10:51:57.749 Saved time in database 2507.725
+I 21/10 10:52:02.639 Saved time in database 2514.240
+I 21/10 10:52:07.633 Saved time in database 2520.722
+I 21/10 10:52:12.663 Saved time in database 2527.220
+I 21/10 10:52:17.630 Saved time in database 2533.725
+I 21/10 10:52:22.620 Saved time in database 2540.217
+I 21/10 10:52:27.628 Saved time in database 2546.730
+I 21/10 10:52:32.632 Saved time in database 2553.230
+I 21/10 10:52:37.621 Saved time in database 2559.717
+I 21/10 10:52:42.852 Saved time in database 2566.217
+I 21/10 10:52:47.766 Saved time in database 2572.733
+I 21/10 10:52:52.613 Saved time in database 2579.210
+I 21/10 10:52:57.631 Saved time in database 2585.724
+I 21/10 10:53:01.577 seq=217 elapsed_ms=417620403 unix_ms=1792551181570 pid=23463 event=Window reason=RouteChanged source=ScoState window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:53:01.829 seq=218 elapsed_ms=417620662 unix_ms=1792551181828 pid=23463 event=Window reason=RouteChanged source=CommunicationDevice window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:53:01.835 seq=219 elapsed_ms=417620668 unix_ms=1792551181835 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:53:01.837 Audio device removed: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 10:53:01.842 System fired 'Audio Becoming Noisy' event, pausing playback.
+I 21/10 10:53:01.845 Giving up audio focus
+I 21/10 10:53:01.845 Giving up audio focus. Request granted
+I 21/10 10:53:01.846 Paused - Not transient
+I 21/10 10:53:01.850 seq=220 elapsed_ms=417620683 unix_ms=1792551181849 pid=23463 event=Eligibility reason=Observed source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=50 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=WakeWord mode=Off prior_capture=true capture=null route=Unknown availability=BluetoothA2dpOnly acquiring=false dropped_before=0
+I 21/10 10:53:02.209 Audio device removed: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 10:53:02.209 seq=221 elapsed_ms=417621042 unix_ms=1792551182208 pid=23463 event=Capture reason=EligibilityOff source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=51 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=WakeWord mode=Off prior_capture=true capture=false route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:53:02.211 seq=222 elapsed_ms=417621042 unix_ms=1792551182209 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:53:02.266 Saved time in database 2591.652
+I 21/10 10:53:03.011 seq=223 elapsed_ms=417621844 unix_ms=1792551183010 pid=23463 event=Window reason=RouteChanged source=Devices window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 10:53:03.011 Audio device removed: AirPods Pro - Find My, Bluetooth a2dp
+I 21/10 11:40:30.236 RefreshPodcastsTask - Start
+I 21/10 11:40:32.558 Refresh - podcasts response - 2211 ms
+I 21/10 11:40:32.573 data sync start - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:32.585 up-next sync start - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:32.590 UpNextSyncWorker - scheduled
+I 21/10 11:40:32.781 up-next sync done - 192.522257ms - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:32.788 data-incremental sync start - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:32.788 UpNextSyncWorker - started
+I 21/10 11:40:32.791 request-data-incremental sync start - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:35.734 Fetching the access token, SignInType: Tokens
+I 21/10 11:40:37.511 UpNextSyncWorker - finished - 4723 ms
+I 21/10 11:40:37.867 request-data-incremental sync done - 5.074203250s - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:37.873 episode-data-incremental sync start - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:37.891 PlaybackService seekToTimeMsInternalIfEpisode 2712.000 
+I 21/10 11:40:37.904 LocalPlayer seekToToTimeMs 2712.000
+I 21/10 11:40:37.907 episode-data-incremental sync done - 34.015869ms - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:37.908 podcasts-data-incremental sync start - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:37.909 podcasts-data-incremental sync done - 615.031us - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:37.910 folders-data-incremental sync start - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:37.914 LocalPlayer onSeekComplete 2712.000
+I 21/10 11:40:38.390 Saved time in database 2712.000
+I 21/10 11:40:38.394 folders-data-incremental sync done - 483.201986ms - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:38.395 playlists-data-incremental sync start - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:38.489 playlists-data-incremental sync done - 91.146240ms - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:38.489 bookmarks-data-incremental sync start - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:38.493 bookmarks-data-incremental sync done - 2.605876ms - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:38.493 device-data-incremental sync start - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:38.919 device-data-incremental sync done - 424.851319ms - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:38.921 data-incremental sync done - 6.130689050s - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:38.924 missing-episodes sync start - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:38.928 missing-episodes sync done - 2.988444ms - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:38.930 settings sync start - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:39.417 settings sync done - 485.050863ms - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:39.418 cloud-files sync start - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:40.055 cloud-files sync done - 634.199260ms - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:40.058 playback-history sync start - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:40.062 Sync history task scheduled
+I 21/10 11:40:40.150 playback-history sync done - 89.732300ms - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:40.157 ratings sync start - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:40.180 Sync history running
+I 21/10 11:40:40.787 ratings sync done - 624.453247ms - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:40.790 data sync done - 8.214455896s - 7183557c-e783-40ca-af5c-072e0dfe8353
+I 21/10 11:40:40.849 Refresh - auto archive check - 50.567057ms
+I 21/10 11:40:40.870 Refresh - unsued podcasts check - 18.583985ms
+I 21/10 11:40:40.873 Refresh - notifications check - 2.015421ms
+I 21/10 11:40:40.880 Refresh - auto download check - 5.764892ms
+I 21/10 11:40:40.882 RefreshPodcastsTask - Finished Success {mOutputData=Data {}}
+I 21/10 11:40:41.240 Sync history completed successfully
+I 21/10 12:35:41.679 Set up periodic refresh
+I 21/10 12:35:41.691 seq=224 elapsed_ms=423780525 unix_ms=1792557341691 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 12:35:42.681 Running refresh from open app
+I 21/10 12:35:42.685 RefreshPodcastsTask - runNow - Start
+I 21/10 12:35:43.766 Initiating auth token sync to Wear
+I 21/10 12:35:43.769 Sending auth token to Wear Data Layer (identity: au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity$PocketCasts@c12d814)
+I 21/10 12:35:44.747 seq=225 elapsed_ms=423783579 unix_ms=1792557344746 pid=23463 event=Window reason=Backgrounded source=Foreground window=2 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 12:35:44.747 seq=226 elapsed_ms=423783580 unix_ms=1792557344746 pid=23463 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 12:35:45.228 Refresh - podcasts response - 2510 ms
+I 21/10 12:35:45.251 UpdateEpisodeDetailsTask - enqueued a3d938ee-cc15-4cdb-91bd-9a868894be36
+I 21/10 12:35:45.296 data sync start - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:45.297 up-next sync start - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:45.297 Observing podcast 855d68d0-e50c-013a-5f24-0e94336f7152 changes
+I 21/10 12:35:45.299 UpNextSyncWorker - scheduled
+I 21/10 12:35:45.302 Observing podcast 855d68d0-e50c-013a-5f24-0e94336f7152 episode changes
+I 21/10 12:35:45.335 up-next sync done - 37.307821ms - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:45.335 data-incremental sync start - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:45.335 request-data-incremental sync start - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:45.341 UpdateEpisodeDetailsTask (Worker ID: 44be8eae-60bf-4c36-b3b7-00ca5a2eafca) - Worker started - episodes: a3d938ee-cc15-4cdb-91bd-9a868894be36}
+I 21/10 12:35:45.346 UpNextSyncWorker - started
+I 21/10 12:35:45.903 UpNextSyncWorker - finished - 556 ms
+I 21/10 12:35:47.569 request-data-incremental sync done - 2.232877036s - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:47.574 episode-data-incremental sync start - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:47.611 episode-data-incremental sync done - 35.876383ms - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:47.614 podcasts-data-incremental sync start - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:47.616 podcasts-data-incremental sync done - 1.276083ms - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:47.617 folders-data-incremental sync start - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:47.769 folders-data-incremental sync done - 149.114217ms - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:47.773 playlists-data-incremental sync start - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:47.789 playlists-data-incremental sync done - 14.055054ms - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:47.791 bookmarks-data-incremental sync start - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:47.808 bookmarks-data-incremental sync done - 15.053589ms - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:47.810 device-data-incremental sync start - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:48.408 device-data-incremental sync done - 596.722005ms - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:48.411 data-incremental sync done - 3.074835003s - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:48.412 missing-episodes sync start - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:48.418 missing-episodes sync done - 4.693888ms - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:48.420 settings sync start - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:48.904 settings sync done - 482.447062ms - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:48.906 cloud-files sync start - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:49.682 cloud-files sync done - 774.472819ms - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:49.684 playback-history sync start - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:49.689 Sync history task scheduled
+I 21/10 12:35:49.748 playback-history sync done - 62.085287ms - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:49.749 ratings sync start - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:49.760 Sync history running
+I 21/10 12:35:50.229 ratings sync done - 477.334961ms - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:50.233 data sync done - 4.936887209s - 7a5f5d67-5b01-4092-b050-e515acc23ef5
+I 21/10 12:35:50.279 Refresh - auto archive check - 42.222087ms
+I 21/10 12:35:50.298 Refresh - unsued podcasts check - 17.037476ms
+I 21/10 12:35:50.307 Refresh - notifications check - 4.344157ms
+I 21/10 12:35:50.309 New podcast episode received: a3d938ee-cc15-4cdb-91bd-9a868894be36
+I 21/10 12:35:50.323 Refresh - auto download check - 13.009440ms
+I 21/10 12:35:50.325 RefreshPodcastsTask - runNow - Finished Success {mOutputData=Data {}}
+I 21/10 12:35:50.449 Sync history completed successfully
+I 21/10 12:35:59.152 UpdateEpisodeDetailsTask (Worker ID: 44be8eae-60bf-4c36-b3b7-00ca5a2eafca) - Worker completed - took 13810 ms
+I 21/10 13:20:53.889 Hibernating playback from Pause timer.
+I 21/10 13:20:53.900 Stopping playback
+I 21/10 13:20:54.190 seq=227 elapsed_ms=426493021 unix_ms=1792560054188 pid=23463 event=Gate reason=ContextLost source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=3 changed_rules=256 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null dropped_before=0
+I 21/10 13:20:54.281 seq=228 elapsed_ms=426493112 unix_ms=1792560054279 pid=23463 event=Eligibility reason=Observed source=ServiceObserver window=2 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=54 requested_window=null request_id=- prior_gate=null gate=3 changed_rules=null prior_mode=Off mode=Off prior_capture=false capture=null route=Unknown availability=Speaker acquiring=false dropped_before=0
+I 21/10 13:38:53.347 RefreshPodcastsTask - Start
+I 21/10 13:38:56.057 Refresh - podcasts response - 2593 ms
+I 21/10 13:38:56.125 UpdateEpisodeDetailsTask - enqueued 5db83efd-ad0c-4515-96cf-a5b51da33899
+I 21/10 13:38:56.141 data sync start - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:38:56.157 up-next sync start - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:38:56.163 UpNextSyncWorker - scheduled
+I 21/10 13:38:56.166 Observing podcast 855d68d0-e50c-013a-5f24-0e94336f7152 changes
+I 21/10 13:38:56.173 Observing podcast 855d68d0-e50c-013a-5f24-0e94336f7152 episode changes
+I 21/10 13:38:56.305 up-next sync done - 146.045939ms - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:38:56.307 data-incremental sync start - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:38:56.308 request-data-incremental sync start - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:38:56.316 UpdateEpisodeDetailsTask (Worker ID: 45f3882f-66e6-4466-b3d5-1db0f593e8c0) - Worker started - episodes: 5db83efd-ad0c-4515-96cf-a5b51da33899}
+I 21/10 13:38:56.321 UpNextSyncWorker - started
+I 21/10 13:38:58.467 Fetching the access token, SignInType: Tokens
+I 21/10 13:39:00.447 UpNextSyncWorker - finished - 4126 ms
+I 21/10 13:39:00.821 request-data-incremental sync done - 4.511309125s - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:00.821 episode-data-incremental sync start - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:00.827 episode-data-incremental sync done - 4.614502ms - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:00.827 podcasts-data-incremental sync start - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:00.827 podcasts-data-incremental sync done - 55.176us - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:00.828 folders-data-incremental sync start - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:00.830 folders-data-incremental sync done - 1.802653ms - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:00.830 playlists-data-incremental sync start - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:00.835 playlists-data-incremental sync done - 4.579875ms - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:00.836 bookmarks-data-incremental sync start - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:00.838 bookmarks-data-incremental sync done - 2.103353ms - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:00.838 device-data-incremental sync start - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:01.820 device-data-incremental sync done - 980.013510ms - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:01.827 data-incremental sync done - 5.518135012s - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:01.828 missing-episodes sync start - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:01.839 missing-episodes sync done - 9.641927ms - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:01.841 settings sync start - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:02.560 settings sync done - 711.879720ms - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:02.563 cloud-files sync start - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:03.215 cloud-files sync done - 649.233724ms - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:03.219 playback-history sync start - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:03.229 Sync history task scheduled
+I 21/10 13:39:03.367 playback-history sync done - 143.806315ms - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:03.371 ratings sync start - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:03.405 Sync history running
+I 21/10 13:39:03.955 ratings sync done - 579.841431ms - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:03.961 data sync done - 7.809996179s - 716d0cce-2891-4156-9eaa-140599c2ba6d
+I 21/10 13:39:04.045 Refresh - auto archive check - 73.876709ms
+I 21/10 13:39:04.064 Refresh - unsued podcasts check - 17.131185ms
+I 21/10 13:39:04.072 Refresh - notifications check - 6.395182ms
+I 21/10 13:39:04.074 New podcast episode received: 5db83efd-ad0c-4515-96cf-a5b51da33899
+I 21/10 13:39:04.092 Refresh - auto download check - 17.633342ms
+I 21/10 13:39:04.095 RefreshPodcastsTask - Finished Success {mOutputData=Data {}}
+I 21/10 13:39:04.196 Sync history completed successfully
+I 21/10 13:39:26.432 UpdateEpisodeDetailsTask (Worker ID: 45f3882f-66e6-4466-b3d5-1db0f593e8c0) - Unable to check episode file details with a head request for 5db83efd-ad0c-4515-96cf-a5b51da33899. Error: failed to connect to api.substack.com/173.252.108.21 (port 443) from /192.168.1.7 (port 44876) after 30000ms
+I 21/10 13:39:26.434 UpdateEpisodeDetailsTask (Worker ID: 45f3882f-66e6-4466-b3d5-1db0f593e8c0) - Worker completed - took 30118 ms
+I 21/10 13:41:49.630 Initializing experiments with uuid: 4f98e379-b1ef-4666-bb56-0a0575a284e5
+I 21/10 13:41:49.632 App started. 8.20 (9452)
+I 21/10 13:41:49.786 seq=2 elapsed_ms=427748619 unix_ms=1792561309785 pid=5094 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=3 gate=15 changed_rules=256 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:41:50.824 Audio device added: Pixel 8, Built-in speaker (safe)
+I 21/10 13:41:50.839 Audio device added: Pixel 8, Rerouting audio between mixes and system apps
+I 21/10 13:41:50.857 Audio device added: Pixel 8, Echo canceller loopback reference
+I 21/10 13:41:54.915 ExPlat: fetching assignments successful with result: Assignments(variations={}, timeToLive=7200, fetchedAt=1792561314, anonymousId=4f98e379-b1ef-4666-bb56-0a0575a284e5)
+I 21/10 13:44:39.483 Opening deep link: Intent { act=android.intent.action.MAIN cat=[android.intent.category.DEFAULT,android.intent.category.LAUNCHER] flg=0x10008000 xflg=0x5 cmp=fm.auris.debug/au.com.shiftyjelly.pocketcasts.ui.MainActivity }. Safe URI: null
+I 21/10 13:44:39.484 Did not find any matching deep link for: Intent { act=android.intent.action.MAIN cat=[android.intent.category.DEFAULT,android.intent.category.LAUNCHER] flg=0x10008000 xflg=0x5 cmp=fm.auris.debug/au.com.shiftyjelly.pocketcasts.ui.MainActivity }
+I 21/10 13:44:39.513 Loading subscription plans
+I 21/10 13:44:39.515 Loaded subscription plans
+I 21/10 13:44:39.569 Opening deep link: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x10600000 cmp=fm.auris.debug/au.com.shiftyjelly.pocketcasts.ui.MainActivity }. Safe URI: null
+I 21/10 13:44:39.569 Did not find any matching deep link for: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x10600000 cmp=fm.auris.debug/au.com.shiftyjelly.pocketcasts.ui.MainActivity }
+I 21/10 13:44:39.575 Set up periodic refresh
+I 21/10 13:44:39.580 seq=3 elapsed_ms=427918413 unix_ms=1792561479579 pid=5094 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:44:39.845 Loading subscription plans
+I 21/10 13:44:39.847 Loaded subscription plans
+I 21/10 13:44:40.337 seq=4 elapsed_ms=427919169 unix_ms=1792561480335 pid=5094 event=Window reason=RouteChanged source=Devices window=0 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:44:40.341 seq=5 elapsed_ms=427919174 unix_ms=1792561480340 pid=5094 event=Window reason=RouteChanged source=ScoState window=0 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:44:40.368 seq=6 elapsed_ms=427919201 unix_ms=1792561480367 pid=5094 event=Window reason=Backgrounded source=Foreground window=0 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:44:40.373 seq=7 elapsed_ms=427919203 unix_ms=1792561480369 pid=5094 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:44:40.574 Running refresh from open app
+I 21/10 13:44:40.576 RefreshPodcastsTask - runNow - Start
+I 21/10 13:44:43.308 Refresh - podcasts response - 2709 ms
+I 21/10 13:44:43.375 data sync start - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:43.377 up-next sync start - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:43.378 UpNextSyncWorker - scheduled
+I 21/10 13:44:43.493 up-next sync done - 115.537272ms - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:43.495 data-incremental sync start - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:43.497 request-data-incremental sync start - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:43.503 UpNextSyncWorker - started
+I 21/10 13:44:43.984 seq=8 elapsed_ms=427922815 unix_ms=1792561483982 pid=5094 event=Eligibility reason=Observed source=ServiceObserver window=0 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=0 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=Off mode=Off prior_capture=false capture=null route=Unknown availability=Speaker acquiring=false error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:44:44.118 UpNextSyncWorker - finished - 598 ms
+I 21/10 13:44:44.577 request-data-incremental sync done - 1.076151978s - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:44.584 episode-data-incremental sync start - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:44.643 episode-data-incremental sync done - 56.291830ms - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:44.651 podcasts-data-incremental sync start - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:44.660 podcasts-data-incremental sync done - 1.395182ms - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:44.662 folders-data-incremental sync start - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:44.687 folders-data-incremental sync done - 21.766927ms - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:44.689 playlists-data-incremental sync start - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:44.728 playlists-data-incremental sync done - 36.279175ms - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:44.730 bookmarks-data-incremental sync start - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:44.758 bookmarks-data-incremental sync done - 25.950195ms - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:44.759 device-data-incremental sync start - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:45.345 device-data-incremental sync done - 576.002890ms - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:45.347 data-incremental sync done - 1.850416545s - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:45.351 missing-episodes sync start - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:45.358 missing-episodes sync done - 5.152262ms - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:45.360 settings sync start - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:47.296 settings sync done - 1.934468304s - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:47.298 cloud-files sync start - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:47.893 cloud-files sync done - 593.987223ms - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:47.898 playback-history sync start - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:47.921 Sync history task scheduled
+I 21/10 13:44:48.038 playback-history sync done - 138.329264ms - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:48.045 ratings sync start - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:48.191 Sync history running
+I 21/10 13:44:48.843 ratings sync done - 792.991170ms - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:48.857 data sync done - 5.476017744s - 0e1c992d-02cb-4a3c-b483-0a92a9cab886
+I 21/10 13:44:48.976 Refresh - auto archive check - 95.542724ms
+I 21/10 13:44:49.079 Refresh - unsued podcasts check - 100.923340ms
+I 21/10 13:44:49.112 Refresh - notifications check - 23.390585ms
+I 21/10 13:44:49.124 Sync history completed successfully
+I 21/10 13:44:49.141 Refresh - auto download check - 24.525757ms
+I 21/10 13:44:49.145 RefreshPodcastsTask - runNow - Finished Success {mOutputData=Data {}}
+I 21/10 13:51:53.291 Set up periodic refresh
+I 21/10 13:51:53.297 seq=9 elapsed_ms=428352130 unix_ms=1792561913296 pid=5094 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:51:54.291 Running refresh from open app
+I 21/10 13:51:54.295 RefreshPodcastsTask - runNow - Start
+I 21/10 13:51:55.127 Initiating auth token sync to Wear
+I 21/10 13:51:55.133 Sending auth token to Wear Data Layer (identity: au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity$PocketCasts@a70acfa)
+I 21/10 13:51:57.078 Refresh - podcasts response - 2757 ms
+I 21/10 13:51:57.079 data sync start - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:57.080 up-next sync start - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:57.081 UpNextSyncWorker - scheduled
+I 21/10 13:51:57.144 up-next sync done - 62.843506ms - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:57.146 data-incremental sync start - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:57.146 request-data-incremental sync start - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:57.148 UpNextSyncWorker - started
+I 21/10 13:51:57.565 seq=10 elapsed_ms=428356397 unix_ms=1792561917564 pid=5094 event=Window reason=Backgrounded source=Foreground window=0 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:51:57.582 seq=11 elapsed_ms=428356411 unix_ms=1792561917578 pid=5094 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:51:57.663 UpNextSyncWorker - finished - 514 ms
+I 21/10 13:51:57.980 request-data-incremental sync done - 832.701457ms - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:57.981 episode-data-incremental sync start - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:57.993 episode-data-incremental sync done - 11.698527ms - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:57.994 podcasts-data-incremental sync start - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:57.995 podcasts-data-incremental sync done - 89.925us - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:57.995 folders-data-incremental sync start - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:58.000 folders-data-incremental sync done - 4.277343ms - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:58.000 playlists-data-incremental sync start - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:58.005 playlists-data-incremental sync done - 4.303508ms - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:58.005 bookmarks-data-incremental sync start - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:58.015 bookmarks-data-incremental sync done - 9.130331ms - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:58.016 device-data-incremental sync start - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:58.513 device-data-incremental sync done - 495.308879ms - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:58.515 data-incremental sync done - 1.368235881s - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:58.518 missing-episodes sync start - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:58.525 missing-episodes sync done - 4.285726ms - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:58.527 settings sync start - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:59.259 settings sync done - 729.606201ms - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:59.260 cloud-files sync start - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:59.964 cloud-files sync done - 702.872844ms - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:59.965 playback-history sync start - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:51:59.969 Sync history task scheduled
+I 21/10 13:52:00.005 playback-history sync done - 38.663168ms - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:52:00.005 ratings sync start - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:52:00.010 Sync history running
+I 21/10 13:52:00.567 ratings sync done - 560.103719ms - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:52:00.573 data sync done - 3.493355471s - 59e90f5b-c2b5-4bd8-b998-bc17b9b9dde3
+I 21/10 13:52:00.653 Refresh - auto archive check - 76.870768ms
+I 21/10 13:52:00.672 Refresh - unsued podcasts check - 17.783813ms
+I 21/10 13:52:00.675 Refresh - notifications check - 1.711995ms
+I 21/10 13:52:00.682 Refresh - auto download check - 5.970581ms
+I 21/10 13:52:00.683 RefreshPodcastsTask - runNow - Finished Success {mOutputData=Data {}}
+I 21/10 13:52:00.845 Sync history completed successfully
+I 21/10 13:52:45.079 Opening deep link: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x10600000 xflg=0x4 cmp=fm.auris.debug/au.com.shiftyjelly.pocketcasts.ui.MainActivity bnds=[71,1905][244,2100] }. Safe URI: null
+I 21/10 13:52:45.080 Did not find any matching deep link for: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] flg=0x10600000 xflg=0x4 cmp=fm.auris.debug/au.com.shiftyjelly.pocketcasts.ui.MainActivity bnds=[71,1905][244,2100] }
+I 21/10 13:52:45.081 Set up periodic refresh
+I 21/10 13:52:45.086 seq=12 elapsed_ms=428403919 unix_ms=1792561965085 pid=5094 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:52:45.584 Initiating auth token sync to Wear
+I 21/10 13:52:45.587 Sending auth token to Wear Data Layer (identity: au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity$PocketCasts@a70acfa)
+I 21/10 13:52:48.059 Audio device added: AirPods Pro - Find My, Bluetooth a2dp
+I 21/10 13:52:48.071 seq=13 elapsed_ms=428406900 unix_ms=1792561968067 pid=5094 event=Window reason=RouteChanged source=Devices window=0 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:52:48.484 Audio device added: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 13:52:48.490 seq=14 elapsed_ms=428407322 unix_ms=1792561968488 pid=5094 event=Window reason=RouteChanged source=Devices window=0 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:52:48.902 Audio device added: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 13:52:48.908 seq=15 elapsed_ms=428407739 unix_ms=1792561968906 pid=5094 event=Window reason=RouteChanged source=Devices window=0 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:16.206 seq=16 elapsed_ms=428435012 unix_ms=1792561996179 pid=5094 event=Window reason=Backgrounded source=Foreground window=0 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:16.213 seq=17 elapsed_ms=428435034 unix_ms=1792561996200 pid=5094 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:16.544 seq=18 elapsed_ms=428435372 unix_ms=1792561996539 pid=5094 event=Window reason=RouteChanged source=Acquisition window=0 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:16.549 seq=19 elapsed_ms=428435378 unix_ms=1792561996545 pid=5094 event=Window reason=RouteChanged source=ScoState window=0 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:16.550 seq=20 elapsed_ms=428435380 unix_ms=1792561996547 pid=5094 event=Window reason=RouteChanged source=ScoState window=0 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:16.564 seq=21 elapsed_ms=428435392 unix_ms=1792561996559 pid=5094 event=Window reason=RouteChanged source=CommunicationDevice window=0 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:16.592 seq=22 elapsed_ms=428435424 unix_ms=1792561996591 pid=5094 event=Eligibility reason=Observed source=ServiceObserver window=0 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=5 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=Off mode=WakeWord prior_capture=false capture=null route=Headset(hasMicrophone=true) availability=Headset(hasMicrophone=true) acquiring=false error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:17.135 seq=23 elapsed_ms=428435966 unix_ms=1792561997132 pid=5094 event=Capture reason=CaptureStarted source=ServiceObserver window=0 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=5 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=Off mode=WakeWord prior_capture=false capture=true route=Headset(hasMicrophone=true) availability=Headset(hasMicrophone=true) acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:18.391 Set up periodic refresh
+I 21/10 13:53:18.397 seq=24 elapsed_ms=428437230 unix_ms=1792561998396 pid=5094 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:18.914 Initiating auth token sync to Wear
+I 21/10 13:53:18.924 Sending auth token to Wear Data Layer (identity: au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity$PocketCasts@a70acfa)
+I 21/10 13:53:25.566 seq=25 elapsed_ms=428444398 unix_ms=1792562005565 pid=5094 event=Window reason=Wake source=Grace window=1 prior_window=0 prior_active=false active=true holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:25.568 seq=26 elapsed_ms=428444400 unix_ms=1792562005567 pid=5094 event=Eligibility reason=Observed source=ServiceObserver window=1 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=5 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=WakeWord mode=Continuous prior_capture=true capture=null route=Headset(hasMicrophone=true) availability=Headset(hasMicrophone=true) acquiring=false error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:25.891 request_id=e9300a21-dfc9-4925-bd51-c39705a31601 outcome=no_intent stage=no_match reason=no_match transcript='H.'
+I 21/10 13:53:32.835 request_id=18193b2d-df0c-4ba1-bdf3-17a8468d1d8a outcome=no_intent stage=mapper_dialog reason=mapper_or_dialog_failed transcript='Hey, help me build it.'
+I 21/10 13:53:32.845 seq=27 elapsed_ms=428451677 unix_ms=1792562012844 pid=5094 event=Hold reason=HoldAcquired source=Grace window=1 prior_window=null prior_active=null active=true holds_before=0 holds_after=1 owner=1 requested_window=1 request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:32.847 seq=28 elapsed_ms=428451677 unix_ms=1792562012844 pid=5094 event=Turn reason=TurnStarted source=Cloud window=1 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=1 requested_window=null request_id=18193b2d-df0c-4ba1-bdf3-17a8468d1d8a prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:34.743 seq=29 elapsed_ms=428453574 unix_ms=1792562014740 pid=5094 event=Turn reason=TurnAuthResolved source=Cloud window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=18193b2d-df0c-4ba1-bdf3-17a8468d1d8a prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=RESOLVED feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:37.539 seq=30 elapsed_ms=428456368 unix_ms=1792562017535 pid=5094 event=Turn reason=TurnSocketOpened source=Cloud window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=18193b2d-df0c-4ba1-bdf3-17a8468d1d8a prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:37.541 seq=31 elapsed_ms=428456372 unix_ms=1792562017538 pid=5094 event=Turn reason=TurnSocketSendComplete source=Cloud window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=18193b2d-df0c-4ba1-bdf3-17a8468d1d8a prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=SEND_ATTEMPTED feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:37.542 seq=32 elapsed_ms=428456373 unix_ms=1792562017539 pid=5094 event=Turn reason=TurnSocketSendComplete source=Cloud window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=18193b2d-df0c-4ba1-bdf3-17a8468d1d8a prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=ACCEPTED feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:38.582 seq=33 elapsed_ms=428457412 unix_ms=1792562018578 pid=5094 event=Turn reason=TurnTerminalReceived source=Cloud window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=18193b2d-df0c-4ba1-bdf3-17a8468d1d8a prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=limit_exceeded feedback_kind=- terminal_origin=SERVER_ERROR dropped_before=0
+I 21/10 13:53:38.586 seq=34 elapsed_ms=428457417 unix_ms=1792562018584 pid=5094 event=Turn reason=TurnFeedbackSelected source=Cloud window=1 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=1 requested_window=null request_id=18193b2d-df0c-4ba1-bdf3-17a8468d1d8a prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=spoken terminal_origin=- dropped_before=0
+I 21/10 13:53:38.589 seq=35 elapsed_ms=428457420 unix_ms=1792562018587 pid=5094 event=Turn reason=TurnFailed source=Cloud window=1 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=1 requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:38.590 seq=36 elapsed_ms=428457420 unix_ms=1792562018587 pid=5094 event=Hold reason=HoldReleased source=Grace window=1 prior_window=null prior_active=null active=true holds_before=1 holds_after=0 owner=1 requested_window=1 request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:38.592 seq=37 elapsed_ms=428457421 unix_ms=1792562018588 pid=5094 event=Turn reason=TurnFeedbackSelected source=Cloud window=1 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=1 requested_window=null request_id=18193b2d-df0c-4ba1-bdf3-17a8468d1d8a prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=spoken_selected terminal_origin=- dropped_before=0
+I 21/10 13:53:38.592 seq=38 elapsed_ms=428457422 unix_ms=1792562018589 pid=5094 event=Window reason=Extended source=Grace window=1 prior_window=null prior_active=true active=true holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:38.593 seq=39 elapsed_ms=428457425 unix_ms=1792562018591 pid=5094 event=Turn reason=TurnFeedbackSelected source=Cloud window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=18193b2d-df0c-4ba1-bdf3-17a8468d1d8a prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=entry_spoken terminal_origin=- dropped_before=0
+I 21/10 13:53:43.605 seq=40 elapsed_ms=428462434 unix_ms=1792562023601 pid=5094 event=Turn reason=TurnFeedbackRendered source=Cloud window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=18193b2d-df0c-4ba1-bdf3-17a8468d1d8a prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=spoken_submitted terminal_origin=- dropped_before=0
+I 21/10 13:53:49.561 seq=41 elapsed_ms=428468393 unix_ms=1792562029560 pid=5094 event=Window reason=Backgrounded source=Foreground window=1 prior_window=null prior_active=true active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:49.565 seq=42 elapsed_ms=428468395 unix_ms=1792562029562 pid=5094 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 13:53:49.566 seq=43 elapsed_ms=428468397 unix_ms=1792562029564 pid=5094 event=Eligibility reason=Observed source=ServiceObserver window=1 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=5 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=Continuous mode=WakeWord prior_capture=true capture=null route=Headset(hasMicrophone=true) availability=Headset(hasMicrophone=true) acquiring=false error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 14:29:53.141 Set up periodic refresh
+I 21/10 14:29:53.165 seq=44 elapsed_ms=430631998 unix_ms=1792564193164 pid=5094 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 14:29:54.143 Running refresh from open app
+I 21/10 14:29:54.145 RefreshPodcastsTask - runNow - Start
+I 21/10 14:29:56.300 Refresh - podcasts response - 2128 ms
+I 21/10 14:29:56.302 data sync start - cd345acb-f525-4a4b-b095-8bd73d751938
+I 21/10 14:29:56.305 up-next sync start - cd345acb-f525-4a4b-b095-8bd73d751938
+I 21/10 14:29:56.306 UpNextSyncWorker - scheduled
+I 21/10 14:29:56.352 up-next sync done - 46.197225ms - cd345acb-f525-4a4b-b095-8bd73d751938
+I 21/10 14:29:56.353 data-incremental sync start - cd345acb-f525-4a4b-b095-8bd73d751938
+I 21/10 14:29:56.353 request-data-incremental sync start - cd345acb-f525-4a4b-b095-8bd73d751938
+I 21/10 14:29:56.368 UpNextSyncWorker - started
+E 21/10 14:29:56.384 UpNextSyncWorker - failed - 14 ms
+java.net.UnknownHostException: Unable to resolve host "api-staging.auris.fm": No address associated with hostname
+	at java.net.Inet6AddressImpl.lookupHostByName(Inet6AddressImpl.java:124)
+	at java.net.Inet6AddressImpl.lookupAllHostAddr(Inet6AddressImpl.java:103)
+	at java.net.InetAddress.getAllByName(InetAddress.java:1154)
+	at okhttp3.internal.dns.InetAddressDns.lookup(InetAddressDns.kt:31)
+	at okhttp3.Dns$Companion$SYSTEM$1.lookup(Dns.kt:293)
+	at okhttp3.internal.connection.RouteSelector.dnsLookup(RouteSelector.kt:228)
+	at okhttp3.internal.connection.RouteSelector.nextRoutes(RouteSelector.kt:184)
+	at okhttp3.internal.connection.RouteSelector.nextProxy(RouteSelector.kt:140)
+	at okhttp3.internal.connection.RouteSelector.next(RouteSelector.kt:72)
+	at okhttp3.internal.connection.RealRoutePlanner.planConnect$okhttp(RealRoutePlanner.kt:170)
+	at okhttp3.internal.connection.RealRoutePlanner.plan(RealRoutePlanner.kt:77)
+	at okhttp3.internal.connection.FastFallbackExchangeFinder.launchTcpConnect(FastFallbackExchangeFinder.kt:122)
+	at okhttp3.internal.connection.FastFallbackExchangeFinder.find(FastFallbackExchangeFinder.kt:64)
+	at okhttp3.internal.connection.RealCall.initExchange$okhttp(RealCall.kt:306)
+	at okhttp3.internal.connection.ConnectInterceptor.intercept(ConnectInterceptor.kt:32)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at okhttp3.internal.cache.CacheInterceptor.intercept(CacheInterceptor.kt:98)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at okhttp3.internal.http.BridgeInterceptor.intercept(BridgeInterceptor.kt:83)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at okhttp3.internal.http.RetryAndFollowUpInterceptor.intercept(RetryAndFollowUpInterceptor.kt:72)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at okhttp3.logging.HttpLoggingInterceptor.intercept(HttpLoggingInterceptor.kt:249)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at io.sentry.okhttp.SentryOkHttpInterceptor.intercept(SentryOkHttpInterceptor.kt:123)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at au.com.shiftyjelly.pocketcasts.servers.interceptors.InternationalizationInterceptor.intercept(InternationalizationInterceptor.kt:25)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at au.com.shiftyjelly.pocketcasts.servers.di.InterceptorModule.internalUserAgentInterceptor$lambda$0(InterceptorModule.kt:58)
+	at au.com.shiftyjelly.pocketcasts.servers.di.InterceptorModule$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at au.com.shiftyjelly.pocketcasts.servers.di.InterceptorModule.cacheControlInterceptor$lambda$0(InterceptorModule.kt:63)
+	at au.com.shiftyjelly.pocketcasts.servers.di.InterceptorModule$$ExternalSyntheticLambda4.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at au.com.shiftyjelly.pocketcasts.servers.interceptors.HttpStatusUrlLoggingInterceptor.intercept(HttpStatusUrlLoggingInterceptor.kt:13)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at okhttp3.internal.connection.RealCall.getResponseWithInterceptorChain$okhttp(RealCall.kt:234)
+	at okhttp3.internal.connection.RealCall$AsyncCall.run(RealCall.kt:582)
+	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
+	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
+	at java.lang.Thread.run(Thread.java:1571)
+
+E 21/10 14:29:56.427 request-data-incremental sync failed - cd345acb-f525-4a4b-b095-8bd73d751938
+java.net.UnknownHostException: Unable to resolve host "api-staging.auris.fm": No address associated with hostname
+	at java.net.Inet6AddressImpl.lookupHostByName(Inet6AddressImpl.java:124)
+	at java.net.Inet6AddressImpl.lookupAllHostAddr(Inet6AddressImpl.java:103)
+	at java.net.InetAddress.getAllByName(InetAddress.java:1154)
+	at okhttp3.internal.dns.InetAddressDns.lookup(InetAddressDns.kt:31)
+	at okhttp3.Dns$Companion$SYSTEM$1.lookup(Dns.kt:293)
+	at okhttp3.internal.connection.RouteSelector.dnsLookup(RouteSelector.kt:228)
+	at okhttp3.internal.connection.RouteSelector.nextRoutes(RouteSelector.kt:184)
+	at okhttp3.internal.connection.RouteSelector.nextProxy(RouteSelector.kt:140)
+	at okhttp3.internal.connection.RouteSelector.next(RouteSelector.kt:72)
+	at okhttp3.internal.connection.RealRoutePlanner.planConnect$okhttp(RealRoutePlanner.kt:170)
+	at okhttp3.internal.connection.RealRoutePlanner.plan(RealRoutePlanner.kt:77)
+	at okhttp3.internal.connection.FastFallbackExchangeFinder.launchTcpConnect(FastFallbackExchangeFinder.kt:122)
+	at okhttp3.internal.connection.FastFallbackExchangeFinder.find(FastFallbackExchangeFinder.kt:64)
+	at okhttp3.internal.connection.RealCall.initExchange$okhttp(RealCall.kt:306)
+	at okhttp3.internal.connection.ConnectInterceptor.intercept(ConnectInterceptor.kt:32)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at okhttp3.internal.cache.CacheInterceptor.intercept(CacheInterceptor.kt:98)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at okhttp3.internal.http.BridgeInterceptor.intercept(BridgeInterceptor.kt:83)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at okhttp3.internal.http.RetryAndFollowUpInterceptor.intercept(RetryAndFollowUpInterceptor.kt:72)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at okhttp3.logging.HttpLoggingInterceptor.intercept(HttpLoggingInterceptor.kt:249)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at io.sentry.okhttp.SentryOkHttpInterceptor.intercept(SentryOkHttpInterceptor.kt:123)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at au.com.shiftyjelly.pocketcasts.servers.interceptors.InternationalizationInterceptor.intercept(InternationalizationInterceptor.kt:25)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at au.com.shiftyjelly.pocketcasts.servers.di.InterceptorModule.internalUserAgentInterceptor$lambda$0(InterceptorModule.kt:58)
+	at au.com.shiftyjelly.pocketcasts.servers.di.InterceptorModule$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at au.com.shiftyjelly.pocketcasts.servers.di.InterceptorModule.cacheControlInterceptor$lambda$0(InterceptorModule.kt:63)
+	at au.com.shiftyjelly.pocketcasts.servers.di.InterceptorModule$$ExternalSyntheticLambda4.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at au.com.shiftyjelly.pocketcasts.servers.interceptors.HttpStatusUrlLoggingInterceptor.intercept(HttpStatusUrlLoggingInterceptor.kt:13)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at okhttp3.internal.connection.RealCall.getResponseWithInterceptorChain$okhttp(RealCall.kt:234)
+	at okhttp3.internal.connection.RealCall$AsyncCall.run(RealCall.kt:582)
+	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
+	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
+	at java.lang.Thread.run(Thread.java:1571)
+
+E 21/10 14:29:56.429 data-incremental sync failed - cd345acb-f525-4a4b-b095-8bd73d751938
+java.net.UnknownHostException: Unable to resolve host "api-staging.auris.fm": No address associated with hostname
+	at java.net.Inet6AddressImpl.lookupHostByName(Inet6AddressImpl.java:124)
+	at java.net.Inet6AddressImpl.lookupAllHostAddr(Inet6AddressImpl.java:103)
+	at java.net.InetAddress.getAllByName(InetAddress.java:1154)
+	at okhttp3.internal.dns.InetAddressDns.lookup(InetAddressDns.kt:31)
+	at okhttp3.Dns$Companion$SYSTEM$1.lookup(Dns.kt:293)
+	at okhttp3.internal.connection.RouteSelector.dnsLookup(RouteSelector.kt:228)
+	at okhttp3.internal.connection.RouteSelector.nextRoutes(RouteSelector.kt:184)
+	at okhttp3.internal.connection.RouteSelector.nextProxy(RouteSelector.kt:140)
+	at okhttp3.internal.connection.RouteSelector.next(RouteSelector.kt:72)
+	at okhttp3.internal.connection.RealRoutePlanner.planConnect$okhttp(RealRoutePlanner.kt:170)
+	at okhttp3.internal.connection.RealRoutePlanner.plan(RealRoutePlanner.kt:77)
+	at okhttp3.internal.connection.FastFallbackExchangeFinder.launchTcpConnect(FastFallbackExchangeFinder.kt:122)
+	at okhttp3.internal.connection.FastFallbackExchangeFinder.find(FastFallbackExchangeFinder.kt:64)
+	at okhttp3.internal.connection.RealCall.initExchange$okhttp(RealCall.kt:306)
+	at okhttp3.internal.connection.ConnectInterceptor.intercept(ConnectInterceptor.kt:32)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at okhttp3.internal.cache.CacheInterceptor.intercept(CacheInterceptor.kt:98)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at okhttp3.internal.http.BridgeInterceptor.intercept(BridgeInterceptor.kt:83)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at okhttp3.internal.http.RetryAndFollowUpInterceptor.intercept(RetryAndFollowUpInterceptor.kt:72)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at okhttp3.logging.HttpLoggingInterceptor.intercept(HttpLoggingInterceptor.kt:249)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at io.sentry.okhttp.SentryOkHttpInterceptor.intercept(SentryOkHttpInterceptor.kt:123)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at au.com.shiftyjelly.pocketcasts.servers.interceptors.InternationalizationInterceptor.intercept(InternationalizationInterceptor.kt:25)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at au.com.shiftyjelly.pocketcasts.servers.di.InterceptorModule.internalUserAgentInterceptor$lambda$0(InterceptorModule.kt:58)
+	at au.com.shiftyjelly.pocketcasts.servers.di.InterceptorModule$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at au.com.shiftyjelly.pocketcasts.servers.di.InterceptorModule.cacheControlInterceptor$lambda$0(InterceptorModule.kt:63)
+	at au.com.shiftyjelly.pocketcasts.servers.di.InterceptorModule$$ExternalSyntheticLambda4.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at au.com.shiftyjelly.pocketcasts.servers.interceptors.HttpStatusUrlLoggingInterceptor.intercept(HttpStatusUrlLoggingInterceptor.kt:13)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.toClientInterceptor$lambda$0(Interceptors.kt:16)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda3.intercept(D8$$SyntheticClass:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.addInterceptors$lambda$0$0(Interceptors.kt:24)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt.$r8$lambda$wB4A5sGLsSP7iTb_PVZ4Xi-wXkw(Interceptors.kt:0)
+	at au.com.shiftyjelly.pocketcasts.servers.InterceptorsKt$$ExternalSyntheticLambda1.intercept(D8$$SyntheticClass:0)
+	at okhttp3.internal.http.RealInterceptorChain.proceed(RealInterceptorChain.kt:332)
+	at okhttp3.internal.connection.RealCall.getResponseWithInterceptorChain$okhttp(RealCall.kt:234)
+	at okhttp3.internal.connection.RealCall$AsyncCall.run(RealCall.kt:582)
+	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1100)
+	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:624)
+	at java.lang.Thread.run(Thread.java:1571)
+
+I 21/10 14:29:56.430 data sync done - 127.134400ms - cd345acb-f525-4a4b-b095-8bd73d751938
+I 21/10 14:29:56.446 Refresh - auto archive check - 15.227580ms
+I 21/10 14:29:56.454 Refresh - unsued podcasts check - 7.160400ms
+I 21/10 14:29:56.456 Refresh - notifications check - 1.076945ms
+I 21/10 14:29:56.459 Refresh - auto download check - 1.822591ms
+I 21/10 14:29:56.463 RefreshPodcastsTask - runNow - Finished Success {mOutputData=Data {}}
+I 21/10 14:30:00.940 Initiating auth token sync to Wear
+I 21/10 14:30:00.944 Sending auth token to Wear Data Layer (identity: au.com.shiftyjelly.pocketcasts.servers.sync.LoginIdentity$PocketCasts@a70acfa)
+I 21/10 14:30:26.401 seq=45 elapsed_ms=430665223 unix_ms=1792564226390 pid=5094 event=Window reason=Backgrounded source=Foreground window=1 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 14:30:26.405 seq=46 elapsed_ms=430665233 unix_ms=1792564226399 pid=5094 event=Gate reason=Observed source=Gate window=null prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=null requested_window=null request_id=- prior_gate=15 gate=15 changed_rules=128 prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 14:30:33.617 seq=47 elapsed_ms=430672444 unix_ms=1792564233611 pid=5094 event=Window reason=RouteChanged source=ScoState window=1 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 14:30:33.621 seq=48 elapsed_ms=430672453 unix_ms=1792564233619 pid=5094 event=Window reason=RouteChanged source=CommunicationDevice window=1 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 14:30:33.657 seq=49 elapsed_ms=430672489 unix_ms=1792564233655 pid=5094 event=Eligibility reason=Observed source=ServiceObserver window=1 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=5 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=WakeWord mode=Off prior_capture=true capture=null route=Unknown availability=BluetoothA2dpOnly acquiring=false error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 14:30:34.345 Audio device removed: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 14:30:34.354 Audio device removed: AirPods Pro - Find My, Bluetooth sco (telephony)
+I 21/10 14:30:34.348 seq=50 elapsed_ms=430673175 unix_ms=1792564234341 pid=5094 event=Capture reason=EligibilityOff source=ServiceObserver window=1 prior_window=null prior_active=null active=null holds_before=null holds_after=null owner=6 requested_window=null request_id=- prior_gate=null gate=15 changed_rules=null prior_mode=WakeWord mode=Off prior_capture=true capture=false route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 14:30:34.364 seq=51 elapsed_ms=430673186 unix_ms=1792564234353 pid=5094 event=Window reason=RouteChanged source=Devices window=1 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 14:30:34.367 Audio device removed: AirPods Pro - Find My, Bluetooth a2dp
+I 21/10 14:30:34.367 seq=52 elapsed_ms=430673192 unix_ms=1792564234359 pid=5094 event=Window reason=RouteChanged source=Devices window=1 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0
+I 21/10 14:30:34.372 seq=53 elapsed_ms=430673204 unix_ms=1792564234371 pid=5094 event=Window reason=RouteChanged source=Devices window=1 prior_window=null prior_active=false active=false holds_before=0 holds_after=0 owner=null requested_window=null request_id=- prior_gate=null gate=null changed_rules=null prior_mode=null mode=null prior_capture=null capture=null route=null availability=null acquiring=null error_code=- feedback_kind=- terminal_origin=- dropped_before=0

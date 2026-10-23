@@ -1,0 +1,47 @@
+name: "Voice and cloud transport unit tests"
+
+# The voice module's Robolectric suite (47+ cases covering ASR engine, cloud route sink,
+# intent routing, spoken template resolution, and diagnostics) and the repositories
+# module's cloud transport tests (encoded frame serialization, WebSocket transport)
+# had no CI job running them. This wires both into every push and PR so regressions
+# are caught without requiring an emulator or secrets.
+on:
+  push:
+  pull_request:
+
+jobs:
+  voice-unit-tests:
+    name: "voice:testDebugUnitTest"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Run voice module Robolectric unit tests
+        shell: bash
+        run: set -o pipefail; ./gradlew :modules:services:voice:testDebugUnitTest --no-daemon --info 2>&1 | tee voice-test-output.log
+      - name: Upload test reports and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-test-reports
+          path: |
+            modules/services/voice/build/reports/tests/testDebugUnitTest/
+            modules/services/voice/build/test-results/testDebugUnitTest/
+            voice-test-output.log
+
+  cloud-transport-tests:
+    name: "repositories:cloud transport tests"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Run cloud transport and encoding tests
+        run: ./gradlew :modules:services:repositories:testDebugUnitTest --tests "*CloudTurnRouteTest*" --tests "*WebSocketCloudTurnTransport*" --no-daemon

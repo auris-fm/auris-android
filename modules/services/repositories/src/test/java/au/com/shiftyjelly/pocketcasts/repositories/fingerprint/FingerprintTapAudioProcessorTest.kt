@@ -9,9 +9,13 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.mockito.kotlin.any
 import org.mockito.kotlin.argumentCaptor
+import org.mockito.kotlin.atLeastOnce
+import org.mockito.kotlin.clearInvocations
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
+import org.mockito.kotlin.never
 import org.mockito.kotlin.verify
 import org.mockito.kotlin.verifyNoInteractions
 
@@ -25,18 +29,53 @@ class FingerprintTapAudioProcessorTest {
         flush(AudioProcessor.StreamMetadata.DEFAULT)
     }
 
+    // LIFECYCLE CONTRACT (4235652501, @reviewer 7fc5a3b8): the processor is ALWAYS configured -- a
+    // NOT_SET configuration bypasses it entirely and would make a capture session that starts during
+    // playback unable to activate it. Forwarding is gated per buffer instead.
     @Test
-    fun `stays inactive when disabled`() {
+    fun `always configured, whatever the static flag`() {
         val processor = FingerprintTapAudioProcessor(tap, isEnabled = { false })
-        assertSame(AudioProcessor.AudioFormat.NOT_SET, processor.configure(format))
-        assertFalse(processor.isActive)
+        assertSame(format, processor.configure(format))
+        assertTrue(processor.isActive)
+        val processorEnabled = FingerprintTapAudioProcessor(tap, isEnabled = { true })
+        assertSame(format, processorEnabled.configure(format))
     }
 
     @Test
-    fun `keeps the input format when enabled`() {
-        val processor = FingerprintTapAudioProcessor(tap, isEnabled = { true })
-        assertSame(format, processor.configure(format))
-        assertTrue(processor.isActive)
+    fun `capture starting during playback begins forwarding on the next buffer`() {
+        val gate = EpisodeReferenceEligibility()
+        val processor = FingerprintTapAudioProcessor(tap, isEnabled = { false }, episodeReferenceEligibility = gate).apply {
+            configure(format)
+            flush(AudioProcessor.StreamMetadata.DEFAULT)
+        }
+        queueThrough(processor)
+        verify(tap, never()).onPcm(any(), any())
+        // Capture attaches MID-PLAYBACK: the very next buffer is forwarded.
+        gate.setCaptureActive(true)
+        queueThrough(processor)
+        verify(tap, atLeastOnce()).onPcm(any(), any())
+    }
+
+    @Test
+    fun `capture teardown stops forwarding without reconfiguration`() {
+        val gate = EpisodeReferenceEligibility()
+        gate.setCaptureActive(true)
+        val processor = FingerprintTapAudioProcessor(tap, isEnabled = { false }, episodeReferenceEligibility = gate).apply {
+            configure(format)
+            flush(AudioProcessor.StreamMetadata.DEFAULT)
+        }
+        queueThrough(processor)
+        verify(tap, atLeastOnce()).onPcm(any(), any())
+        gate.setCaptureActive(false)
+        clearInvocations(tap)
+        queueThrough(processor)
+        verify(tap, never()).onPcm(any(), any())
+    }
+
+    private fun queueThrough(processor: FingerprintTapAudioProcessor) {
+        val buffer = ByteBuffer.allocate(16)
+        processor.queueInput(buffer)
+        processor.getOutput().position(0)
     }
 
     @Test

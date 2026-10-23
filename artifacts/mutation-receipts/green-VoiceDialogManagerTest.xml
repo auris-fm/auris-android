@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManagerTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-10-20T15:17:28.829Z" hostname="MacBook-Pro.local" time="0.021">
+  <properties/>
+  <testcase name="begin A complete B carries B on the serialized cloud wire" classname="au.com.shiftyjelly.pocketcasts.voicecontrol.dialog.VoiceDialogManagerTest" time="0.019"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

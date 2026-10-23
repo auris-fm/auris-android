@@ -31,6 +31,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.mockito.kotlin.any
+import org.mockito.kotlin.anyOrNull
 import org.mockito.kotlin.eq
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.never
@@ -379,6 +380,9 @@ class Media3SessionCallbackTest {
         verify(playbackManager).skipForwardSuspend(
             sourceView = any(),
             jumpAmountSeconds = eq(30),
+            // A hardware-button skip is episode-INDEPENDENT: it carries no expected episode, so the
+            // widened signature's binding is null here.
+            expectedEpisodeUuid = anyOrNull(),
         )
     }
 
@@ -405,6 +409,7 @@ class Media3SessionCallbackTest {
         verify(playbackManager).skipBackwardSuspend(
             sourceView = any(),
             jumpAmountSeconds = eq(10),
+            expectedEpisodeUuid = anyOrNull(),
         )
     }
 
@@ -420,6 +425,9 @@ class Media3SessionCallbackTest {
         verify(playbackManager).skipForwardSuspend(
             sourceView = any(),
             jumpAmountSeconds = eq(30),
+            // A hardware-button skip is episode-INDEPENDENT: it carries no expected episode, so the
+            // widened signature's binding is null here.
+            expectedEpisodeUuid = anyOrNull(),
         )
     }
 
@@ -433,6 +441,7 @@ class Media3SessionCallbackTest {
         verify(playbackManager).skipBackwardSuspend(
             sourceView = any(),
             jumpAmountSeconds = eq(10),
+            expectedEpisodeUuid = anyOrNull(),
         )
     }
 

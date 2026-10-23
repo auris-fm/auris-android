@@ -3,6 +3,8 @@ package au.com.shiftyjelly.pocketcasts.voicecontrol.audio
 import android.Manifest
 import android.content.Context
 import androidx.annotation.RequiresPermission
+import au.com.shiftyjelly.pocketcasts.repositories.fingerprint.EpisodeReferenceEligibility
+import au.com.shiftyjelly.pocketcasts.voicecontrol.BuildConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -26,11 +28,81 @@ import timber.log.Timber
 class MicrophoneCapture @Inject constructor(
     @ApplicationContext private val context: Context,
     private val hardware: CaptureHardware,
+    private val episodeReferenceEligibility: EpisodeReferenceEligibility,
 ) {
     companion object {
         internal const val SAMPLE_RATE_HZ = 16_000
         internal const val CHANNELS = 1
         internal const val BYTES_PER_SAMPLE = 2
+
+        /**
+         * Whether libonnxruntime.so is already loaded in this process. Exposed so a test can assert
+         * that capture succeeds without wake/embedding/transcriber setup having loaded it first.
+         */
+        fun isOnnxRuntimeLoaded(): Boolean = OboeNative.nativeIsOrtLoaded()
+
+        /**
+         * Frames the native VAD has consumed from capture since it started. Lets a test assert that
+         * captured audio actually reaches the VAD, which a liveness check cannot show in silence.
+         */
+        fun framesConsumed(): Long = OboeNative.nativeGetFramesConsumed()
+
+        /**
+         * Whether the native capture stream itself is still running.
+         *
+         * Distinct from [MicrophoneCapture.isRecording], which reads `disposed` first and so reports
+         * "not recording" as soon as the wrapper is told to stop, whether or not the native stream was
+         * actually released. A test that asserts only `isRecording` cannot tell those apart; this can.
+         */
+        fun isNativeCapturing(): Boolean = OboeNative.nativeIsCapturing()
+
+        /**
+         * The device id the live capture stream is routed to, or null when no capture route is
+         * observed. Null is "unknown", not "no microphone": the platform reports no device for the
+         * live stream, and substituting an enumerated one would present availability as routing.
+         */
+        fun routedCaptureDeviceId(): Int? = OboeNative.nativeRoutedCaptureDeviceId().takeIf { it != OboeNative.NO_ROUTED_DEVICE }
+
+        /**
+         * Detector aggregates for capture diagnosis, or null when unavailable.
+         *
+         * Returns null in a release build, so the diagnostic cannot be reached from a shipped app: the
+         * boundary is a build property rather than a runtime flag a caller could flip. The values are a
+         * level, a probability and the detector's own state counters — no audio.
+         */
+        fun diagnostics(): VadDiagnostics? {
+            if (!BuildConfig.DEBUG) return null
+            val values = OboeNative.nativeGetVadDiagnostics()
+            if (values.size < 8) return null
+            return VadDiagnostics(
+                rms = values[0] / 1000.0,
+                score = values[1] / 1000.0f,
+                speechFrames = values[2].toInt(),
+                silentFrames = values[3].toInt(),
+                drainRemaining = values[4].toInt(),
+                gatePassed = values[5] == 1L,
+                isSpeech = values[6] == 1L,
+                speechActive = values[7] == 1L,
+            )
+        }
+
+        /** Starts or stops collection. Off by default, and inert in a release build. */
+        fun setDiagnosticsEnabled(enabled: Boolean) {
+            if (!BuildConfig.DEBUG) return
+            OboeNative.nativeSetVadDiagnosticsEnabled(enabled)
+        }
+
+        /** The detector's own view of the most recent frame. A level and its decision, never audio. */
+        data class VadDiagnostics(
+            val rms: Double,
+            val score: Float,
+            val speechFrames: Int,
+            val silentFrames: Int,
+            val drainRemaining: Int,
+            val gatePassed: Boolean,
+            val isSpeech: Boolean,
+            val speechActive: Boolean,
+        )
     }
 
     private val lock = Any()
@@ -60,6 +132,9 @@ class MicrophoneCapture @Inject constructor(
         val attached = engine.attachCapture()
         if (attached) {
             activeEngine = engine
+            // REFERENCE ELIGIBILITY (4235652501): capture is live, so the episode reference must be
+            // collected regardless of the transcripts feature toggle.
+            episodeReferenceEligibility.setCaptureActive(true)
             Timber.i("Using OboeCaptureEngine (event-driven VAD) generation=%d", generation)
         } else {
             activeEngine = null
@@ -102,12 +177,14 @@ class MicrophoneCapture @Inject constructor(
         hardware.closeInputCapture()
         currentGeneration = null
         activeEngine = null
+        episodeReferenceEligibility.setCaptureActive(false)
     }
 
     /**
      * Stop audio capture and release resources.
      */
     fun stopCapture() = synchronized(lock) {
+        episodeReferenceEligibility.setCaptureActive(false)
         activeEngine?.dispose()
     }
 
@@ -129,6 +206,10 @@ class MicrophoneCapture @Inject constructor(
         synchronized(lock) {
             if (activeEngine === engine) {
                 activeEngine = null
+                // Only the engine that still OWNS the active capture ends eligibility: a stale
+                // engine finishing while a replacement holds the session must not end it
+                // (@reviewer fe77cc24).
+                episodeReferenceEligibility.setCaptureActive(false)
             }
             if (currentGeneration == engine.generation) {
                 currentGeneration = null

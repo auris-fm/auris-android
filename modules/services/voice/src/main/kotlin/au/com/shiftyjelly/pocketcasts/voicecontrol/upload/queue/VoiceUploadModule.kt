@@ -136,18 +136,24 @@ object VoiceUploadModule {
         accountStartup: VoiceSharingAccountStartup,
         @UploadTriggerScope scope: CoroutineScope,
     ): UploadTrigger {
-        // THE production watcher: every projection move recomputes the mismatch set - entries whose
-        // admitted epoch no longer matches the LIVE identity - and cancels their live launch leases
-        // (which reach the registered Call). Bytes are NOT purged: retired-identity captures are
-        // RETAINED by the ownership contract, they just never complete a send.
+        // THE production watcher: polls the AUTHORITATIVE owner snapshot (account+session, under the
+        // owner lock) AND the epoch projection - a same-epoch account or session move must also enter
+        // the mismatch set (reviewer ffca25e6). Selection runs against the LEASES' admitted
+        // identities inside the store; bytes are NOT purged: retired-identity captures are RETAINED.
         val identityRevocationWatcher: suspend kotlinx.coroutines.CoroutineScope.() -> Unit = {
-            accountStartup.state.projection.collect { projection ->
-                val liveEpoch = projection?.enrollmentEpoch
-                val mismatched = store.readyEntries()
-                    .filter { it.enrollmentEpoch != liveEpoch }
-                    .map { it.captureId }
-                    .toSet()
-                store.cancelLaunchesIdentityMismatch(mismatched, "account-transition")
+            var lastAccount: String? = null
+            var lastSession: Long? = null
+            var lastEpoch: String? = null
+            while (true) {
+                val snap = accountStartup.authoritySnapshot()
+                val epoch = accountStartup.state.projection.value?.enrollmentEpoch
+                if (snap.accountName != lastAccount || snap.session != lastSession || epoch != lastEpoch) {
+                    lastAccount = snap.accountName
+                    lastSession = snap.session
+                    lastEpoch = epoch
+                    store.cancelLaunchesIdentityMismatch(snap.accountName, snap.session, epoch, "account-transition")
+                }
+                kotlinx.coroutines.delay(POLL_INTERVAL_MS)
             }
         }
         return UploadTrigger(assembly, scope, POLL_INTERVAL_MS, identityRevocationWatcher)

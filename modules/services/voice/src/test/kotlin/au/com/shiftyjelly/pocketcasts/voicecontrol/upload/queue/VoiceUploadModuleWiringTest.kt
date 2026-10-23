@@ -315,16 +315,14 @@ class VoiceUploadModuleWiringTest {
         holdRequests = hold
         val response = java.util.concurrent.atomic.AtomicReference<ContributionRetryCaller.PollResult>()
 
-        // Live epoch flips at the transition; the watcher (the production shape, a polling loop here)
-        // recomputes the mismatch set and cancels the live lease - which reaches the registered Call.
+        // Live authority flips at the transition; the watcher (the production shape, a polling loop
+        // here) compares the FULL live account/session/epoch against the LEASES' admitted identities.
+        val liveAccount = java.util.concurrent.atomic.AtomicReference("a@x")
+        val liveSession = java.util.concurrent.atomic.AtomicReference(7L)
         val liveEpoch = java.util.concurrent.atomic.AtomicReference("epoch-1")
         val watcher: suspend kotlinx.coroutines.CoroutineScope.() -> Unit = {
             while (true) {
-                val mismatched = store.readyEntries()
-                    .filter { it.enrollmentEpoch != liveEpoch.get() }
-                    .map { it.captureId }
-                    .toSet()
-                store.cancelLaunchesIdentityMismatch(mismatched, "account-transition")
+                store.cancelLaunchesIdentityMismatch(liveAccount.get(), liveSession.get(), liveEpoch.get(), "account-transition")
                 kotlinx.coroutines.delay(10)
             }
         }
@@ -357,8 +355,9 @@ class VoiceUploadModuleWiringTest {
             val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
             while (requests.get() < 1 && System.nanoTime() < deadline) Thread.sleep(10)
             assertEquals("the request started (call is registered and in flight)", 1, requests.get())
-            // THE TRANSITION, deterministically after registration: the account moves to epoch-2.
-            liveEpoch.set("epoch-2")
+            // THE TRANSITION, deterministically after registration: SAME epoch, moved SESSION - an
+            // epoch-only filter would miss this; the full-identity comparison must cancel it.
+            liveSession.set(9L)
             uploadThread.join(15_000)
             val result = response.get()
             assertTrue("the transition reached the REGISTERED call: the attempt ENDED", result != null)

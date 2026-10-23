@@ -1468,7 +1468,8 @@ class ContributionStore(
                     null
                 } else {
                     // Register FIRST so a revocation triggered by the hook can cancel this very lease.
-                    val lease = LaunchLease(generation, captureId)
+                    val entry = memoryEntries[captureId]
+                    val lease = LaunchLease(generation, captureId, entry?.enrollmentAccount, entry?.enrollmentSession, entry?.enrollmentEpoch ?: "")
                     synchronized(launchLeasesLock) { launchLeases.add(lease) }
                     hooks.beforeTransportLaunch?.invoke(generation, captureId)
                     // The hook may have revoked: a cancelled lease is NOT a valid launch authorization.
@@ -1484,7 +1485,14 @@ class ContributionStore(
     )
 
     /** A launched attempt whose authorization may be withdrawn while it is in flight. */
-    class LaunchLease internal constructor(val generation: Long, val captureId: String) {
+    class LaunchLease internal constructor(
+        val generation: Long,
+        val captureId: String,
+        /** The FULL admitted identity at attempt start - the revocation source compares THIS, never a readyEntries re-read. */
+        val admittedAccount: String?,
+        val admittedSession: Long?,
+        val admittedEpoch: String,
+    ) {
         private val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
 
         /**
@@ -1542,14 +1550,29 @@ class ContributionStore(
      * purged (a retired identity's capture is RETAINED by the ownership contract - it must simply
      * never complete a send). Returns the cancelled capture ids for control observability.
      */
-    fun cancelLaunchesIdentityMismatch(mismatchedCaptureIds: Set<String>, reason: String): Set<String> {
-        if (mismatchedCaptureIds.isEmpty()) return emptySet()
+    fun cancelLaunchesIdentityMismatch(
+        liveAccount: String?,
+        liveSession: Long?,
+        liveEpoch: String?,
+        reason: String,
+    ): Set<String> {
         val cancelledIds = mutableSetOf<String>()
         synchronized(launchLeasesLock) {
             val iterator = launchLeases.iterator()
             while (iterator.hasNext()) {
                 val lease = iterator.next()
-                if (lease.captureId in mismatchedCaptureIds) {
+                // Compare the LEASE'S OWN admitted identity (reviewer ffca25e6) against the LIVE
+                // authority - NOT a readyEntries re-read, whose coverage hold can return nothing
+                // while live leases still exist. Any component mismatch cancels; null live
+                // components (no live account/token) cancel everything attempted under one.
+                val mismatched = when {
+                    liveAccount == null || liveSession == null -> true
+                    lease.admittedAccount != null && lease.admittedAccount != liveAccount -> true
+                    lease.admittedSession != null && lease.admittedSession != liveSession -> true
+                    lease.admittedEpoch != liveEpoch -> true
+                    else -> false
+                }
+                if (mismatched) {
                     iterator.remove()
                     lease.cancel() // reaches the live CALL, not just a flag
                     cancelledIds.add(lease.captureId)

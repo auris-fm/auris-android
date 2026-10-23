@@ -690,6 +690,83 @@ class VoiceUploadModuleWiringTest {
     }
 
     @Test
+    fun `a SCOPED 401 (processUnauthorized) with no session move cancels an ALREADY-REGISTERED in-flight call`() {
+        val root = tmp.newFolder("wiring-401-cancel")
+        val store = newStore(root)
+        val id = UUID.randomUUID().toString()
+        prepareCapture(store, id)
+        requests.set(0)
+        responseStatus = 201
+        responseBody = receiptFor(store, id, "accepted")
+        val port = startServer()
+        val hold = java.util.concurrent.CountDownLatch(1)
+        holdRequests = hold
+        val response = java.util.concurrent.atomic.AtomicReference<ContributionRetryCaller.PollResult>()
+
+        val owner = WatchOwner("a@x", 7L)
+        val (binding, accountState) = realConnector(owner)
+        val token = accountState.sessionStarted(7L)
+        val ticket = accountState.beginOperation(token, requireProjection = false, ownerSession = 7L)!!
+        assertTrue(
+            accountState.applyOutcome(
+                token,
+                ticket,
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.projectionJson(epoch = "epoch-1"),
+                ownerSession = 7L,
+            ),
+        )
+        val watcher = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.IdentityRevocationWatchers.production(
+            binding,
+            accountState,
+            { owner.authoritySnapshot() },
+            { accountState.projection.value?.enrollmentEpoch },
+            store,
+        )
+        val assembly = ContributionUploadAssembly(
+            store = store,
+            transport = ContributionUploadTransport(
+                endpoint = "http://127.0.0.1:$port/v1/contributions",
+                authorization = { "Bearer t" },
+                callTimeoutMs = 30_000,
+            ),
+            captureFor = { captureId ->
+                store.durableCapture(captureId)?.let {
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession)
+                }
+            },
+            clock = { 51_000_000L },
+            policyAllows = { true },
+            networkAvailable = { true },
+            identityHolds = { true },
+            credentialFor = { admitted ->
+                UploadIdentityAuthority.LiveCredential("Bearer-A", admitted.account ?: "a@x", admitted.session ?: 7L, admitted.epoch)
+            },
+            launchIdentityCheck = { true },
+        )
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO + kotlinx.coroutines.SupervisorJob())
+        try {
+            val trigger = UploadTrigger(assembly, scope, intervalMs = 60_000L, identityRevocationWatcher = watcher)
+            trigger.start()
+            val uploadThread = Thread { runCatching { response.set(assembly.poll()) } }
+            uploadThread.start()
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+            while (requests.get() < 1 && System.nanoTime() < deadline) Thread.sleep(10)
+            assertEquals("the request started (call is registered and in flight)", 1, requests.get())
+            // THE REAL SCOPED 401 path: same account, same session, no binding tail - the
+            // projection-loss notification must fire the full-identity cancel.
+            assertTrue(accountState.processUnauthorized(token, ticket))
+            assertNull("the projection is lost", accountState.projection.value)
+            uploadThread.join(15_000)
+            val result = response.get()
+            assertTrue("the 401 loss reached the REGISTERED call", result != null)
+            assertTrue("the capture is retained", store.readyEntries().any { it.captureId == id })
+        } finally {
+            hold.countDown()
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `a DISABLED policy puts nothing on the network and settles nothing`() {
         val root = tmp.newFolder("wiring-disabled")
         val store = newStore(root)

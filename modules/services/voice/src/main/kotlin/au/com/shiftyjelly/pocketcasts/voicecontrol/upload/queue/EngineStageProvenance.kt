@@ -49,10 +49,21 @@ object EngineStageProvenance {
             } else {
                 StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("provider_error")))
             },
-            StageName.Translation to if (recognized == null) {
-                StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text")))
-            } else {
-                StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("source_language_target_language")))
+            // TRANSLATION: only OBSERVED truth (reviewer 8288ac15). A produced result is
+            // completed with the observed target language; no observation at all is UNKNOWN —
+            // a missing observation never justifies an invented not_run reason.
+            StageName.Translation to when {
+                candidate.translation?.producedResult == true -> {
+                    val target = candidate.translation?.targetLanguage
+                    StageEntry(
+                        StageState.Completed,
+                        if (target != null) mapOf("translated_text" to RecordNode.Str(target)) else emptyMap(),
+                    )
+                }
+
+                candidate.translation != null -> StageEntry(StageState.NotRun, mapOf("reason" to RecordNode.Str("no_text")))
+
+                else -> StageEntry(StageState.Unknown)
             },
             StageName.Routing to if (routed != null) {
                 StageEntry(StageState.Completed, mapOf("predicted_intent" to RecordNode.Str(routed.intentCategory)))

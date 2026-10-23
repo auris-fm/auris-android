@@ -42,16 +42,22 @@ class RetentionPublishTrigger(
     /** Stage outcomes for THIS candidate, supplied by the pipeline at publish time. */
     private val stagesProvider: (RetainedCandidate) -> List<Pair<StageName, StageEntry>>,
     /**
-     * THE one coherent live identity read (account, session, enrollment-epoch), taken under the
-     * owner transaction by the composition; null when no live identity exists at all.
+     * THE ATOMIC PUBLICATION SECTION (reviewer 8288ac15): [block] runs ENTIRELY inside ONE owner
+     * transaction — validation of the frozen tuple AND the producer's own live reads — so no
+     * identity transition can interleave between the check and the commit. The trigger passes
+     * the frozen tuple as the IMMUTABLE publication owner: [block] returns false WITHOUT any
+     * reservation when the live coherent identity does not match it; it commits only when it does.
      */
-    private val coherentLiveIdentity: () -> LiveIdentity?,
+    private val publishUnderOwner: ((FrozenOwner, () -> Boolean) -> Boolean)? = null,
     /** Dispatch body; returns the Job (or null for synchronous test dispatch). */
     private val dispatch: (() -> Unit) -> Job?,
 ) {
 
     /** One coherent identity read: all three fields from ONE owner-transaction snapshot. */
     data class LiveIdentity(val account: String, val session: Long, val enrollmentEpoch: String?)
+
+    /** THE immutable publication owner: the tuple FROZEN at capture start. */
+    data class FrozenOwner(val account: String, val session: Long, val enrollmentEpoch: String)
 
     /** Attach this trigger to the sink. Calling twice is refused (one owner, one trigger). */
     fun attach() {
@@ -86,28 +92,35 @@ class RetentionPublishTrigger(
             val pcm = candidate.pcm
             // GUARD 1: terminal executed outcome with retained audio.
             if (candidate.outcome !is CollectionOutcome.Executed || pcm == null) return
-            // GUARD 2: FULL frozen tuple vs ONE coherent live read — every field must match.
+            // GUARD 2: the frozen tuple IS the publication owner; validation and the producer's
+            // live reads happen inside ONE owner transaction (no check-then-use window).
             if (issued == null || issued.enrollmentEpoch == null) return
-            val live = coherentLiveIdentity() ?: return
-            if (live.account != issued.accountName ||
-                live.session != issued.sessionGeneration ||
-                live.enrollmentEpoch != issued.enrollmentEpoch
-            ) {
-                return
-            }
+            val frozen = FrozenOwner(
+                account = issued.accountName ?: return,
+                session = issued.sessionGeneration,
+                enrollmentEpoch = issued.enrollmentEpoch,
+            )
             // GUARD 3: observed per-capture model provenance is record truth.
             val asrModel = candidate.context.asrModel as? ModelRef.Named ?: return
-            val translationModel = candidate.context.translationModel
+            // TRANSLATION provenance comes from the OBSERVED record on the candidate, never
+            // from the frozen context (which cannot know whether translation ran).
+            val translationModel = candidate.translation?.model ?: ModelRef.None
             val chunks = listOf(pcm to pcm.size)
-            producer.publish(
-                id.toString(),
-                issued.enrollmentEpoch,
-                candidate.sampleRateHz,
-                chunks,
-                fixedModels + listOf("asr" to asrModel, "translation" to translationModel),
-                stagesProvider(candidate),
-            )
-            // null return = store/producer refused: the capture ends record-less by design.
+            val commit = {
+                producer.publish(
+                    id.toString(),
+                    frozen.enrollmentEpoch,
+                    candidate.sampleRateHz,
+                    chunks,
+                    fixedModels + listOf("asr" to asrModel, "translation" to translationModel),
+                    stagesProvider(candidate),
+                )
+                true
+            }
+            // ATOMIC section: identity validation + reservation/prepare in the SAME acquisition.
+            // A missing binding FAILS CLOSED; false = no matching live owner: record-less.
+            val section = publishUnderOwner ?: return
+            section(frozen) { commit() }
         } finally {
             sink.releaseRetained(id)
         }

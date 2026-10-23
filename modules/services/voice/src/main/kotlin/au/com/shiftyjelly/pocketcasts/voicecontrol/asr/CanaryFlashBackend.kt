@@ -136,9 +136,9 @@ class CanaryFlashBackend @Inject constructor(
 
     override val requiredModel: ModelSpec = ModelSpec(
         files = listOf(
-            ModelFile(url = "$CANARY_BASE_URL/$CANARY_ENCODER_FILENAME", filename = CANARY_ENCODER_FILENAME),
-            ModelFile(url = "$CANARY_BASE_URL/$CANARY_DECODER_FILENAME", filename = CANARY_DECODER_FILENAME),
-            ModelFile(url = "$CANARY_BASE_URL/$CANARY_TOKENS_FILENAME", filename = CANARY_TOKENS_FILENAME),
+            ModelFile(url = "$CANARY_BASE_URL/$CANARY_ENCODER_FILENAME", filename = CANARY_ENCODER_FILENAME, manifestId = CANARY_MANIFEST_ID),
+            ModelFile(url = "$CANARY_BASE_URL/$CANARY_DECODER_FILENAME", filename = CANARY_DECODER_FILENAME, manifestId = CANARY_MANIFEST_ID),
+            ModelFile(url = "$CANARY_BASE_URL/$CANARY_TOKENS_FILENAME", filename = CANARY_TOKENS_FILENAME, manifestId = CANARY_MANIFEST_ID),
         ),
         targetDir = CANARY_TARGET_DIR,
     )
@@ -180,6 +180,9 @@ class CanaryFlashBackend @Inject constructor(
         private const val CANARY_DECODER_FILENAME = "decoder.int8.onnx"
         private const val CANARY_TOKENS_FILENAME = "tokens.txt"
         private const val CANARY_TARGET_DIR = "canary-flash-model"
+
+        /** The model's own published manifest identity (repo/version tag), not a filename. */
+        private const val CANARY_MANIFEST_ID = "sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8"
 
         private val SUPPORTED_SOURCE_LANGUAGES = setOf("en", "de", "es", "fr")
 

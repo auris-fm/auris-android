@@ -182,24 +182,17 @@ class VoiceAsrEngine @Inject constructor(
                             // ownership then transfers to the sink. Refusal allocates NOTHING and
                             // leaves the recognition buffer untouched.
                             val initialSize = voiceAudioProcessor.speechPcmSize()
-                            // PER-CAPTURE MODEL PROVENANCE (reviewer 54635caa): the ACTUAL
-                            // selected backend's model identity, frozen with the context. The
-                            // translation provenance is the backend itself when it translates,
-                            // ML Kit when the standalone stage will run, honest None otherwise.
+                            // PER-CAPTURE MODEL PROVENANCE (reviewers 54635caa/8288ac15): the
+                            // ACTUAL selected backend's model identity, frozen with the context.
+                            // The VERSION is the model's own manifest identity, never a filename.
                             val spec = backend.requiredModel
                             val asrRef = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named(
                                 spec.targetDir,
-                                spec.files.firstOrNull()?.filename ?: "",
+                                spec.files.firstOrNull { it.manifestId.isNotEmpty() }?.manifestId ?: "",
                             )
-                            // ML Kit's per-language model version is NOT observed at capture
-                            // time — the honest value is absence (None), never a fixed label.
-                            val translationRef =
-                                if (backend.capabilities.canTranslateToEnglish) {
-                                    asrRef
-                                } else {
-                                    au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None
-                                }
-                            val admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef, translationRef)
+                            // Translation provenance is NOT knowable at capture start (the stage may
+                            // or may not run for this utterance); it is recorded when observed.
+                            val admission = segmentObserver.speechStartedAdmitting(captureSessionIncarnation, currentRouteClass, initialSize, asrRef)
                             openContext = admission?.context
                             if (admission != null) {
                                 // Lease-protected initial allocation (reviewers 23cae70e b4 /
@@ -326,6 +319,8 @@ class VoiceAsrEngine @Inject constructor(
      */
     private data class TranscribeRequest(
         val capture: CaptureContext?,
+        /** Records the ACTUAL translation provenance when the stage runs for this capture. */
+        val noteTranslation: (au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance) -> Unit = {},
         val samples: FloatArray,
         val wakePositive: Boolean,
         val completionSample: Int = 0,
@@ -417,6 +412,7 @@ class VoiceAsrEngine @Inject constructor(
             Timber.i("[VoicePipeline] wake %s → ASR (hit, mode=%s)", wakeCmp, mode)
             return TranscribeRequest(
                 capture = capture,
+                noteTranslation = { provenance -> capture?.let { segmentObserver.noteTranslation(it, provenance) } },
                 samples = floatSamples,
                 speechEndSample = segment.speechEndSample,
                 sampleRateHz = segment.frames.firstOrNull()?.sampleRateHz ?: 16000,
@@ -429,7 +425,12 @@ class VoiceAsrEngine @Inject constructor(
         return when (mode) {
             ListeningMode.Continuous -> {
                 Timber.i("[VoicePipeline] wake %s → ASR (grace/continuous)", wakeCmp)
-                TranscribeRequest(capture = capture, samples = floatSamples, wakePositive = false)
+                TranscribeRequest(
+                    capture = capture,
+                    noteTranslation = { provenance -> capture?.let { segmentObserver.noteTranslation(it, provenance) } },
+                    samples = floatSamples,
+                    wakePositive = false,
+                )
             }
 
             ListeningMode.WakeWord -> {
@@ -500,6 +501,8 @@ class VoiceAsrEngine @Inject constructor(
         // Use the wake-trimmed transcript from LFM's WakeTranscriptTrimmer.
         val trimmedResult = asrResult.copy(text = transcript)
         val routePrep = prepareRoutingInput(trimmedResult, b)
+        // OBSERVED translation provenance travels with the capture (never claimed when absent).
+        routePrep.translation?.let(request.noteTranslation)
         // Source-first: lang + first quote are ASR; translate note carries the English result.
         // Printing post-translate fields first made lines like
         //   lang=en 'Play.' translate=yue→en '播放。'
@@ -702,6 +705,9 @@ class VoiceAsrEngine @Inject constructor(
                 ),
                 translateNote = "translate=skip(backend)",
                 dropWithError = false,
+                // The BACKEND itself produced English: its model identity IS the translation
+                // provenance, and a result was produced by definition of this path.
+                translation = requestTranslationProvenance(backend),
             )
         }
         if (detected == "en") {
@@ -756,13 +762,32 @@ class VoiceAsrEngine @Inject constructor(
             ),
             translateNote = "translate=$detected→en '$translated'",
             dropWithError = false,
+            // A translated RESULT was observed; the on-device model's own identity/version is not
+            // observable here, so the model is honest absence rather than a fixed label.
+            translation = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance(
+                model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
+                producedResult = true,
+                targetLanguage = "en",
+            ),
         )
     }
+
+    /** The selected backend's manifest identity, when it is the component translating. */
+    private fun requestTranslationProvenance(backend: AsrBackend) = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance(
+        model = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.Named(
+            backend.requiredModel.targetDir,
+            backend.requiredModel.files.firstOrNull { it.manifestId.isNotEmpty() }?.manifestId ?: "",
+        ),
+        producedResult = true,
+        targetLanguage = "en",
+    )
 
     private data class RoutePrep(
         val input: IntentRoutingInput?,
         val translateNote: String?,
         val dropWithError: Boolean,
+        /** OBSERVED translation provenance for this capture (reviewer 8288ac15); null = none ran. */
+        val translation: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance? = null,
     )
 
     fun stop() {

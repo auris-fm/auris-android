@@ -211,15 +211,13 @@ object VoiceUploadModule {
             producer,
             fixedModels = ENGINE_FIXED_MODEL_PROVENANCE,
             stagesProvider = EngineStageProvenance::stagesFor,
-            // ONE coherent identity read under the REAL owner transaction: account/session from
-            // the ownership snapshot, epoch from the projection — all inside the same block.
-            coherentLiveIdentity = {
+            // THE ATOMIC PUBLICATION SECTION (reviewer 8288ac15): the frozen tuple is compared
+            // against ONE coherent live read AND the producer's own identity reads + reservation +
+            // prepare+commit run inside the SAME owner transaction — no check-then-use window.
+            publishUnderOwner = { frozen, commit ->
                 accountStartup.validateUnderOwnerTransaction { snap ->
-                    RetentionPublishTrigger.LiveIdentity(
-                        snap.accountName ?: "",
-                        snap.session,
-                        accountStartup.state.projection.value?.enrollmentEpoch,
-                    )
+                    val epoch = accountStartup.state.projection.value?.enrollmentEpoch
+                    if (snap.accountName == frozen.account && snap.session == frozen.session && epoch == frozen.enrollmentEpoch) commit() else false
                 }
             },
             dispatch = { body -> scope.launch { body() } },

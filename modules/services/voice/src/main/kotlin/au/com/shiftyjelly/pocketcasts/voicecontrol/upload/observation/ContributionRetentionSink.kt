@@ -68,6 +68,9 @@ class RetainedCandidate internal constructor(val context: CaptureContext) {
      * Executed join overwrites. Terminal joins are still refused after Executed/NotCollected.
      */
     val stageOutcomes = mutableListOf<CollectionOutcome>()
+
+    /** The ACTUAL translation observed for this capture (null = none ran / not observed). */
+    var translation: TranslationProvenance? = null
     var incrementalSamplesAccounted: Long = 0L
     var bytesCharged: Long = 0L
 }
@@ -514,6 +517,17 @@ class ContributionRetentionSink(
     }
 
     fun retainedCount(): Int = synchronized(lock) { candidates.size }
+
+    /**
+     * Records the ACTUAL translation provenance observed for a capture (reviewer 8288ac15).
+     * The sink is the owner of retained state, so the observation is stored beside the candidate
+     * rather than mutating an already-issued context identity.
+     */
+    fun noteTranslation(captureId: UUID, provenance: TranslationProvenance): Boolean = synchronized(lock) {
+        val candidate = candidates.firstOrNull { it.context.captureId == captureId } ?: return false
+        candidate.translation = provenance
+        true
+    }
 
     /** Test visibility: the live candidate for a retained capture, WITHOUT copying its PCM. */
     fun retainedCandidateForTest(captureId: UUID): RetainedCandidate? = synchronized(lock) { candidates.firstOrNull { it.context.captureId == captureId } }

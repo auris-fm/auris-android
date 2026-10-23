@@ -114,11 +114,13 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
                 url = "$SENSEVOICE_BASE_URL/$SENSEVOICE_MODEL_FILENAME",
                 filename = SENSEVOICE_MODEL_FILENAME,
                 sha256 = "",
+                manifestId = SENSEVOICE_MANIFEST_ID,
             ),
             ModelFile(
                 url = "$SENSEVOICE_BASE_URL/$SENSEVOICE_TOKENS_FILENAME",
                 filename = SENSEVOICE_TOKENS_FILENAME,
                 sha256 = "",
+                manifestId = SENSEVOICE_MANIFEST_ID,
             ),
         ),
         targetDir = "sensevoice-model",
@@ -139,6 +141,9 @@ class SenseVoiceBackend @Inject constructor() : AsrBackend {
     companion object {
         private const val SENSEVOICE_BASE_URL =
             "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main"
+
+        /** The model's own published manifest identity (repo/version tag), not a filename. */
+        private const val SENSEVOICE_MANIFEST_ID = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
         private const val SENSEVOICE_MODEL_FILENAME = "model.int8.onnx"
         private const val SENSEVOICE_TOKENS_FILENAME = "tokens.txt"
 

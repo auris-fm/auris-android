@@ -6,6 +6,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.Collection
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.ContributionRetentionSink
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuthority
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.StageEntry
@@ -81,7 +82,6 @@ class EngineToProducerPublishTest {
         routeClass = "Bluetooth",
         issuedAuthority = authority,
         asrModel = asrModel,
-        translationModel = ModelRef.None,
     )
 
     private fun retainCapture(sink: ContributionRetentionSink, context: CaptureContext, samples: Int = 1600) {
@@ -124,7 +124,12 @@ class EngineToProducerPublishTest {
         producer(store, account = producerAccount, session = producerSession),
         fixedModels = fixedModels,
         stagesProvider = { stages },
-        coherentLiveIdentity = live,
+        publishUnderOwner = { frozen, commit ->
+            val now = live()
+            // ATOMIC: validate the frozen tuple and commit in ONE section; the barrier below
+            // can change identity BETWEEN trigger entry and this section.
+            if (now != null && now.account == frozen.account && now.session == frozen.session && now.enrollmentEpoch == frozen.enrollmentEpoch) commit() else false
+        },
         dispatch = dispatch,
     )
 
@@ -361,7 +366,10 @@ class EngineToProducerPublishTest {
             producer(storeRef),
             fixedModels = fixedModels,
             stagesProvider = { stages },
-            coherentLiveIdentity = { RetentionPublishTrigger.LiveIdentity("a@x", 7L, "epoch-1") },
+            publishUnderOwner = { frozen, commit ->
+                val now = RetentionPublishTrigger.LiveIdentity("a@x", 7L, "epoch-1")
+                if (now.account == frozen.account && now.session == frozen.session && now.enrollmentEpoch == frozen.enrollmentEpoch) commit() else false
+            },
             dispatch = { body ->
                 futures.add(
                     java.util.concurrent.Executors.newSingleThreadExecutor().submit {
@@ -405,8 +413,8 @@ class EngineToProducerPublishTest {
         val asr = byName.getValue(StageName.Asr)
         assertEquals(StageState.Completed, asr.state)
         assertEquals("skip this ad", (asr.fields.getValue("text") as RecordNode.Str).value)
-        // Translation without an observed on-device translation result:
-        assertEquals(StageState.NotRun, byName.getValue(StageName.Translation).state)
+        // Translation UNOBSERVED for this capture: honest unknown, never an invented not_run.
+        assertEquals(StageState.Unknown, byName.getValue(StageName.Translation).state)
         // REAL routing truth from the history Routed join (NOT overwritten to not_run):
         val routing = byName.getValue(StageName.Routing)
         assertEquals(StageState.Completed, routing.state)
@@ -432,5 +440,76 @@ class EngineToProducerPublishTest {
         upload.start()
         assertNotNull("runtime attachment must be established by the startup consumer", sink.onReadyForPublication)
         upload.start()
+    }
+
+    @Test
+    fun `identity transition between trigger entry and the atomic section cannot publish the old capture under a new owner`() {
+        // THE CHECK-THEN-USE WINDOW (reviewer 8288ac15): the capture is retained under A, the
+        // trigger body is entered while A is still live, and the identity flips to B BEFORE the
+        // atomic section runs. Because validation and commit share ONE section, the publish must
+        // refuse and leave NO record and NO reservation.
+        val root = tmp.newFolder("window")
+        val store = newStore(root)
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val ctx = context()
+        retainCapture(sink, ctx)
+        val live = java.util.concurrent.atomic.AtomicReference(RetentionPublishTrigger.LiveIdentity("a@x", 7L, "epoch-1"))
+        val bodyEntered = java.util.concurrent.CountDownLatch(1)
+        val flipDone = java.util.concurrent.CountDownLatch(1)
+        val trig = RetentionPublishTrigger(
+            sink,
+            producer(store, account = { live.get().account }, session = { live.get().session }),
+            fixedModels = fixedModels,
+            stagesProvider = { stages },
+            publishUnderOwner = { frozen, commit ->
+                // BARRIER: run the atomic section on another thread only after the identity
+                // flip is complete — the flip happens INSIDE the window.
+                bodyEntered.countDown()
+                flipDone.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                val now = live.get()
+                if (now.account == frozen.account && now.session == frozen.session && now.enrollmentEpoch == frozen.enrollmentEpoch) commit() else false
+            },
+            dispatch = { body ->
+                // Synchronous body: the flip (below) happens BEFORE the atomic section runs, so
+                // the window is exercised deterministically rather than raced.
+                body()
+                null
+            },
+        )
+        trig.attach()
+        val body = Thread {
+            bodyEntered.await(5, java.util.concurrent.TimeUnit.SECONDS)
+            live.set(RetentionPublishTrigger.LiveIdentity("b@y", 9L, "epoch-2"))
+            flipDone.countDown()
+        }
+        body.start()
+        assertTrue(sink.joinOutcome(CollectionOutcome.Executed(ctx.captureId, dispatchedWithoutThrowing = true)))
+        body.join(5000)
+        val deadline = System.currentTimeMillis() + 5000
+        while (sink.retainedCount() > 0 && System.currentTimeMillis() < deadline) Thread.sleep(20)
+
+        assertEquals("a moved capture must never be published", 0, store.readyEntries().size)
+        assertEquals(0L, sink.retainedBytes())
+        assertEquals(0, sink.retainedCount())
+    }
+
+    @Test
+    fun `observed translation provenance is recorded - backend-native, platform and absent`() {
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val ctx = context()
+        retainCapture(sink, ctx)
+        val candidate = sink.retainedCandidateForTest(ctx.captureId)!!
+        // No observation yet: translation is honest UNKNOWN (not an invented not_run reason).
+        assertEquals(StageState.Unknown, EngineStageProvenance.stagesFor(candidate).toMap().getValue(StageName.Translation).state)
+        // An OBSERVED produced result is completed with the observed target language.
+        assertTrue(
+            sink.noteTranslation(
+                ctx.captureId,
+                TranslationProvenance(ModelRef.Named("canary-flash-model", "sherpa-onnx-nemo-canary-180m-flash-en-es-de-fr-int8"), producedResult = true, targetLanguage = "en"),
+            ),
+        )
+        val observed = EngineStageProvenance.stagesFor(candidate).toMap().getValue(StageName.Translation)
+        assertEquals(StageState.Completed, observed.state)
+        assertEquals("en", (observed.fields.getValue("translated_text") as RecordNode.Str).value)
     }
 }

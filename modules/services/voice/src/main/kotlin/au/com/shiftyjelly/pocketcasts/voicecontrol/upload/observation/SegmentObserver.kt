@@ -67,22 +67,28 @@ class SegmentObserver(
     // opened — release never depends on "the currently open context".
     data class AdmissionHandle(val context: CaptureContext, val initialToken: ReservationToken?)
 
+    /** Records the ACTUAL translation observation for a retained capture (null = none). */
+    fun noteTranslation(
+        context: CaptureContext,
+        provenance: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance,
+    ) {
+        (sink as? ContributionRetentionSink)?.noteTranslation(context.captureId, provenance)
+    }
+
     fun speechStartedAdmitting(
         captureSession: Long,
         routeClass: String,
         producerSize: Int,
         asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef =
             au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
-        translationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef =
-            au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
     ): AdmissionHandle? = fenceGate.gate {
         val issued = issueAuthority() // under the shared primitive, no observer lock yet
         val permitted = gate.accepts(authority()) // same: decision read before the monitor
-        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted, asrModel, translationModel)?.let { AdmissionHandle(it, admissionToken) }
+        speechStartedAdmittingLocked(captureSession, routeClass, producerSize, issued, permitted, asrModel)?.let { AdmissionHandle(it, admissionToken) }
     }
 
-    private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int, issued: IssuedAuthority, permitted: Boolean, asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef, translationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef): CaptureContext? {
-        val context = CaptureContext(UUID.randomUUID(), captureSession, routeClass, issued, asrModel, translationModel)
+    private fun speechStartedAdmittingLocked(captureSession: Long, routeClass: String, producerSize: Int, issued: IssuedAuthority, permitted: Boolean, asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef): CaptureContext? {
+        val context = CaptureContext(UUID.randomUUID(), captureSession, routeClass, issued, asrModel)
         return synchronized(lock) {
             if (open != null || !permitted) return@speechStartedAdmittingLocked null
             cumulativeAccounted = 0

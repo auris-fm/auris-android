@@ -109,6 +109,7 @@ class WhisperCppBackend @Inject constructor() : AsrBackend {
                 url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin",
                 filename = "ggml-small-q5_1.bin",
                 sha256 = "",
+                manifestId = "whisper.cpp-ggml-small-q5_1",
             ),
         ),
         targetDir = "whisper-model",

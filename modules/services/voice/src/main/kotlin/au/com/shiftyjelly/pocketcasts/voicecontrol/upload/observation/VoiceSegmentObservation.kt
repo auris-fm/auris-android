@@ -25,9 +25,20 @@ data class CaptureContext(
      */
     val asrModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef =
         au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
-    /** The translation provenance: the backend itself when it translates, else honest absence. */
-    val translationModel: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef =
-        au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef.None,
+    /**
+     * The TRANSLATION provenance OBSERVED for this capture (reviewer 8288ac15): null when no
+     * translation ran or its identity was not observed. Never claimed when unobserved.
+     */
+    val translation: TranslationProvenance? = null,
+)
+
+/** What the translation stage actually did for one capture. */
+data class TranslationProvenance(
+    val model: au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef,
+    /** True only when a translated result was actually produced for this capture. */
+    val producedResult: Boolean,
+    /** The target language the result is in (observed), when a result exists. */
+    val targetLanguage: String?,
 )
 
 /**

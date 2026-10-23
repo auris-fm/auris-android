@@ -40,6 +40,8 @@ class ContributionCaptureProducerTest {
         appVersion = "8.20",
         appBuild = "12345",
         captureSessionId = { "00000000-0000-4000-8000-000000000000" },
+        enrollmentAccount = { "a@x" },
+        enrollmentSession = { 7L },
     )
 
     private val models = listOf(

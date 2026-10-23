@@ -39,6 +39,13 @@ class ContributionCaptureProducer(
      * derived from the capture id, which is a capture-scoped value, not a session-scoped one.
      */
     private val captureSessionId: () -> String,
+    /**
+     * The ADMITTED ownership of the capture (reviewer 0081c95f): account and session FROZEN by the
+     * owning capture session at capture start - never inferred at upload time. Every published
+     * record gets a full owner sidecar; without them the store refuses to serve the capture.
+     */
+    private val enrollmentAccount: () -> String,
+    private val enrollmentSession: () -> Long,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
 
@@ -105,7 +112,10 @@ class ContributionCaptureProducer(
         )
         val metadata = CanonicalJson.canonicalBytes(record)
         val admission = store.admit(samples, metadata.size) ?: return null
-        return store.prepare(admission, captureId, enrollmentEpoch, pcmChunks, metadata)
+        val account = enrollmentAccount()
+        val session = enrollmentSession()
+        if (account.isEmpty() || session <= 0) return null // no admitted identity, no publication
+        return store.prepare(admission, captureId, enrollmentEpoch, pcmChunks, metadata, account, session)
     }
 
     private fun sha256Hex(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }

@@ -6,6 +6,7 @@ import java.util.UUID
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -62,11 +63,75 @@ class DurableCaptureAuthorityTest {
         )
         val admission = store.admitForTest(1600, metadata.size)
         val generation = store.fence.currentGeneration()
-        assertNotNull(store.prepareAt(generation, admission, id, "epoch-1", pcm, metadata))
+        assertNotNull(store.prepareAt(generation, admission, id, "epoch-1", pcm, metadata, "a@x", 7L))
         return generation
     }
 
     private fun captureDir(root: File): File = File(root, "contributions")
+
+    private val ownerFile: (File, String) -> File = { root, id -> File(captureDir(root), "$id.owner") }
+
+    @Test
+    fun `prepare - durableCapture - RESTART round-trip preserves the full admitted identity`() {
+        val root = tmp.newFolder("rt")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root)
+        prepare(store, root, id)
+        assertNotNull(store.durableCapture(id))
+        // RESTART: a fresh store instance over the same directory; recover() rebuilds the index.
+        val reopened = newStore(root)
+        assertEquals(listOf(id), reopened.recover().map { it.captureId })
+        val recapture = reopened.durableCapture(id)!!
+        assertEquals("a@x", recapture.enrollmentAccount)
+        assertEquals(7L, recapture.enrollmentSession)
+        assertEquals("epoch-1", recapture.enrollmentEpoch)
+    }
+
+    @Test
+    fun `a CORRUPT owner sidecar refuses to serve - no epoch-only downgrade`() {
+        val root = tmp.newFolder("corrupt")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root)
+        prepare(store, root, id)
+        assertNotNull(store.durableCapture(id))
+        ownerFile(root, id).writeText("{\"account\":\"a@x\",\"session\"") // truncated/corrupt
+        assertNull("corrupt ownership fails CLOSED", store.durableCapture(id))
+    }
+
+    @Test
+    fun `a REMOVED owner sidecar refuses to serve - removal cannot bypass the account check`() {
+        val root = tmp.newFolder("removed")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root)
+        prepare(store, root, id)
+        assertNotNull(store.durableCapture(id))
+        assertTrue(ownerFile(root, id).delete())
+        assertNull("absent ownership fails CLOSED", store.durableCapture(id))
+    }
+
+    @Test
+    fun `a TAMPERED owner sidecar (different account) is carried verbatim and mismatches the live identity`() {
+        val root = tmp.newFolder("tamper")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root)
+        prepare(store, root, id)
+        // Rewrite the sidecar to a DIFFERENT admitted account: the store serves what is durably
+        // vouched (tamper-evident downstream - the upload identity check compares it live), never
+        // silently "fixes" it.
+        ownerFile(root, id).writeText("{\"account\":\"attacker@x\",\"session\":7,\"epoch\":\"epoch-1\"}")
+        val capture = store.durableCapture(id)!!
+        assertEquals("attacker@x", capture.enrollmentAccount)
+    }
+
+    @Test
+    fun `an OVERSIZE owner sidecar refuses to serve`() {
+        val root = tmp.newFolder("oversize")
+        val id = UUID.randomUUID().toString()
+        val store = newStore(root)
+        prepare(store, root, id)
+        ownerFile(root, id).writeText("{\"account\":\"" + "x".repeat(600) + "\",\"session\":7,\"epoch\":\"epoch-1\"}")
+        assertNull("over-cap ownership fails CLOSED", store.durableCapture(id))
+    }
 
     @Test
     fun `an intact published pair is served with its owning epoch`() {

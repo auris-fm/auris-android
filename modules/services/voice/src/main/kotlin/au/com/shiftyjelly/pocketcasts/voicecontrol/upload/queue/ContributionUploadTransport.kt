@@ -102,6 +102,14 @@ class ContributionUploadTransport(
          * account switch after acquisition cannot swap the bearer mid-attempt (reviewer 064d5a00).
          */
         authorizationOverride: String? = null,
+        /**
+         * LAUNCH OWNERSHIP VALIDATION at the transport's final pre-execution boundary (reviewer
+         * 0081c95f): runs AFTER request construction, immediately BEFORE registration/transmission -
+         * inside the same seam the admission control observes. A false verdict refuses locally:
+         * zero bytes, zero registration, and the caller retains. The caller-side check alone
+         * cannot close the acquisition→launch window; this one runs at the network edge.
+         */
+        validateAtLaunch: (() -> Boolean)? = null,
     ): Response {
         // BEFORE THE FIRST BYTE. Admission and this call are not atomic, so a withdrawal that landed
         // between them must not put a request on the network.
@@ -125,6 +133,10 @@ class ContributionUploadTransport(
             // request below is the first thing that touches the network. A withdrawal landing here must
             // still prevent transmission.
             onBeforeRegistrationForTest?.invoke()
+            // OWNERSHIP at the network edge: after construction and the admission seam, immediately
+            // before registration. A moved account refuses here with zero server contact and zero
+            // registration; the verdict comes from the SAME authority the acquisition used.
+            if (validateAtLaunch?.invoke() == false) return Response.PolicyRefused("identity-moved")
             if (isCancelled()) return Response.Cancelled
             // REGISTERED BEFORE EXECUTION, and the withdrawal is WIRED TO cancel() - not merely polled.
             // A blocked write cannot re-read a Boolean, so the registration is what makes live revocation

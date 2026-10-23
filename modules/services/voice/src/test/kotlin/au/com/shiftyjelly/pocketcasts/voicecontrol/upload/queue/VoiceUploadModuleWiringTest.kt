@@ -253,6 +253,54 @@ class VoiceUploadModuleWiringTest {
     }
 
     @Test
+    fun `an identity move INSIDE the transport's pre-registration boundary sends nothing - admitted identity end to end`() {
+        val root = tmp.newFolder("wiring-prereg")
+        val store = newStore(root)
+        val id = UUID.randomUUID().toString()
+        prepareCapture(store, id)
+        requests.set(0)
+        responseStatus = 201
+        responseBody = receiptFor(store, id, "accepted")
+        val port = startServer()
+
+        // The capture carries its FULL admitted identity from the store sidecar. DETERMINISTIC
+        // transition: afterAcquisitionForTest flips the LIVE account to b@y between acquisition and
+        // launch; the launch check re-runs the comparison against the LIVE authority at the
+        // transport's pre-registration boundary, where the admission control proves we arrived.
+        val liveAccount = java.util.concurrent.atomic.AtomicReference("a@x")
+        var reachedBoundary = false
+        val assembly = ContributionUploadAssembly(
+            store = store,
+            transport = ContributionUploadTransport(
+                endpoint = "http://127.0.0.1:$port/v1/contributions",
+                authorization = { "Bearer t" },
+                onBeforeRegistrationForTest = { reachedBoundary = true },
+            ),
+            captureFor = { captureId ->
+                store.durableCapture(captureId)?.let {
+                    assertEquals("the admitted account travelled", "a@x", it.enrollmentAccount)
+                    assertEquals(7L, it.enrollmentSession)
+                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession)
+                }
+            },
+            clock = { 51_000_000L },
+            policyAllows = { true },
+            networkAvailable = { true },
+            identityHolds = { true },
+            credentialFor = { admitted ->
+                check(admitted.account == liveAccount.get() && admitted.session == 7L)
+                UploadIdentityAuthority.LiveCredential("Bearer-A", liveAccount.get(), 7L, admitted.epoch)
+            },
+            launchIdentityCheck = { admitted -> admitted.account == liveAccount.get() },
+        )
+        assembly.afterAcquisitionForTest = { liveAccount.set("b@y") } // THE transition, deterministically placed
+        assembly.poll()
+        assertTrue("the control actually reached the pre-registration boundary", reachedBoundary)
+        assertEquals("the moved identity never registered a request", 0, requests.get())
+        assertTrue("the capture is retained", store.readyEntries().any { it.captureId == id })
+    }
+
+    @Test
     fun `a DISABLED policy puts nothing on the network and settles nothing`() {
         val root = tmp.newFolder("wiring-disabled")
         val store = newStore(root)
@@ -373,7 +421,7 @@ class VoiceUploadModuleWiringTest {
         )
         val admission = store.admitForTest(1600, metadata.size)
         val generation = store.fence.currentGeneration()
-        assertNotNull(store.prepareAt(generation, admission, id, "epoch-1", pcm, metadata))
+        assertNotNull(store.prepareAt(generation, admission, id, "epoch-1", pcm, metadata, "a@x", 7L))
         assertEquals(1, store.recordAttempt(generation, id))
     }
 }

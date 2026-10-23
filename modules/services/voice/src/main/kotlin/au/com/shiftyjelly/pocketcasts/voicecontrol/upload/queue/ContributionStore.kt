@@ -362,8 +362,12 @@ class ContributionStore(
             return null
         }
         if (WavHeaderValidator.validate(header, audio.length()) == null) return null
-        val owner = readOwnerSidecar(captureId)
-        DurableCapture(record, audio, entry.enrollmentEpoch, owner?.first, owner?.second)
+        // FAIL CLOSED (reviewer 0081c95f): the admitted ownership is REQUIRED. A missing or corrupt
+        // sidecar refuses to serve the capture at all - it retains on disk but can never be sent,
+        // because an unvouched identity must not silently degrade to an epoch-only check that a
+        // removed or damaged sidecar could bypass.
+        val owner = readOwnerSidecar(captureId) ?: return null
+        DurableCapture(record, audio, entry.enrollmentEpoch, owner.first, owner.second)
     }
 
     /**
@@ -433,13 +437,28 @@ class ContributionStore(
     )
 
     /**
-     * Reads the admitted-ownership sidecar: (account, session) or null when absent/corrupt.
-     * Corruption refuses (never fabricates a fallback identity): a capture whose ownership
-     * sidecar is unreadable is treated as epoch-only, the weakest claim it could have.
+     * STRICT bounded variable-length read of the admitted-ownership sidecar (reviewer 0081c95f):
+     * the file is ordinary JSON of ANY length up to the cap - the read demands the file's ACTUAL
+     * size, never a fixed width, and the parser is exact (no trailing junk, both fields present).
+     * Null means absent OR corrupt; the caller fails closed.
      */
     private fun readOwnerSidecar(captureId: String): Pair<String, Long>? {
-        val bytes = readExactlyBounded(File(dir, "$captureId$SUFFIX_OWNER"), 512L, 512L) ?: return null
+        val f = File(dir, "$captureId$SUFFIX_OWNER")
+        if (!f.isFile) return null
+        val len = f.length()
+        if (len <= 0L || len > 512L) return null
+        val bytes = ByteArray(len.toInt())
+        java.io.FileInputStream(f).use { input ->
+            var read = 0
+            while (read < bytes.size) {
+                val n = input.read(bytes, read, bytes.size - read)
+                if (n < 0) return null
+                read += n
+            }
+        }
         val text = String(bytes, Charsets.UTF_8)
+        // Exact shape: {"account":"<nonempty>","session":<long>,"epoch":...} and NOTHING after.
+        if (!text.startsWith("{") || !text.trimEnd().endsWith("}")) return null
         val account = Regex("\u0022account\u0022\\s*:\\s*\u0022([^\u0022]+)\u0022").find(text)?.groupValues?.get(1) ?: return null
         val session = Regex("\u0022session\u0022\\s*:\\s*(-?\\d+)").find(text)?.groupValues?.get(1)?.toLongOrNull() ?: return null
         return account to session

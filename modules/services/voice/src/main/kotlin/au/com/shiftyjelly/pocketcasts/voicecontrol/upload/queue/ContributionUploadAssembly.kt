@@ -112,12 +112,6 @@ class ContributionUploadAssembly(
                 frozenBearer = live.bearer
             }
             afterAcquisitionForTest?.invoke()
-            // LAUNCH revalidation: the acquisition transaction has ENDED by now; the window between
-            // acquisition and Call execution is closed here, on the caller thread, immediately
-            // before the transport is entered (reviewer d2f1bfc8).
-            if (capture.enrollmentEpoch != null && launchIdentityCheck?.invoke(admitted) == false) {
-                throw CaptureUnavailable(captureId)
-            }
             if (isRevoked()) {
                 throw AttemptCancelled(captureId)
             }
@@ -132,6 +126,14 @@ class ContributionUploadAssembly(
                 capture.audio,
                 isCancelled = isRevoked,
                 authorizationOverride = frozenBearer,
+                // LAUNCH OWNERSHIP at the network edge (reviewer 0081c95f): evaluated by the
+                // transport after construction, before registration - the caller-side check alone
+                // cannot close the acquisition→launch window.
+                validateAtLaunch = if (capture.enrollmentEpoch != null && launchIdentityCheck != null) {
+                    { launchIdentityCheck(admitted) }
+                } else {
+                    null
+                },
                 // The REAL chain: the transport reports the registered handle, and the abort that cancels
                 // THAT call is installed on the lease which owns this attempt's authorization. A
                 // revocation then reaches a transmitting Call without anyone polling a flag.

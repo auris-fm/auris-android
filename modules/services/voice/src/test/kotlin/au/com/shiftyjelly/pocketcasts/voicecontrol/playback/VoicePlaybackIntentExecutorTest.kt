@@ -776,6 +776,7 @@ class VoicePlaybackIntentExecutorTest {
             request: String,
             tier: VoiceIntent.CloudTier,
             context: PlaybackContext,
+            onDuck: ((VoiceActionOutcome) -> Unit)?,
         ): VoiceResponse {
             calls += "routeToCloud:$request:${tier.name}"
             whileInFlight?.invoke()

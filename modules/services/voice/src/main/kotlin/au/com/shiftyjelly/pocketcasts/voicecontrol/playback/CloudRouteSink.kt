@@ -144,20 +144,22 @@ class CloudRouteSink internal constructor(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
-    ): VoiceResponse = routeTurn(request, tier, context, hint = null)
+        onDuck: ((VoiceActionOutcome) -> Unit)?,
+    ): VoiceResponse = routeTurn(request, tier, context, hint = null, onDuck = onDuck)
 
     override suspend fun routeToCloudWithHint(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
         hint: CloudRouteHint,
-    ): VoiceResponse = routeTurn(request, tier, context, hint = hint)
+    ): VoiceResponse = routeTurn(request, tier, context, hint = hint, onDuck = null)
 
     private suspend fun routeTurn(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
         hint: CloudRouteHint?,
+        onDuck: ((VoiceActionOutcome) -> Unit)? = null,
     ): VoiceResponse {
         if (resolveBaseUrl().isBlank()) {
             val soon = localizedTemplate(KEY_CLOUD_COMING_SOON)
@@ -253,7 +255,16 @@ class CloudRouteSink internal constructor(
                         // Duck the host player on the first frame; restore on Done.
                         if (!audioPlayed) {
                             audioPlayed = true
-                            playbackSink.duck()
+                            // The duck outcome exists ONLY at the focus-result branch; deliver
+                            // this turn's channel there (narrow window; supersession keeps one
+                            // live turn, so the per-sink slot is single-flight here).
+                            val playback = playbackSink as? PlaybackManagerPlaybackSink
+                            playback?.actionReporter = onDuck
+                            try {
+                                playbackSink.duck()
+                            } finally {
+                                playback?.actionReporter = null
+                            }
                             ducked = true
                         }
                         audioPlayer?.submitFrame(event.bytes)

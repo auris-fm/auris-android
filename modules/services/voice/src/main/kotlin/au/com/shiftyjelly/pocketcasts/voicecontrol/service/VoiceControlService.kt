@@ -68,6 +68,8 @@ class VoiceControlService : Service() {
 
     @Inject lateinit var voicePlaybackIntentExecutor: VoicePlaybackIntentExecutor
 
+    @Inject lateinit var intentDispatcher: VoiceIntentDispatcher
+
     @Inject lateinit var playbackContextMonitor: PlaybackContextMonitor
 
     @Inject lateinit var audioRouteMonitor: AndroidAudioRouteMonitor
@@ -671,87 +673,23 @@ class VoiceControlService : Service() {
         intent: au.com.shiftyjelly.pocketcasts.voicecontrol.intent.VoiceIntent,
         invocationToken: au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine.InvocationToken?,
     ) {
-        val now = System.currentTimeMillis()
-        val intentType = intent::class.simpleName ?: intent.toString()
-        if (intentType == lastIntentType && (now - lastCommandTime) < COMMAND_DEBOUNCE_MS) {
-            Timber.i("[VoicePipeline] debounce %s", intentType)
-            // A debounced dispatch still had a token bound by the engine: settling it here is what
-            // finalizes its publication (with schema unknown — no action was attempted) instead of
-            // leaking an open invocation forever (reviewer 3fb01865).
-            invocationToken?.let { voiceAsrEngine.get().settleInvocation(it) }
-            return
-        }
-        lastIntentType = intentType
-        lastCommandTime = now
-
-        // ALL-EXIT OWNERSHIP CLEANUP (reviewer dab802ec): invokeOnCompletion runs even when the
-        // coroutine is cancelled BEFORE its body first runs (a launch finally does not). The token
-        // is captured OUTSIDE the coroutine so the completion handler can settle without it.
-        // Settlement is one-shot in the engine, so every exit converges on one publication.
-        val engine = voiceAsrEngine.get()
-        val token = invocationToken
-        val job = serviceScope.launch(Dispatchers.IO) {
-            // THE ACTION-RESULT CHANNEL (spec 03c96924 + reviewer 268d8cf0): the SINK reports what
-            // it actually did, at its own decision point, through the executor's reportAction.
-            // Presentation is rendered but NEVER read here — an earcon is a thing the user hears,
-            // not evidence of what happened (UpNextQueueSink.clear() renders CONFIRM_REQUIRED
-            // after the clear was really dispatched; duck() renders Silent on grant AND denial).
-            // Results are addressed by the INVOCATION TOKEN captured before dispatch, so identical
-            // overlapping intents stay two different dispatches bound to two different captures.
-            // INVOCATION-LOCAL reporter (reviewer 3fb01865): the fact channel is a parameter of
-            // THIS execute call, not a shared executor slot — overlapping dispatches cannot
-            // overwrite each other, and one dispatch's cleanup cannot detach another's reporter.
-            val onOutcome: (au.com.shiftyjelly.pocketcasts.voicecontrol.playback.VoiceActionOutcome) -> Unit = { fact ->
-                if (token != null) {
-                    executionOutcomeOf(fact)?.let { engine.reportExecutionResult(token, it) }
-                }
-            }
-            val response = try {
-                voicePlaybackIntentExecutor.execute(intent, onOutcome)
-            } catch (t: kotlinx.coroutines.CancellationException) {
-                // Cancellation is NOT "the user cancelled" and NOT "the action did not happen":
-                // a scope teardown looks identical here, and work may already have run. The
-                // settle boundary below leaves the outcome unobserved (provenance: unknown) —
-                // a claim only someone who can attribute the cancellation may make.
-                throw t
-            } catch (t: Throwable) {
-                // NO throw→failure inference (reviewer dab802ec): a generic throw after an
-                // unobserved effect cannot prove action_failed. If a sink reported a fact, that
-                // fact stands; otherwise settlement records the explicit schema unknown.
-                throw t
-            }
-            audioFeedbackRenderer.render(response)
-            gracePeriodSignal.onCommandRecognized(
-                fromGeneration = intent.windowGenerationOf(),
-                restoresAllowance = intent.restoresAllowance(),
-            )
-            // Normal-completion settlement for the body that ran (the launch-level handler below
-            // covers every other exit; settlement is one-shot either way).
-            if (token != null) engine.settleInvocation(token)
-        }
-        try {
-            job.invokeOnCompletion { _ ->
-                if (token != null) engine.settleInvocation(token)
-            }
-        } catch (t: Throwable) {
-            // The launch itself failed before a Job existed: this call site is the only observer.
-            if (token != null) engine.settleInvocation(token)
-        }
-    }
-
-    /**
-     * The SINK'S OWN structured fact as an execution outcome (spec 3ed49695). Presentation never
-     * appears here. Dispatched and NotObserved map to NOTHING: neither is a result — dispatch is
-     * not effect, and a lost observation asserts nothing about what the action did — so
-     * provenance keeps `unknown/observation_unavailable` for both.
-     */
-    private fun executionOutcomeOf(fact: VoiceActionOutcome): ExecutionOutcome? = when (fact) {
-        VoiceActionOutcome.Dispatched -> null
-        VoiceActionOutcome.NotObserved -> null
-        VoiceActionOutcome.Performed -> ExecutionOutcome.Success
-        is VoiceActionOutcome.Failed -> ExecutionOutcome.Failure
-        is VoiceActionOutcome.PreconditionFailed -> ExecutionOutcome.Failure
-        is VoiceActionOutcome.Refused -> ExecutionOutcome.Refused
+        // THE OBSERVABLE SEAM: the dispatch lifecycle (debounce settle, invocation-local fact
+        // channel, all-exit one-shot settlement) lives in VoiceIntentDispatcher so REAL controls
+        // can drive it — overlap→persist, pre-body cancellation, handler throw (spec 250ddcc3).
+        intentDispatcher.dispatch(
+            scope = serviceScope,
+            engine = voiceAsrEngine.get(),
+            executor = voicePlaybackIntentExecutor,
+            render = { _, response -> audioFeedbackRenderer.render(response) },
+            onCommandRecognized = { recognized ->
+                gracePeriodSignal.onCommandRecognized(
+                    fromGeneration = recognized.windowGenerationOf(),
+                    restoresAllowance = recognized.restoresAllowance(),
+                )
+            },
+            intent = intent,
+            invocationToken = invocationToken,
+        )
     }
 
     private fun updateListeningState() {

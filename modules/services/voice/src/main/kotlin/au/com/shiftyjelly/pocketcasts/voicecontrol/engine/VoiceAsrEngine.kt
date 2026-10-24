@@ -117,9 +117,14 @@ class VoiceAsrEngine @Inject constructor(
      */
     data class InvocationToken(val id: Long, val captureId: java.util.UUID)
 
-    /** One dispatch's identity plus the fact recorded so far (null = nothing observed). */
+    /**
+     * One dispatch's identity plus its PER-ACTION observations, append-only (spec 250ddcc3):
+     * every reported fact is preserved in arrival order. Settlement aggregates — the supported
+     * schema can carry one outcome, so full agreement publishes it and disagreement publishes the
+     * explicit unknown rather than an invented single outcome.
+     */
     internal class InvocationRecord(val token: InvocationToken) {
-        var outcome: ExecutionOutcome? = null
+        val observations = mutableListOf<ExecutionOutcome>()
     }
 
     /** Open invocations awaiting finalization; guarded by [invocationLock]. */
@@ -334,8 +339,8 @@ class VoiceAsrEngine @Inject constructor(
         // settlement — a first fact no longer pre-empts a later observed failure, and the
         // finalize boundary remains the single publication point (reviewer dab802ec).
         val record = openInvocations[token.id] ?: return false
-        if (record.outcome != null) return false
-        record.outcome = outcome
+        if (record.token != token) return false
+        record.observations += outcome
         true
     }
 
@@ -347,9 +352,12 @@ class VoiceAsrEngine @Inject constructor(
      */
     fun settleInvocation(token: InvocationToken) {
         val record = synchronized(invocationLock) { openInvocations.remove(token.id) }
-        // ONE publication per invocation: the recorded fact if a sink reported one, otherwise the
-        // explicit schema unknown. Never both, never neither.
-        record?.let { finalizePublication(it.token, it.outcome) }
+        if (record != null && record.token != token) {
+            // A mismatched token must not consume the legitimate invocation: restore it.
+            synchronized(invocationLock) { openInvocations[record.token.id] = record }
+            return
+        }
+        record?.let { finalizePublication(it.token, aggregateObservations(it.observations)) }
     }
 
     private fun finalizePublication(token: InvocationToken, outcome: ExecutionOutcome?) {
@@ -368,9 +376,10 @@ class VoiceAsrEngine @Inject constructor(
             openInvocations.clear()
             open
         }
-        // An abandoned invocation publishes with whatever fact was recorded before the stop —
-        // never an invented unknown over a known fact (spec e62305a2), never silence over a loss.
-        abandoned.forEach { finalizePublication(it.token, it.outcome) }
+        // An abandoned invocation publishes its supported aggregate — the agreed fact, or the
+        // explicit unknown when observations disagree — never an invented claim over known facts
+        // (spec e62305a2), never silence over a loss.
+        abandoned.forEach { finalizePublication(it.token, aggregateObservations(it.observations)) }
     }
 
     /**
@@ -385,7 +394,14 @@ class VoiceAsrEngine @Inject constructor(
         pendingExecutionContext = null
         val token = capture?.let { InvocationToken(id = nextInvocationId.incrementAndGet(), captureId = it.captureId) }
         if (token != null) synchronized(invocationLock) { openInvocations[token.id] = InvocationRecord(token) }
-        handler(intent, token)
+        try {
+            handler(intent, token)
+        } catch (t: Throwable) {
+            // A SYNCHRONOUS handler throw must not strand the token: settle it here so the
+            // invocation finalizes (recorded fact or explicit unknown) exactly once.
+            if (token != null) settleInvocation(token)
+            throw t
+        }
     }
 
     fun updateListeningMode(mode: ListeningMode) {
@@ -918,5 +934,20 @@ class VoiceAsrEngine @Inject constructor(
     companion object {
         /** Client-owned wording, resolved through [SpokenLine] so a foreign locale hears the earcon. */
         private const val KEY_CLOUD_UNROUTED = "pipeline.unclear_command"
+
+        /**
+         * THE SUPPORTED AGGREGATE over one invocation's per-action observations (spec 250ddcc3):
+         * full agreement publishes that outcome; ANY disagreement publishes null — the explicit
+         * schema unknown (observation_unavailable) — because the schema carries one outcome and
+         * inventing a single one over conflicting facts is the defect this channel exists to
+         * prevent. Empty observations (nothing observed) also aggregate to null.
+         */
+        internal fun aggregateObservations(observations: List<ExecutionOutcome>): ExecutionOutcome? {
+            val distinct = observations.toSet()
+            if (distinct.size > 1) {
+                Timber.w("[VoicePipeline] execution observations disagree (%s); recording unknown", distinct)
+            }
+            return if (distinct.size == 1) distinct.single() else null
+        }
     }
 }

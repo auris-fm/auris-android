@@ -67,7 +67,7 @@ class VoicePlaybackIntentExecutor @Inject constructor(
 
             is VoiceIntent.CloudRoute -> {
                 val context = playbackContextProvider.current()
-                cloudRouteSink.routeToCloud(intent.request, intent.tier, context)
+                cloudRouteSink.routeToCloud(intent.request, intent.tier, context, onOutcome)
             }
 
             is VoiceIntent.Queue -> executeQueue(intent, onOutcome)
@@ -289,10 +289,15 @@ interface VoiceBookmarkSink {
 }
 
 interface VoiceCloudRouteSink {
+    /**
+     * [onDuck] is THE INVOCATION-LOCAL channel for the sink's OWN facts at its real decision
+     * points (e.g. the audio-focus duck outcome, spec 03c96924) — never presentation.
+     */
     suspend fun routeToCloud(
         request: String,
         tier: VoiceIntent.CloudTier,
         context: PlaybackContext,
+        onDuck: ((VoiceActionOutcome) -> Unit)? = null,
     ): VoiceResponse
 
     /**

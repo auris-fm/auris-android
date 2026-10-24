@@ -467,6 +467,14 @@ class VoiceControlService : Service() {
                     Timber.i("[VoicePipeline] engine not started: start was invalidated")
                     return@startIfNotRunning false
                 }
+                // RECHECK SHUTDOWN AFTER THE SUSPENSION (reviewer 543d284b): the pre-suspension guard
+                // only proves teardown had not begun when the start was admitted. ensureReady() can
+                // block for a model load, and a teardown that began meanwhile would release the
+                // backend this start is about to use.
+                if (stopInFlightJob != null) {
+                    Timber.i("[VoicePipeline] engine not started: teardown began while readying")
+                    return@startIfNotRunning false
+                }
                 if (!gate.state.value.allowed) {
                     Timber.i("[VoicePipeline] engine not started: gate no longer allows capture")
                     return@startIfNotRunning false
@@ -780,6 +788,9 @@ class VoiceControlService : Service() {
         // Idempotent for BOTH cases: a running teardown is joined, and a COMPLETED teardown keeps its
         // identity, so a later stop cannot release resources a second time.
         stopInFlightJob?.let { return it }
+        // INVALIDATE ANY PENDING START UP FRONT (reviewer 543d284b): a start suspended inside
+        // ensureReady() would otherwise commit after this teardown released the backend it needs.
+        engineStart.invalidatePendingStart()
         Timber.i("Stopping voice control service")
         // CAPTURE THE ROOT NOW, before the cancel below. A child that outlives this call (a job
         // created just before cancellation, or a child of a child) must not be able to make the
@@ -814,6 +825,11 @@ class VoiceControlService : Service() {
                 // and a child that ran during this teardown may have cancelled a job that did not
                 // exist when the teardown started. Sampling before the join made that job
                 // invisible and let the backend be released under it.
+                // UNCONDITIONAL FINAL STOP before the snapshot (reviewer 543d284b): a child could
+                // have left the engine with live work that no earlier stop() cancelled. Stopping
+                // here makes that work visible to the snapshot below instead of racing it.
+                runCatching { voiceAsrEngine.get().stop() }
+                    .onFailure { Timber.w(it, "[VoicePipeline] final engine stop failed") }
                 // JOIN UNTIL THE SET STOPS GROWING: joining is not atomic with the snapshot, and a
                 // late stop can add a job after we sampled. Bounded so a hostile engine cannot spin
                 // this forever.

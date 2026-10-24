@@ -278,6 +278,53 @@ class TeardownOrderContractTest {
     }
 
     @Test
+    fun `shutdown invalidates a pending start before doing anything else`() {
+        // Reviewer 543d284b: a start suspended inside ensureReady() can commit after teardown
+        // released the backend it needs, so teardown must invalidate it up front.
+        val source = productionStopVoiceControlSource()
+        val invalidateAt = source.indexOf("engineStart.invalidatePendingStart()")
+        assertTrue("teardown must invalidate a pending start", invalidateAt >= 0)
+        val cancelAt = source.indexOf("serviceScope.cancel()")
+        val rootCaptureAt = source.indexOf("val rootJob =")
+        assertTrue(
+            "invalidation must happen before the cancel and the root capture " +
+                "(invalidate at $invalidateAt, cancel at $cancelAt, root at $rootCaptureAt)",
+            invalidateAt < cancelAt && (rootCaptureAt < 0 || invalidateAt < rootCaptureAt),
+        )
+    }
+
+    @Test
+    fun `the final engine stop happens after the root join and before the job snapshot`() {
+        val source = productionStopVoiceControlSource()
+        val rootJoinAt = source.indexOf("rootJob?.join()")
+        val finalStopAt = source.indexOf("final engine stop failed")
+        val sampleAt = source.indexOf("unfinishedProcessingJobs")
+        assertTrue("the final unconditional stop must be present", finalStopAt >= 0)
+        assertTrue("engine jobs must be sampled after the root join", sampleAt > rootJoinAt)
+        assertTrue(
+            "the final stop must precede the snapshot so late work becomes visible " +
+                "(stop at $finalStopAt, sample at $sampleAt)",
+            finalStopAt < sampleAt,
+        )
+    }
+
+    @Test
+    fun `a start rechecks shutdown after the readiness suspension`() {
+        // The pre-suspension guard proves nothing about a teardown that begins during ensureReady().
+        val source = productionFileSource()
+        val engineFn = source.indexOf("private suspend fun startEngine(mode: ListeningMode): Boolean {")
+        assertTrue("startEngine must exist", engineFn >= 0)
+        val body = source.substring(engineFn, source.indexOf("\n    }", engineFn))
+        val readyAt = body.indexOf("ensureReady()")
+        val recheckAt = body.indexOf("stopInFlightJob != null", body.indexOf("isCurrent(generation)"))
+        assertTrue("the readiness call must be present", readyAt >= 0)
+        assertTrue(
+            "shutdown must be rechecked AFTER ensureReady() suspends",
+            recheckAt > readyAt,
+        )
+    }
+
+    @Test
     fun `the root job is captured before the scope is cancelled`() {
         // Reviewer f457fbad: a child created just before cancellation, or a child of a child, must
         // not let the completion job observe a DIFFERENT root than the one being cancelled. So the

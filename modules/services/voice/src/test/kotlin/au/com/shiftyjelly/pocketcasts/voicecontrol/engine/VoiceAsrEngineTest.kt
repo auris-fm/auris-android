@@ -214,6 +214,38 @@ class VoiceAsrEngineTest {
     }
 
     @Test
+    fun `a finished processing job stays owned until pruned, and pruning forgets it`() = runTest {
+        // Reviewer 9f873b94, against the REAL engine. Two claims in one control, because they are
+        // the same defect from both sides: ownership must OUTLIVE the unfinished list (so a failure
+        // that finished before the teardown snapshot is still judged), and pruning must scan
+        // OWNERSHIP (the completion callback already removed the job from `unfinished`, so a pruner
+        // that searched there found nothing and the maps grew once per utterance).
+        createEngine()
+        `when`(voiceAudioProcessor.startProcessing()).thenReturn(flowOf(VoiceSegmenterResult.Silence))
+        startEngine(AudioRoute.Speaker)
+        advanceUntilIdle()
+
+        val owned = engine.ownedJobs
+        assertTrue("a processing job the engine created must be owned", owned.isNotEmpty())
+        // NOT asserted: that the job is still in `unfinished`. The flow is `flowOf(...)`, which
+        // completes immediately, so the job may already have finished by now — and the point of this
+        // control is precisely that ownership does not depend on that list.
+
+        // Let the flow end so the job completes, then confirm ownership survives its completion.
+        engine.stop()
+        advanceUntilIdle()
+        val finishedOwned = engine.ownedJobs.filter { it.isCompleted }
+        assertTrue("finished work must remain owned until it is judged", finishedOwned.isNotEmpty())
+
+        engine.pruneConsumedBookkeeping(onlyKeep = emptySet())
+
+        assertTrue(
+            "pruning must FORGET finished jobs (mutation: scanning the unfinished list prunes nothing)",
+            engine.ownedJobs.none { it.isCompleted },
+        )
+    }
+
+    @Test
     fun `a pipeline that never attaches reports termination`() = runTest {
         createEngine()
         `when`(voiceAudioProcessor.attachCapture()).thenReturn(false)

@@ -40,13 +40,29 @@ internal object TeardownRetry {
     fun decide(
         recheck: () -> List<Job>,
         observe: Boolean = true,
-    ): Decision = if (!observe) {
-        Decision.Unproven(IllegalStateException("retry requires continued observation"))
-    } else {
-        val unfinished = runCatching { recheck().count { !it.isCompleted } }.getOrElse {
-            return Decision.Unproven(it)
+        unresolvedHold: Any? = null,
+    ): Decision = when {
+        !observe -> Decision.Unproven(IllegalStateException("retry requires continued observation"))
+
+        // A RECORDED HOLD BLOCKS THE RETRY EVEN WHEN THE LIST LOOKS EMPTY (reviewer 9f873b94).
+        // Deciding on list emptiness alone let a retry release resources after a FAILED STOP or an
+        // abnormal engine finish: the jobs were gone from the list, but the reason the teardown held
+        // had never been resolved. Only a hold that is about quiescence can be cleared by observing
+        // quiescence; anything else has to be re-established by the caller.
+        else -> {
+            val unfinished = runCatching { recheck().count { !it.isCompleted } }.getOrElse {
+                return Decision.Unproven(it)
+            }
+            when {
+                unfinished > 0 -> Decision.StillHeld(unfinished)
+
+                unresolvedHold != null -> Decision.Unproven(
+                    IllegalStateException("retry cannot clear an unresolved hold: $unresolvedHold"),
+                )
+
+                else -> Decision.Quiescent
+            }
         }
-        if (unfinished == 0) Decision.Quiescent else Decision.StillHeld(unfinished)
     }
 
     /**

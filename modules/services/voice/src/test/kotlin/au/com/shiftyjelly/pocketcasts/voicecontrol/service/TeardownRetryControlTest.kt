@@ -82,6 +82,34 @@ class TeardownRetryControlTest {
     }
 
     @Test
+    fun `a retry will not release past a hold that quiescence cannot explain`() = runBlocking {
+        // Reviewer 9f873b94: deciding on list emptiness alone let a retry release resources after a
+        // FAILED STOP or an abnormal engine finish. The jobs were gone from the list, but the reason
+        // the teardown held had never been resolved — so an empty list was not evidence of safety.
+        val unresolved = EngineQuiescence.Verdict.StopFailed(IllegalStateException("the final stop threw"))
+        val decision = TeardownRetry.decide(
+            recheck = { emptyList() },
+            unresolvedHold = unresolved,
+        )
+        assertTrue(
+            "an empty list must NOT make an unexplained hold retryable, got $decision",
+            decision is TeardownRetry.Decision.Unproven,
+        )
+    }
+
+    @Test
+    fun `a hold that IS about quiescence is cleared by observing quiescence`() = runBlocking {
+        // The complement: Residual means "work was still finishing", so finding it finished is
+        // exactly the evidence that resolves it. Without this, the guard above could be satisfied by
+        // refusing every retry, which would make the whole retry path dead code.
+        val decision = TeardownRetry.decide(
+            recheck = { emptyList() },
+            unresolvedHold = null,
+        )
+        assertTrue("quiescence must permit the retry, got $decision", decision is TeardownRetry.Decision.Quiescent)
+    }
+
+    @Test
     fun `a held teardown is not reported as released by omission`() {
         // Nothing released yet: every release is still pending, so it cannot read as complete.
         val all = listOf("backend", "session")

@@ -118,10 +118,15 @@ class VoiceAsrEngine @Inject constructor(
      * cancellation markers are pruned once they can no longer influence a verdict.
      */
     internal fun pruneConsumedBookkeeping(onlyKeep: Set<Job>) {
-        val finished = unfinished.filter { it.isCompleted && it !in onlyKeep }
+        // Scan the OWNERSHIP set, not the unfinished list (reviewer 9f873b94). The completion
+        // callback removes a job from `unfinished` the moment it finishes, so searching that list
+        // for completed jobs found the ones already gone and retained the maps forever: outcomes,
+        // cancellation markers and ownership all leaked one entry per utterance.
+        val finished = ownedProcessingJobs.keys.filter { it.isCompleted && it !in onlyKeep }
         finished.forEach {
             outcomes.remove(it)
             cancelledJobs.remove(it)
+            ownedProcessingJobs.remove(it)
         }
         unfinished.removeAll(finished.toSet())
     }
@@ -137,6 +142,16 @@ class VoiceAsrEngine @Inject constructor(
 
     internal val unfinishedProcessingJobs: List<Job>
         get() = unfinished.toList()
+
+    /**
+     * EVERY processing job this engine ever created, running or finished (reviewer 9f873b94).
+     *
+     * [unfinishedProcessingJobs] is not enough for a verdict: a job that was removed from the
+     * unfinished list — cancelled, or finished before the snapshot ran — vanished from quiescence's
+     * view entirely, so a failure that happened before the snapshot was never judged. Ownership outlives
+     * the unfinished list; this is the set quiescence must scan.
+     */
+    internal val ownedJobs: Set<Job> get() = ownedProcessingJobs.keys.toSet()
 
     private val unfinished = java.util.concurrent.CopyOnWriteArrayList<Job>()
     private var playbackBufferProvider: (() -> FloatArray)? = null

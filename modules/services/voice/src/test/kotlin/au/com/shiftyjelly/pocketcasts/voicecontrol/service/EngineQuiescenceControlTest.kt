@@ -14,6 +14,7 @@ import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -178,7 +179,7 @@ class EngineQuiescenceControlTest {
     }
 
     @Test
-    fun `an expected cancellation is not a failure even with a recorded cause`() = runBlocking {
+    fun `an expected cancellation is not a failure`() = runBlocking {
         // Reviewer 51baa020: a job this teardown cancelled records a CancellationException. Passing
         // recordedCause through unchanged would classify our own clean cancellation as a failure.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -189,15 +190,34 @@ class EngineQuiescenceControlTest {
             val cause = EngineQuiescence.abnormalEngineFinish(
                 job = job,
                 cancelledByEngine = setOf(job),
-                // A cancellation CARRYING a nested failure: this is where "expected" matters, because
-                // the recorded-cause filter alone would surface the nested cause as a failure.
-                recordedCause = kotlinx.coroutines.CancellationException(
-                    "stopped by teardown",
-                    IllegalStateException("cleanup detail"),
-                ),
+                recordedCause = kotlinx.coroutines.CancellationException("stopped by teardown"),
                 expectedCancellation = setOf(job),
             )
             assertNull("expected cancellation must not be a failure, got $cause", cause)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `an expected cancellation that WRAPS a real failure is still a failure`() = runBlocking {
+        // Reviewer 9f873b94: this control previously asserted the OPPOSITE and was wrong. Exempting
+        // the job unconditionally meant a cleanup path that threw AFTER we cancelled it had its
+        // throwable recorded and then discarded — a genuine failure reported as a clean stop. Only a
+        // bare cancellation is expected; a cancellation carrying a cause is a wrapper around it.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val job = scope.launch(Dispatchers.IO) { awaitCancellation() }
+            job.cancel()
+            job.join()
+            val nested = IllegalStateException("cleanup detail")
+            val cause = EngineQuiescence.abnormalEngineFinish(
+                job = job,
+                cancelledByEngine = setOf(job),
+                recordedCause = kotlinx.coroutines.CancellationException("stopped by teardown", nested),
+                expectedCancellation = setOf(job),
+            )
+            assertSame("a wrapped failure must not be exempt", nested, cause)
         } finally {
             scope.cancel()
         }

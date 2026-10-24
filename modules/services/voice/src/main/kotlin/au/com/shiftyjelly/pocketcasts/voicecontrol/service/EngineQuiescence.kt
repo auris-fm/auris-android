@@ -34,18 +34,32 @@ internal object EngineQuiescence {
         recordedCause: Throwable? = null,
         expectedCancellation: Set<Job> = emptySet(),
     ): Throwable? {
-        // AN EXPECTED CANCELLATION IS NOT A FAILURE, EVEN WITH A RECORDED CAUSE (reviewer 51baa020):
-        // a job cancelled by this teardown records a CancellationException, which must not be
-        // classified as a failure just because a cause exists.
-        if (job in expectedCancellation) return null
+        // AN EXPECTED CANCELLATION IS NOT A FAILURE — BUT ONLY THE CANCELLATION ITSELF IS EXEMPT
+        // (reviewers 51baa020, 9f873b94). This used to exempt the job unconditionally, which hid a
+        // genuine failure: a cleanup path that threw a RuntimeException AFTER we cancelled it had
+        // its throwable recorded, and the early return discarded it. Exemption is now literal —
+        // the recorded cause must actually BE a cancellation, and a cancellation wrapping a real
+        // cause is not one. Anything else keeps its verdict.
+        if (job in expectedCancellation && recordedCause.isCancellationLike()) return null
         // A RECORDED FAILURE WINS (reviewer 1ff17ee6): a job that had already failed before the stop
         // must keep its own failure, even though the teardown also referenced it.
         recordedCause?.let { cause ->
-            return cause.takeIf { it !is kotlinx.coroutines.CancellationException || it.cause != null }
+            // A cancellation WRAPPING a real cause is not an exemption: report the real cause, so a
+            // failure thrown during cleanup is visible as itself rather than as "cancelled".
+            if (cause is kotlinx.coroutines.CancellationException) return cause.cause
+            return cause
         }
         if (!job.isCancelled) return null
         return if (job in cancelledByEngine) null else ABANDONED_CANCELLATION
     }
+
+    /**
+     * True only for a cause that is a cancellation and carries nothing else.
+     *
+     * A `CancellationException` with a non-null cause is a wrapper: the real throwable is inside it,
+     * so it is NOT exempt. Keeping the test in one place means the exemption cannot quietly widen.
+     */
+    private fun Throwable?.isCancellationLike(): Boolean = this is kotlinx.coroutines.CancellationException && cause == null
 
     /** Cause reported for a cancellation the engine did not initiate. */
     val ABANDONED_CANCELLATION: Throwable = IllegalStateException("engine job finished cancelled by someone else")

@@ -308,6 +308,49 @@ class TeardownOrderContractTest {
     }
 
     @Test
+    fun `each release is recorded as it confirms, not batched afterwards`() {
+        // Reviewer 9f873b94: the retry path added the whole batch AFTER the release loop. A throw
+        // halfway through therefore lost the record of kinds that HAD already released, and the
+        // retry released them again — a repeated media-session or renderer release is destructive.
+        // The record must be written per kind, immediately after that kind confirms.
+        val source = productionFileSource()
+        val body = source.substringAfter("private fun releaseResources(pending: List<String>) {")
+            .substringBefore("\n    }")
+        assertTrue(
+            "releaseResources must record each kind as it confirms",
+            body.contains("releasedResources.add(kind)"),
+        )
+        assertTrue(
+            "the retry must not re-add a whole batch it did not necessarily complete",
+            !source.contains("releasedResources.addAll(pending)"),
+        )
+    }
+
+    @Test
+    fun `the start path actually ADMITS its job to the shutdown barrier`() {
+        // Reviewer 9f873b94, confirmed by grep: `beginStart` had no production caller at all. The
+        // barrier only ever CLOSED, so `close()` always returned an empty set and the owned-job join
+        // below looped over nothing. Every control on the barrier itself still passed, because they
+        // construct it directly — a class whose admission half nothing calls is not evidence.
+        //
+        // This pins the production wiring, which is the only thing that can make those controls mean
+        // something: the start must be ADMITTED, and a refused admission must abort the start.
+        val source = productionFileSource()
+        val admitAt = source.indexOf("shutdownBarrier.beginStart(listOf(startJob))")
+        assertTrue("the start path must admit its job to the barrier", admitAt > 0)
+        assertTrue(
+            "the admitted job must be dropped once it finishes, or the set grows forever",
+            source.contains("startJob.invokeOnCompletion { shutdownBarrier.release(listOf(startJob)) }"),
+        )
+        // A refused admission means a shutdown closed the barrier while this start was being built.
+        // Proceeding would start work the teardown will never wait for.
+        assertTrue(
+            "a refused admission must abort the start rather than proceed",
+            source.contains("if (!shutdownBarrier.beginStart(listOf(startJob))) {"),
+        )
+    }
+
+    @Test
     fun `the teardown closes the barrier before cancelling and joins what it owned`() {
         // Reviewers 902e0c1a1/cce1f100/9045dd43: a snapshot-then-cancel leaves a start that lands in
         // between owned by nobody. The barrier must be CLOSED (not sampled) and its returned set
@@ -337,7 +380,26 @@ class TeardownOrderContractTest {
         )
         assertTrue(
             "the observation must distinguish Held from Released",
-            source.contains("is TeardownResult.Held -> {") && source.contains("teardownFailure = outcome.failure"),
+            source.contains("is TeardownResult.Held ->") && source.contains("failure = settled.failure"),
+        )
+        // ONE OWNER OF THE OUTCOME (reviewer 9f873b94). Two independent launchers each awaited the
+        // same Deferred and then wrote `teardownFailure`, so they raced: a re-stop could observe a
+        // completed Deferred while the field still held its previous value, and a HELD teardown read
+        // as successful and non-retryable. Both entries must route through the one recorder.
+        assertEquals(
+            "every teardown outcome must be recorded by exactly one owner",
+            4,
+            Regex("recordTeardownOutcome\\(").findAll(source).count(),
+            // declaration + stop path + observeTeardown + retry path
+        )
+        // Judge CODE, not prose: comments in this file explain the very field being counted.
+        val code = source.lineSequence()
+            .filterNot { it.trimStart().startsWith("//") || it.trimStart().startsWith("*") }
+            .joinToString("\n")
+        assertEquals(
+            "exactly ONE place may ASSIGN teardownFailure — the recorder (the declaration is not a write)",
+            1,
+            Regex("teardownFailure = [^(]").findAll(code).count(),
         )
     }
 

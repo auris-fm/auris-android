@@ -9,6 +9,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -218,126 +219,247 @@ class LoopbackRefusalSettlementTest {
         }
     }
 
+    /**
+     * The production assembly loop (caller + token-scoped resolver + captureFor via
+     * store.durableCapture, as VoiceUploadModule wires it) settles EVERY retryable refusal over a
+     * real socket: retain with a durable boundary, fresh-owner recovery, boundary timing, accepted
+     * re-upload with a receipt bound to the recorded digest.
+     *
+     * The record is verified from the RECEIVED WIRE BYTES, not from memory: the metadata part's
+     * claimed record digest must equal the store's recorded digest on BOTH exchanges, so what the
+     * transport actually sent is what the refusal retained (reviewer 62e2beb6).
+     */
     @Test
-    fun `the PRODUCTION assembly loop settles a socket refusal, retains, and a fresh owner re-uploads`() {
-        // This is the composition the earlier controls did NOT cover: no test-written settlement.
-        // The PRODUCTION ContributionUploadAssembly - its retry caller, its token-scoped ack resolver,
-        // its captureFor reading the DURABLE queue record - drives everything; the only test-written
-        // part is the loopback server's answers. The refusal arrives over a real socket, the caller's
-        // own resolution retains the capture with a durable boundary, a FRESH owner over the same
-        // directory recovers it, and the re-attempt is ACCEPTED and RELEASED with the receipt bound to
-        // the recorded digest.
-        responseStatus = 429
-        responseBody = """{"schema_version":1,"code":"rate_limited","retry_after_s":30}"""
+    fun `the PRODUCTION assembly loop settles every retryable refusal, retains, and a fresh owner re-uploads`() {
+        for ((code, statusAndBody) in retryableFixtures) {
+            val (status, body) = statusAndBody
+            responseStatus = status
+            responseBody = body
+            receivedBodies.clear()
+            acceptedIds.clear()
+            requestCount.set(0)
+
+            var now = 40_000_000L
+            val root = tmp.newFolder("loopback-assembly-$code")
+            val store = newStore(root) { now }
+            val id = UUID.randomUUID().toString()
+            val audio = ContributionRetryCallerTestSupport.chunks(1600)
+            val recordedBytes = ContributionRetryCallerTestSupport.wavBytes(1600)
+            val meta = ContributionRetryCallerTestSupport.meta(id)
+            val admission = store.admitForTest(1600, meta.size)
+            val generation = store.fence.currentGeneration()
+            assertNotNull(
+                "$code: fixture sanity - the capture must be admittable",
+                store.prepareAt(generation, admission, id, "epoch-1", audio, meta, "a@x", 7L),
+            )
+            val digestBefore = store.recordedDigest(id)!!
+            assertEquals(
+                "$code: fixture sanity - the recorded digest binds the metadata",
+                ContributionRetryCallerTestSupport.sha256Hex(meta),
+                digestBefore,
+            )
+
+            val assembly = productionAssembly(store, { now })
+            val first = assembly.poll()
+            assertEquals("$code: the attempt must have run", 1, first.attempted)
+            assertEquals("$code: exactly one exchange left the device", 1, requestCount.get())
+            assertEquals(
+                "$code: the FIRST request's metadata part must claim the recorded digest - the " +
+                    "transport sent the admitted record, not a lookalike",
+                digestBefore,
+                claimedRecordDigest(receivedBodies.single(), id),
+            )
+            val boundary = store.retryBoundariesForTest()[id]
+            assertNotNull("$code: the production settlement must persist a durable boundary", boundary)
+            assertTrue(
+                "$code: the capture must be retained byte-identical",
+                recordingIn(root, id).let { it.isFile && it.readBytes().contentEquals(recordedBytes) },
+            )
+
+            // A FRESH owner over the SAME directory: recovery is asserted from the FRESH store only -
+            // the durable capture with its identity, and the EXACT persisted boundary value.
+            now += 1_000
+            val freshStore = newStore(root) { now }
+            // Recovery is EXPLICIT on a fresh owner (as RetryableRefusalRetentionTest pins); the
+            // assertion reads what the fresh owner itself recovered, not the original store.
+            val recoveredEntries = freshStore.recover()
+            assertTrue(
+                "$code: the fresh owner's recovery must include this capture",
+                recoveredEntries.any { it.captureId == id },
+            )
+            val recovered = freshStore.durableCapture(id)
+            assertNotNull("$code: the fresh owner must recover the durable capture", recovered)
+            assertEquals("$code: recovered account identity", "a@x", recovered!!.enrollmentAccount)
+            assertEquals("$code: recovered session identity", 7L, recovered.enrollmentSession)
+            assertEquals(
+                "$code: the fresh owner must read the SAME persisted boundary, not a recomputed one",
+                boundary,
+                freshStore.retryBoundariesForTest()[id],
+            )
+            assertTrue(
+                "$code: the recovered audio must be byte-identical",
+                recovered.audio.readBytes().contentEquals(recordedBytes),
+            )
+
+            val freshAssembly = productionAssembly(freshStore, { now })
+            val early = freshAssembly.poll()
+            assertEquals("$code: nothing may be attempted before the boundary", 0, early.attempted)
+            assertEquals("$code: no second exchange before the boundary", 1, requestCount.get())
+
+            now += 60_000
+            responseStatus = 201
+            responseBody = receiptFor(id, digestBefore)
+            receivedBodies.clear()
+            requestCount.set(0)
+            val second = freshAssembly.poll()
+            assertEquals("$code: the re-attempt must run", 1, second.attempted)
+            assertEquals("$code: exactly one re-attempt exchange", 1, requestCount.get())
+            assertEquals(
+                "$code: the RE-ATTEMPT's metadata part must claim the recorded digest",
+                digestBefore,
+                claimedRecordDigest(receivedBodies.single(), id),
+            )
+            assertTrue(
+                "$code: the re-attempt's wire body must contain the exact audio bytes",
+                receivedBodies.single().indexOfSlice(recordedBytes) >= 0,
+            )
+            assertTrue(
+                "$code: acceptance (freshDigest=" + freshStore.recordedDigest(id) +
+                    ", before=" + digestBefore +
+                    ", readyNow=" + freshStore.readyEntries().map { it.captureId } + ")",
+                acceptedIds.contains(id),
+            )
+            assertTrue(
+                "$code: the released entry must be gone from the ready set",
+                freshStore.readyEntries().none { it.captureId == id },
+            )
+        }
+    }
+
+    @Test
+    fun `the PRODUCTION assembly loop disposes a terminal capture_conflict without a retry`() {
+        responseStatus = 409
+        responseBody = """{"schema_version":1,"code":"capture_conflict","retry_after_s":30}"""
         receivedBodies.clear()
+        acceptedIds.clear()
         requestCount.set(0)
 
         var now = 40_000_000L
-        val root = tmp.newFolder("loopback-assembly")
+        val root = tmp.newFolder("loopback-assembly-conflict")
         val store = newStore(root) { now }
         val id = UUID.randomUUID().toString()
-        val audio = ContributionRetryCallerTestSupport.chunks(1600)
-        val recordedBytes = ContributionRetryCallerTestSupport.wavBytes(1600)
-        val digest = ContributionRetryCallerTestSupport.sha256Hex(recordedBytes)
         val meta = ContributionRetryCallerTestSupport.meta(id)
         val admission = store.admitForTest(1600, meta.size)
         val generation = store.fence.currentGeneration()
         assertNotNull(
-            store.prepareAt(generation, admission, id, "epoch-1", audio, meta, "a@x", 7L),
-        )
-        val digestBefore = store.recordedDigest(id)
-        // The recorded digest binds the METADATA (canonical record), which is what the receipt must
-        // echo; the audio is bound by the wire-bytes assertion below.
-        assertEquals("fixture sanity: the recorded digest is the digest of the metadata", ContributionRetryCallerTestSupport.sha256Hex(meta), digestBefore)
-
-        // PRODUCTION captureFor: exactly what VoiceUploadModule wires - the record read from the
-        // DURABLE queue, not a test-side rebuilt object.
-        val assembly = ContributionUploadAssembly(
-            store = store,
-            transport = transport(),
-            captureFor = { captureId ->
-                store.durableCapture(captureId)?.let {
-                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession)
-                }
-            },
-            clock = { now },
-            policyAllows = { true },
-            networkAvailable = { true },
-            onAccepted = { _, captureId -> acceptedIds += captureId },
+            store.prepareAt(generation, admission, id, "epoch-1", ContributionRetryCallerTestSupport.chunks(1600), meta, "a@x", 7L),
         )
 
-        // FIRST POLL: a real multipart POST leaves the device; the 429 lands; the caller's own
-        // token-scoped resolution retains the capture. No test code touches the store here.
-        val first = assembly.poll()
-        assertEquals("the attempt must have run", 1, first.attempted)
-        assertEquals("the backend must have received exactly one exchange", 1, requestCount.get())
-        assertNotNull(
-            "the production settlement must persist a durable not-before boundary",
+        val assembly = productionAssembly(store, { now })
+        val result = assembly.poll()
+        assertEquals("the attempt must have run", 1, result.attempted)
+        assertEquals("exactly one exchange", 1, requestCount.get())
+        assertNull(
+            "a TERMINAL refusal must not schedule a retry boundary",
             store.retryBoundariesForTest()[id],
         )
         assertTrue(
-            "the capture must be retained by the production loop",
-            recordingIn(root, id).let { it.isFile && it.readBytes().contentEquals(recordedBytes) },
+            "terminal disposal removes the entry from the ready set",
+            store.readyEntries().none { it.captureId == id },
         )
+        // onAccepted is the caller's RELEASE hook, not an acceptance-specific signal: it fires for a
+        // SERVER_TERMINAL disposal too. The refusal assertions are the null boundary and the removed
+        // entry above; a terminal disposal must never leave audio queued for retry.
+        assertTrue("no retry may remain scheduled", store.retryBoundariesForTest().isEmpty())
+    }
 
-        // METADATA IDENTITY (reviewer 1be3d63d): the record the loop would re-send is parsed from the
-        // recovered immutable queue bytes. Re-serialising it canonically must hash to the recorded
-        // digest - so what the retry sends is byte-identical to what the refusal retained, not a
-        // test-regenerated lookalike.
-        val recovered = store.durableCapture(id)
-        assertNotNull("the fresh owner must see the durable capture", recovered)
-        val recoveredCanonical = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
-            .canonicalBytes(recovered!!.record)
-        assertEquals(
-            "the recovered record must be byte-identical to what was admitted",
-            digestBefore,
-            ContributionRetryCallerTestSupport.sha256Hex(recoveredCanonical),
+    @Test
+    fun `a receipt bound to DIFFERENT bytes never releases the entry`() {
+        // The negative before any release claim: a 201 whose record digest does not match the queue's
+        // recorded digest is NOT an acceptance - the resolver retains the capture.
+        responseStatus = 429
+        responseBody = """{"schema_version":1,"code":"rate_limited","retry_after_s":1}"""
+        receivedBodies.clear()
+        acceptedIds.clear()
+        requestCount.set(0)
+
+        var now = 50_000_000L
+        val root = tmp.newFolder("loopback-assembly-forged")
+        val store = newStore(root) { now }
+        val id = UUID.randomUUID().toString()
+        val meta = ContributionRetryCallerTestSupport.meta(id)
+        val admission = store.admitForTest(1600, meta.size)
+        val generation = store.fence.currentGeneration()
+        assertNotNull(
+            store.prepareAt(generation, admission, id, "epoch-1", ContributionRetryCallerTestSupport.chunks(1600), meta, "a@x", 7L),
         )
+        val digestBefore = store.recordedDigest(id)
+        val assembly = productionAssembly(store, { now })
+        assertEquals(1, assembly.poll().attempted)
 
-        // A FRESH owner over the SAME directory, before the boundary: the production loop must refuse.
-        now += 1_000
-        val freshStore = newStore(root) { now }
-        assertTrue("recovery must admit the entry", freshStore.recover().any { it.captureId == id } || freshStore.readyEntries().any { it.captureId == id } || true)
-        val freshAssembly = ContributionUploadAssembly(
-            store = freshStore,
-            transport = transport(),
-            captureFor = { captureId ->
-                freshStore.durableCapture(captureId)?.let {
-                    ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession)
-                }
-            },
-            clock = { now },
-            policyAllows = { true },
-            networkAvailable = { true },
-            onAccepted = { _, captureId -> acceptedIds += captureId },
-        )
-        val early = freshAssembly.poll()
-        assertEquals("nothing may be attempted before the boundary elapses", 0, early.attempted)
-        assertEquals("no second exchange before the boundary", 1, requestCount.get())
-
-        // After the boundary the SAME production loop re-attempts; the server now ACCEPTS with a
-        // receipt bound to the recorded digest, and the entry is RELEASED.
         now += 60_000
         responseStatus = 201
-        responseBody =
-            """{"schema_version":1,"capture_id":"$id","record_sha256":"$digestBefore","status":"accepted",""" +
-            """"receipt_id":"rcpt-lb1","accepted_at":"2026-10-22T00:00:00Z","retention_expires_at":"2026-11-21T00:00:00Z"}"""
+        responseBody = receiptFor(id, "f".repeat(64)) // a valid-shape receipt for OTHER bytes
         receivedBodies.clear()
-        val second = freshAssembly.poll()
+        val second = assembly.poll()
         assertEquals("the re-attempt must run", 1, second.attempted)
-        assertEquals("exactly one re-attempt exchange reached the backend", 2, requestCount.get())
-        assertTrue(
-            "the re-attempt's wire body must contain the EXACT audio bytes",
-            receivedBodies.single().indexOfSlice(recordedBytes) >= 0,
-        )
-        assertTrue(
-            "the acceptance must be reported only for this capture",
+        assertFalse(
+            "a receipt for different bytes must NOT be reported as acceptance",
             acceptedIds.contains(id),
         )
-        assertTrue(
-            "the released entry must be gone from the ready set",
-            freshStore.readyEntries().none { it.captureId == id },
+        assertEquals(
+            "the capture must still be retained",
+            digestBefore,
+            store.recordedDigest(id),
         )
+    }
+
+    /** The production wiring: captureFor reads the DURABLE queue record, exactly as VoiceUploadModule. */
+    private fun productionAssembly(
+        store: ContributionStore,
+        now: () -> Long,
+    ): ContributionUploadAssembly = ContributionUploadAssembly(
+        store = store,
+        transport = transport(),
+        captureFor = { captureId ->
+            store.durableCapture(captureId)?.let {
+                ContributionUploadAssembly.Capture(it.record, it.audio, it.enrollmentEpoch, it.enrollmentAccount, it.enrollmentSession)
+            }
+        },
+        clock = now,
+        policyAllows = { true },
+        networkAvailable = { true },
+        onAccepted = { _, captureId -> acceptedIds += captureId },
+    )
+
+    /**
+     * Parses the ACTUAL received multipart body: extracts the metadata part's claimed record digest.
+     * Verifying the wire (not memory) is the point - a reserialized in-memory record proves nothing
+     * about what the transport sent.
+     */
+    private fun claimedRecordDigest(wire: ByteArray, captureId: String): String? {
+        val text = String(wire, Charsets.UTF_8)
+        val partStart = text.indexOf("name=\"metadata\"")
+        if (partStart < 0) return null
+        val jsonStart = text.indexOf('{', partStart)
+        val json = text.substring(jsonStart, text.indexOf("\r\n--", jsonStart))
+        val claimed = Regex("\"record_sha256\":\"([0-9a-f]{64})\"").find(json)?.groupValues?.get(1)
+            ?: return null
+        // The part must be THIS capture's, not debris from another exchange.
+        check(json.contains("\"capture_id\":\"" + captureId + "\"")) { "metadata part is for another capture" }
+        return claimed
+    }
+
+    private fun receiptFor(id: String, digest: String): String {
+        val q = "\""
+        val sb = StringBuilder()
+        sb.append("{" + q + "schema_version" + q + ":1," + q + "capture_id" + q + ":" + q).append(id)
+        sb.append(q + "," + q + "record_sha256" + q + ":" + q).append(digest)
+        sb.append(q + "," + q + "status" + q + ":" + q + "accepted" + q + "," + q + "receipt_id" + q + ":" + q + "rcpt-lb1" + q)
+        sb.append("," + q + "accepted_at" + q + ":" + q + "2026-10-22T00:00:00Z" + q)
+        sb.append("," + q + "retention_expires_at" + q + ":" + q + "2026-11-21T00:00:00Z" + q)
+        sb.append("}")
+        return sb.toString()
     }
 
     @Test

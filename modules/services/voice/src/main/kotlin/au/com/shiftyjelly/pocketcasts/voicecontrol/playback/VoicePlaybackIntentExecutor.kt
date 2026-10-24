@@ -49,13 +49,23 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         var primaryReported = false
         val observed: ((VoiceActionOutcome) -> Unit)? = onOutcome?.let { cb ->
             { fact: VoiceActionOutcome ->
-                if (!fact.isAuxiliary()) primaryReported = true
+                // DISPATCH IS NOT A RESULT (reviewer 00b0d7a9): Dispatched says the call was made,
+                // never that it took effect, so it must not clear the unobserved fallback — the
+                // dispatcher maps it to nothing, which would otherwise drop the only unknown marker.
+                if (fact.isObservedPrimaryResult()) primaryReported = true
                 cb(fact)
             }
         }
-        val response = executeIntent(intent, observed)
-        if (onOutcome != null && !primaryReported) onOutcome(VoiceActionOutcome.NotObserved)
-        return response
+        // GUARANTEED COMPLETION (reviewer 00b0d7a9): the fallback runs on EVERY exit — a normal
+        // return, a throw, or cancellation. A cloud duck can report its auxiliary grant and then
+        // the stream throws or cancels; the primary action's result is still unobserved then, and
+        // saying so is what prevents the auxiliary success from being published as the turn's
+        // outcome. Known facts are never overwritten: this only ADDS an observation.
+        return try {
+            executeIntent(intent, observed)
+        } finally {
+            if (onOutcome != null && !primaryReported) onOutcome(VoiceActionOutcome.NotObserved)
+        }
     }
 
     private suspend fun executeIntent(

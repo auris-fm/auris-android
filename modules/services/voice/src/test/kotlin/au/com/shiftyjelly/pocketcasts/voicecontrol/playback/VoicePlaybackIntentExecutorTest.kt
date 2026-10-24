@@ -434,7 +434,9 @@ class VoicePlaybackIntentExecutorTest {
         // dispatch. Either way the earcon is presentation and the fact below is the outcome.
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         // ...while the reported fact says the clear was requested.
-        assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched), facts)
+        // Dispatched is not a result (reviewer 00b0d7a9): the executor also records the
+        // primary unknown, so an auxiliary or later fact cannot lift this into success.
+        assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), facts)
     }
 
     @Test
@@ -447,7 +449,9 @@ class VoicePlaybackIntentExecutorTest {
 
         assertEquals(VoiceResponse.Earcon(EarconId.SUCCESS), response)
         // A SUCCESS earcon is NOT evidence of completion: the sink call returning is dispatch only.
-        assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched), facts)
+        // Dispatched is not a result (reviewer 00b0d7a9): the executor also records the
+        // primary unknown, so an auxiliary or later fact cannot lift this into success.
+        assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), facts)
     }
 
     @Test
@@ -459,7 +463,9 @@ class VoicePlaybackIntentExecutorTest {
         val response = executor.execute(VoiceIntent.Playback.Resume) { facts += it }
 
         assertEquals(VoiceResponse.Silent, response)
-        assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched), facts)
+        // Dispatched is not a result (reviewer 00b0d7a9): the executor also records the
+        // primary unknown, so an auxiliary or later fact cannot lift this into success.
+        assertEquals(listOf<VoiceActionOutcome>(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), facts)
     }
 
     @Test
@@ -490,8 +496,8 @@ class VoicePlaybackIntentExecutorTest {
         b.start()
         assertTrue(latch.await(10, java.util.concurrent.TimeUnit.SECONDS))
 
-        assertEquals(listOf(VoiceActionOutcome.Dispatched), aFacts)
-        assertEquals(listOf(VoiceActionOutcome.Dispatched), bFacts)
+        assertEquals(listOf(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), aFacts)
+        assertEquals(listOf(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), bFacts)
     }
 
     @Test
@@ -532,7 +538,7 @@ class VoicePlaybackIntentExecutorTest {
 
         assertTrue("pause must enter while the cloud stream is held", enteredWhileHeld)
         assertTrue(pauseCompleted)
-        assertEquals(listOf(VoiceActionOutcome.Dispatched), pauseFacts)
+        assertEquals(listOf(VoiceActionOutcome.Dispatched, VoiceActionOutcome.NotObserved), pauseFacts)
     }
 
     // The deprecated requestAudioFocus overload is what the sink itself calls (suppressing there is

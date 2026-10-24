@@ -67,3 +67,22 @@ internal fun VoiceActionOutcome.isAuxiliary(): Boolean = when (this) {
     is VoiceActionOutcome.Failed,
     -> false
 }
+
+/**
+ * True only for a fact that IS a primary action result (reviewer 00b0d7a9). A [VoiceActionOutcome.Dispatched]
+ * proves the call was made and nothing more, so it does not clear the unobserved fallback; an
+ * auxiliary fact never stands in for the primary action's result.
+ */
+internal fun VoiceActionOutcome.isObservedPrimaryResult(): Boolean = when (this) {
+    VoiceActionOutcome.Performed,
+    VoiceActionOutcome.NotObserved,
+    is VoiceActionOutcome.PreconditionFailed,
+    is VoiceActionOutcome.Refused,
+    is VoiceActionOutcome.Failed,
+    -> true
+
+    VoiceActionOutcome.Dispatched,
+    is VoiceActionOutcome.AuxiliaryPerformed,
+    is VoiceActionOutcome.AuxiliaryPreconditionFailed,
+    -> false
+}

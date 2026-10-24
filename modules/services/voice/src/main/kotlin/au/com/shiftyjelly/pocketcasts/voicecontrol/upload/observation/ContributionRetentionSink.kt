@@ -565,7 +565,7 @@ open class ContributionRetentionSink(
     }
 
     /** Test visibility: retains a candidate directly so outcome recording can be exercised. */
-    fun retainCandidateForTest(captureId: UUID): Boolean = synchronized(lock) {
+    open fun retainCandidateForTest(captureId: UUID): Boolean = synchronized(lock) {
         candidates += RetainedCandidate(
             context = CaptureContext(captureId = captureId, captureSession = 1L, routeClass = "Headset"),
         )

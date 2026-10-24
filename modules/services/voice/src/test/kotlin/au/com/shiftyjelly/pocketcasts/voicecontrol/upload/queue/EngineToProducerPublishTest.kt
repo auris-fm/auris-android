@@ -9,6 +9,7 @@ import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.IssuedAuth
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.RetainedCandidate
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.SegmentObservation
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.TranslationProvenance
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.ModelRef
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordNode
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.RecordValidator
@@ -571,11 +572,12 @@ class EngineToProducerPublishTest {
         assertEquals("observation_unavailable", (execution.fields.getValue("reason") as RecordNode.Str).value)
     }
 
-    // DISPATCH → SETTLEMENT → PUBLICATION (spec db897b24, reviewer 6775fc58). Unlike the
-    // decode control, these drive the REAL trigger/producer/store: the candidate is published, the
-    // persisted record is read back from disk through the durable store, and the EXECUTION stage is
-    // decoded from those bytes. The boundary that remains synthetic is the invocation itself (opened
-    // through the engine test seam) and the duck (reported as a fact, not granted by a real sink).
+    // RETENTION → TRIGGER → PRODUCER → STORE (spec 05f9d6c3, reviewer bb8221f7). ACCURATE SCOPE:
+    // this creates NO engine, opens NO invocation, reports NO auxiliary duck fact and calls NO
+    // dispatcher — it notes NotObserved on the retention sink directly and joins Executed. The
+    // publishUnderOwner here is a TEST lambda checking account/session/epoch, not the production
+    // owner binding/transaction. What IS real: the trigger, producer and store, and the assertions
+    // read the EXECUTION stage parsed out of the single on-disk metadata file.
     @Test
     fun `an auxiliary duck success published with an unobserved action decodes as unknown execution`() {
         val root = tmp.newFolder("aux-unknown-pub")
@@ -605,20 +607,28 @@ class EngineToProducerPublishTest {
             is RecordValidator.Result.Ok -> v.record
             else -> error("the persisted record must decode, got $v")
         }
-        // The bytes ON DISK must carry the honest unknown — not merely the in-memory model.
-        val onDisk = publishedRecordText(root, captureId)
-        assertTrue(
-            "the published bytes must record the execution as unknown, got $onDisk",
-            onDisk.contains("observation_unavailable"),
+        // The EXACT single on-disk metadata file is parsed and its EXECUTION stage asserted; a
+        // substring match anywhere in joined text would not establish the stage.
+        val onDiskExecution = onDiskExecutionStage(root, captureId)
+        assertEquals(
+            "the published bytes must record the execution as UNKNOWN, got $onDiskExecution",
+            "unknown",
+            (onDiskExecution.getValue("state") as RecordNode.Str).value,
         )
         val execution = decoded.observations.getValue(StageName.Execution)
         return StageProvenanceExecution(execution.state, execution.fields)
     }
 
-    /** The record file exactly as the store wrote it (the producer's serialized bytes). */
-    private fun publishedRecordText(root: java.io.File, captureId: UUID): String = root.walkTopDown()
-        .filter { it.isFile && it.name.startsWith(captureId.toString()) && it.name.endsWith(".metadata.json") }
-        .joinToString("\n") { it.readText() }
+    /** Parses the ONE on-disk metadata file for this capture and returns its Execution stage. */
+    private fun onDiskExecutionStage(root: java.io.File, captureId: UUID): Map<String, RecordNode> {
+        val files = root.walkTopDown()
+            .filter { it.isFile && it.name == "$captureId.metadata.json" }
+            .toList()
+        assertEquals("exactly one metadata file must be published", 1, files.size)
+        val parsed = CanonicalJson.parse(files.single().readText())
+        val observations = (parsed as RecordNode.Obj).fields["observations"] as RecordNode.Obj
+        return (observations.fields["execution"] as RecordNode.Obj).fields
+    }
 
     private data class StageProvenanceExecution(val state: StageState, val fields: Map<String, RecordNode>)
 

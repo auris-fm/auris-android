@@ -5,63 +5,60 @@ import kotlinx.coroutines.Job
 /**
  * THE SERVICE LIFECYCLE SEAM.
  *
- * [VoiceControlService] owns an Android `Service` lifetime, which unit tests cannot enter without an
- * instrumentation run. This interface IS that lifetime, narrowed to the decisions the service makes:
- * start the pipeline once, stop it once, and bind the stop to the service scope. The Android class
- * supplies the platform behaviour; a source-level control supplies the same contract and drives the
- * SAME [VoiceIntentDispatcher] and engine, so cancellation and dispatch ordering can be exercised
- * without pretending an instrumentation run happened.
+ * [VoiceControlService] owns an Android `Service` lifetime, which source-level controls cannot enter.
+ * This interface IS that lifetime, narrowed to the decisions the service makes and, critically,
+ * REPORTED FROM THE AUTHORITY that actually makes them:
  *
- * Deliberately NOT a policy: no decision about WHEN to start or stop lives here. If a branch is added
- * to this interface, the production service and every control must both adopt it.
+ * - [start] is the only entry point that may start the pipeline. The service's own `onStartCommand`
+ *   calls it, so there is exactly one start authority; a start already in flight is not repeated.
+ * - [stop] is the only entry point that may tear down. It returns a job that completes when teardown
+ *   has actually finished, so a caller awaiting it is not lied to.
+ * - [isStarted] reports whether a start is IN FLIGHT OR RUNNING, not just whether capture is up. The
+ *   engine's `isStarted` alone is false across the whole model-readiness window, which would let a
+ *   second start slip in.
  */
 interface VoiceServiceLifecycle {
+    /** True once a start has been accepted, including while it is still waiting for readiness. */
+    val isStarted: Boolean
+
+    /** The scope a stop cancels. */
+    val lifetime: LifetimeScope
+
+    /** Start the pipeline unless one is already running or in flight. Returns false if it did not. */
+    fun start(): Boolean
+
+    /** Stop the pipeline; the returned job completes when teardown has really finished. */
+    fun stop(): Job
+
+    interface LifetimeScope {
+        val isActive: Boolean
+    }
+
     /**
-     * A lifetime over the REAL service state: [isStarted] reads the engine's own start state and
-     * [lifetime] wraps the service's own scope, so the seam cannot disagree with production.
-     * [start] and [stop] are the service's existing private methods handed in as callbacks — this
-     * adapter holds NO policy of its own, which is what keeps start/stop behaviour unchanged.
+     * The production implementation, supplied BY THE SERVICE with accessors over its own state. It
+     * holds no policy: every decision it reports is the service's.
+     *
+     * [startedOrStarting] must answer true while a start is in flight, not only when capture is up.
+     * [stopPipeline] must return a job that completes after the pipeline has finished tearing down —
+     * a job completed merely because `stop()` returned is NOT acceptable, which is exactly what the
+     * previous implementation did.
      */
     class FromServiceState(
-        private val started: () -> Boolean,
+        private val startedOrStarting: () -> Boolean,
         private val scope: LifetimeScope,
         private val startPipeline: () -> Boolean,
         private val stopPipeline: () -> Job,
     ) : VoiceServiceLifecycle {
-        override val isStarted: Boolean get() = started()
+        override val isStarted: Boolean get() = startedOrStarting()
         override val lifetime: LifetimeScope get() = scope
 
         override fun start(): Boolean {
-            if (started()) return false
+            // The authority is consulted here AND by the service, which is the same flag, so a
+            // racing second start cannot get past both.
+            if (startedOrStarting()) return false
             return startPipeline()
         }
 
-        override fun stop(): Job {
-            val job = stopPipeline()
-            return job
-        }
-    }
-
-    /** True while the capture pipeline is running under this lifetime. */
-    val isStarted: Boolean
-
-    /** The scope the service cancels on stop; dispatch is bound to it. */
-    val lifetime: LifetimeScope
-
-    /**
-     * Start the pipeline. Returns false when it was already started — a second start must never
-     * produce a second pipeline.
-     */
-    fun start(): Boolean
-
-    /**
-     * Stop the pipeline exactly once. The returned job completes when teardown is finished, so a
-     * control can await the real ordering rather than sleeping.
-     */
-    fun stop(): Job
-
-    /** The scope a stop cancels, exposed for the cancellation-ordering control. */
-    interface LifetimeScope {
-        val isActive: Boolean
+        override fun stop(): Job = stopPipeline()
     }
 }

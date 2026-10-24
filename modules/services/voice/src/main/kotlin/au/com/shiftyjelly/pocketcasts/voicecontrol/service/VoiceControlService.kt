@@ -48,6 +48,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
@@ -55,6 +56,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import timber.log.Timber
 
 @AndroidEntryPoint
@@ -99,6 +101,17 @@ class VoiceControlService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var modeJob: Job? = null
     private var acquisitionJob: Job? = null
+
+    /**
+     * The start that has been ACCEPTED but may still be waiting for model readiness. `engineStart`
+     * only flips true once capture is really up, so without this a second start would slip into the
+     * readiness window (reviewer a85cf8fe). Cleared when the start coroutine finishes, so a failed
+     * start can be retried.
+     */
+    private var startInFlightJob: Job? = null
+
+    /** The teardown currently running, so a stop can return a job that really completes. */
+    private var stopInFlightJob: Job? = null
     private var lastIntentType: String? = null
     private var lastCommandTime: Long = 0L
     private val engineStart = EngineStartState()
@@ -134,41 +147,36 @@ class VoiceControlService : Service() {
             // Stop came from the user, not from Android: the controller must not bring the service
             // back on the next foreground, or the button would silently do nothing.
             voiceControlServiceController.onServiceStoppedByUser()
-            stopVoiceControl()
+            // ONE STOP AUTHORITY: the platform path stops through the seam, exactly like onDestroy.
+            lifecycle.stop()
             return START_NOT_STICKY
         }
-        startVoiceControl()
+        // ONE START AUTHORITY: this platform path starts through the seam, not around it.
+        lifecycle.start()
         return START_NOT_STICKY
     }
 
     /**
-     * THE LIFECYCLE SEAM over this service's REAL state: the engine's start flag, the service scope,
-     * and the existing start/stop entry points. No lift-and-shift of behaviour — the adapter calls
-     * straight through, so what it reports is what the service does.
+     * THE LIFECYCLE SEAM, reporting THIS service's own authority (reviewer a85cf8fe):
+     * `startedOrStarting` covers the readiness window, and `stopPipeline` returns a job that
+     * completes only after the pipeline has finished tearing down.
      */
     internal val lifecycle: VoiceServiceLifecycle by lazy {
         VoiceServiceLifecycle.FromServiceState(
-            started = { engineStart.isStarted },
+            startedOrStarting = { engineStart.isStarted || startInFlightJob?.isActive == true },
             scope = object : VoiceServiceLifecycle.LifetimeScope {
-                override val isActive get() = serviceScope.coroutineContext[kotlinx.coroutines.Job]?.isActive == true
+                override val isActive get() = serviceScope.coroutineContext[Job]?.isActive == true
             },
-            startPipeline = {
-                startVoiceControl()
-                engineStart.isStarted
-            },
-            stopPipeline = {
-                stopVoiceControl()
-                // Teardown is synchronous up to and including the scope cancel, so completion is
-                // already reachable when stop returns; callers may still await this job.
-                Job().apply { complete() }
-            },
+            startPipeline = { startVoiceControl() },
+            stopPipeline = { stopVoiceControl() },
         )
     }
 
-    private fun startVoiceControl() {
-        if (engineStart.isStarted) {
+    /** Returns true when a start was accepted; false when one is already running or in flight. */
+    private fun startVoiceControl(): Boolean {
+        if (engineStart.isStarted || startInFlightJob?.isActive == true) {
             Timber.i("Voice control already started")
-            return
+            return false
         }
         // A user-driven service start clears the automatic-restart cap left by a previous session.
         captureRestartBudget.reset()
@@ -176,7 +184,7 @@ class VoiceControlService : Service() {
         if (!hasRequiredPermissions()) {
             Timber.w("Missing permissions, stopping")
             stopSelf()
-            return
+            return false
         }
 
         try {
@@ -188,7 +196,7 @@ class VoiceControlService : Service() {
         } catch (e: SecurityException) {
             Timber.e(e, "Cannot start foreground — mic permission not granted")
             stopSelf()
-            return
+            return false
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
@@ -203,7 +211,7 @@ class VoiceControlService : Service() {
         // coroutine is cancelled BEFORE its body first runs (a launch finally does not), and the
         // try/catch below covers a launch that fails before the Job exists. Settlement is one-shot
         // in the engine, so every exit path converges on exactly one publication.
-        serviceScope.launch(Dispatchers.IO) {
+        startInFlightJob = serviceScope.launch(Dispatchers.IO) {
             ensureModelsReady()
             launch(Dispatchers.Main) {
                 modeJob = kotlinx.coroutines.flow.combine(
@@ -327,6 +335,7 @@ class VoiceControlService : Service() {
         }
 
         Timber.i("Voice control service started, observing listening mode")
+        return true
     }
 
     private suspend fun ensureModelsReady() {
@@ -745,10 +754,21 @@ class VoiceControlService : Service() {
         }
     }
 
-    private fun stopVoiceControl() {
+    /**
+     * Stops the pipeline and returns a job that completes when teardown has REALLY finished
+     * (reviewer a85cf8fe). The previous version returned an already-completed job, which told an
+     * awaiting caller that children had settled when they had not. This awaits the cancelled
+     * children — `modeJob`, the acquisition job and the in-flight start — under `NonCancellable`, so
+     * the returned job is a truthful completion signal. `serviceScope` is cancelled first so nothing
+     * can be restarted behind the join.
+     */
+    private fun stopVoiceControl(): Job {
+        // Idempotent: a second stop joins the teardown already running instead of starting another.
+        stopInFlightJob?.let { if (it.isActive) return it }
         Timber.i("Stopping voice control service")
+        val children = listOfNotNull(modeJob, acquisitionJob, startInFlightJob)
+        startInFlightJob = null
         modeJob?.cancel()
-        stopEngine()
         wiredBackend?.release()
         wiredBackend = null
         mediaSession?.isActive = false
@@ -760,6 +780,15 @@ class VoiceControlService : Service() {
         stopForeground(STOP_FOREGROUND_REMOVE)
         serviceScope.cancel()
         stopSelf()
+        // The completion authority: awaits the cancelled children's own finally/settlement.
+        return CoroutineScope(Dispatchers.IO).launch {
+            withContext(NonCancellable) {
+                children.forEach { child ->
+                    runCatching { child.join() }
+                        .onFailure { Timber.w(it, "[VoicePipeline] teardown join failed") }
+                }
+            }
+        }.also { stopInFlightJob = it }
     }
 
     private fun hasRequiredPermissions(): Boolean {

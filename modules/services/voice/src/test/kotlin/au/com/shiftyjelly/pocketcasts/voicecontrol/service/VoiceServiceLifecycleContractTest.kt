@@ -1,84 +1,103 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.service
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * CONTRACT CONTROL for the lifecycle seam, run against the PRODUCTION mapping.
+ * CONTRACT CONTROL for the lifecycle seam, against the PRODUCTION adapter class.
  *
- * Reviewer 5184236b: asserting this against a hand-written fake proves nothing about production —
- * a fake can satisfy any title it is given. So this drives
- * [VoiceServiceLifecycle.FromServiceState] — the same class `VoiceControlService.lifecycle` uses —
- * with the service's real decision shapes: the started flag, the scope's active flag, and the
- * start/stop callbacks.
+ * Reviewer a85cf8fe found the previous version proved nothing: it used a fake with an unchecked
+ * counter and never modelled the readiness window or a real teardown. The harness here models the
+ * TWO properties the service actually has and the seam must report:
  *
- * Still NOT covered, stated plainly: no Android `Service` is instantiated, so `onCreate`/
- * `onDestroy`, `stopSelf` and the platform foreground-service path are outside this control.
+ * 1. a start is ACCEPTED before capture is up (model-readiness window), and a second start in that
+ *    window must be refused;
+ * 2. stop returns a job that completes only after the teardown work has finished.
+ *
+ * Still NOT covered: no Android `Service` is constructed (that control is blocked on the Hilt test
+ * application), so `onStartCommand`/`onDestroy` wiring and the foreground path are outside this file.
  */
 class VoiceServiceLifecycleContractTest {
 
-    /**
-     * The PRODUCTION adapter, driven by the same state the service owns: a started flag, the scope's
-     * active flag, and start/stop callbacks. The counters record what the adapter asked for, so the
-     * assertions are about the adapter's decisions rather than a fake's convenience.
-     */
     private class Harness {
-        var engineStarted = false
+        var captureUp = false
+        var acceptedStartPending = false
         var scopeActive = true
         var startCalls = 0
         var stopCalls = 0
+        var stopJob: Job? = null
 
         val lifetime: VoiceServiceLifecycle = VoiceServiceLifecycle.FromServiceState(
-            started = { engineStarted },
+            // The service's authority: capture up OR an accepted start still in readiness.
+            startedOrStarting = { captureUp || acceptedStartPending },
             scope = object : VoiceServiceLifecycle.LifetimeScope {
                 override val isActive get() = scopeActive
             },
             startPipeline = {
                 startCalls++
-                engineStarted = true
-                engineStarted
+                acceptedStartPending = true
+                true
             },
             stopPipeline = {
                 stopCalls++
-                engineStarted = false
-                scopeActive = false
-                Job().apply { complete() }
+                checkNotNull(stopJob) { "stop requires a teardown job" }
             },
         )
     }
 
     @Test
-    fun `a second start does not start a second pipeline`() {
+    fun `a second start during the readiness window is refused`() {
         val h = Harness()
         assertTrue(h.lifetime.start())
-        assertFalse("a second start must report already-started", h.lifetime.start())
-        assertTrue(h.lifetime.isStarted)
-        assertEquals("the pipeline is started exactly once", 1, h.startCalls)
+        // Capture is NOT up yet: the start was accepted and is waiting on readiness.
+        assertFalse(h.captureUp)
+        assertFalse("a start already in flight must refuse a second one", h.lifetime.start())
+        assertEquals("the pipeline is entered exactly once", 1, h.startCalls)
+        assertTrue("the seam reports started while the start is still in flight", h.lifetime.isStarted)
     }
 
     @Test
-    fun `stop is idempotent and deactivates the lifetime scope`() {
+    fun `a start is allowed again once the in-flight start finishes`() {
         val h = Harness()
         h.lifetime.start()
-        val first = h.lifetime.stop()
-        assertTrue("stop's job completes so a control can await real ordering", first.isCompleted)
+        h.acceptedStartPending = false // the start completed and did not end up capturing
         assertFalse(h.lifetime.isStarted)
-        assertFalse("the service scope is cancelled on stop", h.lifetime.lifetime.isActive)
-        h.lifetime.stop()
-        assertFalse("stopping twice must not restart anything", h.lifetime.isStarted)
-        assertEquals("stop reaches the pipeline on each call, never restarting", 2, h.stopCalls)
+        assertTrue("a finished start must not block the next one forever", h.lifetime.start())
     }
 
     @Test
-    fun `reported state comes from the service, not from the adapter's own flag`() {
+    fun `stop returns a job that completes only after teardown really finishes`() = runBlocking {
         val h = Harness()
-        // The engine state is the authority: the adapter must reflect it, not track its own copy.
-        h.engineStarted = true
-        assertTrue("isStarted must read the engine's real flag", h.lifetime.isStarted)
+        // Teardown is gated so the assertion observes a genuinely incomplete job.
+        val gate = CompletableDeferred<Unit>()
+        h.stopJob = CoroutineScope(Dispatchers.IO).launch {
+            withContext(NonCancellable) { gate.await() }
+        }
+        val returned = h.lifetime.stop()
+        assertNotNull(returned)
+        assertFalse("stop must NOT report completion before teardown finishes", returned.isCompleted)
+        gate.complete(Unit)
+        returned.join()
+        assertTrue("stop completes once teardown is really done", returned.isCompleted)
+    }
+
+    @Test
+    fun `reported state comes from the service, not from an adapter-local flag`() {
+        val h = Harness()
+        h.captureUp = true
+        assertTrue("isStarted must read the service's authority", h.lifetime.isStarted)
         h.scopeActive = false
-        assertFalse("lifetime.isActive must read the service scope", h.lifetime.lifetime.isActive)
+        assertFalse("isActive must read the service scope", h.lifetime.lifetime.isActive)
     }
 }

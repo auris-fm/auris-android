@@ -127,17 +127,19 @@ class SettingsStopWiringTest {
                 "window exists in which collection could still admit a capture",
             launchIndex > recordIndex,
         )
-        // Whitespace-normalised and matched on the guarded call, not a frozen line: the call now also
-        // consumes the durability result, and pinning the old exact text made this control fail for a
-        // change that strengthened it.
+        // Whitespace-normalised, not a frozen line.
         val flatStop = source.replace(Regex("\\s+"), " ")
         assertTrue(
             "the stop must be recorded only on the OFF branch, never on a turn-on",
-            flatStop.contains("if (!checked && !localWithdrawalIntent.recordWithdrawalRequested())"),
+            flatStop.contains("if (!checked) localWithdrawalIntent.recordWithdrawalRequested()"),
         )
-        assertTrue(
-            "a stop that could not be made durable must still keep this session closed",
-            flatStop.contains("locallyStopped = true"),
+        // Enforcement of a FAILED write lives in the store the collection gate consults, not in a
+        // flag beside this screen (reviewer 7a2e10a6). A flag here would be write-only decoration, so
+        // this control asserts the screen does not pretend to enforce it.
+        assertFalse(
+            "the screen must not keep its own stop latch: the collection gate does not read it, so it " +
+                "would look like enforcement without being any",
+            source.contains("locallyStopped"),
         )
     }
 

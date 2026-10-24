@@ -19,7 +19,9 @@ import javax.inject.Singleton
  * exists to prevent.
  *
  * KNOWN ASYMMETRY, stated rather than hidden: a file that is present but corrupt/empty/unreadable
- * reads as STOPPED (see [read]), while an ABSENT file reads as PERMITTED. The two are deliberately
+ * reads as STOPPED (see [read]), while an ABSENT file reads as PERMITTED. A missing marker therefore
+ * does NOT stop collection - the [LocalWithdrawalIntentStore] failure latch covers the case where a
+ * stop could not be written at all, since that is the only way absence can appear after a stop. The two are deliberately
  * different demands. Absence is the legitimate state before the user has ever made a decision, and
  * treating it as a stop would strand every first-run user behind an opt-in they never asked for.
  * The price is that a lost file resumes collection, which is why [write] never removes the

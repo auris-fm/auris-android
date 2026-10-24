@@ -63,11 +63,29 @@ class WorkerWireParityTest {
                 .redirectErrorStream(true)
                 .start()
                 .inputStream.bufferedReader().readText().trim()
+            // HEAD ALONE DOES NOT BIND THE TESTED BYTES (reviewer 7a2e10a6): a dirty checkout can run
+            // code that matches no commit. Record whether the tree was clean, and a content digest of
+            // the inputs the comparison actually reads, so the archive identifies what ran.
+            val dirty = ProcessBuilder("git", "status", "--porcelain")
+                .directory(File(".").absoluteFile)
+                .redirectErrorStream(true)
+                .start()
+                .inputStream.bufferedReader().readText().trim()
+            val probeSource = javaClass.classLoader!!
+                .getResourceAsStream("worker-parity/probe_worker_intake.mjs")!!.readBytes()
+            val contentDigest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(probeSource)
+                .joinToString("") { "%02x".format(it) }
             val out = File("build/worker-parity-receipt.txt")
             out.parentFile?.mkdirs()
             out.writeText(
                 buildString {
                     appendLine("android_source_head=$head")
+                    appendLine("android_source_clean=${dirty.isEmpty()}")
+                    if (dirty.isNotEmpty()) {
+                        appendLine("android_source_dirty_paths=$dirty")
+                    }
+                    appendLine("probe_sha256=$contentDigest")
                     appendLine("worker_root=${workerRoot.absolutePath}")
                     appendLine("worker_head=$workerHead")
                     appendLine("worker_reported_revision=${reportedRevision?.trim()}")

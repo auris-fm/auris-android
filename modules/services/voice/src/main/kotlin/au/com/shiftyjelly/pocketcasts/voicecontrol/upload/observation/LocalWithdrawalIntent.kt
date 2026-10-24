@@ -35,18 +35,39 @@ interface WithdrawalIntentPersistence {
 class LocalWithdrawalIntentStore(private val persistence: WithdrawalIntentPersistence) {
 
     /**
+     * Set when a stop could not be made durable.
+     *
+     * This latch lives HERE, in the object the collection gate actually asks, because a failure flag
+     * anywhere else is decorative (reviewer 7a2e10a6): my previous version put it in the Settings
+     * fragment, where nothing read it, and collection stayed open for the rest of the session even
+     * though the user had asked to stop. A stop whose write failed is still a stop, and the only
+     * entity that can enforce that is the one the gate consults.
+     *
+     * Cleared only by an explicit opt-in, exactly like the durable marker.
+     */
+    @Volatile
+    private var stopCouldNotPersist: Boolean = false
+
+    /**
      * Recorded BEFORE the network call, so no window exists in which collection could resume.
      *
-     * Returns false when the marker could not be durably written. The caller must then keep the
-     * collection gate closed anyway: the user asked to stop, and an unwritten stop is still a stop.
+     * Returns false when the marker could not be durably written, and LATCHES that failure so the
+     * collection gate refuses admission even though the disk has no record of the stop.
      */
-    fun recordWithdrawalRequested(): Boolean = persistence.write(true)
+    fun recordWithdrawalRequested(): Boolean {
+        val written = persistence.write(true)
+        if (!written) stopCouldNotPersist = true
+        return written
+    }
 
     /**
      * Collection is permitted locally only when the user has NOT asked to stop. The server
      * projection is consulted by the caller; this answers the narrower, overriding question.
      */
     fun collectionPermittedByLocalIntent(projection: VoiceSharingAccountProjection?): Boolean {
+        // A latch from a failed write outranks everything: the user asked to stop and the disk does
+        // not know it, so the only safe answer is no.
+        if (stopCouldNotPersist) return false
         if (persistence.read()) return false
         if (projection == null) return false
         return projection.voiceSharingEnrolled && projection.withdrawalState == WithdrawalState.ACTIVE
@@ -83,5 +104,11 @@ class LocalWithdrawalIntentStore(private val persistence: WithdrawalIntentPersis
     }
 
     /** An explicit new opt-in is a fresh user action and releases the local stop. */
-    fun clearOnUserEnrollment(): Boolean = persistence.write(false)
+    fun clearOnUserEnrollment(): Boolean {
+        val written = persistence.write(false)
+        // Only a DURABLE clear releases the latch. A failed clear leaves the session stopped, which is
+        // the safe direction and matches what the on-disk marker now says.
+        if (written) stopCouldNotPersist = false
+        return written
+    }
 }

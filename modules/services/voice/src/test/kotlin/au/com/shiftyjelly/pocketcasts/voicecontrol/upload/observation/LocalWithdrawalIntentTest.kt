@@ -55,6 +55,50 @@ class LocalWithdrawalIntentTest {
     }
 
     @Test
+    fun `a stop whose write FAILS still stops collection in this session`() {
+        // Reviewer 7a2e10a6. The failure latch used to live in the Settings fragment, where nothing
+        // read it, so a failed stop left the gate open for the rest of the session while the disk held
+        // an older PERMITTED marker. The latch now lives here - in the object the collection gate
+        // actually asks - and this asserts the GATE's answer, not a flag's value.
+        val persistence = FailingIntentPersistence()
+        val intent = LocalWithdrawalIntentStore(persistence)
+
+        // Precondition: before any stop, an enrolled projection DOES permit collection. Without this
+        // the assertion below could pass for the wrong reason.
+        assertTrue(
+            "precondition: collection must be permitted before the stop, or this control is vacuous",
+            intent.collectionPermittedByLocalIntent(projection()),
+        )
+
+        assertFalse("the stop write must report failure", intent.recordWithdrawalRequested())
+        assertFalse(
+            "after a FAILED stop write the collection gate must still refuse admission - the user " +
+                "asked to stop, and the disk not knowing it is not permission",
+            intent.collectionPermittedByLocalIntent(projection()),
+        )
+
+        // A DURABLE clear is the only thing that releases the latch.
+        persistence.failWrites = false
+        assertTrue("a successful clear must report success", intent.clearOnUserEnrollment())
+        assertTrue(
+            "an explicit durable opt-in must release the latch",
+            intent.collectionPermittedByLocalIntent(projection()),
+        )
+    }
+
+    @Test
+    fun `a failed CLEAR does not release the latch`() {
+        val persistence = FailingIntentPersistence()
+        val intent = LocalWithdrawalIntentStore(persistence)
+        intent.recordWithdrawalRequested()
+        assertFalse("the clear write must report failure", intent.clearOnUserEnrollment())
+        assertFalse(
+            "a failed clear must never release the stop",
+            intent.collectionPermittedByLocalIntent(projection()),
+        )
+    }
+
+    @Test
     fun `the intent survives process recreation`() {
         val persistence = InMemoryIntentPersistence()
         LocalWithdrawalIntentStore(persistence).recordWithdrawalRequested()
@@ -114,6 +158,19 @@ class InMemoryIntentPersistence : WithdrawalIntentPersistence {
     override fun read(): Boolean = stored
 
     override fun write(requested: Boolean): Boolean {
+        stored = requested
+        return true
+    }
+}
+
+/** Writes fail and say so; reads report whatever was last successfully written. */
+class FailingIntentPersistence(var failWrites: Boolean = true) : WithdrawalIntentPersistence {
+    private var stored: Boolean = false
+
+    override fun read(): Boolean = stored
+
+    override fun write(requested: Boolean): Boolean {
+        if (failWrites) return false
         stored = requested
         return true
     }

@@ -67,13 +67,6 @@ import au.com.shiftyjelly.pocketcasts.localization.R as LR
 @AndroidEntryPoint
 class VoiceControlSettingsFragment : BaseFragment() {
 
-    /**
-     * Set when the stop is known to this session but could NOT be made durable. The screen already
-     * shows the user as stopped; this records that the on-disk marker did not land, so nothing
-     * downstream can read the absence of a marker as permission.
-     */
-    private var locallyStopped = false
-
     @Inject lateinit var settings: Settings
 
     @Inject lateinit var modelManager: ModelManager
@@ -278,11 +271,10 @@ class VoiceControlSettingsFragment : BaseFragment() {
                     // place the actual tap reaches durable state, so without it the collection gate
                     // consults a flag nobody ever sets. Written BEFORE the coroutine launches, so no
                     // scheduling window exists in which collection could still admit a capture.
-                    // A stop that could not be DURABLY written is still a stop for this session: the
-                    // in-memory switch below already refuses to collect, and the failed marker is
-                    // reported rather than discarded. Treating the failure as "carry on" would resume
-                    // collection for someone who asked us to stop.
-                    if (!checked && !localWithdrawalIntent.recordWithdrawalRequested()) locallyStopped = true
+                    // A stop that could not be DURABLY written is still a stop. The store latches that
+                    // failure and the COLLECTION GATE consults the latch, so enforcement lives where
+                    // admission is decided rather than in a flag beside the screen (reviewer 7a2e10a6).
+                    if (!checked) localWithdrawalIntent.recordWithdrawalRequested()
                     scope.launch {
                         val outcome = if (checked) {
                             enrollmentController.enroll(acceptedDisclosureVersion = localDisclosureVersion())

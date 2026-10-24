@@ -358,8 +358,10 @@ class PlaybackCrossCorrelatorPositionTest {
                 x = x xor (x shr 13)
                 (((x shr 16) and 0xFF) - 128) / 128f
             }
-            // Reference offset 18 000 = analysis-tail index 18 000, i.e. the echo aligns at search
-            // offset 0 (implied delay 500 ms, the admissible edge): analysis[j] = 0.3f * ref[j].
+            // The burst itself starts at REFERENCE OFFSET 18 000; the matching ANALYSIS WINDOW
+            // starts at search offset 0 (implied delay 500 ms, the admissible edge): the tail's
+            // analysis[j] = 0.3f * ref[j] for every j, because tail index 18 000 + j hits the
+            // burst copy that begins at reference 18 000.
             val reference = FloatArray(32_000)
             burst.copyInto(reference, 18_000)
             val segment = FloatArray(41_984)

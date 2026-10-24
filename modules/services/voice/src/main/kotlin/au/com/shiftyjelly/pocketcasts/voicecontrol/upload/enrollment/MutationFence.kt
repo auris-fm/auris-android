@@ -89,15 +89,24 @@ class MutationFence {
      * [issue] ever runs to notice. Detecting it on check keeps the fence correct whether or not
      * another mutation follows.
      */
-    fun isCurrent(attempt: Attempt, liveSession: () -> Long): Boolean = synchronized(this) {
+    fun isCurrent(attempt: Attempt, liveSession: () -> Long): Boolean {
+        // The session is snapshotted BEFORE the fence lock is taken. The lock ORDER is owner -> fence
+        // everywhere: applyIfCurrent with an owner scope holds the owner lock and then acquires this
+        // fence's lock, so this method must never do the reverse (fence -> owner) or the two paths
+        // can deadlock (reviewer 445faa5c). The snapshot can therefore be a moment stale on its own;
+        // paths that need the session read atomic WITH the decision must use the owner scope, and
+        // this read-only labelling check tolerates a snapshot taken just before the fence check.
         val live = liveSession()
-        // The account changed while this was in flight: the result belongs to somebody else's screen.
-        if (attempt.ownerSession != live) {
-            generation += 1
-            boundSession = live
-            return false
+        return synchronized(this) {
+            // The account changed while this was in flight: the result belongs to somebody else's screen.
+            if (attempt.ownerSession != live) {
+                generation += 1
+                boundSession = live
+                false
+            } else {
+                attempt.generation == generation && boundSession == live
+            }
         }
-        attempt.generation == generation && boundSession == live
     }
 
     /**
@@ -143,27 +152,30 @@ class MutationFence {
         underOwnerTransaction: ((() -> T?) -> T?)? = null,
         effect: () -> T,
     ): T? {
+        // LOCK ORDER: owner -> fence on every path. The owner transaction (when present) is the
+        // OUTERMOST scope and the fence lock nests inside it. decideLocked snapshots the session
+        // BEFORE taking the fence lock, so even the scope-less path never acquires the owner lock
+        // while holding the fence lock - isCurrent and this path cannot deadlock against the scoped
+        // path (reviewer 445faa5c). The earlier claim that opposite orders never occur was false.
         if (underOwnerTransaction != null) {
-            // The owner transaction is the OUTERMOST scope and the fence lock nests inside it, so the
-            // two are never acquired in opposite orders.
             return underOwnerTransaction { decideLocked(attempt, liveSession, effect) }
         }
         return decideLocked(attempt, liveSession, effect)
     }
 
-    private fun <T> decideLocked(attempt: Attempt, liveSession: () -> Long, effect: () -> T): T? = synchronized(this) {
-        // Inlined rather than delegating to isCurrent: isCurrent is itself synchronized on `this`,
-        // and re-entering it here would be correct but obscure the fact that one lock covers both
-        // the decision and the effect. The condition is kept textually identical to isCurrent.
+    private fun <T> decideLocked(attempt: Attempt, liveSession: () -> Long, effect: () -> T): T? {
+        // Snapshot BEFORE the fence lock (see isCurrent: the order is owner -> fence everywhere).
         val live = liveSession()
-        val current = if (attempt.ownerSession != live) {
-            generation += 1
-            boundSession = live
-            false
-        } else {
-            attempt.generation == generation && boundSession == live
+        return synchronized(this) {
+            val current = if (attempt.ownerSession != live) {
+                generation += 1
+                boundSession = live
+                false
+            } else {
+                attempt.generation == generation && boundSession == live
+            }
+            if (!current) null else effect()
         }
-        if (!current) null else effect()
     }
 
     /** Runs SERVER work one at a time; the caller decides what to do with a superseded result. */

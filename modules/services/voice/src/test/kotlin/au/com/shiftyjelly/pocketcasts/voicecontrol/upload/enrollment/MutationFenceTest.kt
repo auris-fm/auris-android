@@ -21,6 +21,83 @@ import org.junit.Test
 class MutationFenceTest {
 
     @Test
+    fun `the scoped path and isCurrent cannot deadlock against each other`() {
+        // Reviewer 445faa5c: applyIfCurrent with an owner scope takes owner -> fence, while the old
+        // isCurrent took fence -> owner (it read liveSession() INSIDE synchronized(this)). Two
+        // threads on those paths could each hold one lock and wait for the other. This control
+        // forces BOTH placements deterministically:
+        //
+        //   T1 holds the owner lock, then asks the fence to apply (needs the fence lock).
+        //   T2 is made to HOLD the fence lock while reading the session (which needs the owner lock).
+        //
+        // Under the old order T2 is inside the fence critical section waiting for the owner lock T1
+        // holds, and T1 is waiting for the fence lock T2 holds - both hang. Under the fixed order the
+        // session snapshot happens BEFORE the fence lock, so T1 acquires the fence freely, finishes,
+        // and T2 proceeds. Both threads must COMPLETE within the deadline; the assertion is that
+        // neither hangs.
+        val fence = MutationFence()
+        val attempt = fence.issue(ownerSession = 7L)
+        val ownerLock = Any()
+
+        @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+        val t1OwnerHeld = java.util.concurrent.CountDownLatch(1)
+        val t2FenceHeld = java.util.concurrent.CountDownLatch(1)
+        val t1Done = java.util.concurrent.CountDownLatch(1)
+        val t2Done = java.util.concurrent.CountDownLatch(1)
+
+        val t1 = Thread {
+            synchronized(ownerLock) {
+                t1OwnerHeld.countDown()
+                // Wait until T2 is (under the old order) holding the fence lock and wanting ours.
+                t2FenceHeld.await()
+                val ran = fence.applyIfCurrent(
+                    attempt = attempt,
+                    liveSession = { 7L },
+                    underOwnerTransaction = { block -> block() },
+                    effect = { true },
+                )
+                check(ran == true) { "the attempt must be current on T1" }
+            }
+            t1Done.countDown()
+        }
+        val t2 = Thread {
+            // Under the OLD order, liveSession() ran INSIDE synchronized(fence): this thread holds
+            // the fence lock at the moment it signals t2FenceHeld, and then waits for the owner lock
+            // T1 holds. Under the FIXED order the snapshot happens before the lock, so signalling
+            // happens outside the fence and no cycle can form.
+            val current = fence.isCurrent(attempt) {
+                t1OwnerHeld.await()
+                t2FenceHeld.countDown()
+                // Give the deadlock a chance to form before we release anything: under the old order
+                // T1 is now blocked on the fence we (old) hold, and we block below on t1Done.
+                // Unbounded on purpose: under the OLD order this thread holds the fence lock while
+                // waiting for T1, and T1 waits for the fence - only the outer deadline below may
+                // end the test, and a bounded wait here would let the cycle dissolve itself.
+                t1Done.await()
+                7L
+            }
+            check(current) { "the attempt must be current on T2" }
+            t2Done.countDown()
+        }
+        t1.isDaemon = true
+        t2.isDaemon = true
+        t1.start()
+        t2.start()
+
+        val bothFinished = t1Done.await(5, java.util.concurrent.TimeUnit.SECONDS) &&
+            t2Done.await(1, java.util.concurrent.TimeUnit.SECONDS)
+        assertTrue(
+            "one of the two lock-order paths hung: the fence reads the owner session while holding " +
+                "its own lock while the scoped apply path takes the locks in the opposite order - " +
+                "that is the reviewer 445faa5c deadlock; the session snapshot must happen BEFORE the " +
+                "fence lock on every path",
+            bothFinished,
+        )
+        t1.join(1_000)
+        t2.join(1_000)
+    }
+
+    @Test
     fun `an off action supersedes an in-flight enrollment so its late result cannot win`() = runTest {
         val fence = MutationFence()
         val enrollment = fence.issue(ownerSession = 1L)

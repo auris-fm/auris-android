@@ -1536,14 +1536,19 @@ class VoiceAsrEngineTest {
         override fun release() = Unit
     }
 
-    // TERMINAL BLEED DELIVERY, END TO END (spec + reviewer 1e4295a1): the ACTUAL engine path —
-    // SpeechStarted admission freezes the capture, the segmenter closes it, the REAL
-    // UtteranceFilter decision rejects the segment as playback bleed, VoiceAsrEngine joins
-    // NotCollected("bleed"), the attached RetentionPublishTrigger fires through its unmodified
-    // consent/eligibility guards, and the PRODUCER's persisted bytes decode with bleed
-    // completed/overlap. No manual stagesFor/publish staging: the only test-authored pieces are
-    // the mocks the engine already takes (segmenter flow, filter, backend) and the store/producer
-    // every publish control uses.
+    // TERMINAL BLEED DELIVERY (spec + reviewer 1e4295a1; claim corrected per reviewer 3cc4a92f).
+    //
+    // WHAT THIS PROVES: the engine's handling of an INJECTED filter refusal. The segment flows
+    // through real SpeechStarted admission (capture frozen, prefix adopted) and a real segment
+    // close; `utteranceFilter` is a MOCK whose shouldProcess returns false, and the playback
+    // reference is empty, so nothing here demonstrates that the real correlator WOULD have rejected
+    // this audio. When the injection is refused, the engine joins NotCollected("bleed") itself,
+    // the ATTACHED RetentionPublishTrigger fires through the real sink callback, and the producer
+    // persists bytes the control decodes (bleed completed/overlap).
+    //
+    // WHAT THIS DOES NOT PROVE: correlator/filter detection accuracy (device/JNI boundary), and
+    // actual Hilt assembly/owner integration — publishUnderOwner is supplied BY THIS TEST, so the
+    // production owner-binding wiring is exercised only at source level.
     @Test
     fun `a bleed-rejected segment is delivered to the producer by the publish trigger`() = runTest {
         authority = { AuthorityDecision(collectionPermitted = true, fullRevocation = false) }
@@ -1569,7 +1574,8 @@ class VoiceAsrEngineTest {
         )
         `when`(voiceAudioProcessor.speechPcmSize()).thenReturn(800)
         `when`(voiceAudioProcessor.drainSpeechPcm(any())).thenReturn(800)
-        // THE PRODUCTION DECISION UNDER TEST: the filter rejects the segment as bleed.
+        // THE INJECTED REFUSAL: a mocked filter returning false stands in for the correlator's
+        // bleed verdict. This proves the engine's reaction to a refusal, not the verdict itself.
         `when`(utteranceFilter.shouldProcess(any(), any(), any(), any())).thenReturn(false)
         // Grace open: a wake-negative segment in Continuous still flows to the transcriber,
         // which is where the bleed filter decision lives.
@@ -1619,8 +1625,8 @@ class VoiceAsrEngineTest {
         )
         trigger.attach()
 
-        // The bleed branch fires BEFORE ASR, but the capture's frozen model provenance must be
-        // a real Named manifest id for the producer's schema to accept the record.
+        // The bleed branch fires BEFORE ASR, so no ASR model is consulted; the capture's frozen
+        // model provenance still has to satisfy the producer's schema, hence a Named id here.
         val bleedBackend = object : AsrBackend {
             override suspend fun ensureReady(): Result<Unit> = Result.success(Unit)
 

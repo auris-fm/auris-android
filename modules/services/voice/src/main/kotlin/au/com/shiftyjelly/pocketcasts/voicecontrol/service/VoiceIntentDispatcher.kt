@@ -118,6 +118,13 @@ class VoiceIntentDispatcher @Inject constructor() {
 
         is VoiceActionOutcome.PreconditionFailed -> ExecutionOutcome.Failure
 
+        // Auxiliary operations are OBSERVATIONS too: the duck grant is known, and what happened
+        // to the turn's own action is unknown. Reporting it keeps the aggregate honest
+        // (agreement-or-unknown) instead of letting it vanish (reviewer 8c77f5aa).
+        is VoiceActionOutcome.AuxiliaryPerformed -> ExecutionOutcome.Success
+
+        is VoiceActionOutcome.AuxiliaryPreconditionFailed -> ExecutionOutcome.Failure
+
         is VoiceActionOutcome.Refused -> ExecutionOutcome.Refused
     }
 

@@ -70,7 +70,7 @@ class MixedFactsPersistControlTest {
         val harness = Harness(this)
         harness.startTurn()
         harness.reportThroughProductionChannel(
-            VoiceActionOutcome.Performed, // the duck: a real auxiliary fact
+            VoiceActionOutcome.AuxiliaryPerformed("audio_focus"), // the duck: an AUXILIARY fact
             VoiceActionOutcome.NotObserved, // the turn's own action: explicitly unobserved
         )
         assertNull(
@@ -91,7 +91,7 @@ class MixedFactsPersistControlTest {
         harness.startTurn()
         // Same duck fact, but reported ALONE: only the explicit NotObserved keeps this from
         // aggregating to success. This is the counterfactual the spec asks to be verified.
-        harness.reportThroughProductionChannel(VoiceActionOutcome.Performed)
+        harness.reportThroughProductionChannel(VoiceActionOutcome.AuxiliaryPerformed("audio_focus"))
         assertEquals(
             "duck alone aggregates to success — which is why the unobserved action MUST be reported",
             ExecutionOutcome.Success,

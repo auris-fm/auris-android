@@ -36,23 +36,13 @@ class PlaybackManagerPlaybackSink @Inject constructor(
     @Suppress("DEPRECATION")
     override suspend fun duck(): VoiceResponse = duckReporting(null)
 
-    /**
-     * The duck with its OWN result channel (reviewer c15bf037): no shared mutable callback. The
-     * reporter travels with THIS focus request, serialized by [duckMutex] so concurrent entries
-     * cannot cross facts. The duck is a quick operation; the stream it may precede is never held.
-     */
-    suspend fun duckReporting(onOutcome: ((VoiceActionOutcome) -> Unit)?): VoiceResponse = duckMutex.withLock {
-        val previous = actionReporter
-        actionReporter = onOutcome
-        try {
-            duckInternal()
-        } finally {
-            actionReporter = previous
-        }
-    }
+    // Reviewer 8c77f5aa: the callback is a PARAMETER all the way down — no shared mutable slot.
+    // Serialized by [duckMutex] because the focus request itself is not reentrant-safe, not to
+    // guard a slot: every caller's facts travel inside its own call frame.
+    suspend fun duckReporting(onOutcome: ((VoiceActionOutcome) -> Unit)?): VoiceResponse = duckMutex.withLock { duckInternal(onOutcome) }
 
     @Suppress("DEPRECATION")
-    private suspend fun duckInternal(): VoiceResponse {
+    private suspend fun duckInternal(onOutcome: ((VoiceActionOutcome) -> Unit)?): VoiceResponse {
         val result = audioManager.requestAudioFocus(
             { focusChange ->
                 when (focusChange) {
@@ -75,23 +65,15 @@ class PlaybackManagerPlaybackSink @Inject constructor(
         // (spec 03c96924). A consumer reading the response would see one identical value.
         if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
             Timber.i("[VoicePipeline] cloud audio ducked host player")
-            actionReporter?.invoke(VoiceActionOutcome.Performed)
+            onOutcome?.invoke(VoiceActionOutcome.AuxiliaryPerformed("audio_focus"))
         } else {
             Timber.w("[VoicePipeline] cloud duck request rejected")
-            actionReporter?.invoke(VoiceActionOutcome.PreconditionFailed("audio_focus_denied"))
+            onOutcome?.invoke(VoiceActionOutcome.AuxiliaryPreconditionFailed("audio_focus", "audio_focus_denied"))
         }
         return VoiceResponse.Silent
     }
 
-    /**
-     * Where sink facts go, set by the caller that drives THIS duck. The focus request is
-     * serialized by [duckMutex] so the slot is never shared across concurrent entries (reviewer
-     * c15bf037) — a quick operation, unlike the stream it may precede.
-     */
     private val duckMutex = kotlinx.coroutines.sync.Mutex()
-
-    @Volatile
-    var actionReporter: ((VoiceActionOutcome) -> Unit)? = null
 
     /** Restore by abandoning the duckable focus so the host player regains full volume. */
     @Suppress("DEPRECATION") // Same reason as duck(): see the note there.

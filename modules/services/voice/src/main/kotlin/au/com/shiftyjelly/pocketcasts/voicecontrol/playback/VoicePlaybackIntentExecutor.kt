@@ -41,20 +41,20 @@ class VoicePlaybackIntentExecutor @Inject constructor(
         intent: VoiceIntent,
         onOutcome: ((VoiceActionOutcome) -> Unit)? = null,
     ): VoiceResponse {
-        // AUXILIARY-ACTION HONESTY (reviewer c15bf037): a cloud turn can produce a fact for an
-        // AUXILIARY operation (the duck) while the turn's own actions stay unobserved. When no
-        // fact at all was reported, the invocation's primary action gets the explicit
-        // NotObserved observation — so a duck success plus unobserved turn actions can never
-        // aggregate to success.
-        var factReported = false
+        // AUXILIARY vs PRIMARY (reviewer 8c77f5aa): a cloud turn's audio FOCUS is an AUXILIARY
+        // operation — its success says nothing about whether the turn's own actions ran. So
+        // primary results are tracked SEPARATELY from auxiliary ones: with no primary fact, the
+        // explicit NotObserved is appended even when a duck fact WAS reported. Treating "any
+        // fact" as sufficiency is exactly what let duck-success aggregate to Success.
+        var primaryReported = false
         val observed: ((VoiceActionOutcome) -> Unit)? = onOutcome?.let { cb ->
             { fact: VoiceActionOutcome ->
-                factReported = true
+                if (!fact.isAuxiliary()) primaryReported = true
                 cb(fact)
             }
         }
         val response = executeIntent(intent, observed)
-        if (onOutcome != null && !factReported) onOutcome(VoiceActionOutcome.NotObserved)
+        if (onOutcome != null && !primaryReported) onOutcome(VoiceActionOutcome.NotObserved)
         return response
     }
 

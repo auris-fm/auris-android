@@ -40,4 +40,30 @@ sealed interface VoiceActionOutcome {
      * fact is that the result was not observed.
      */
     data object NotObserved : VoiceActionOutcome
+
+    /**
+     * An AUXILIARY operation completed (reviewer 8c77f5aa). The cloud turn ducks the host player
+     * before streaming; that grant is a real observation but it is NOT the turn's action result.
+     * Reporting it distinctly is what lets the caller record the primary action as unobserved
+     * instead of treating the auxiliary success as covering it.
+     */
+    data class AuxiliaryPerformed(val operation: String) : VoiceActionOutcome
+
+    /** An auxiliary operation was attempted and its precondition did not hold. */
+    data class AuxiliaryPreconditionFailed(val operation: String, val reason: String) : VoiceActionOutcome
+}
+
+/** True for facts describing an AUXILIARY operation, which never stand in for a primary result. */
+internal fun VoiceActionOutcome.isAuxiliary(): Boolean = when (this) {
+    is VoiceActionOutcome.AuxiliaryPerformed -> true
+
+    is VoiceActionOutcome.AuxiliaryPreconditionFailed -> true
+
+    VoiceActionOutcome.Dispatched,
+    VoiceActionOutcome.Performed,
+    VoiceActionOutcome.NotObserved,
+    is VoiceActionOutcome.PreconditionFailed,
+    is VoiceActionOutcome.Refused,
+    is VoiceActionOutcome.Failed,
+    -> false
 }

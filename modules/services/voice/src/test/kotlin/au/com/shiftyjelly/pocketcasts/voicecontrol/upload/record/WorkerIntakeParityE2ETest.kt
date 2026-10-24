@@ -45,8 +45,9 @@ class WorkerIntakeParityE2ETest {
     /**
      * Where the Worker authority comes from — and it must be a PINNED revision, not a moving checkout.
      *
-     * `AURIS_CLOUD_WORKER_ROOT` must point at a worktree at [approvedWorkerRevision]; the fallback
-     * path only saves typing a variable for a local run and is checked just as strictly.
+     * `AURIS_CLOUD_WORKER_ROOT` is REQUIRED and must point at a worktree at an approved pinned
+     * revision; there is NO moving-checkout fallback (reviewer round: the core checkout drifted to
+     * an unapproved revision and the pin check refused it).
      */
     private fun cloudWorkerRoot(): File = System.getenv("AURIS_CLOUD_WORKER_ROOT")?.let(::File)
         ?: error(

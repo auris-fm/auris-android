@@ -153,6 +153,10 @@ class VoiceControlService : Service() {
     // renderer release is destructive, not merely redundant (spec d885d207).
     private val releasedResources = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
+    // Guards creation of a retry so two concurrent stops cannot each publish an attempt, letting an
+    // older one overwrite a newer one (reviewer 9d15bb44 follow-up).
+    private val retryLock = Any()
+
     // The settled record for the CURRENT teardown attempt (reviewers 9f873b94 + a9271b39).
     // Volatile rather than CAS: the newest attempt is authoritative, and every read sees a whole
     // record instead of a partially applied one.
@@ -409,13 +413,25 @@ class VoiceControlService : Service() {
         // opens, so there is no window in which the work runs unowned or releases itself before it
         // was ever registered. If a shutdown closed the barrier meanwhile, the work is never
         // unblocked at all: the coroutine is cancelled while still suspended on the gate.
-        startJob.invokeOnCompletion { shutdownBarrier.release(listOf(startJob)) }
         if (!shutdownBarrier.beginStart(listOf(startJob))) {
             Timber.i("Voice control is stopping; refusing a new start")
             startJob.cancel()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return false
+        }
+        // REGISTER THE RELEASE ONLY AFTER ADMISSION SUCCEEDED (reviewer 9d15bb44 follow-up). It used
+        // to be installed BEFORE beginStart, so if the parent scope was already cancelled the job's
+        // completion could fire first: release() ran for a job that had not been registered yet, and
+        // beginStart then registered it into a set nothing would ever clear — a stale registration
+        // the teardown would later wait on. Release now only exists for an admitted job.
+        //
+        // A job that completed between beginStart and this point is handled by releasing immediately
+        // rather than relying on a callback that has already fired.
+        if (startJob.isCompleted) {
+            shutdownBarrier.release(listOf(startJob))
+        } else {
+            startJob.invokeOnCompletion { shutdownBarrier.release(listOf(startJob)) }
         }
         startInFlightJob = startJob
         startGate.complete(Unit)
@@ -867,10 +883,15 @@ class VoiceControlService : Service() {
         // A HELD teardown is RETRIED by its owner (spec d885d207), not joined forever: rechecking the
         // CURRENT state is the only thing that can turn a hold into a release. A running teardown is
         // still joined, and a RELEASED teardown keeps its identity so nothing is freed twice.
+        // CONSUME THE DEFERRED'S OWN RESULT (reviewer 9d15bb44 follow-up). Reading the separate
+        // `teardownFailure` field here raced the completion handler that writes it: a re-stop could
+        // see `isCompleted == true` while the field still held its previous value, and treat a HELD
+        // teardown as a finished, non-retryable one. The record now comes FROM the completed
+        // Deferred, so completion and outcome are the same observation.
         stopInFlightJob?.let { existing ->
-            val failure = teardownFailure
-            if (!existing.isCompleted || failure == null) return existing
-            return retryHeldTeardown(failure)
+            if (!existing.isCompleted) return existing
+            val failure = settleRecord(existing).failure ?: return existing
+            return retryHeldTeardown(failure, existing)
         }
         // INVALIDATE ANY PENDING START UP FRONT (reviewer 543d284b): a start suspended inside
         // ensureReady() would otherwise commit after this teardown released the backend it needs.
@@ -912,8 +933,18 @@ class VoiceControlService : Service() {
                 // before the close, work it spawned) would otherwise be left running while the
                 // backend is released underneath it — precisely what the barrier exists to prevent.
                 ownedByShutdown.forEach { owned ->
-                    runCatching { withTimeout(BARRIER_JOIN_TIMEOUT_MS) { owned.join() } }
-                        .onFailure { Timber.w(it, "[VoicePipeline] barrier-owned job did not finish") }
+                    // A TIMEOUT IS NOT PERMISSION TO RELEASE (reviewer 9d15bb44 follow-up). This
+                    // used to log and carry on toward the releases, so a job the barrier owned could
+                    // still be running while the backend was freed underneath it — exactly what the
+                    // barrier exists to prevent. An unproven join now becomes a Held teardown; the
+                    // resources stay owned rather than being freed on a guess.
+                    val wait = runCatching { withTimeout(BARRIER_JOIN_TIMEOUT_MS) { owned.join() } }
+                    wait.exceptionOrNull()?.let { error ->
+                        Timber.e(error, "[VoicePipeline] barrier-owned job did not finish; holding resources")
+                        return@withContext TeardownResult.Held(
+                            TeardownFailure(EngineQuiescence.Verdict.JoinFailed(error)),
+                        )
+                    }
                 }
                 // The engine's processing jobs are NOT children of the service scope, so they need
                 // their own join. SNAPSHOT THEM ONLY NOW, AFTER the service children have finished
@@ -993,48 +1024,63 @@ class VoiceControlService : Service() {
      * quiescence allows the remaining releases. Releases already recorded are skipped, and the
      * result stays Held until every release is confirmed — it is never silently reported as Released.
      */
-    private fun retryHeldTeardown(previous: TeardownFailure): Deferred<TeardownResult> {
+    private fun retryHeldTeardown(
+        previous: TeardownFailure,
+        previousSource: Deferred<TeardownResult>,
+    ): Deferred<TeardownResult> {
         Timber.i("[VoicePipeline] retrying held teardown (${previous.reason})")
-        return CoroutineScope(Dispatchers.IO).async {
-            when (
-                val decision = TeardownRetry.decide(
-                    recheck = { voiceAsrEngine.get().unfinishedProcessingJobs },
-                    // A hold that is NOT about quiescence cannot be cured by finding the list empty
-                    // (reviewer 9f873b94): a failed stop or an abnormal finish must stay unproven.
-                    unresolvedHold = previous.verdict.takeIf {
-                        it !is EngineQuiescence.Verdict.Residual && it !is EngineQuiescence.Verdict.Settled
-                    },
-                )
-            ) {
-                is TeardownRetry.Decision.Quiescent -> {
-                    val all = ALL_RELEASES
-                    val pending = TeardownRetry.pendingReleases(all, releasedResources)
-                    val released = runCatching {
-                        withContext(Dispatchers.Main) { releaseResources(pending) }
-                    }
-                    released.exceptionOrNull()?.let { error ->
-                        Timber.e(error, "[VoicePipeline] retry release failed")
-                        return@async TeardownResult.Held(TeardownFailure(EngineQuiescence.Verdict.Residual(remaining = 0, error = error)))
-                    }
-                    // NO BATCH ADD HERE: releaseResources records each kind as it confirms, so
-                    // re-adding would claim kinds whose release threw (reviewer 9f873b94).
-                    if (TeardownRetry.fullyReleased(all, releasedResources)) {
-                        TeardownResult.Released
-                    } else {
-                        // Not every release is confirmed: stay Held rather than claim a clean stop.
-                        TeardownResult.Held(previous)
-                    }
-                }
-
-                is TeardownRetry.Decision.StillHeld -> TeardownResult.Held(previous)
-
-                is TeardownRetry.Decision.Unproven -> TeardownResult.Held(previous)
+        // SERIALIZED CREATION (reviewer 9d15bb44 follow-up): two concurrent stops could each decide
+        // to retry, start an attempt, and let the SLOWER one publish last, so an older attempt's
+        // outcome overwrote a newer one and resurrected a hold that had already been resolved.
+        // Creation and publication happen under one lock, and an attempt is only started while the
+        // held teardown it was derived from is STILL the current one.
+        return synchronized(retryLock) {
+            if (stopInFlightJob !== previousSource) {
+                // Someone else already replaced that teardown; their attempt is authoritative.
+                return@synchronized (stopInFlightJob ?: previousSource)
             }
-        }.also { retried ->
-            stopInFlightJob = retried
-            // THE RETRY'S OUTCOME GOES THROUGH THE SAME OWNER (reviewer 9f873b94): writing
-            // teardownFailure here directly made the retry a second writer racing the recorder.
-            recordTeardownOutcome(retried)
+            val attempt = CoroutineScope(Dispatchers.IO).async {
+                when (
+                    val decision = TeardownRetry.decide(
+                        recheck = { voiceAsrEngine.get().unfinishedProcessingJobs },
+                        // A hold that is NOT about quiescence cannot be cured by an empty list
+                        // (reviewer 9f873b94): a failed stop or abnormal finish stays unproven.
+                        unresolvedHold = previous.verdict.takeIf {
+                            it !is EngineQuiescence.Verdict.Residual && it !is EngineQuiescence.Verdict.Settled
+                        },
+                    )
+                ) {
+                    is TeardownRetry.Decision.Quiescent -> {
+                        val all = ALL_RELEASES
+                        val pending = TeardownRetry.pendingReleases(all, releasedResources)
+                        val released = runCatching {
+                            withContext(Dispatchers.Main) { releaseResources(pending) }
+                        }
+                        released.exceptionOrNull()?.let { error ->
+                            Timber.e(error, "[VoicePipeline] retry release failed")
+                            return@async TeardownResult.Held(
+                                TeardownFailure(
+                                    EngineQuiescence.Verdict.Residual(remaining = 0, error = error),
+                                ),
+                            )
+                        }
+                        // NO BATCH ADD: releaseResources records each kind as it confirms, so
+                        // re-adding would claim kinds whose release threw (reviewer 9f873b94).
+                        if (TeardownRetry.fullyReleased(all, releasedResources)) {
+                            TeardownResult.Released
+                        } else {
+                            TeardownResult.Held(previous)
+                        }
+                    }
+
+                    is TeardownRetry.Decision.StillHeld -> TeardownResult.Held(previous)
+
+                    is TeardownRetry.Decision.Unproven -> TeardownResult.Held(previous)
+                }
+            }
+            stopInFlightJob = attempt
+            recordTeardownOutcome(attempt)
+            attempt
         }
     }
 
@@ -1113,8 +1159,10 @@ class VoiceControlService : Service() {
      * `isCompleted` also read a stale `teardownFailure = null` and treated a HELD teardown as a
      * successful, non-retryable stop.
      *
-     * The record is now written under the same completion the caller observes, so "the Deferred is
-     * complete" and "the outcome is recorded" cannot disagree.
+     * The stop path does NOT read this field to decide a retry (reviewer 9d15bb44 follow-up): it
+     * consumes the completed Deferred's own result via [settleRecord], so an attempt's outcome is
+     * always the one that attempt produced. This field exists for status and health surfaces, where a
+     * slightly later publish is harmless. Claiming the two can never disagree would be false.
      */
     private fun recordTeardownOutcome(teardown: Deferred<TeardownResult>) {
         teardown.invokeOnCompletion {

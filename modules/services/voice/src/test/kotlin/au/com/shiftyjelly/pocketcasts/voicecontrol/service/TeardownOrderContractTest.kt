@@ -364,6 +364,110 @@ class TeardownOrderContractTest {
     }
 
     @Test
+    fun `the stop path decides its retry from the deferred's own record, not a side field`() {
+        // Reviewer 9d15bb44 follow-up: reading the separate `teardownFailure` field raced the
+        // completion handler that writes it. A re-stop could see isCompleted == true while the field
+        // still held its previous value, and treat a HELD teardown as a finished, non-retryable one.
+        // The record must come FROM the completed Deferred, so completion and outcome are one
+        // observation.
+        val source = productionStopVoiceControlSource()
+        val reuseAt = source.indexOf("stopInFlightJob?.let { existing ->")
+        assertTrue("the stop path must reuse a running teardown", reuseAt >= 0)
+        val branch = source.substring(reuseAt, source.indexOf("return retryHeldTeardown(", reuseAt))
+        assertTrue(
+            "the retry decision must consume the completed Deferred's record",
+            branch.contains("settleRecord(existing)"),
+        )
+        assertFalse(
+            "the retry decision must not read the side field, which can lag the completion",
+            branch.contains("teardownFailure"),
+        )
+    }
+
+    @Test
+    fun `a retry is created under the lock and only while its source is still current`() {
+        // Reviewer 9d15bb44 follow-up: two concurrent stops could each decide to retry and let the
+        // SLOWER attempt publish last, so an older attempt's outcome overwrote a newer one and
+        // resurrected a hold that had already been resolved. Creation must be serialized (under a
+        // lock) and must refuse to start once its source teardown has been replaced.
+        val source = productionFileSource()
+        val retryStart = source.indexOf("private fun retryHeldTeardown(")
+        assertTrue("retryHeldTeardown must exist", retryStart >= 0)
+        val retry = source.substring(retryStart, source.indexOf("\n    }\n", retryStart))
+        assertTrue(
+            "creating a retry must be serialized, not left to concurrent callers",
+            retry.contains("synchronized(retryLock)"),
+        )
+        assertTrue(
+            "a retry must refuse to start if its source teardown is no longer the current one",
+            retry.contains("stopInFlightJob !== previousSource"),
+        )
+        // Publication must also be inside the lock, or the check above is merely advisory.
+        val guardAt = retry.indexOf("stopInFlightJob !== previousSource")
+        val publishAt = retry.indexOf("stopInFlightJob = attempt")
+        assertTrue("the retry must publish itself as the current teardown", publishAt >= 0)
+        assertTrue(
+            "publication must happen after the currency check it depends on",
+            guardAt < publishAt,
+        )
+    }
+
+    @Test
+    fun `a start registers its barrier release only AFTER admission succeeds`() {
+        // Reviewer 9d15bb44 follow-up: the completion callback was installed BEFORE beginStart, so a
+        // job whose parent scope was already cancelled could complete (and release) before it was
+        // ever registered; beginStart would then register a job nothing would clear, and the teardown
+        // would wait on that stale registration. Release must exist only for an ADMITTED job.
+        val source = productionStartSource()
+        val admitAt = source.indexOf("shutdownBarrier.beginStart(listOf(startJob))")
+        val releaseAt = source.indexOf("shutdownBarrier.release(listOf(startJob))")
+        assertTrue("the start must be admitted to the barrier", admitAt >= 0)
+        assertTrue("an admitted start must be released when it completes", releaseAt >= 0)
+        assertTrue(
+            "the release must be installed AFTER admission, or a pre-admission completion " +
+                "releases a job that was never registered",
+            admitAt < releaseAt,
+        )
+        // The already-completed case must be handled explicitly, not left to a callback that fired.
+        assertTrue(
+            "an already-completed job must be released directly",
+            source.contains("if (startJob.isCompleted) {"),
+        )
+    }
+
+    @Test
+    fun `an unproven barrier join holds resources instead of releasing them`() {
+        // Reviewer 9d15bb44 follow-up: the barrier-owned join used to time out with a log line and
+        // then carry on toward the releases, so a job the barrier owned could still be running while
+        // the backend was freed underneath it. Fail CLOSED: an unproven join must return Held.
+        val source = productionStopVoiceControlSource()
+        val joinAt = source.indexOf("withTimeout(BARRIER_JOIN_TIMEOUT_MS) { owned.join() }")
+        assertTrue("the barrier-owned join must be bounded", joinAt >= 0)
+        // SCOPE THE SEARCH TO THE JOIN'S OWN BLOCK. Searching the whole remainder of the file would
+        // find a `Held(` return belonging to a LATER, unrelated block and pass no matter what this
+        // one does — a position that cannot be false. The block ends at the closing brace of the
+        // `forEach` that contains the join.
+        val afterJoin = source.substring(joinAt)
+        val blockEnd = afterJoin.indexOf("\n                }\n")
+        assertTrue("the join must sit inside a block", blockEnd > 0)
+        val block = afterJoin.substring(0, blockEnd)
+        assertTrue(
+            "an unproven join must return Held from its own block, not merely somewhere later",
+            block.contains("return@withContext TeardownResult.Held("),
+        )
+        assertTrue(
+            "the Held return must be the join's failure branch, not a bare log line",
+            block.contains("JoinFailed("),
+        )
+        val heldAt = afterJoin.indexOf("return@withContext TeardownResult.Held(")
+        val releaseAt = afterJoin.indexOf("releaseResources(TeardownRetry.pendingReleases(ALL_RELEASES")
+        assertTrue(
+            "the Held return must come BEFORE any release, or the hold does not fail closed",
+            releaseAt < 0 || heldAt < releaseAt,
+        )
+    }
+
+    @Test
     fun `the start path actually ADMITS its job to the shutdown barrier`() {
         // Reviewer 9f873b94, confirmed by grep: `beginStart` had no production caller at all. The
         // barrier only ever CLOSED, so `close()` always returned an empty set and the owned-job join

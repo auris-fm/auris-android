@@ -90,22 +90,20 @@ class MutationFence {
      * another mutation follows.
      */
     fun isCurrent(attempt: Attempt, liveSession: () -> Long): Boolean {
-        // The session is snapshotted BEFORE the fence lock is taken. The lock ORDER is owner -> fence
-        // everywhere: applyIfCurrent with an owner scope holds the owner lock and then acquires this
-        // fence's lock, so this method must never do the reverse (fence -> owner) or the two paths
-        // can deadlock (reviewer 445faa5c). The snapshot can therefore be a moment stale on its own;
-        // paths that need the session read atomic WITH the decision must use the owner scope, and
-        // this read-only labelling check tolerates a snapshot taken just before the fence check.
+        // The session is snapshotted BEFORE the fence lock is taken (lock order owner -> fence
+        // everywhere; see applyIfCurrent, reviewer 445faa5c).
+        //
+        // This check is NON-MUTATING (reviewer 8ef73f3f): an old labelling check that bumped
+        // generation/rebound the session from a possibly-STALE snapshot could invalidate or rebind a
+        // NEWER attempt issued after the snapshot was taken. Detection of an account switch is
+        // therefore answered here by comparison alone; the state change belongs to the APPLY decision
+        // (decideLocked), which production runs inside the real owner scope where the snapshot is not
+        // stale.
         val live = liveSession()
         return synchronized(this) {
-            // The account changed while this was in flight: the result belongs to somebody else's screen.
-            if (attempt.ownerSession != live) {
-                generation += 1
-                boundSession = live
-                false
-            } else {
-                attempt.generation == generation && boundSession == live
-            }
+            attempt.generation == generation &&
+                attempt.ownerSession == live &&
+                (boundSession == null || boundSession == attempt.ownerSession)
         }
     }
 

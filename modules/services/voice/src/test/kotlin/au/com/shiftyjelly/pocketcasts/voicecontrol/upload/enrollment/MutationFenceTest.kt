@@ -21,6 +21,46 @@ import org.junit.Test
 class MutationFenceTest {
 
     @Test
+    fun `a stale labelling check must not invalidate a newer attempt`() {
+        // Reviewer 8ef73f3f: isCurrent claimed to be read-only but bumped generation / rebound the
+        // session from a possibly-STALE owner snapshot. An OLD attempt's check, arriving after an
+        // account switch or after a newer attempt was issued, could then invalidate the newer
+        // attempt it had no business touching. The labelling check must be pure: it answers for the
+        // attempt it was given and changes nothing.
+        val fence = MutationFence()
+        val old = fence.issue(ownerSession = 7L)
+        // A NEWER action is issued (e.g. the user tapped again before the old result landed).
+        val newer = fence.supersedeAndIssue(ownerSession = 7L)
+
+        // The old check reads a session value captured BEFORE the newer attempt existed. Under the
+        // old implementation this call bumped generation, silently invalidating `newer`.
+        val staleSnapshot = java.util.concurrent.atomic.AtomicLong(7L)
+        assertFalse(
+            "the old attempt must not be current",
+            fence.isCurrent(old) { staleSnapshot.get() },
+        )
+        assertTrue(
+            "a stale labelling check for the OLD attempt must not invalidate the NEWER attempt " +
+                "issued after the snapshot was taken",
+            fence.isCurrent(newer) { staleSnapshot.get() },
+        )
+
+        // Same for an account switch seen by a stale check: it answers false for the old attempt and
+        // leaves everyone else's state alone.
+        staleSnapshot.set(99L)
+        assertFalse(fence.isCurrent(old) { staleSnapshot.get() })
+        // `newer` was issued under session 7, so it is not current under 99 either - but the point is
+        // that the CHECK ITSELF must not have moved generation; a check for the old attempt cannot
+        // decide the fate of `newer`'s generation. Restore the snapshot to the issuing session: if
+        // the stale check had mutated, `newer` would now be dead.
+        staleSnapshot.set(7L)
+        assertTrue(
+            "the newer attempt must survive checks made for the old attempt",
+            fence.isCurrent(newer) { staleSnapshot.get() },
+        )
+    }
+
+    @Test
     fun `the scoped path and isCurrent cannot deadlock against each other`() {
         // Reviewer 445faa5c: applyIfCurrent with an owner scope takes owner -> fence, while the old
         // isCurrent took fence -> owner (it read liveSession() INSIDE synchronized(this)). Two

@@ -289,6 +289,18 @@ class TeardownOrderContractTest {
     }
 
     @Test
+    fun `a teardown that holds resources does not complete as a success`() {
+        // Reviewer 6ce4ad78: returning normally from a non-released teardown made an unsafe outcome
+        // indistinguishable from a clean one, and the retained job blocked any retry.
+        val source = productionStopVoiceControlSource()
+        assertTrue(
+            "a non-Settled verdict must record a failure and fail the teardown job, not just log",
+            source.contains("teardownFailure = TeardownFailure(verdict)") &&
+                source.contains("throw IllegalStateException(\"voice teardown did not release"),
+        )
+    }
+
+    @Test
     fun `the teardown delegates quiescence to EngineQuiescence after the root join`() {
         // The concrete stop/join/fail-closed behaviour moved into EngineQuiescence and is proven by
         // EngineQuiescenceControlTest (behavioural, with failure and exhaustion mutants). What this

@@ -132,6 +132,16 @@ class VoiceControlService : Service() {
     private var mediaSession: MediaSession? = null
     private var currentMode: ListeningMode = ListeningMode.Off
 
+    /**
+     * Why the last teardown declined to release, or null when it released cleanly.
+     *
+     * A teardown that leaves resources in place is NOT a success: the audio stack may still be held
+     * and a retry is required. This makes that visible to whatever observes the teardown job
+     * (reviewer 6ce4ad78) instead of reporting a normal completion.
+     */
+    internal var teardownFailure: TeardownFailure? = null
+        private set
+
     companion object {
         // Bounded re-sampling rounds for engine work; exhaustion refuses to release (reviewer 1092c632).
         private const val MAX_ENGINE_JOIN_ROUNDS = 8
@@ -839,8 +849,12 @@ class VoiceControlService : Service() {
                     join = { job -> job.join() },
                 )
                 if (verdict != EngineQuiescence.Verdict.Settled) {
+                    // REPORT THE OUTCOME TRUTHFULLY (reviewer 6ce4ad78): returning normally made an
+                    // unsafe, resources-held teardown indistinguishable from a clean one. The job
+                    // now FAILS, so completion means "released", not merely "returned".
                     Timber.e("[VoicePipeline] engine not settled ($verdict); skipping resource release")
-                    return@withContext
+                    teardownFailure = TeardownFailure(verdict)
+                    throw IllegalStateException("voice teardown did not release: $verdict")
                 }
                 // The releases themselves run on MAIN: the media session and the feedback renderer
                 // own Main-confined state (the renderer's scope is Dispatchers.Main.immediate), so

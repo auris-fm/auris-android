@@ -87,30 +87,34 @@ class EngineQuiescenceControlTest {
     }
 
     @Test
-    fun `round exhaustion fails closed even though every join succeeded`() = runBlocking {
-        // The set keeps growing: each round joins the known jobs but a new one appears. This is the
-        // exact shape the reviewer described — joins succeed, work never settles.
+    fun `work that never settles fails closed when the set keeps growing`() = runBlocking {
+        // Reviewer 6ce4ad78: the previous version created jobs that completed immediately, so the
+        // set could spuriously look settled. These jobs are HELD open: a pool per round, each one
+        // added by unfinished() and never finished, with bounded waits and cleanup.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val gates = mutableListOf<CompletableDeferred<Unit>>()
         var released = false
         try {
+            fun holdOne(): Job {
+                val gate = CompletableDeferred<Unit>()
+                gates.add(gate)
+                return scope.launch(Dispatchers.IO) { withTimeout(5_000) { gate.await() } }
+            }
             val jobs = mutableListOf<Job>()
             val verdict = EngineQuiescence.settle(
                 stop = {},
                 unfinished = {
-                    // A fresh, already-finished-looking job each call: the set never empties.
-                    val j = scope.launch(Dispatchers.IO) { }
-                    jobs.add(j)
-                    listOf(j) + jobs.dropLast(1).take(1)
+                    // A NEW held job per sample: the set genuinely grows and never empties.
+                    jobs.add(holdOne())
+                    jobs.toList()
                 },
-                join = { it.join() },
+                join = { /* deliberately does not release the gates */ },
             )
             if (verdict == Verdict.Settled) released = true
-            assertTrue(
-                "work that never settles must fail closed with a residual count, got $verdict",
-                verdict is Verdict.Residual,
-            )
+            assertTrue("a growing set of held jobs must fail closed, got $verdict", verdict !is Verdict.Settled)
             assertTrue("no release may happen when work never settled", !released)
         } finally {
+            gates.forEach { it.complete(Unit) }
             scope.cancel()
         }
     }

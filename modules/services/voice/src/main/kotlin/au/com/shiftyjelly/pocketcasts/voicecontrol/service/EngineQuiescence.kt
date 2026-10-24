@@ -68,3 +68,14 @@ internal object EngineQuiescence {
         return Verdict.Residual(residual)
     }
 }
+
+/**
+ * Why a teardown declined to release the engine's dependent resources.
+ *
+ * Held resources are not a clean teardown: the audio stack may still be owned, and a caller decides
+ * whether to retry. Exposed so completion can be truthful about which happened.
+ */
+internal data class TeardownFailure(val verdict: EngineQuiescence.Verdict) {
+    /** Human-readable reason, suitable for logs and status text. */
+    val reason: String get() = verdict.toString()
+}

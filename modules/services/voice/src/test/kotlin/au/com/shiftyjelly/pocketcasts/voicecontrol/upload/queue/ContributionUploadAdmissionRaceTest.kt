@@ -189,15 +189,18 @@ class ContributionUploadAdmissionRaceTest {
         val pool = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }
         servers += pool
         val result = pool.submit<ContributionUploadTransport.Response> {
-            transport.upload(id, record(id), wav(id), isCancelled = { revoked.get() })
+            transport.upload(
+                id,
+                record(id),
+                wav(id),
+                isCancelled = { revoked.get() },
+                // DETERMINISTIC REGISTRATION SIGNAL (reviewer round): the transport itself counts
+                // the latch down at registration - no polling, no sleep, no window by luck.
+                onRegistered = { registered.countDown() },
+            )
         }
         // Wait until a call is actually registered, then withdraw - the opposite ordering.
-        repeat(100) {
-            if (transport.registeredCallForTest() != null) registered.countDown()
-            if (registered.count == 0L) return@repeat
-            Thread.sleep(20)
-        }
-        assertTrue("a call was registered", registered.await(5, TimeUnit.SECONDS))
+        assertTrue("a call was registered", registered.await(15, TimeUnit.SECONDS))
         revoked.set(true)
         val response = result.get(30, TimeUnit.SECONDS)
         assertEquals("the registered call reports the withdrawal", ContributionUploadTransport.Response.Cancelled, response)
@@ -213,12 +216,42 @@ class ContributionUploadAdmissionRaceTest {
         sockets += socket
         val id = UUID.randomUUID().toString()
         val registered = CountDownLatch(1)
+        // GATED SERVER (deterministic stall, no sleep): reads the request head and exactly ONE body
+        // chunk, signals both, then never reads again. With an 8 MB body and a server that stopped
+        // reading, the writer is blocked on the socket once the OS buffers fill - and the test no
+        // longer GUESSES when that happened with a sleep.
+        val serverHeadRead = CountDownLatch(1)
+        val serverGotBodyChunk = CountDownLatch(1)
+        val server = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }
+        servers += server
+        server.submit {
+            runCatching {
+                val client = runCatching { socket.accept() }.getOrNull() ?: return@runCatching
+                client.use { c ->
+                    val input = c.getInputStream()
+                    val head = StringBuilder()
+                    while (!head.endsWith("\r\n\r\n")) {
+                        val b = input.read()
+                        if (b < 0) return@use
+                        head.append(b.toChar())
+                    }
+                    serverHeadRead.countDown()
+                    val buffer = ByteArray(8192)
+                    if (input.read(buffer) > 0) serverGotBodyChunk.countDown()
+                    // Stall: never read again, never answer. The client's remaining writes block.
+                    CountDownLatch(1).await()
+                }
+            }
+        }
         // ONE transport instance for the whole control, so its own accounting is what is observed.
+        val writerEnteredBody = java.util.concurrent.CountDownLatch(1)
         val transport = ContributionUploadTransport(
             endpoint = "http://127.0.0.1:${socket.localPort}/v1/contributions",
             authorization = { "Bearer token" },
             callTimeoutMs = 60_000,
             onBeforeRegistrationForTest = null,
+            // Fires once per chunk that left the process: proof the write path is executing.
+            onBodyProgressForTest = { writerEnteredBody.countDown() },
         )
         val big = File(tmp.root, "$id.big.wav").also { f ->
             f.writeBytes(ByteArray(8 * 1024 * 1024) { b -> (b % 251).toByte() })
@@ -229,7 +262,12 @@ class ContributionUploadAdmissionRaceTest {
             transport.upload(id, record(id), big, onRegistered = { registered.countDown() })
         }
         assertTrue("the call was registered", registered.await(15, TimeUnit.SECONDS))
-        Thread.sleep(400) // let the socket buffer fill: the write is now genuinely blocked
+        // FORCED INTERLEAVING instead of a sleep: the server has the head and one chunk and has
+        // stopped reading, and the writer has proven it is inside the body-copy loop. From here the
+        // remaining writes stall on the non-reading socket; cancel is issued in that state.
+        assertTrue("server read the request head", serverHeadRead.await(15, TimeUnit.SECONDS))
+        assertTrue("server read one body chunk", serverGotBodyChunk.await(15, TimeUnit.SECONDS))
+        assertTrue("the writer entered the body-copy loop", writerEnteredBody.await(15, TimeUnit.SECONDS))
         val handle = requireNotNull(transport.currentHandleForTest()) { "a handle was exposed" }
         val cancelledAt = System.nanoTime()
         transport.cancelRegistered(handle)

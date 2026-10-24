@@ -9,6 +9,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
@@ -34,17 +35,19 @@ class TeardownOrderContractTest {
     /** The order `stopVoiceControl` must perform teardown in, engine before resource release. */
     private val requiredOrder = listOf(
         "cancel-mode",
-        "stop-engine", // RESTORED: must precede every resource release
-        // CANCEL BEFORE RELEASE (reviewer 0bba7db5): releasing first is use-after-release, because a
-        // dispatcher child could still be running its handler/finally against a released resource.
+        "stop-engine", // engine teardown is SYNCHRONOUS; nothing engine-owned outlives it
+        // CANCEL BEFORE RELEASE (reviewers 0bba7db5 + dbde4427): a cancellation REQUEST is not
+        // "users have finished" — dispatcher children still call render()/onCommandRecognized. So
+        // the releases must follow the JOIN, not merely the cancellation.
         "cancel-scope",
+        "stop-self",
+        "join-root",
         "release-backend",
         "release-session",
         "release-recognizer",
         "release-feedback",
         "cancel-notification",
         "stop-foreground",
-        "stop-self",
     )
 
     @Test
@@ -66,18 +69,18 @@ class TeardownOrderContractTest {
     }
 
     @Test
-    fun `no resource is released before the scope cancellation request`() {
+    fun `no resource is released before the children have actually finished`() {
         val source = productionStopVoiceControlSource()
-        val cancelAt = indexOfStep(source, "cancel-scope")
-        assertTrue("the scope cancel must be present", cancelAt >= 0)
+        val joinAt = indexOfStep(source, "join-root")
+        assertTrue("the root join must be present in the teardown job", joinAt >= 0)
         listOf("release-backend", "release-session", "release-recognizer", "release-feedback")
             .forEach { step ->
                 val at = indexOfStep(source, step)
                 assertTrue("$step must be present", at >= 0)
                 assertTrue(
-                    "$step releases a resource a child could still use; it must come AFTER the " +
-                        "cancellation request (cancel-scope at $cancelAt, $step at $at)",
-                    at > cancelAt,
+                    "$step touches a resource a dispatcher child may still use; it must come AFTER " +
+                        "the root join (join at $joinAt, $step at $at)",
+                    at > joinAt,
                 )
             }
     }
@@ -115,27 +118,31 @@ class TeardownOrderContractTest {
             }
         }
         try {
-            childEntered.await() // BARRIER: the child is inside its body
+            withTimeout(5_000) { childEntered.await() } // BOUNDED BARRIER: child inside its body
             val rootJob = checkNotNull(scope.coroutineContext[Job])
 
             // THE SUBJECT: a joiner of the root job, dispatched from an EXTERNAL scope (production
             // shape). It must stay incomplete for as long as the child's finally is held.
+            // EXPLICIT RUNNING-JOINER HANDSHAKE (reviewer 9003d3cc): the joiner signals that it has
+            // STARTED and is about to join, so the assertion below cannot sample an unstarted job.
+            val joinerStarted = CompletableDeferred<Unit>()
             val joiner = CoroutineScope(Dispatchers.IO).launch {
-                withContext(NonCancellable) { rootJob.join() }
+                withContext(NonCancellable) {
+                    joinerStarted.complete(Unit)
+                    rootJob.join()
+                }
             }
+            withTimeout(5_000) { joinerStarted.await() }
 
             bodyReleased.complete(Unit)
             scope.cancel()
-            finallyEntered.await() // BARRIER: the child has reached its finalization
-            // Yield so a joiner that would complete spuriously has the chance to do so.
-            repeat(20) { kotlinx.coroutines.yield() }
-            Thread.sleep(50)
+            withTimeout(5_000) { finallyEntered.await() } // BOUNDED BARRIER: child finalizing
             assertFalse(
                 "teardown must NOT report complete while a child finally is still running",
                 joiner.isCompleted,
             )
             releaseFinally.complete(Unit)
-            joiner.join()
+            withTimeout(5_000) { joiner.join() }
             assertTrue("teardown completes once the child finally has finished", joiner.isCompleted)
         } finally {
             releaseFinally.complete(Unit) // cleanup: never leave the held finally hanging
@@ -154,6 +161,7 @@ class TeardownOrderContractTest {
         "cancel-notification" -> source.indexOf("notificationManager.cancelNotification()")
         "stop-foreground" -> source.indexOf("stopForeground(")
         "cancel-scope" -> source.indexOf("serviceScope.cancel()")
+        "join-root" -> source.indexOf("rootJob?.join()")
         "stop-self" -> source.indexOf("stopSelf()")
         else -> -1
     }
@@ -175,56 +183,26 @@ class TeardownOrderContractTest {
         return source.substring(start, source.indexOf("\n    }", start))
     }
 
-    @Test
-    fun `the restored engine teardown clears the engine start state`() = runBlocking {
-        // BEHAVIOURAL half of the control: stopEngine's running branch calls clearCaptureState(),
-        // which calls engineStart.onStopped(). Reproducing the regression (deleting stopEngine)
-        // leaves this flag true after teardown, so this observes the fix rather than the source text.
-        val engineStart = EngineStartState()
-        assertFalse("precondition: not started", engineStart.isStarted)
-        engineStart.startIfNotRunning(start = { true })
-        assertTrue("precondition: a start is running", engineStart.isStarted)
-
-        // The production teardown sequence for a RUNNING engine (stopVoiceControl's stopEngine path).
-        simulateStopEngine(engineRunning = engineStart.isStarted, clearCaptureState = { engineStart.onStopped() })
-        assertFalse(
-            "engine teardown must clear the started flag; a deleted stopEngine leaves it true",
-            engineStart.isStarted,
-        )
-    }
+    // DELETED (reviewer 9003d3cc): the two "simulateStopEngine" tests were a re-implementation of
+    // production logic. Deleting or changing the real stopEngine could not fail them, so they proved
+    // nothing about the production teardown. A behavioural control needs an Android Service instance,
+    // which is blocked on the unapproved Hilt test dependency — so this seam is SOURCE-ORDER ONLY and
+    // is described as such rather than padded with model tests.
 
     @Test
-    fun `an inactive engine teardown releases routing instead of stopping an engine it never started`() {
-        val engineStart = EngineStartState()
-        var routingReleased = false
-        var captureCleared = false
-        simulateStopEngine(
-            engineRunning = engineStart.isStarted,
-            clearCaptureState = { captureCleared = true },
-            releaseRouting = { routingReleased = true },
+    fun `stopEngine is structurally present in the production teardown`() {
+        val source = productionStopVoiceControlSource()
+        assertTrue(
+            "the engine teardown must not be dropped: cancelling the scope is not a substitute " +
+                "because the engine tears down the stream it owns in its own flow finally",
+            source.contains("stopEngine()"),
         )
-        assertTrue("the inactive branch must release acquisition routing", routingReleased)
-        assertFalse("an engine that never started must not be stopped", captureCleared)
-    }
-
-    /** The two branches of the production `stopEngine`, with the ordering the service uses. */
-    private fun simulateStopEngine(
-        engineRunning: Boolean,
-        clearCaptureState: () -> Unit,
-        releaseRouting: () -> Unit = {},
-    ) {
-        if (engineRunning) {
-            // voiceAsrEngine.get().stop() then clearCaptureState()
-            clearCaptureState()
-        } else {
-            releaseRouting()
-        }
     }
 
     @Test
     fun `the ordering helper is not vacuous`() {
         // Guards this control itself: a step name that matches nothing must be detectable.
-        assertSame(-1, indexOfStep("", "stop-engine"))
+        assertEquals(-1, indexOfStep("", "stop-engine"))
         assertEquals(-1, indexOfStep("no steps here", "cancel-mode"))
     }
 }

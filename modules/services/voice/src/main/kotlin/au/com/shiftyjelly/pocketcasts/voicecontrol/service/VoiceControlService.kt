@@ -769,36 +769,35 @@ class VoiceControlService : Service() {
         Timber.i("Stopping voice control service")
         val rootJob = serviceScope.coroutineContext[Job]
 
-        // ORDER (reviewer 0bba7db5): CANCEL FIRST, then teardown, then release.
-        // Releasing before children have stopped is a use-after-release: a dispatcher child could
-        // still be running its handler/finally against the recognizer, renderer or session we just
-        // released. Cancellation is requested here, before anything is torn down, and the join below
-        // completes only once every owned child has actually finished.
+        // CANCEL, STOP, JOIN, THEN RELEASE (reviewers 0bba7db5 + dbde4427).
+        // A cancellation REQUEST is not "the users have finished": dispatcher children call
+        // render()/onCommandRecognized and can still be inside them. Releasing the renderer,
+        // recognizer, session or backend before those children have actually finished is
+        // use-after-release, so the releases happen only AFTER the join below.
         modeJob?.cancel()
-        // Engine + capture teardown runs after the cancellation request and BEFORE the releases.
-        // Cancelling the scope is not a substitute: the engine tears down the stream it owns in its
-        // own flow `finally`, and the inactive-engine branch releases acquisition routing.
+        // Engine + capture teardown runs after the cancellation request. It is SYNCHRONOUS for the
+        // engine's own resources (segment lifecycle, invocation ownership, native capture), so no
+        // engine work outlives this call; only the scope's children remain to be joined.
         stopEngine()
-        // Every user of these resources has been asked to stop; the join at the end proves they did.
         serviceScope.cancel()
-
-        wiredBackend?.release()
-        wiredBackend = null
-        mediaSession?.isActive = false
-        mediaSession?.release()
-        mediaSession = null
-        voiceRecognizer.release()
-        audioFeedbackRenderer.release()
-        notificationManager.cancelNotification()
-        stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
 
-        // The completion authority, dispatched OUTSIDE the cancelled scope: it completes only after
-        // the root job (and so every owned child's handler/finally/settlement) has finished.
+        // The completion authority, dispatched OUTSIDE the cancelled scope. It joins the root (so
+        // every owned child has really finished) and THEN releases the resources those children
+        // were using. Its completion therefore means: users finished AND resources released.
         return CoroutineScope(Dispatchers.IO).launch {
             withContext(NonCancellable) {
                 runCatching { rootJob?.join() }
                     .onFailure { Timber.w(it, "[VoicePipeline] teardown join failed") }
+                wiredBackend?.release()
+                wiredBackend = null
+                mediaSession?.isActive = false
+                mediaSession?.release()
+                mediaSession = null
+                voiceRecognizer.release()
+                audioFeedbackRenderer.release()
+                notificationManager.cancelNotification()
+                stopForeground(STOP_FOREGROUND_REMOVE)
             }
         }.also { stopInFlightJob = it }
     }

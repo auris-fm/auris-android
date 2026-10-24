@@ -430,6 +430,13 @@ class VoiceControlService : Service() {
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private suspend fun startEngine(mode: ListeningMode): Boolean {
+        // FINAL SHUTDOWN EXCLUDES EVERY ENGINE START, not only the top-level one (reviewer
+        // e1b11171). A child that is already inside a start when teardown begins must not open a
+        // capture the teardown is about to release from under it.
+        if (stopInFlightJob != null) {
+            Timber.i("[VoicePipeline] stopping; refusing to start the engine")
+            return false
+        }
         // Captured before the attempt: validated after ensureReady() so a start that was
         // invalidated while suspended (gate loss, stop) does not commit.
         val generation = engineStart.generation()
@@ -791,7 +798,6 @@ class VoiceControlService : Service() {
         // SupervisorJob+IO scope and is only CANCELLED here, not joined (reviewers 267001c1). That
         // job is captured below and awaited alongside the service children before any release.
         stopEngine()
-        val engineProcessingJobs = voiceAsrEngine.get().unfinishedProcessingJobs
         serviceScope.cancel()
         stopSelf()
 
@@ -802,12 +808,13 @@ class VoiceControlService : Service() {
             withContext(NonCancellable) {
                 runCatching { rootJob?.join() }
                     .onFailure { Timber.w(it, "[VoicePipeline] teardown join failed") }
-                // The engine's processing job is NOT a child of the service scope, so it needs its
-                // own join: a noncooperative ASR/native call or its finally must finish before we
-                // release the backend it may still be using.
-                // EVERY unfinished engine job, not just the newest: a stop/start/stop sequence can
-                // leave an older native call running (reviewer 26883305).
-                engineProcessingJobs.forEach { job ->
+                // The engine's processing jobs are NOT children of the service scope, so they need
+                // their own join. SNAPSHOT THEM ONLY NOW, AFTER the service children have finished
+                // (reviewer e1b11171): the engine's stop() is called from several service children,
+                // and a child that ran during this teardown may have cancelled a job that did not
+                // exist when the teardown started. Sampling before the join made that job
+                // invisible and let the backend be released under it.
+                voiceAsrEngine.get().unfinishedProcessingJobs.forEach { job ->
                     runCatching { job.join() }
                         .onFailure { Timber.w(it, "[VoicePipeline] engine processing join failed") }
                 }

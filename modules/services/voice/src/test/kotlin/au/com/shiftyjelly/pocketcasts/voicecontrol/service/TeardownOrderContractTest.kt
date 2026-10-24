@@ -224,6 +224,24 @@ class TeardownOrderContractTest {
     }
 
     @Test
+    fun `every engine start is refused once teardown has begun, not only the top-level one`() {
+        // Reviewer e1b11171: startVoiceControl is not the only path that opens a capture. A child
+        // already inside startEngine when teardown begins must also be refused, or it opens a
+        // stream the teardown is about to release from under it.
+        val source = productionFileSource()
+        val engineFn = source.indexOf("private suspend fun startEngine(mode: ListeningMode): Boolean {")
+        assertTrue("startEngine must exist in the production source", engineFn >= 0)
+        val body = source.substring(engineFn, source.indexOf("\n    }", engineFn))
+        val guardAt = body.indexOf("stopInFlightJob != null")
+        assertTrue("startEngine must refuse to start during teardown", guardAt >= 0)
+        val returnAt = body.indexOf("return false", guardAt)
+        assertTrue("the guard must return without starting the engine", returnAt > guardAt)
+        // The guard must precede the first state-changing call, not merely exist.
+        val startAt = body.indexOf("engineStart.startIfNotRunning")
+        assertTrue("the guard must precede startIfNotRunning", startAt < 0 || guardAt < startAt)
+    }
+
+    @Test
     fun `a start is refused once teardown has begun`() {
         // Reviewer fd3f5a4d: the final shutdown must EXCLUDE new starts. A start that slipped in
         // would open a capture the teardown is about to release from under it.

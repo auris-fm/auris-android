@@ -33,6 +33,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
@@ -141,70 +142,79 @@ class EngineProcessingJoinControlTest {
     }
 
     @Test
-    fun `stop after a restart keeps the OLDER unfinished job as well as the newer one`() = runBlocking {
-        // Reviewer 26883305: stop/start/stop. The older job's native work can still be running when
-        // the newer job exists; a single slot would DROP it and teardown would release the backend
-        // underneath it. Both must stay awaitable until each actually finishes.
+    fun `both jobs stay retained while each is held, then prune independently`() = runBlocking {
+        // Reviewer e1b11171: job #2 could COMPLETE and be pruned before the size assertion, making
+        // it flaky. So BOTH completions are held: capture distinct identities, assert exact
+        // retention while both are held, then release each one and assert it prunes on its own.
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val holdFirst = CompletableDeferred<Unit>()
-        val firstRunning = CompletableDeferred<Unit>()
-        val firstCompletionEntered = CompletableDeferred<Unit>()
-        val secondFlowEntered = CompletableDeferred<Unit>()
+        val holdSecond = CompletableDeferred<Unit>()
+        val firstEntered = CompletableDeferred<Unit>()
+        val secondEntered = CompletableDeferred<Unit>()
         var starts = 0
-        val flows = kotlinx.coroutines.flow.MutableSharedFlow<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult>()
-        `when`(processor.startProcessing()).thenAnswer { invocation ->
+        // A FRESH flow per start: sharing one MutableSharedFlow meant the second collection never
+        // reached its own onCompletion, and the test hung instead of proving anything.
+        val flowStarted = CompletableDeferred<Unit>()
+        `when`(processor.startProcessing()).thenAnswer {
             val n = ++starts
-            flows.onStart {
-                if (n == 1) firstRunning.complete(Unit)
-                if (n == 2) secondFlowEntered.complete(Unit)
-            }
+            kotlinx.coroutines.flow.emptyFlow<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult>()
+                .onStart { flowStarted.complete(Unit) }
                 .onCompletion {
                     if (n == 1) {
-                        // EXPLICIT BARRIER: the first job is provably in its finalization before we
-                        // hold it, so the restart below cannot be racing an unstarted completion.
-                        firstCompletionEntered.complete(Unit)
+                        firstEntered.complete(Unit)
                         withContext(NonCancellable) { holdFirst.await() }
+                    }
+                    if (n == 2) {
+                        secondEntered.complete(Unit)
+                        withContext(NonCancellable) { holdSecond.await() }
                     }
                 }
         }
         val engine = engine(scope)
+        fun startOnce() = engine.start(
+            backend = readyBackend(),
+            audioRoute = AudioRoute.Speaker,
+            listeningMode = ListeningMode.Continuous,
+            playbackBufferProvider = { FloatArray(0) },
+            micExposureProvider = { MicExposure.NoMic },
+            onIntent = { _, _ -> },
+        )
         try {
-            engine.start(
-                backend = readyBackend(),
-                audioRoute = AudioRoute.Speaker,
-                listeningMode = ListeningMode.Continuous,
-                playbackBufferProvider = { FloatArray(0) },
-                micExposureProvider = { MicExposure.NoMic },
-                onIntent = { _, _ -> },
-            )
-            withTimeout(5_000) { flows.subscriptionCount.first { it > 0 } }
-            engine.stop() // cancels job #1, which is held in its completion
-            withTimeout(5_000) { firstRunning.await() }
-            withTimeout(5_000) { firstCompletionEntered.await() }
-            val firstJob = engine.unfinishedProcessingJobs.firstOrNull()
-            assertNotNull("the first job must be retained", firstJob)
+            startOnce()
+            withTimeout(5_000) { flowStarted.await() }
+            engine.stop()
+            withTimeout(5_000) { firstEntered.await() } // BARRIER: job #1 is in its finalization
+            val firstJob = checkNotNull(engine.unfinishedProcessingJobs.singleOrNull()) { "job #1 must be retained" }
 
-            engine.start(
-                backend = readyBackend(),
-                audioRoute = AudioRoute.Speaker,
-                listeningMode = ListeningMode.Continuous,
-                playbackBufferProvider = { FloatArray(0) },
-                micExposureProvider = { MicExposure.NoMic },
-                onIntent = { _, _ -> },
-            )
-            // EXPLICIT BARRIER: the newly started flow is actually collecting before the second stop.
-            withTimeout(5_000) { secondFlowEntered.await() }
-            engine.stop() // cancels job #2 while #1 is still held in its finalization
+            startOnce()
+            withTimeout(5_000) { secondEntered.await() }
+            engine.stop()
+            withTimeout(5_000) { secondEntered.await() } // BARRIER: job #2 is in its finalization
 
+            // BOTH held, so neither can be pruned by completion: the exact set is stable.
             val jobs = engine.unfinishedProcessingJobs
+            assertEquals("both held jobs must be retained", 2, jobs.size)
+            assertTrue("the older held job must be retained", jobs.contains(firstJob))
+            val secondJob = jobs.first { it !== firstJob }
+            assertNotSame("the two retained jobs must be distinct", firstJob, secondJob)
+
+            // Release ONE and assert only that one prunes; the other stays.
+            holdSecond.complete(Unit)
+            withTimeout(5_000) { secondJob.join() }
             assertTrue(
-                "BOTH jobs must be retained: the held older one and the newer one " +
-                    "(found ${jobs.size} job(s))",
-                jobs.size == 2,
+                "only the finished job prunes; the still-held one must remain",
+                engine.unfinishedProcessingJobs.none { it === secondJob },
             )
-            assertTrue("the older held job must still be in the retained set", jobs.contains(firstJob))
+            assertTrue(
+                "the still-held job must NOT be pruned just because its sibling finished",
+                engine.unfinishedProcessingJobs.contains(firstJob),
+            )
+
+            holdFirst.complete(Unit)
+            withTimeout(5_000) { firstJob.join() }
         } finally {
             holdFirst.complete(Unit)
+            holdSecond.complete(Unit)
             scope.cancel()
         }
     }

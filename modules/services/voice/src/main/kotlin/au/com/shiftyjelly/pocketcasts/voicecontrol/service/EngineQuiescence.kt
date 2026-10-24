@@ -28,7 +28,14 @@ internal object EngineQuiescence {
      * in this coroutines version, a cancellation the engine did not initiate stays conservative:
      * it is treated as a failure rather than claimed as success.
      */
-    fun abnormalEngineFinish(job: Job, cancelledByEngine: Set<Job>): Throwable? {
+    fun abnormalEngineFinish(
+        job: Job,
+        cancelledByEngine: Set<Job>,
+        recordedCause: Throwable? = null,
+    ): Throwable? {
+        // A RECORDED FAILURE WINS (reviewer 1ff17ee6): a job that had already failed before the stop
+        // must keep its own failure, even though the teardown also referenced it.
+        recordedCause?.let { return it }
         if (!job.isCancelled) return null
         return if (job in cancelledByEngine) null else ABANDONED_CANCELLATION
     }

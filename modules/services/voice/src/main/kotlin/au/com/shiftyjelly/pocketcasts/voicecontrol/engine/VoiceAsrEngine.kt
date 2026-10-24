@@ -105,7 +105,29 @@ class VoiceAsrEngine @Inject constructor(
      */
     internal val cancelledProcessingJobs: Set<Job> get() = cancelledJobs.toSet()
 
+    /** The completion cause recorded for [job], or null when it finished cleanly or is still running. */
+    internal fun recordedOutcome(job: Job): Throwable? = outcomes[job]?.takeIf { it !== CLEAN_COMPLETION }
+
+    /**
+     * Drop bookkeeping for jobs that are finished AND already judged (reviewer 1ff17ee6).
+     *
+     * Without this a long-lived service accumulates one entry per stop, so consumed outcomes and
+     * cancellation markers are pruned once they can no longer influence a verdict.
+     */
+    internal fun pruneConsumedBookkeeping(onlyKeep: Set<Job>) {
+        val finished = unfinished.filter { it.isCompleted && it !in onlyKeep }
+        finished.forEach {
+            outcomes.remove(it)
+            cancelledJobs.remove(it)
+        }
+        unfinished.removeAll(finished.toSet())
+    }
+
     private val cancelledJobs = java.util.concurrent.ConcurrentHashMap.newKeySet<Job>()
+
+    // The cause each tracked processing job completed with, captured when it finished. Immutable
+    // once recorded, so judging a job never depends on when the snapshot ran.
+    private val outcomes = java.util.concurrent.ConcurrentHashMap<Job, Throwable>()
 
     internal val unfinishedProcessingJobs: List<Job>
         get() = unfinished.toList()
@@ -959,8 +981,20 @@ class VoiceAsrEngine @Inject constructor(
             // this one until it actually finishes.
             unfinished.removeAll { it.isCompleted }
             unfinished.add(cancelled)
-            cancelledJobs.add(cancelled)
-            cancelled.invokeOnCompletion { unfinished.remove(cancelled) }
+            // ONLY a job that was still running counts as cancelled BY US (reviewer 1ff17ee6): a job
+            // that had already failed or been cancelled elsewhere keeps its own outcome, and
+            // relabelling it as expected shutdown would hide a real failure.
+            if (cancelled.isActive) {
+                cancelledJobs.add(cancelled)
+            }
+            // Capture the outcome AT REGISTRATION. Waiting until the shutdown snapshot misses jobs
+            // that finished (and were pruned) before it, and would replay the outcome later.
+            cancelled.invokeOnCompletion { cause ->
+                // ConcurrentHashMap REJECTS null values, and a CLEAN completion has no cause, so the
+                // entries are typed nullable and store a sentinel for "finished cleanly".
+                outcomes[cancelled] = cause ?: CLEAN_COMPLETION
+                unfinished.remove(cancelled)
+            }
         }
         processingJob?.cancel()
         processingJob = null
@@ -983,6 +1017,12 @@ class VoiceAsrEngine @Inject constructor(
     private fun VoiceIntent.stampedForWindow(generation: Long): VoiceIntent = if (this is VoiceIntent.CloudRoute) copy(windowGeneration = generation) else this
 
     companion object {
+        /**
+         * Marks a tracked job that finished with no cause, so the outcome map never stores null
+         * (ConcurrentHashMap rejects null values).
+         */
+        private val CLEAN_COMPLETION: Throwable = java.util.concurrent.CancellationException("finished cleanly")
+
         /** Client-owned wording, resolved through [SpokenLine] so a foreign locale hears the earcon. */
         private const val KEY_CLOUD_UNROUTED = "pipeline.unclear_command"
 

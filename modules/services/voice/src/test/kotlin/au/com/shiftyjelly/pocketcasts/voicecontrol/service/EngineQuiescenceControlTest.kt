@@ -178,6 +178,48 @@ class EngineQuiescenceControlTest {
     }
 
     @Test
+    fun `a job that failed before the stop keeps its failure, not the engine's cancellation`() = runBlocking {
+        // Reviewer 1ff17ee6: the teardown references this job too, so relabelling it expected
+        // shutdown would hide a genuine engine failure.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val failed = scope.launch(Dispatchers.IO) { runCatching { throw IllegalStateException("failed before stop") } }
+            failed.join()
+            val recorded = IllegalStateException("failed before stop")
+            val cause = EngineQuiescence.abnormalEngineFinish(
+                job = failed,
+                // Present in BOTH sets: the stop referenced it AND it had already failed.
+                cancelledByEngine = setOf(failed),
+                recordedCause = recorded,
+            )
+            assertEquals("a recorded failure must win over expected cancellation", recorded, cause)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `a cleanup failure recorded at registration is not lost`() = runBlocking {
+        // Reviewer 1ff17ee6: cleanup can fail after the cancellation was requested. The outcome is
+        // captured at registration, so a failure that completed before the snapshot is still seen.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val job = scope.launch(Dispatchers.IO) { awaitCancellation() }
+            job.cancel()
+            job.join()
+            val cleanupFailure = IllegalStateException("cleanup failed")
+            val cause = EngineQuiescence.abnormalEngineFinish(
+                job = job,
+                cancelledByEngine = setOf(job),
+                recordedCause = cleanupFailure,
+            )
+            assertEquals("a cleanup failure must surface even after cancellation", cleanupFailure, cause)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `only a cancellation the engine did not initiate counts as a failure`() = runBlocking {
         // Reviewer 47a3a267: the teardown cancels these jobs itself, so blanket-treating every
         // cancelled job as abnormal reported a normal shutdown as Held.

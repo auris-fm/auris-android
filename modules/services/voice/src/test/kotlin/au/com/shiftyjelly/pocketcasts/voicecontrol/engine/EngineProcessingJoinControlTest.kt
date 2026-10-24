@@ -142,6 +142,49 @@ class EngineProcessingJoinControlTest {
     }
 
     @Test
+    fun `a processing job that already FAILED is not relabelled as engine-cancelled`() = runBlocking {
+        // Reviewer 1ff17ee6: stop() references the current processing job even when it has already
+        // failed. Adding it to cancelledJobs unconditionally would relabel a real failure as
+        // expected shutdown and hide it from the quiescence verdict.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val died = CompletableDeferred<Unit>()
+        `when`(processor.startProcessing()).thenReturn(
+            kotlinx.coroutines.flow.flow<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult> {
+                throw IllegalStateException("segmenter died")
+            }.onCompletion { died.complete(Unit) },
+        )
+        val engine = engine(scope)
+        try {
+            engine.start(
+                backend = readyBackend(),
+                audioRoute = AudioRoute.Speaker,
+                listeningMode = ListeningMode.Continuous,
+                playbackBufferProvider = { FloatArray(0) },
+                micExposureProvider = { MicExposure.NoMic },
+                onIntent = { _, _ -> },
+            )
+            // BARRIER: the processing flow has failed, so the job has already FAILED by the time
+            // stop() runs. The engine tracks the job only when stop() references it, so the state
+            // to assert is what stop() records for an already-failed job.
+            withTimeout(5_000) { died.await() }
+            engine.stop()
+            // The job had ALREADY finished, so stop() prunes it rather than tracking it — it is not
+            // outstanding work. What matters is what stop() recorded for it: a failure must not be
+            // relabelled as expected shutdown.
+            assertTrue(
+                "a finished job is not outstanding work, got ${engine.unfinishedProcessingJobs}",
+                engine.unfinishedProcessingJobs.isEmpty(),
+            )
+            assertTrue(
+                "a job that had already FAILED must NOT be recorded as engine-cancelled",
+                engine.cancelledProcessingJobs.none { it.isCompleted },
+            )
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `both jobs stay retained while each is held, then prune independently`() = runBlocking {
         // Reviewer e1b11171: job #2 could COMPLETE and be pruned before the size assertion, making
         // it flaky. So BOTH completions are held: capture distinct identities, assert exact

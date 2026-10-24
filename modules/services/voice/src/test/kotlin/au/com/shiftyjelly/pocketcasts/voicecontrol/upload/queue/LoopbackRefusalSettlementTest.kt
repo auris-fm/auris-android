@@ -259,6 +259,11 @@ class LoopbackRefusalSettlementTest {
                 digestBefore,
             )
 
+            // The expected canonical bytes, from the store's OWN durable record read back from disk
+            // (not the in-memory fixture object): this is the identity every exchange must carry.
+            val expectedCanonical = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
+                .canonicalBytes(store.durableCapture(id)!!.record).toList()
+
             val assembly = productionAssembly(store, { now })
             val first = assembly.poll()
             assertEquals("$code: the attempt must have run", 1, first.attempted)
@@ -268,6 +273,14 @@ class LoopbackRefusalSettlementTest {
                     "transport sent the admitted record, not a lookalike",
                 digestBefore,
                 claimedRecordDigest(receivedBodies.single(), id),
+            )
+            // The claim alone proves nothing: hash the EMBEDDED record bytes from the wire and compare
+            // them to the durable expected bytes. A transport that altered the record while keeping
+            // the claim unchanged fails here.
+            assertEquals(
+                "$code: the embedded record BYTES must equal the durable canonical record",
+                expectedCanonical,
+                embeddedRecordBytes(receivedBodies.single(), id).toList(),
             )
             val boundary = store.retryBoundariesForTest()[id]
             assertNotNull("$code: the production settlement must persist a durable boundary", boundary)
@@ -301,6 +314,15 @@ class LoopbackRefusalSettlementTest {
                 recovered.audio.readBytes().contentEquals(recordedBytes),
             )
 
+            // The recovered immutable record must canonicalize to the SAME bytes the first exchange
+            // sent - recovery preserved identity.
+            assertEquals(
+                "$code: the recovered record must canonicalize identically",
+                expectedCanonical,
+                au.com.shiftyjelly.pocketcasts.voicecontrol.upload.record.CanonicalJson
+                    .canonicalBytes(recovered.record).toList(),
+            )
+
             val freshAssembly = productionAssembly(freshStore, { now })
             val early = freshAssembly.poll()
             assertEquals("$code: nothing may be attempted before the boundary", 0, early.attempted)
@@ -318,6 +340,11 @@ class LoopbackRefusalSettlementTest {
                 "$code: the RE-ATTEMPT's metadata part must claim the recorded digest",
                 digestBefore,
                 claimedRecordDigest(receivedBodies.single(), id),
+            )
+            assertEquals(
+                "$code: the RE-ATTEMPT's embedded record BYTES must equal the durable canonical record",
+                expectedCanonical,
+                embeddedRecordBytes(receivedBodies.single(), id).toList(),
             )
             assertTrue(
                 "$code: the re-attempt's wire body must contain the exact audio bytes",
@@ -448,6 +475,28 @@ class LoopbackRefusalSettlementTest {
         // The part must be THIS capture's, not debris from another exchange.
         check(json.contains("\"capture_id\":\"" + captureId + "\"")) { "metadata part is for another capture" }
         return claimed
+    }
+
+    /**
+     * Extracts the ACTUAL embedded record bytes from the received metadata part. The transport embeds
+     * the canonical record verbatim between \"record\": and ,\"record_sha256\", so a byte comparison
+     * against the durable expected bytes proves what was SENT - a transport could alter the record
+     * while leaving the claim string unchanged, and the claim alone would not notice (reviewer
+     * bcdb6e4e).
+     */
+    private fun embeddedRecordBytes(wire: ByteArray, captureId: String): ByteArray {
+        val text = String(wire, Charsets.UTF_8)
+        val partStart = text.indexOf("name=\"metadata\"")
+        check(partStart >= 0) { "no metadata part in the received body" }
+        val recordKey = text.indexOf("\"record\":", partStart)
+        val recordStart = recordKey + "\"record\":".length
+        val claimStart = text.indexOf(",\"record_sha256\":", recordStart)
+        check(claimStart > recordStart) { "no record_sha256 claim after the record" }
+        val embedded = text.substring(recordStart, claimStart)
+        check(embedded.contains("\"\$captureId\"") || embedded.contains(captureId)) {
+            "the embedded record is for another capture"
+        }
+        return embedded.toByteArray(Charsets.UTF_8)
     }
 
     private fun receiptFor(id: String, digest: String): String {

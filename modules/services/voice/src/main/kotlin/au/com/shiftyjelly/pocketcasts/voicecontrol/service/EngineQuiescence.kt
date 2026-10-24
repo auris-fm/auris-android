@@ -32,10 +32,17 @@ internal object EngineQuiescence {
         job: Job,
         cancelledByEngine: Set<Job>,
         recordedCause: Throwable? = null,
+        expectedCancellation: Set<Job> = emptySet(),
     ): Throwable? {
+        // AN EXPECTED CANCELLATION IS NOT A FAILURE, EVEN WITH A RECORDED CAUSE (reviewer 51baa020):
+        // a job cancelled by this teardown records a CancellationException, which must not be
+        // classified as a failure just because a cause exists.
+        if (job in expectedCancellation) return null
         // A RECORDED FAILURE WINS (reviewer 1ff17ee6): a job that had already failed before the stop
         // must keep its own failure, even though the teardown also referenced it.
-        recordedCause?.let { return it }
+        recordedCause?.let { cause ->
+            return cause.takeIf { it !is kotlinx.coroutines.CancellationException || it.cause != null }
+        }
         if (!job.isCancelled) return null
         return if (job in cancelledByEngine) null else ABANDONED_CANCELLATION
     }

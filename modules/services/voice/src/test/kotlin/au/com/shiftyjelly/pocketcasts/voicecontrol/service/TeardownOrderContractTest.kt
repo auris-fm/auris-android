@@ -289,6 +289,25 @@ class TeardownOrderContractTest {
     }
 
     @Test
+    fun `the production predicate receives the recorded outcome and the expected-cancellation set`() {
+        // Reviewer 51baa020: the helper was proven only in isolation. If production never PASSES the
+        // recorded cause, the classification it enables is dead code. This pins the wiring.
+        val source = productionFileSource()
+        assertTrue(
+            "recordedOutcome must reach the predicate",
+            source.contains("recordedCause = engine.recordedOutcome(job)"),
+        )
+        assertTrue(
+            "expected cancellation must reach the predicate",
+            source.contains("expectedCancellation = engine.cancelledByThisTeardown"),
+        )
+        assertTrue(
+            "the pruner must actually be called, not just defined",
+            source.contains("pruneConsumedBookkeeping("),
+        )
+    }
+
+    @Test
     fun `the teardown closes the barrier before cancelling and joins what it owned`() {
         // Reviewers 902e0c1a1/cce1f100/9045dd43: a snapshot-then-cancel leaves a start that lands in
         // between owned by nobody. The barrier must be CLOSED (not sampled) and its returned set

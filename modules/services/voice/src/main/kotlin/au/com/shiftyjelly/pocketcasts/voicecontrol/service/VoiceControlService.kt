@@ -899,6 +899,11 @@ class VoiceControlService : Service() {
                 // The releases themselves run on MAIN: the media session and the feedback renderer
                 // own Main-confined state (the renderer's scope is Dispatchers.Main.immediate), so
                 // touching them from this IO job would be an off-thread release.
+                // PRUNE AFTER THE DECISION THAT CONSUMED THE OUTCOMES (reviewer 51baa020): the maps
+                // must not grow one entry per stop, but pruning before judging would erase the very
+                // evidence the verdict depends on.
+                runCatching { voiceAsrEngine.get().pruneConsumedBookkeeping(onlyKeep = emptySet()) }
+                    .onFailure { Timber.w(it, "[VoicePipeline] bookkeeping prune failed") }
                 runCatching {
                     withContext(Dispatchers.Main) {
                         wiredBackend?.release()
@@ -1023,7 +1028,18 @@ class VoiceControlService : Service() {
     // Judge an engine job's finish. The POLICY lives in EngineQuiescence so it is executable in a
     // control: a cancellation the engine initiated is expected shutdown, and a job that completed
     // without cancellation is clean (reviewer 47a3a267).
-    private fun abnormalEngineFinish(job: Job): Throwable? = EngineQuiescence.abnormalEngineFinish(job, voiceAsrEngine.get().cancelledProcessingJobs)
+    private fun abnormalEngineFinish(job: Job): Throwable? {
+        val engine = voiceAsrEngine.get()
+        // The RECORDED outcome and the expected-cancellation set are PASSED THROUGH (reviewer
+        // 51baa020): without them the classification that distinguishes a real failure from our own
+        // shutdown never runs in production, however well the helper is controlled.
+        return EngineQuiescence.abnormalEngineFinish(
+            job,
+            cancelledByEngine = engine.cancelledProcessingJobs,
+            recordedCause = engine.recordedOutcome(job),
+            expectedCancellation = engine.cancelledByThisTeardown,
+        )
+    }
 
     private fun observeTeardown(teardown: Deferred<TeardownResult>) {
         CoroutineScope(Dispatchers.IO).launch {

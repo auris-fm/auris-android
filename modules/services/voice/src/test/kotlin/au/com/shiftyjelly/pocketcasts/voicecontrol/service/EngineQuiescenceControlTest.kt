@@ -178,6 +178,32 @@ class EngineQuiescenceControlTest {
     }
 
     @Test
+    fun `an expected cancellation is not a failure even with a recorded cause`() = runBlocking {
+        // Reviewer 51baa020: a job this teardown cancelled records a CancellationException. Passing
+        // recordedCause through unchanged would classify our own clean cancellation as a failure.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val job = scope.launch(Dispatchers.IO) { awaitCancellation() }
+            job.cancel()
+            job.join()
+            val cause = EngineQuiescence.abnormalEngineFinish(
+                job = job,
+                cancelledByEngine = setOf(job),
+                // A cancellation CARRYING a nested failure: this is where "expected" matters, because
+                // the recorded-cause filter alone would surface the nested cause as a failure.
+                recordedCause = kotlinx.coroutines.CancellationException(
+                    "stopped by teardown",
+                    IllegalStateException("cleanup detail"),
+                ),
+                expectedCancellation = setOf(job),
+            )
+            assertNull("expected cancellation must not be a failure, got $cause", cause)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `a job that failed before the stop keeps its failure, not the engine's cancellation`() = runBlocking {
         // Reviewer 1ff17ee6: the teardown references this job too, so relabelling it expected
         // shutdown would hide a genuine engine failure.

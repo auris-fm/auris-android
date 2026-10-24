@@ -108,6 +108,9 @@ class VoiceAsrEngine @Inject constructor(
     /** The completion cause recorded for [job], or null when it finished cleanly or is still running. */
     internal fun recordedOutcome(job: Job): Throwable? = outcomes[job]?.takeIf { it !== CLEAN_COMPLETION }
 
+    /** Jobs this engine cancelled because a stop was requested, i.e. EXPECTED cancellation. */
+    internal val cancelledByThisTeardown: Set<Job> get() = cancelledJobs.toSet()
+
     /**
      * Drop bookkeeping for jobs that are finished AND already judged (reviewer 1ff17ee6).
      *
@@ -128,6 +131,9 @@ class VoiceAsrEngine @Inject constructor(
     // The cause each tracked processing job completed with, captured when it finished. Immutable
     // once recorded, so judging a job never depends on when the snapshot ran.
     private val outcomes = java.util.concurrent.ConcurrentHashMap<Job, Throwable>()
+
+    /** Every processing job this engine created, so a pre-snapshot failure still has an owner. */
+    private val ownedProcessingJobs = java.util.concurrent.ConcurrentHashMap<Job, Unit>()
 
     internal val unfinishedProcessingJobs: List<Job>
         get() = unfinished.toList()
@@ -209,7 +215,8 @@ class VoiceAsrEngine @Inject constructor(
         utteranceFilter.reset()
 
         val attached = CompletableDeferred<Boolean>()
-        processingJob = scope.launch {
+        lateinit var started: Job
+        started = scope.launch {
             Timber.i("[VoicePipeline] start route=%s bluetoothCandidate=%b", audioRoute, audioRoute is AudioRoute.BluetoothA2dpOnly)
             // Prepare the backend on every start. Not because a pause releases it — stop()
             // deliberately keeps it warm — but because the engine can be handed a backend that
@@ -358,10 +365,17 @@ class VoiceAsrEngine @Inject constructor(
         // If the job ends without ever attaching (backend not ready, native attach failure, or
         // cancellation before the body ran), report that the stream was never taken. Completing
         // an already-completed true is a no-op.
-        processingJob?.invokeOnCompletion {
+        processingJob = started
+        started.invokeOnCompletion {
             attached.complete(false)
             onTerminated()
         }
+        // OWNERSHIP AND OUTCOME AT CREATION (reviewer 51baa020): registering only in stop() missed
+        // work that finished and was pruned before the teardown ever looked, and gave a pre-snapshot
+        // failure nowhere to live. Every processing job is owned and its terminal cause recorded the
+        // moment it exists; stop() only decides which are cancelled BY US.
+        ownedProcessingJobs[started] = Unit
+        started.invokeOnCompletion { cause -> outcomes[started] = cause ?: CLEAN_COMPLETION }
         Timber.i("[VoicePipeline] engine start requested backend=%s mode=%s", backend::class.simpleName, listeningMode)
         return CaptureAttachment(attached)
     }

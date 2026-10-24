@@ -188,21 +188,63 @@ class ContributionUploadAdmissionRaceTest {
         )
         val pool = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }
         servers += pool
+        // GATED SERVER: the revocation premise is POST-EXECUTE / NETWORK ARRIVAL, not the
+        // registration latch (reviewer 25c1ccd5: registration fires before the transport's immediate
+        // cancellation recheck, so revoking on it can pass via the pre-execute branch). Only when
+        // the server has actually read the request head and a body chunk is the call executing on
+        // the network; a plain latch at registration proves neither.
+        val serverHeadRead = CountDownLatch(1)
+        val serverGotBodyChunk = CountDownLatch(1)
+        val serverPool = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }
+        servers += serverPool
+        serverPool.submit {
+            runCatching {
+                val client = runCatching { server.accept() }.getOrNull() ?: return@runCatching
+                client.use { c ->
+                    val input = c.getInputStream()
+                    val head = StringBuilder()
+                    while (!head.endsWith("\r\n\r\n")) {
+                        val b = input.read()
+                        if (b < 0) return@use
+                        head.append(b.toChar())
+                    }
+                    serverHeadRead.countDown()
+                    if (input.read(ByteArray(8192)) > 0) serverGotBodyChunk.countDown()
+                    // The recorder answers 200 only after draining; keep this connection half-open so
+                    // the response the client would read can only exist if the call stayed live.
+                    CountDownLatch(1).await()
+                }
+            }
+        }
+        // The PRODUCTION revoker wiring, verbatim from ContributionUploadAssembly: the transport
+        // reports the registered handle and the abort that cancels THAT call is what a revocation
+        // drives - not a Boolean flip.
+        val abort = java.util.concurrent.atomic.AtomicReference<(() -> Unit)?>(null)
         val result = pool.submit<ContributionUploadTransport.Response> {
             transport.upload(
                 id,
                 record(id),
                 wav(id),
                 isCancelled = { revoked.get() },
-                // DETERMINISTIC REGISTRATION SIGNAL (reviewer round): the transport itself counts
-                // the latch down at registration - no polling, no sleep, no window by luck.
-                onRegistered = { registered.countDown() },
+                onRegistered = { handle ->
+                    registered.countDown()
+                    abort.set { transport.cancelRegistered(handle) }
+                },
             )
         }
-        // Wait until a call is actually registered, then withdraw - the opposite ordering.
         assertTrue("a call was registered", registered.await(15, TimeUnit.SECONDS))
+        // POST-EXECUTE premise: the request is on the network and has been received.
+        assertTrue("server read the request head", serverHeadRead.await(15, TimeUnit.SECONDS))
+        assertTrue("server received a body chunk", serverGotBodyChunk.await(15, TimeUnit.SECONDS))
+        // Withdrawal ordering as in production: revocation state first, then the real abort owner.
         revoked.set(true)
-        val response = result.get(30, TimeUnit.SECONDS)
+        val cancelledAt = System.nanoTime()
+        requireNotNull(abort.get()) { "the production abort was installed at registration" }.invoke()
+        // BOUNDED COMPLETION: the server never answers, so only the abort can end this call. A
+        // no-op abort would leave the attempt to the 30 s call timeout - the bound below fails it.
+        val response = result.get(10, TimeUnit.SECONDS)
+        val ms = (System.nanoTime() - cancelledAt) / 1_000_000
+        assertTrue("the production abort bounded the attempt (took ${ms}ms)", ms < 10_000)
         assertEquals("the registered call reports the withdrawal", ContributionUploadTransport.Response.Cancelled, response)
         assertEquals("and nothing is left outstanding", 0, transport.inFlightForTest())
     }
@@ -217,9 +259,11 @@ class ContributionUploadAdmissionRaceTest {
         val id = UUID.randomUUID().toString()
         val registered = CountDownLatch(1)
         // GATED SERVER (deterministic stall, no sleep): reads the request head and exactly ONE body
-        // chunk, signals both, then never reads again. With an 8 MB body and a server that stopped
-        // reading, the writer is blocked on the socket once the OS buffers fill - and the test no
-        // longer GUESSES when that happened with a sleep.
+        // chunk, signals both, then never reads again. SCOPE (reviewer 25c1ccd5): this proves the
+        // call is executing and mid-body with a non-reading server; it does NOT prove a blocked
+        // kernel write - BufferedSink may still buffer, and cancellation can land before buffers
+        // fill. The control's claim is bounded completion of cancellation in that state, not
+        // kernel-write observability.
         val serverHeadRead = CountDownLatch(1)
         val serverGotBodyChunk = CountDownLatch(1)
         val server = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }
@@ -263,8 +307,9 @@ class ContributionUploadAdmissionRaceTest {
         }
         assertTrue("the call was registered", registered.await(15, TimeUnit.SECONDS))
         // FORCED INTERLEAVING instead of a sleep: the server has the head and one chunk and has
-        // stopped reading, and the writer has proven it is inside the body-copy loop. From here the
-        // remaining writes stall on the non-reading socket; cancel is issued in that state.
+        // stopped reading, and the writer has proven it is inside the body-copy loop. Cancel is
+        // issued in that controlled no-read state; the claim is bounded completion, not a directly
+        // observed blocked kernel write.
         assertTrue("server read the request head", serverHeadRead.await(15, TimeUnit.SECONDS))
         assertTrue("server read one body chunk", serverGotBodyChunk.await(15, TimeUnit.SECONDS))
         assertTrue("the writer entered the body-copy loop", writerEnteredBody.await(15, TimeUnit.SECONDS))
@@ -274,7 +319,7 @@ class ContributionUploadAdmissionRaceTest {
 
         val response = result.get(20, TimeUnit.SECONDS)
         val ms = (System.nanoTime() - cancelledAt) / 1_000_000
-        assertTrue("cancel() reached the blocked write (took ${ms}ms)", ms < 10_000)
+        assertTrue("cancellation bounded the attempt (took ${ms}ms)", ms < 10_000)
         assertTrue(
             "a cancelled call with no withdrawal signal is an UNKNOWN outcome: $response",
             response is ContributionUploadTransport.Response.Ambiguous,

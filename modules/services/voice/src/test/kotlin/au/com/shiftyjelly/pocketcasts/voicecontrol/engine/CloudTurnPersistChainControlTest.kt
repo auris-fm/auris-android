@@ -38,9 +38,13 @@ import org.mockito.kotlin.whenever
  * [PlaybackManagerPlaybackSink] grants audio focus, a REAL
  * [VoicePlaybackIntentExecutor] decides what to report through its production
  * `execute(intent, onOutcome)` channel, and the engine applies the aggregate to the
- * retained capture. NO fact is injected by the test — the very bug the reviewer described
- * (duck success marking "a fact was reported" and suppressing the primary unknown) can only
- * be caught here.
+ * retained capture.
+ *
+ * EVIDENCE SCOPE (corrected after reviewer f175ac72): the duck runs on the real sink over a mocked
+ * AudioManager, and the cloud route is a TEST adapter that calls it. The reported facts then travel
+ * the same mapping the dispatcher uses and are applied to a test-opened invocation. This is NOT
+ * the production dispatch path, and it does not reach persisted bytes; that composition is
+ * [au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ServiceToPersistedRecordControlTest].
  */
 class CloudTurnPersistChainControlTest {
 

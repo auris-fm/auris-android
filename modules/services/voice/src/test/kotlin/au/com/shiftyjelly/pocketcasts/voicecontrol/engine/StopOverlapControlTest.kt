@@ -22,8 +22,14 @@ import org.mockito.kotlin.mock
 /**
  * SERVICE-STOP OVERLAP (the last open item): stopping the engine while an invocation is still open
  * must finalize it exactly once, and a late report or settle for that invocation must not resurrect
- * it or publish a second time. These drive the real engine's ownership boundary concurrently — the
- * property that a dispatch crossing a stop/restart cannot double-publish or leak retained state.
+ * it or publish a second time.
+ *
+ * EVIDENCE SCOPE (corrected after reviewer f175ac72): this exercises the REAL engine's
+ * stop/report/settle consumption concurrently, but the invocation is opened through the test seam
+ * [au.com.shiftyjelly.pocketcasts.voicecontrol.engine.VoiceAsrEngine.openInvocationForTest] and the
+ * sink overrides retention publication to count observations. It closes the narrow exactly-once
+ * engine boundary; it does NOT drive the actual Service stop/restart lifecycle, and it does not
+ * prove retained state is persisted across a restart.
  */
 class StopOverlapControlTest {
 

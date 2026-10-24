@@ -27,8 +27,13 @@ import org.mockito.kotlin.whenever
  * EVERY EXIT CARRIES THE PRIMARY UNKNOWN (reviewer 00b0d7a9): a cloud duck can report its
  * auxiliary grant and then the stream throws or is cancelled. In both cases the turn's own result
  * is unobserved, so the aggregate must be the explicit unknown — never the auxiliary success.
- * These drive the REAL executor and a real granting sink through its production
- * `execute(intent, onOutcome)` channel; nothing is injected by the test.
+ *
+ * EVIDENCE SCOPE (corrected after reviewer f175ac72): this drives the real
+ * [VoicePlaybackIntentExecutor] and the real [PlaybackManagerPlaybackSink] over a MOCKED
+ * AudioManager/PlaybackManager, with a TEST cloud-route adapter standing at that boundary. It then
+ * applies the dispatcher's mapping and the static aggregation directly. It does NOT cover
+ * production dispatch → settlement → persisted bytes; that composition is
+ * [au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.ServiceToPersistedRecordControlTest].
  */
 class CloudTurnExitControlTest {
 

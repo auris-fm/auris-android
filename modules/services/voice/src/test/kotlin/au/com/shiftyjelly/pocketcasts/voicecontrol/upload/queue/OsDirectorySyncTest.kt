@@ -32,6 +32,7 @@ class OsDirectorySyncTest {
         var failFsyncErrno: Int? = null,
         var failFsyncUnexpected: IllegalStateException? = null,
         var failCloseErrno: Int? = null,
+        var failCloseUnexpected: IllegalStateException? = null,
     ) : OsOperations {
         val calls = mutableListOf<String>()
         val fds = mutableListOf<FileDescriptor>()
@@ -59,6 +60,7 @@ class OsDirectorySyncTest {
         override fun close(fd: FileDescriptor) {
             calls += "close:${label(fd)}"
             failCloseErrno?.let { throw ErrnoException("fake", it) }
+            failCloseUnexpected?.let { throw it }
         }
     }
 
@@ -97,6 +99,31 @@ class OsDirectorySyncTest {
             assertTrue("the errno cause must be preserved", e.cause is ErrnoException)
         }
         assertTrue("close must still have been reached: ${os.calls}", os.calls.last().startsWith("close"))
+    }
+
+    @Test
+    fun `a NON-errno CLOSE failure does not replace an earlier fsync failure - and the double-unexpected case preserves the fsync original`() {
+        // reviewer f52f1209: close's catch must cover arbitrary throwables too, or a misbehaving
+        // injected close implementation would REPLACE the fsync primary.
+        val os = FakeOs(failFsyncErrno = 5, failCloseUnexpected = IllegalStateException("close misbehaved"))
+        try {
+            OsDirectorySync(os).sync(newDir("errno-fsync-unexpected-close"))
+            fail("the fsync primary must surface")
+        } catch (e: IOException) {
+            assertTrue("ORIGINAL errno fsync error must be thrown: ${e.message}", e.message!!.contains("fsync"))
+            assertEquals(
+                "both the close failure kinds must ride along suppressed",
+                1,
+                e.suppressed.size,
+            )
+        }
+        val os2 = FakeOs(failCloseUnexpected = IllegalStateException("close misbehaved"))
+        try {
+            OsDirectorySync(os2).sync(newDir("unexpected-close-only"))
+            fail("a close-only non-errno failure must still propagate")
+        } catch (e: IllegalStateException) {
+            assertEquals("close misbehaved", e.message)
+        }
     }
 
     @Test

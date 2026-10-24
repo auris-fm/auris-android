@@ -57,11 +57,11 @@ class AndroidOsOperations(
 
     internal companion object {
         // Order: the platform's own constant would outrank the compiled one (same surface Os.open
-        // documents) - but as of NDK/platform 34 and 37, NO android.jar platform exposes the field
-        // (javap-verified), so on every shipping device this tier is inert and the flag in
-        // production rests SOLELY on the compiled native authority from the .so. The reflection
-        // tier is kept for forward compatibility (a future platform that adds the field becomes
-        // authority automatically). Missing field OR missing native library => null = unsupported.
+        // documents). javap shows the public android-34 and android-37 platform jars do NOT expose
+        // the field - that proves those PUBLIC JARS lack it, not that every shipping runtime does;
+        // a runtime whose reflective lookup succeeds becomes the authority automatically. Where
+        // reflection is absent, the flag in production rests on the compiled native authority from
+        // the .so. Missing field AND missing native library => null = unsupported, never a guess.
         internal val DEFAULT_O_DIRECTORY_AUTHORITY: () -> Int? = {
             runCatching { OsConstants::class.java.getField("O_DIRECTORY").getInt(null) }.getOrNull()
                 ?: DirectoryFlagJni.oDirectoryOrNull()
@@ -131,18 +131,21 @@ class OsDirectorySync(
         try {
             ops.close(fd)
         } catch (e: ErrnoException) {
-            val closeError = IOException("directory close failed (errno=${e.errno})", e)
-            val original = fsyncError
-            if (original != null) {
-                original.addSuppressed(closeError)
-            } else if (fsyncUnexpected != null) {
-                fsyncUnexpected.addSuppressed(closeError)
-            } else {
-                throw closeError
-            }
+            noteCloseFailure(IOException("directory close failed (errno=${e.errno})", e), fsyncUnexpected, fsyncError)
+        } catch (t: Throwable) {
+            // The seam is documented for arbitrary injected implementations, so a close failure
+            // that is not an ErrnoException must ALSO preserve the earlier primary (fsync) rather
+            // than replace it (reviewer f52f1209).
+            noteCloseFailure(t, fsyncUnexpected, fsyncError)
         }
         fsyncUnexpected?.let { throw it }
         fsyncError?.let { throw it }
+    }
+
+    private fun noteCloseFailure(closeFailure: Throwable, fsyncUnexpected: Throwable?, fsyncError: IOException?) {
+        val primary = fsyncUnexpected ?: fsyncError
+        if (primary == null) throw closeFailure
+        primary.addSuppressed(closeFailure)
     }
 
     companion object {

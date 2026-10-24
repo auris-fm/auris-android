@@ -814,9 +814,18 @@ class VoiceControlService : Service() {
                 // and a child that ran during this teardown may have cancelled a job that did not
                 // exist when the teardown started. Sampling before the join made that job
                 // invisible and let the backend be released under it.
-                voiceAsrEngine.get().unfinishedProcessingJobs.forEach { job ->
-                    runCatching { job.join() }
-                        .onFailure { Timber.w(it, "[VoicePipeline] engine processing join failed") }
+                // JOIN UNTIL THE SET STOPS GROWING: joining is not atomic with the snapshot, and a
+                // late stop can add a job after we sampled. Bounded so a hostile engine cannot spin
+                // this forever.
+                val joined = mutableSetOf<Job>()
+                repeat(8) {
+                    val pending = voiceAsrEngine.get().unfinishedProcessingJobs.filterNot { it in joined }
+                    if (pending.isEmpty()) return@repeat
+                    pending.forEach { job ->
+                        runCatching { job.join() }
+                            .onFailure { Timber.w(it, "[VoicePipeline] engine processing join failed") }
+                        joined.add(job)
+                    }
                 }
                 // The releases themselves run on MAIN: the media session and the feedback renderer
                 // own Main-confined state (the renderer's scope is Dispatchers.Main.immediate), so

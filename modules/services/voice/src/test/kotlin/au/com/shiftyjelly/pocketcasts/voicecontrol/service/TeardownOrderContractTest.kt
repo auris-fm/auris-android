@@ -257,6 +257,27 @@ class TeardownOrderContractTest {
     }
 
     @Test
+    fun `engine jobs are sampled after the root join and joined until the set stops growing`() {
+        // Reviewer e1b11171 + a387bb7a: sampling before the join missed jobs a child cancelled
+        // during teardown, and joining once is not atomic with sampling. The join must follow the
+        // root join and re-sample.
+        val source = productionStopVoiceControlSource()
+        val rootJoinAt = source.indexOf("rootJob?.join()")
+        val sampleAt = source.indexOf("unfinishedProcessingJobs")
+        assertTrue("the root join must be present", rootJoinAt >= 0)
+        assertTrue("the engine jobs must be sampled in the teardown", sampleAt >= 0)
+        assertTrue(
+            "engine jobs must be sampled AFTER the service children finished " +
+                "(sample at $sampleAt, root join at $rootJoinAt)",
+            sampleAt > rootJoinAt,
+        )
+        assertTrue(
+            "the join must re-sample until the set stops growing",
+            source.contains("filterNot { it in joined }"),
+        )
+    }
+
+    @Test
     fun `the root job is captured before the scope is cancelled`() {
         // Reviewer f457fbad: a child created just before cancellation, or a child of a child, must
         // not let the completion job observe a DIFFERENT root than the one being cancelled. So the

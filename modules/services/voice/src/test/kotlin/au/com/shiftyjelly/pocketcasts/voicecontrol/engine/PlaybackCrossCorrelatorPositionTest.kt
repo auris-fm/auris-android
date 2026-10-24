@@ -351,8 +351,9 @@ class PlaybackCrossCorrelatorPositionTest {
             // (Claude 4366645238): a pure tone self-correlates (~0.72) at any aligned offset, and an
             // echo overlapping the prefix window lets a prefix-revert mutant still find it. The
             // unpositioned bounded search covers offsets 0..7 200 (24 000-sample analysis tail in a
-            // 32 000 reference); the echo sits at reference offset 0 (the 500 ms delay edge,
-            // admissible). A prefix-revert mutant analyzes pure silence and must fail.
+            // 32 000 reference); the matching analysis window starts at search offset 0 (the 500 ms
+            // delay edge, admissible), with the burst itself at reference offset 18 000. A
+            // prefix-revert mutant analyzes pure silence and must fail.
             val burst = FloatArray(6_000) { i ->
                 var x = (i * 2_654_435_761L + 1_234_567_891L) % 4_294_967_296L
                 x = x xor (x shr 13)

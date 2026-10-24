@@ -461,6 +461,65 @@ class EngineToProducerPublishTest {
      * producer persist the wrong pair fails this assertion with
      * "the PERSISTED wake state must be a known failure" (receipt: detector-error-mutant.log).
      */
+    // PROVENANCE WIRING (spec audit): production DOES observe bleed rejections —
+    // VoiceAsrEngine.transcribeSegment joins CollectionOutcome.NotCollected(captureId, "bleed")
+    // when UtteranceFilter's correlator rejects the segment — but the provenance mapping ignored
+    // the join and persisted bleed as unknown/observation_unavailable, laundering a KNOWN
+    // production fact into an unavailable observation. The mapping must carry the observed
+    // rejection into the owning schema: bleed completed with an overlap decision.
+    @Test
+    fun `a bleed-rejected capture is persisted as bleed completed with an overlap decision`() {
+        val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))
+        val ctx = context()
+        val first = ShortArray(800) { i -> i.toShort() }
+        assertTrue(sink.started(SegmentObservation.Started(ctx, first, validSamples = 800)))
+        sink.completed(
+            SegmentObservation.Completed(
+                ctx,
+                frames = listOf(ShortArray(800) { i -> (i + 1).toShort() }),
+                sampleRateHz = 16000,
+                speechOnsetSample = 0,
+                speechEndSample = 1600,
+                wakeState = SegmentObservation.WakeState.Detected,
+            ),
+        )
+        // THE PRODUCTION JOIN, verbatim from VoiceAsrEngine.transcribeSegment's bleed branch.
+        assertTrue(sink.joinOutcome(CollectionOutcome.NotCollected(ctx.captureId, "bleed")))
+
+        val candidate = sink.retainedCandidateForTest(ctx.captureId)!!
+        val stages = EngineStageProvenance.stagesFor(candidate)
+        val bleed = stages.toMap().getValue(StageName.Bleed)
+        assertEquals("an observed bleed rejection is a COMPLETED check, not an unavailable one", StageState.Completed, bleed.state)
+        assertEquals("overlap", (bleed.fields.getValue("decision") as RecordNode.Str).value)
+
+        // The produced record must carry the same pair into the owning schema.
+        val root = tmp.newFolder("bleed-rejected")
+        val store = newStore(root)
+        val stored = producer(store).publish(
+            ctx.captureId.toString(),
+            "epoch-1",
+            16000,
+            listOf(first to 800),
+            listOf(
+                "vad" to ModelRef.None,
+                "wakeword" to ModelRef.None,
+                "asr" to ModelRef.None,
+                "translation" to ModelRef.None,
+                "router" to ModelRef.None,
+            ),
+            stages,
+        )
+        assertTrue("the producer must publish a record for a bleed-rejected capture", stored != null)
+        val decoded = checkNotNull(store.durableCapture(ctx.captureId.toString()))
+        val decodedRecord = when (val v = RecordValidator.validate(decoded.record)) {
+            is RecordValidator.Result.Ok -> v.record
+            else -> error("the persisted record must decode, got $v")
+        }
+        val decodedBleed = decodedRecord.observations.getValue(StageName.Bleed)
+        assertEquals("the PERSISTED bleed state must be a completed check", StageState.Completed, decodedBleed.state)
+        assertEquals("overlap", (decodedBleed.fields.getValue("decision") as RecordNode.Str).value)
+    }
+
     @Test
     fun `a failed wake detector is persisted as wake failed with detector_error`() {
         val sink = ContributionRetentionSink(CollectionBudget(4L * 1024 * 1024))

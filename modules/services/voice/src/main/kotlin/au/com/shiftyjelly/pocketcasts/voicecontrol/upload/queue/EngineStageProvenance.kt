@@ -47,9 +47,21 @@ object EngineStageProvenance {
                 SegmentObservation.WakeState.DetectorFailed ->
                     StageEntry(StageState.Failed, mapOf("reason" to RecordNode.Str("detector_error")))
             },
-            // delta736d3180: honest unknown WITH the enumerated reason the schema requires —
-            // the candidate carries no bleed observation at finalization; no specific cause claimed.
-            StageName.Bleed to StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable"))),
+            // WIRED PRODUCTION FACT (spec audit): VoiceAsrEngine.transcribeSegment joins
+            // NotCollected(captureId, "bleed") when UtteranceFilter's correlator rejects the
+            // segment. That join IS the bleed observation - a completed check with a rejected
+            // decision - so it must reach the owning schema instead of laundering a known
+            // production fact into an unavailable observation.
+            StageName.Bleed to if (
+                (candidate.outcome as? CollectionOutcome.NotCollected)?.reason == "bleed" ||
+                candidate.stageOutcomes.any {
+                    (it as? CollectionOutcome.NotCollected)?.reason == "bleed"
+                }
+            ) {
+                StageEntry(StageState.Completed, mapOf("decision" to RecordNode.Str("overlap")))
+            } else {
+                StageEntry(StageState.Unknown, mapOf("reason" to RecordNode.Str("observation_unavailable")))
+            },
             StageName.Asr to if (recognized != null) {
                 StageEntry(StageState.Completed, mapOf("text" to RecordNode.Str(recognized.transcript)))
             } else {

@@ -27,7 +27,6 @@ import javax.inject.Singleton
  * authoritative file and never leaves it half-written - the absent case is narrowed to "nothing was
  * ever written", not reachable by any ordinary crash during an update.
  */
-@Singleton
 class FileWithdrawalIntentPersistence constructor(
     @ApplicationContext private val context: Context,
     /**

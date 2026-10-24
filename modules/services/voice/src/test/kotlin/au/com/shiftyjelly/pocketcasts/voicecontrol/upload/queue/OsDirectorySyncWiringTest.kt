@@ -6,6 +6,7 @@ import java.io.File
 import java.io.IOException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -87,7 +88,10 @@ class OsDirectorySyncWiringTest {
     }
 
     @Test
-    fun `an Os fsync failure PROPAGATES out of publication rather than reporting success`() {
+    fun `an Os fsync failure is never reported as a durable publication`() {
+        // claude review minor 7: prepareAt absorbs fsync failures into a null return by design
+        // (uncertain-outcome handling), so the honest contract pinned here is "no durable entry is
+        // reported" - not "the exception propagates to the caller". The title says what the code does.
         val os = RecordingOs(refuseFsync = true)
         val root = File(System.getProperty("java.io.tmpdir"), "wire-pubfail-${System.nanoTime()}").apply { mkdirs() }
         val store = ContributionStore(
@@ -196,11 +200,20 @@ class OsDirectorySyncWiringTest {
             "a null authority must mean unsupported regardless of device capabilities",
             AndroidOsOperations(oDirectoryAuthority = { null }).isSupported,
         )
-        // And the default authority must be a REAL authority (platform constant or compiled native),
-        // not something derived from SUPPORTED_ABIS: whatever it returns, it is independent of the
-        // capability list ordering.
-        val authority = AndroidOsOperations.DEFAULT_O_DIRECTORY_AUTHORITY()
-        val swapped = AndroidOsOperations.DEFAULT_O_DIRECTORY_AUTHORITY()
-        assertEquals(authority, swapped)
+        // THE control (claude review major 1): under Robolectric the capability list is populated,
+        // the OsConstants field is absent from every platform jar (javap-verified), and the native
+        // .so cannot load on the JVM - so the DEFAULT authority must be NULL here. A
+        // SUPPORTED_ABIS-based selector (the removed first-entry or any-entry approach) returns a
+        // non-null ARM flag in exactly this environment, so this assertion CAN fail - unlike a
+        // check routed through an injected authority, which never exercises the default path.
+        assertNull(
+            "the default authority must not be inferred from the populated device capability list",
+            AndroidOsOperations.DEFAULT_O_DIRECTORY_AUTHORITY(),
+        )
+        assertEquals(
+            "and unsupported follows from it",
+            false,
+            AndroidOsOperations().isSupported,
+        )
     }
 }

@@ -30,6 +30,7 @@ class OsDirectorySyncTest {
         private val supported: Boolean = true,
         var failOpenErrno: Int? = null,
         var failFsyncErrno: Int? = null,
+        var failFsyncUnexpected: IllegalStateException? = null,
         var failCloseErrno: Int? = null,
     ) : OsOperations {
         val calls = mutableListOf<String>()
@@ -52,6 +53,7 @@ class OsDirectorySyncTest {
         override fun fsync(fd: FileDescriptor) {
             calls += "fsync:${label(fd)}"
             failFsyncErrno?.let { throw ErrnoException("fake", it) }
+            failFsyncUnexpected?.let { throw it }
         }
 
         override fun close(fd: FileDescriptor) {
@@ -95,6 +97,33 @@ class OsDirectorySyncTest {
             assertTrue("the errno cause must be preserved", e.cause is ErrnoException)
         }
         assertTrue("close must still have been reached: ${os.calls}", os.calls.last().startsWith("close"))
+    }
+
+    @Test
+    fun `a NON-errno fsync failure still runs close and propagates the original throwable`() {
+        // claude review minor 4: the seam is documented for arbitrary injected implementations, so
+        // an fsync implementation may throw something that is not an ErrnoException; the fd must
+        // still be closed and the ORIGINAL throwable must surface, with the close failure riding
+        // along as suppressed if close also fails.
+        val os = FakeOs()
+        os.failFsyncUnexpected = IllegalStateException("injected implementation misbehaved")
+        try {
+            OsDirectorySync(os).sync(newDir("unexpected-fsync"))
+            fail("the original non-errno throwable must propagate")
+        } catch (e: IllegalStateException) {
+            assertEquals("injected implementation misbehaved", e.message)
+            assertTrue("close must have run: ${os.calls}", os.calls.last().startsWith("close"))
+        }
+        // And when close ALSO fails, the close failure rides on the original throwable.
+        val os2 = FakeOs(failCloseErrno = 9)
+        os2.failFsyncUnexpected = IllegalStateException("injected implementation misbehaved")
+        try {
+            OsDirectorySync(os2).sync(newDir("unexpected-fsync-and-close"))
+            fail("the original non-errno throwable must propagate")
+        } catch (e: IllegalStateException) {
+            assertEquals(1, e.suppressed.size)
+            assertTrue(e.suppressed[0].message!!.contains("close"))
+        }
     }
 
     @Test

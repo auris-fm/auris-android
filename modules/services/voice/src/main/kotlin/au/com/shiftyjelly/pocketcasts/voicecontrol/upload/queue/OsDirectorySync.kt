@@ -56,11 +56,12 @@ class AndroidOsOperations(
     }
 
     internal companion object {
-        // Order matters: the platform's own constant outranks the compiled one because it is the
-        // same surface Os.open documents. On real devices OsConstants.O_DIRECTORY exists since the
-        // API where directory fsync is documented; this SDK's android.jar compile stub omits it,
-        // so reflection is used and the missing-field case (plain JVM tests, stripped builds) falls
-        // through to the compiled native authority, then to null = unsupported.
+        // Order: the platform's own constant would outrank the compiled one (same surface Os.open
+        // documents) - but as of NDK/platform 34 and 37, NO android.jar platform exposes the field
+        // (javap-verified), so on every shipping device this tier is inert and the flag in
+        // production rests SOLELY on the compiled native authority from the .so. The reflection
+        // tier is kept for forward compatibility (a future platform that adds the field becomes
+        // authority automatically). Missing field OR missing native library => null = unsupported.
         internal val DEFAULT_O_DIRECTORY_AUTHORITY: () -> Int? = {
             runCatching { OsConstants::class.java.getField("O_DIRECTORY").getInt(null) }.getOrNull()
                 ?: DirectoryFlagJni.oDirectoryOrNull()
@@ -114,11 +115,18 @@ class OsDirectorySync(
         // is "any call may fail loudly", so a close-only failure propagates, and when fsync AND
         // close both fail the ORIGINAL fsync error is thrown with the close failure attached as a
         // suppressed exception (reviewer 87e2e450 - the previous finally swallowed close entirely).
+        // ANY fsync throwable (not only ErrnoException - the OsOperations seam is documented for
+        // arbitrary injected implementations) still runs close: an fd leaked per failed sync is its
+        // own defect (claude review finding, restoring the guarantee the old finally-shaped code
+        // had for this case).
         var fsyncError: IOException? = null
+        var fsyncUnexpected: Throwable? = null
         try {
             ops.fsync(fd)
         } catch (e: ErrnoException) {
             fsyncError = IOException("directory fsync failed (errno=${e.errno})", e)
+        } catch (t: Throwable) {
+            fsyncUnexpected = t
         }
         try {
             ops.close(fd)
@@ -127,10 +135,13 @@ class OsDirectorySync(
             val original = fsyncError
             if (original != null) {
                 original.addSuppressed(closeError)
-                throw original
+            } else if (fsyncUnexpected != null) {
+                fsyncUnexpected.addSuppressed(closeError)
+            } else {
+                throw closeError
             }
-            throw closeError
         }
+        fsyncUnexpected?.let { throw it }
         fsyncError?.let { throw it }
     }
 

@@ -101,11 +101,6 @@ object VoiceObservationModule {
         sink.onRetentionEnded = { context -> observer.noteRetentionEnded(context) }
     }
 
-    /**
-     * Starts the PRODUCTION loss subscriptions (CollectionLossWatcher): account change,
-     * enrollment/withdrawal post-commit hook, policy disable flow, exact lease-deadline purge.
-     * Called from the app surface once at startup; idempotent inside the watcher.
-     */
     // Spec 64ce2de6: the withdrawal marker's directory barrier is the android.system.Os adapter in
     // production, bound HERE at the Android construction boundary. A failed clear still reports
     // false and sets the admission latch; there is no unsupported-runtime success fallback.
@@ -118,6 +113,11 @@ object VoiceObservationModule {
         directorySyncOverride = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.DirectorySync.PRODUCTION,
     )
 
+    /**
+     * Starts the PRODUCTION loss subscriptions (CollectionLossWatcher): account change,
+     * enrollment/withdrawal post-commit hook, policy disable flow, exact lease-deadline purge.
+     * Called from the app surface once at startup; idempotent inside the watcher.
+     */
     @Provides
     @Singleton
     fun provideLossWatcher(

@@ -91,13 +91,8 @@ class VoiceAsrEngine @Inject constructor(
     internal var scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var processingJob: Job? = null
 
-    /**
-     * The processing job left behind by [stop], exposed so service teardown can AWAIT it before
-     * releasing the ASR backend. It lives on this engine's independent scope, so joining the
-     * service scope's root does not cover it.
-     */
-    // EVERY processing job stop() cancelled that has not yet finished, so service teardown can
-    // await them ALL before releasing the ASR backend. These run on this engine's OWN
+    // EVERY processing job stop() cancelled that has not yet finished, exposed so service teardown
+    // can await them ALL before releasing the ASR backend. These run on this engine's OWN
     // `SupervisorJob + IO` scope, so joining the service scope's root does not cover them
     // (reviewer 267001c1). A single slot is also not enough: with stop/start/stop the older native
     // call can still be running while a newer job exists, and dropping the older one would let

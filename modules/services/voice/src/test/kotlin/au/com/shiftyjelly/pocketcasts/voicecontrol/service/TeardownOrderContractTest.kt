@@ -166,8 +166,23 @@ class TeardownOrderContractTest {
         else -> -1
     }
 
+    /** The production start function, read from the source tree. */
+    private fun productionStartSource(): String {
+        val source = productionFileSource()
+        val start = source.indexOf("private fun startVoiceControl(): Boolean {")
+        assertTrue("startVoiceControl must exist in the production source", start >= 0)
+        return source.substring(start, source.indexOf("\n    }", start))
+    }
+
     /** The real production function, read from the source tree (no Service instantiation needed). */
     private fun productionStopVoiceControlSource(): String {
+        val source = productionFileSource()
+        val start = source.indexOf("private fun stopVoiceControl(): Job {")
+        assertTrue("stopVoiceControl must exist in the production source", start >= 0)
+        return source.substring(start, source.indexOf("\n    }", start))
+    }
+
+    private fun productionFileSource(): String {
         val file = java.io.File("src/main/kotlin/au/com/shiftyjelly/pocketcasts/voicecontrol/service/VoiceControlService.kt")
         val source = if (file.exists()) {
             file.readText()
@@ -178,9 +193,7 @@ class TeardownOrderContractTest {
                 .first { it.exists() }
                 .readText()
         }
-        val start = source.indexOf("private fun stopVoiceControl(): Job {")
-        assertTrue("stopVoiceControl must exist in the production source", start >= 0)
-        return source.substring(start, source.indexOf("\n    }", start))
+        return source
     }
 
     // DELETED (reviewer 9003d3cc): the two "simulateStopEngine" tests were a re-implementation of
@@ -208,6 +221,44 @@ class TeardownOrderContractTest {
                 at > mainAt && at - mainAt < 600,
             )
         }
+    }
+
+    @Test
+    fun `a start is refused once teardown has begun`() {
+        // Reviewer fd3f5a4d: the final shutdown must EXCLUDE new starts. A start that slipped in
+        // would open a capture the teardown is about to release from under it.
+        val source = productionStartSource()
+        val guardAt = source.indexOf("stopInFlightJob != null")
+        assertTrue(
+            "startVoiceControl must refuse to start while a teardown exists; otherwise a start " +
+                "can race the release of the resources it needs",
+            guardAt >= 0,
+        )
+        val earlyReturnAt = source.indexOf("return false", guardAt)
+        assertTrue("the guard must return without starting", earlyReturnAt > guardAt)
+    }
+
+    @Test
+    fun `the root job is captured before the scope is cancelled`() {
+        // Reviewer f457fbad: a child created just before cancellation, or a child of a child, must
+        // not let the completion job observe a DIFFERENT root than the one being cancelled. So the
+        // root is read before the cancel, not sampled from inside the completion coroutine.
+        val source = productionStopVoiceControlSource()
+        val captureAt = source.indexOf("val rootJob = serviceScope.coroutineContext[Job]")
+        val cancelAt = source.indexOf("serviceScope.cancel()")
+        assertTrue("the teardown must capture the root job", captureAt >= 0)
+        assertTrue("the teardown must cancel the scope", cancelAt >= 0)
+        assertTrue(
+            "the root must be captured BEFORE the cancel (root at $captureAt, cancel at $cancelAt)",
+            captureAt < cancelAt,
+        )
+        // And the completion coroutine must use that captured value rather than re-reading the scope.
+        val completionAt = source.indexOf("rootJob?.join()")
+        assertTrue("the completion job must join the captured root", completionAt >= 0)
+        assertTrue(
+            "re-reading the scope inside the completion job would capture a different root",
+            completionAt > captureAt,
+        )
     }
 
     @Test

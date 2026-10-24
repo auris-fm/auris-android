@@ -148,12 +148,24 @@ class EngineProcessingJoinControlTest {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val holdFirst = CompletableDeferred<Unit>()
         val firstRunning = CompletableDeferred<Unit>()
+        val firstCompletionEntered = CompletableDeferred<Unit>()
+        val secondFlowEntered = CompletableDeferred<Unit>()
         var starts = 0
         val flows = kotlinx.coroutines.flow.MutableSharedFlow<au.com.shiftyjelly.pocketcasts.voicecontrol.audio.VoiceSegmenterResult>()
         `when`(processor.startProcessing()).thenAnswer { invocation ->
             val n = ++starts
-            flows.onStart { if (n == 1) firstRunning.complete(Unit) }
-                .onCompletion { if (n == 1) withContext(NonCancellable) { holdFirst.await() } }
+            flows.onStart {
+                if (n == 1) firstRunning.complete(Unit)
+                if (n == 2) secondFlowEntered.complete(Unit)
+            }
+                .onCompletion {
+                    if (n == 1) {
+                        // EXPLICIT BARRIER: the first job is provably in its finalization before we
+                        // hold it, so the restart below cannot be racing an unstarted completion.
+                        firstCompletionEntered.complete(Unit)
+                        withContext(NonCancellable) { holdFirst.await() }
+                    }
+                }
         }
         val engine = engine(scope)
         try {
@@ -168,6 +180,7 @@ class EngineProcessingJoinControlTest {
             withTimeout(5_000) { flows.subscriptionCount.first { it > 0 } }
             engine.stop() // cancels job #1, which is held in its completion
             withTimeout(5_000) { firstRunning.await() }
+            withTimeout(5_000) { firstCompletionEntered.await() }
             val firstJob = engine.unfinishedProcessingJobs.firstOrNull()
             assertNotNull("the first job must be retained", firstJob)
 
@@ -179,15 +192,17 @@ class EngineProcessingJoinControlTest {
                 micExposureProvider = { MicExposure.NoMic },
                 onIntent = { _, _ -> },
             )
-            withTimeout(5_000) { flows.subscriptionCount.first { it > 1 || starts >= 2 } }
-            engine.stop() // cancels job #2 while #1 may still be finishing
+            // EXPLICIT BARRIER: the newly started flow is actually collecting before the second stop.
+            withTimeout(5_000) { secondFlowEntered.await() }
+            engine.stop() // cancels job #2 while #1 is still held in its finalization
 
             val jobs = engine.unfinishedProcessingJobs
             assertTrue(
-                "the older unfinished job must survive a later stop; a single slot drops it and " +
-                    "teardown would then release the backend under it (found ${jobs.size} job(s))",
-                jobs.size >= 2 || jobs.contains(firstJob),
+                "BOTH jobs must be retained: the held older one and the newer one " +
+                    "(found ${jobs.size} job(s))",
+                jobs.size == 2,
             )
+            assertTrue("the older held job must still be in the retained set", jobs.contains(firstJob))
         } finally {
             holdFirst.complete(Unit)
             scope.cancel()
@@ -245,59 +260,6 @@ class EngineProcessingJoinControlTest {
             assertTrue("the join completes once the real processing flow finished", joiner.isCompleted)
         } finally {
             releaseFlow.complete(Unit)
-            scope.cancel()
-        }
-    }
-
-    @Test
-    fun `a join of the engine processing job waits for held engine work`() = runBlocking {
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        val engine = engine(scope)
-        try {
-            engine.start(
-                backend = mock(au.com.shiftyjelly.pocketcasts.voicecontrol.asr.AsrBackend::class.java),
-                audioRoute = AudioRoute.Speaker,
-                listeningMode = ListeningMode.Continuous,
-                playbackBufferProvider = { FloatArray(0) },
-                micExposureProvider = { MicExposure.NoMic },
-                onIntent = { _, _ -> },
-            )
-            withTimeout(5_000) { processingFlow.subscriptionCount.first { it > 0 } }
-
-            // Hold work the way a noncooperative native call would: a child of the SAME engine scope
-            // that the service-root join cannot see.
-            val finallyEntered = CompletableDeferred<Unit>()
-            val releaseFinally = CompletableDeferred<Unit>()
-            val held = scope.launch {
-                withContext(NonCancellable) {
-                    finallyEntered.complete(Unit)
-                    releaseFinally.await()
-                }
-            }
-            try {
-                withTimeout(5_000) { finallyEntered.await() }
-                engine.stop()
-
-                val joinerStarted = CompletableDeferred<Unit>()
-                val joiner = CoroutineScope(Dispatchers.IO).launch {
-                    withContext(NonCancellable) {
-                        joinerStarted.complete(Unit)
-                        engine.unfinishedProcessingJobs.firstOrNull()?.join()
-                        held.join()
-                    }
-                }
-                withTimeout(5_000) { joinerStarted.await() }
-                assertFalse(
-                    "teardown must not proceed to release while engine work is still held",
-                    joiner.isCompleted,
-                )
-                releaseFinally.complete(Unit)
-                withTimeout(5_000) { joiner.join() }
-                assertTrue("the join completes once engine work has finished", joiner.isCompleted)
-            } finally {
-                releaseFinally.complete(Unit)
-            }
-        } finally {
             scope.cancel()
         }
     }

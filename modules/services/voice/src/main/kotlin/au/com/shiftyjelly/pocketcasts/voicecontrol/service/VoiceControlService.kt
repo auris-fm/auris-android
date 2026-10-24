@@ -174,6 +174,13 @@ class VoiceControlService : Service() {
 
     /** Returns true when a start was accepted; false when one is already running or in flight. */
     private fun startVoiceControl(): Boolean {
+        // FINAL SHUTDOWN EXCLUDES NEW STARTS (reviewer fd3f5a4d): once teardown has begun, a start
+        // must be refused rather than opening a capture the teardown is about to release from under
+        // it. The teardown retains its job, so this stays true for the rest of the service's life.
+        if (stopInFlightJob != null) {
+            Timber.i("Voice control is stopping; refusing a new start")
+            return false
+        }
         if (engineStart.isStarted || startInFlightJob?.isActive == true) {
             Timber.i("Voice control already started")
             return false
@@ -767,6 +774,10 @@ class VoiceControlService : Service() {
         // identity, so a later stop cannot release resources a second time.
         stopInFlightJob?.let { return it }
         Timber.i("Stopping voice control service")
+        // CAPTURE THE ROOT NOW, before the cancel below. A child that outlives this call (a job
+        // created just before cancellation, or a child of a child) must not be able to make the
+        // completion job observe a DIFFERENT root than the one this teardown is cancelling
+        // (reviewer f457fbad).
         val rootJob = serviceScope.coroutineContext[Job]
 
         // CANCEL, STOP, JOIN, THEN RELEASE (reviewers 0bba7db5 + dbde4427).

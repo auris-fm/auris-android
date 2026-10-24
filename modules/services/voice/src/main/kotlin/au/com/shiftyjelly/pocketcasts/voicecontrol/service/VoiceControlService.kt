@@ -133,6 +133,8 @@ class VoiceControlService : Service() {
     private var currentMode: ListeningMode = ListeningMode.Off
 
     companion object {
+        // Bounded re-sampling rounds for engine work; exhaustion refuses to release (reviewer 1092c632).
+        private const val MAX_ENGINE_JOIN_ROUNDS = 8
         private const val COMMAND_DEBOUNCE_MS = 2000L
         internal const val STOP_ACTION = "au.com.shiftyjelly.pocketcasts.voicecontrol.action.STOP"
 
@@ -828,20 +830,17 @@ class VoiceControlService : Service() {
                 // UNCONDITIONAL FINAL STOP before the snapshot (reviewer 543d284b): a child could
                 // have left the engine with live work that no earlier stop() cancelled. Stopping
                 // here makes that work visible to the snapshot below instead of racing it.
-                runCatching { voiceAsrEngine.get().stop() }
-                    .onFailure { Timber.w(it, "[VoicePipeline] final engine stop failed") }
-                // JOIN UNTIL THE SET STOPS GROWING: joining is not atomic with the snapshot, and a
-                // late stop can add a job after we sampled. Bounded so a hostile engine cannot spin
-                // this forever.
-                val joined = mutableSetOf<Job>()
-                repeat(8) {
-                    val pending = voiceAsrEngine.get().unfinishedProcessingJobs.filterNot { it in joined }
-                    if (pending.isEmpty()) return@repeat
-                    pending.forEach { job ->
-                        runCatching { job.join() }
-                            .onFailure { Timber.w(it, "[VoicePipeline] engine processing join failed") }
-                        joined.add(job)
-                    }
+                // FAIL CLOSED (reviewers 1092c632 + 9294defb): a failed final stop, round
+                // exhaustion, or anything still unfinished at release time all mean the released
+                // resources might still be in use. Only Settled permits release.
+                val verdict = EngineQuiescence.settle(
+                    stop = { voiceAsrEngine.get().stop() },
+                    unfinished = { voiceAsrEngine.get().unfinishedProcessingJobs },
+                    join = { job -> job.join() },
+                )
+                if (verdict != EngineQuiescence.Verdict.Settled) {
+                    Timber.e("[VoicePipeline] engine not settled ($verdict); skipping resource release")
+                    return@withContext
                 }
                 // The releases themselves run on MAIN: the media session and the feedback renderer
                 // own Main-confined state (the renderer's scope is Dispatchers.Main.immediate), so

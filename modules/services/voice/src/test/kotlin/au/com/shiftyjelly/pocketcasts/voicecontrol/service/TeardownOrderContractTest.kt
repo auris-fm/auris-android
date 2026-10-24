@@ -257,23 +257,18 @@ class TeardownOrderContractTest {
     }
 
     @Test
-    fun `engine jobs are sampled after the root join and joined until the set stops growing`() {
-        // Reviewer e1b11171 + a387bb7a: sampling before the join missed jobs a child cancelled
-        // during teardown, and joining once is not atomic with sampling. The join must follow the
-        // root join and re-sample.
+    fun `engine work is not released before the service children finish`() {
+        // The re-sampling join itself is now EngineQuiescence's job and is proven behaviourally in
+        // EngineQuiescenceControlTest. Retained here: engine quiescence is consulted only AFTER the
+        // service root has been joined, so a child cannot add work behind the decision.
         val source = productionStopVoiceControlSource()
         val rootJoinAt = source.indexOf("rootJob?.join()")
-        val sampleAt = source.indexOf("unfinishedProcessingJobs")
+        val settleAt = source.indexOf("EngineQuiescence.settle(")
         assertTrue("the root join must be present", rootJoinAt >= 0)
-        assertTrue("the engine jobs must be sampled in the teardown", sampleAt >= 0)
+        assertTrue("engine quiescence must be consulted", settleAt >= 0)
         assertTrue(
-            "engine jobs must be sampled AFTER the service children finished " +
-                "(sample at $sampleAt, root join at $rootJoinAt)",
-            sampleAt > rootJoinAt,
-        )
-        assertTrue(
-            "the join must re-sample until the set stops growing",
-            source.contains("filterNot { it in joined }"),
+            "quiescence must follow the root join (settle at $settleAt, root join at $rootJoinAt)",
+            settleAt > rootJoinAt,
         )
     }
 
@@ -294,17 +289,22 @@ class TeardownOrderContractTest {
     }
 
     @Test
-    fun `the final engine stop happens after the root join and before the job snapshot`() {
+    fun `the teardown delegates quiescence to EngineQuiescence after the root join`() {
+        // The concrete stop/join/fail-closed behaviour moved into EngineQuiescence and is proven by
+        // EngineQuiescenceControlTest (behavioural, with failure and exhaustion mutants). What this
+        // source-level control still pins is the ORDER: quiescence runs after the root join, and the
+        // service releases only on a Settled verdict.
         val source = productionStopVoiceControlSource()
         val rootJoinAt = source.indexOf("rootJob?.join()")
-        val finalStopAt = source.indexOf("final engine stop failed")
-        val sampleAt = source.indexOf("unfinishedProcessingJobs")
-        assertTrue("the final unconditional stop must be present", finalStopAt >= 0)
-        assertTrue("engine jobs must be sampled after the root join", sampleAt > rootJoinAt)
+        val settleAt = source.indexOf("EngineQuiescence.settle(")
+        val releaseAt = source.indexOf("wiredBackend?.release()")
+        assertTrue("the root join must be present", rootJoinAt >= 0)
+        assertTrue("quiescence must be consulted", settleAt >= 0)
+        assertTrue("quiescence must run after the root join", settleAt > rootJoinAt)
+        assertTrue("the releases must come after quiescence", releaseAt > settleAt)
         assertTrue(
-            "the final stop must precede the snapshot so late work becomes visible " +
-                "(stop at $finalStopAt, sample at $sampleAt)",
-            finalStopAt < sampleAt,
+            "release must be gated on a Settled verdict",
+            source.contains("verdict != EngineQuiescence.Verdict.Settled"),
         )
     }
 

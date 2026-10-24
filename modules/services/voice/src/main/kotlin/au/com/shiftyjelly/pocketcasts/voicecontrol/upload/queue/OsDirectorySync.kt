@@ -28,12 +28,14 @@ interface OsOperations {
 
 /** Production binding to the real `android.system.Os`. */
 class AndroidOsOperations : OsOperations {
-    // Supported ONLY when the running ABI's O_DIRECTORY value is known: an unknown ABI must fail,
-    // never open with a guessed flag (a wrong flag is O_DIRECT, not O_DIRECTORY, and the open fails
-    // or - worse - is simply not a directory handle).
-    override val isSupported: Boolean = directoryOpenFlags(android.os.Build.SUPPORTED_ABIS.toList()) != null
+    // Supported ONLY when the PREFERRED ABI's O_DIRECTORY value is known. Build.SUPPORTED_ABIS is a
+    // DEVICE capability list (ordered, preferred first - Build.java), not one-ABI-per-process;
+    // the process's syscall ABI is its FIRST entry. An unknown ABI must fail, never open with a
+    // guessed flag (a wrong flag is O_DIRECT, not O_DIRECTORY, and the open fails or - worse - is
+    // simply not a directory handle).
+    override val isSupported: Boolean = directoryOpenFlags(android.os.Build.SUPPORTED_ABIS.firstOrNull()) != null
 
-    override fun openDirectory(path: String): FileDescriptor = Os.open(path, directoryOpenFlags(android.os.Build.SUPPORTED_ABIS.toList())!! or OsConstants.O_RDONLY, 0)
+    override fun openDirectory(path: String): FileDescriptor = Os.open(path, directoryOpenFlags(android.os.Build.SUPPORTED_ABIS.firstOrNull())!! or OsConstants.O_RDONLY, 0)
 
     override fun fsync(fd: FileDescriptor) {
         Os.fsync(fd)
@@ -57,11 +59,18 @@ class AndroidOsOperations : OsOperations {
         internal const val O_DIRECTORY_ARM = 0x4000
         internal const val O_DIRECTORY_X86 = 0x10000
 
-        internal fun directoryOpenFlags(abis: List<String>): Int? = when {
-            abis.any { it.startsWith("arm") || it.startsWith("aarch64") } -> O_DIRECTORY_ARM
-            abis.any { it.startsWith("x86") } -> O_DIRECTORY_X86
-            else -> null
-        }
+        // EXACT known ABI names only, and the PREFERRED (first) entry decides: SUPPORTED_ABIS lists
+        // what a device CAN run, so an ARM entry on an x86-prefixed device must not choose the
+        // syscall flags (reviewer 87e2e450, round 3), and prefix matching would accept names like
+        // "arm-future" that no pinned value was verified against. Unknown -> null -> unsupported.
+        private val ABI_FLAGS: Map<String, Int> = mapOf(
+            "arm64-v8a" to O_DIRECTORY_ARM,
+            "armeabi-v7a" to O_DIRECTORY_ARM,
+            "x86_64" to O_DIRECTORY_X86,
+            "x86" to O_DIRECTORY_X86,
+        )
+
+        internal fun directoryOpenFlags(preferredAbi: String?): Int? = preferredAbi?.let { ABI_FLAGS[it] }
     }
 }
 

@@ -65,25 +65,25 @@ class OsDirectorySyncTest {
     private fun newDir(name: String): File = File(System.getProperty("java.io.tmpdir"), "os-sync-" + name + "-" + System.nanoTime()).apply { mkdirs() }
 
     @Test
-    fun `the open flags are selected per RUNNING ABI - arm64 gets 0x4000, x86_64 gets 0x10000, unknown is unsupported`() {
-        // Bionic per-arch kernel uapi headers, and the values SWAP between families:
-        //   asm-arm/asm-arm64: O_DIRECTORY = 040000 = 0x4000 (O_DIRECT = 0200000 = 0x10000)
-        //   asm-generic (x86, x86_64): O_DIRECTORY = 0200000 = 0x10000 (O_DIRECT = 0040000 = 0x4000)
-        // voice/build.gradle.kts builds arm64-v8a AND x86_64, so a universal literal is wrong on one
-        // family whichever value it picks (reviewer 87e2e450, both rounds). An unknown ABI must make
-        // the platform report UNSUPPORTED rather than open with a guessed flag.
-        assertEquals(0x4000, AndroidOsOperations.directoryOpenFlags(listOf("arm64-v8a")))
-        assertEquals(0x4000, AndroidOsOperations.directoryOpenFlags(listOf("armeabi-v7a", "arm64-v8a")))
-        assertEquals(0x10000, AndroidOsOperations.directoryOpenFlags(listOf("x86_64")))
-        assertEquals(0x10000, AndroidOsOperations.directoryOpenFlags(listOf("x86", "x86_64")))
-        assertNull("an unknown ABI must not yield a guessed flag", AndroidOsOperations.directoryOpenFlags(listOf("riscv64")))
-        assertNull(AndroidOsOperations.directoryOpenFlags(emptyList()))
-        // The flags actually forwarded carry O_RDONLY and never mix families.
-        assertEquals(0x4000 or android.system.OsConstants.O_RDONLY, AndroidOsOperations.directoryOpenFlags(listOf("arm64-v8a"))!! or android.system.OsConstants.O_RDONLY)
-        assertTrue(
-            "arm value must not carry the x86-only O_DIRECT bit 0x4000-as-O_DIRECT confusion: arm O_DIRECT is 0x10000",
-            AndroidOsOperations.O_DIRECTORY_ARM != AndroidOsOperations.O_DIRECTORY_X86,
-        )
+    fun `the PREFERRED ABI selects the flags by EXACT name - mixed lists take the first entry, unknown names are unsupported`() {
+        // Round 3 (reviewer 87e2e450): SUPPORTED_ABIS is a device capability list, so an ARM entry
+        // on an x86-prefixed device must not choose the syscall flags - only the FIRST entry (the
+        // preferred ABI) decides. Values still swap per bionic headers: asm-arm/asm-arm64
+        // O_DIRECTORY = 040000 = 0x4000; asm-generic (x86, x86_64) = 0200000 = 0x10000. Matching is
+        // EXACT name, not prefix - "arm-future" must not inherit an unverified value.
+        assertEquals(0x4000, AndroidOsOperations.directoryOpenFlags("arm64-v8a"))
+        assertEquals(0x4000, AndroidOsOperations.directoryOpenFlags("armeabi-v7a"))
+        assertEquals(0x10000, AndroidOsOperations.directoryOpenFlags("x86_64"))
+        assertEquals(0x10000, AndroidOsOperations.directoryOpenFlags("x86"))
+        // Mixed-family lists: the PREFERRED entry decides, whichever family it is.
+        assertEquals(0x10000, AndroidOsOperations.directoryOpenFlags("x86_64")) // x86-prefixed device that could run arm
+        assertEquals(0x4000, AndroidOsOperations.directoryOpenFlags("arm64-v8a")) // arm device that could run x86
+        // Unknown / future / absent names are unsupported, never guessed.
+        assertNull(AndroidOsOperations.directoryOpenFlags("arm-future"))
+        assertNull(AndroidOsOperations.directoryOpenFlags("riscv64"))
+        assertNull(AndroidOsOperations.directoryOpenFlags("mips64"))
+        assertNull(AndroidOsOperations.directoryOpenFlags(null))
+        assertTrue(AndroidOsOperations.O_DIRECTORY_ARM != AndroidOsOperations.O_DIRECTORY_X86)
     }
 
     @Test

@@ -383,15 +383,23 @@ class PlaybackCrossCorrelatorPositionTest {
     fun `long segment - bleed in the NEWEST window is found via the tail with a shifted anchor`() {
         val segLen = 48_000 // 3 s - longer than the 2 s reference, like a real VAD segment
         val refLen = 32_000 // 2 s
+        // A DISTINCTIVE waveform, not a pure tone: a pure tone self-correlates at any aligned
+        // offset, so the control would pass even if the tail search missed the burst entirely
+        // (Claude review 40080514049). PRBS-like noise only correlates when sample-aligned.
+        val burst = FloatArray(24_000) { i ->
+            var x = (i * 2_654_435_761L + 1_234_567_891L) % 4_294_967_296L
+            x = x xor (x shr 13)
+            (((x shr 16) and 0xFF) - 128) / 128f
+        }
         val samples = FloatArray(refLen)
-        tone(24_000, 300.0).copyInto(samples, 5_600)
+        burst.copyInto(samples, 5_600)
 
         // Segment first sample at player -900 ms; tail (last 24 000 samples) first sample at
         // -900 + 1500 = 600 ms. A 250 ms acoustic delay puts the tail's match at reference
         // offset (600 - 250) * 16 = 5 600.
         val mic = FloatArray(segLen) { i -> 0.01f * sin(i * 0.0007f) }
         val tailStart = segLen - 24_000 // 24 000
-        for (i in 0 until 24_000) mic[tailStart + i] = 0.3f * samples[5_600 + i]
+        for (i in 0 until 24_000) mic[tailStart + i] = 0.3f * burst[i]
 
         val reference = PlaybackReference(samples = samples, sampleRateHz = rate, startPositionMs = 0L)
         assertTrue(

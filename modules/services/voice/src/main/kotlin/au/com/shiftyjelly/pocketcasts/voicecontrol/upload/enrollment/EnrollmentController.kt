@@ -144,6 +144,23 @@ class EnrollmentController(
     }
 
     /**
+     * Applies a durable side effect for [outcome], or applies NOTHING.
+     *
+     * Use this instead of [stillApplies] followed by an effect. The two-step form has a gap the
+     * reviewer named: `issue`/`supersede`/account change do not hold any caller-side lock, so between
+     * the check and the effect the world can move, and the effect then lands on state the decision no
+     * longer describes. Here the decision and the effect run inside the fence's own critical section,
+     * the same one its mutations take.
+     *
+     * Returns true if the effect ran.
+     */
+    fun <T> applyForOutcome(outcome: EnrollmentOutcome, effect: () -> T): T? {
+        if (outcome is EnrollmentOutcome.Superseded) return null
+        val attempt = outcome.attempt ?: return null
+        return fence.applyIfCurrent(attempt, ownerSession, effect)
+    }
+
+    /**
      * Withdraw the CURRENT enrollment. The epoch is deliberately not a parameter: the account layer
      * captures it from the fresh projection inside its owner transaction, so the withdrawal always
      * targets the enrollment that was current at issue time rather than one the caller remembered.

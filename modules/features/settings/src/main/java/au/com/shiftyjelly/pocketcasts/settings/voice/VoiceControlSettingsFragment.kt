@@ -68,13 +68,6 @@ import au.com.shiftyjelly.pocketcasts.localization.R as LR
 class VoiceControlSettingsFragment : BaseFragment() {
 
     /**
-     * Serializes the fence check together with the mutation it authorizes. Private to the fragment
-     * instance: every stop/clear effect in this screen passes through [applyStopEffect], so one lock
-     * is sufficient to make check-then-act indivisible.
-     */
-    private val stopEffectLock = Any()
-
-    /**
      * Set when the stop is known to this session but could NOT be made durable. The screen already
      * shows the user as stopped; this records that the on-disk marker did not land, so nothing
      * downstream can read the absence of a marker as permission.
@@ -107,15 +100,15 @@ class VoiceControlSettingsFragment : BaseFragment() {
     /**
      * The ONE place an enrollment outcome may mutate the durable stop.
      *
-     * Both the fencing decision and the mutation are made under [stopEffectLock], so a competing
-     * outcome cannot slip between "is this still authoritative?" and "do it". Without that pairing
-     * the check would be true, another account's action could be issued, and the mutation would then
-     * apply to state the decision no longer described - the same defect as an unfenced branch, just
-     * narrower.
+     * Runs through [EnrollmentController.applyForOutcome], NOT a fragment-owned lock (reviewer
+     * 60647af3, a65eef2f). A caller-side lock cannot make check-then-act indivisible against the
+     * fence's own mutations: `issue`/`supersede` do not acquire it, so an owner or action change could
+     * land between "is this still authoritative?" and "do it". The decision and the effect now run
+     * inside the fence's critical section, the same one its mutations take.
      *
-     * Unfenced outcomes do NOTHING: not even the conservative re-record. A stop written on behalf of
-     * a superseded or foreign action is indistinguishable from a real one, and would silently re-stop
-     * sharing after the user turned it on.
+     * A refused outcome runs NOTHING - not even the conservative re-record. A stop written on behalf
+     * of a superseded or foreign action is indistinguishable from a real one, and would silently
+     * re-stop sharing after the user turned it on.
      */
     private fun applyStopEffect(
         checked: Boolean,
@@ -124,17 +117,16 @@ class VoiceControlSettingsFragment : BaseFragment() {
         intent: LocalWithdrawalIntentStore,
         onReleased: () -> Unit,
     ) {
-        synchronized(stopEffectLock) {
-            if (!controller.stillApplies(outcome)) return
+        controller.applyForOutcome(outcome) {
             when {
-                // A fresh explicit opt-in, applied, releases the local stop. Only an APPLIED enrollment
-                // releases: a failed one is not consent to resume collection.
+                // A fresh explicit opt-in, applied, releases the local stop. Only an APPLIED
+                // enrollment releases: a failed one is not consent to resume collection.
                 checked && outcome is EnrollmentOutcome.Applied -> {
                     intent.clearOnUserEnrollment()
                     onReleased()
                 }
 
-                // Withdrawal applied: the stop is kept (a stale enrolled projection must not resume
+                // Withdrawal applied: the stop is KEPT (a stale enrolled projection must not resume
                 // collection), so this restates the request rather than clearing anything.
                 !checked && outcome is EnrollmentOutcome.Applied -> intent.onServerAgrees()
 

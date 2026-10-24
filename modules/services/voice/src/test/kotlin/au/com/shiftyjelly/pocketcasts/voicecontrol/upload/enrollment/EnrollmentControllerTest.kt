@@ -159,6 +159,76 @@ class EnrollmentControllerTest {
     }
 
     @Test
+    fun `an action issued in the gap between the check and the effect cannot be overtaken`() = runTest {
+        // THE EXACT GAP the reviewer asked to see controlled. stillApplies followed by an effect in
+        // the caller is two steps, and issue()/supersede()/account changes take no caller-side lock, so
+        // the world can move between them. The effect must run inside the fence's own critical section,
+        // so a competing action cannot slip through that gap.
+        //
+        // The competing change is issued from INSIDE the effect body, which is the tightest possible
+        // placement: if the effect's critical section were not exclusive with issue(), this is where it
+        // would be observed.
+        val subject = EnrollmentController(
+            enrollOperation = { VoiceSharingMutationResult.Failure },
+            withdrawOperation = { VoiceSharingMutationResult.Failure },
+            deleteOperation = { null },
+            clearLocalPending = {},
+            ownerSession = { session },
+        )
+        val outcome = subject.enroll(acceptedDisclosureVersion = "v1")
+
+        // PROVOKE THE GAP FROM INSIDE THE EFFECT. A competing action is issued on another thread
+        // while the effect is running, and the effect WAITS for it to finish before returning. If the
+        // effect and the fence's mutations shared a critical section, that external issue cannot
+        // complete until the effect returns, so it must still be running when the effect exits. If the
+        // effect ran outside the lock - the two-step form this replaced - the competing issue finishes
+        // immediately and the defect is visible.
+        val competingFinished = java.util.concurrent.atomic.AtomicBoolean(false)
+        val startCompeting = java.util.concurrent.CountDownLatch(1)
+        val competing = Thread {
+            startCompeting.await()
+            kotlinx.coroutines.runBlocking { subject.withdraw() }
+            competingFinished.set(true)
+        }
+        competing.isDaemon = true
+        competing.start()
+
+        var observedCompetingFinishedDuringEffect = false
+        subject.applyForOutcome(outcome) {
+            startCompeting.countDown()
+            // Give the competing issuer every chance to run; a shared critical section keeps it
+            // blocked here, so this wait simply expires.
+            val deadline = System.currentTimeMillis() + 400
+            while (System.currentTimeMillis() < deadline) {
+                if (competingFinished.get()) {
+                    observedCompetingFinishedDuringEffect = true
+                    break
+                }
+                Thread.sleep(5)
+            }
+        }
+        competing.join(2_000)
+
+        assertFalse(
+            "a competing mutation completed WHILE the effect was still running, so the fence decision " +
+                "and the effect are not in the same critical section - that is the check-then-act gap " +
+                "this control exists to close",
+            observedCompetingFinishedDuringEffect,
+        )
+
+        // A SUPERSEDED outcome runs nothing at all, which is what protects the durable stop.
+        val first = subject.withdraw()
+        subject.withdraw() // supersedes `first`
+        val refused = mutableListOf<String>()
+        val refusedResult = subject.applyForOutcome(first) { refused += "ran" }
+        assertNull(
+            "an outcome superseded before its effect was applied must run NOTHING",
+            refusedResult,
+        )
+        assertTrue("no effect may have run for a superseded outcome, got: $refused", refused.isEmpty())
+    }
+
+    @Test
     fun `a late enrollment success cannot restore sharing-on after the user turned it off`() = runTest {
         // The exact user-visible defect: tap on, tap off, the slow ON finally returns. Without
         // fencing the controller applies Applied and the screen says sharing is on again.

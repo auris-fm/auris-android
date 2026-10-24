@@ -111,6 +111,37 @@ class MutationFence {
         Attempt(generation, boundSession ?: return null)
     }
 
+    /**
+     * Runs [effect] only if [attempt] is still authoritative, with the decision and the effect
+     * performed under THIS fence's lock (reviewer 60647af3, a65eef2f).
+     *
+     * Why this lives here and not in the caller: a caller-side lock cannot make check-then-act
+     * indivisible against THIS object's own mutations. [issue] and [supersede] do not acquire a
+     * caller's lock, so an owner/action change could land in the gap between "is it current?" and
+     * "do it" - the check passes, another account's action is issued, and the effect then applies to
+     * state the decision no longer described. Serializing only the effect leaves that window open; the
+     * decision and the effect have to sit inside the same critical section as the mutations they are
+     * racing.
+     *
+     * Returns true if the effect ran. A refused outcome runs NOTHING, which is what makes this safe
+     * for a durable stop: an effect applied for a superseded or foreign action is indistinguishable
+     * from a real one.
+     */
+    fun <T> applyIfCurrent(attempt: Attempt, liveSession: () -> Long, effect: () -> T): T? = synchronized(this) {
+        // Inlined rather than delegating to isCurrent: isCurrent is itself synchronized on `this`,
+        // and re-entering it here would be correct but obscure the fact that one lock covers both
+        // the decision and the effect. The condition is kept textually identical to isCurrent.
+        val live = liveSession()
+        val current = if (attempt.ownerSession != live) {
+            generation += 1
+            boundSession = live
+            false
+        } else {
+            attempt.generation == generation && boundSession == live
+        }
+        if (!current) null else effect()
+    }
+
     /** Runs SERVER work one at a time; the caller decides what to do with a superseded result. */
     suspend fun <T> serialize(block: suspend () -> T): T = mutex.withLock { block() }
 

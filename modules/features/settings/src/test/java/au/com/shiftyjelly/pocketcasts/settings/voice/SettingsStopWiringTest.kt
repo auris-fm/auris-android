@@ -1,6 +1,7 @@
 package au.com.shiftyjelly.pocketcasts.settings.voice
 
 import java.io.File
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -67,8 +68,9 @@ class SettingsStopWiringTest {
         // And the helper itself must refuse a superseded outcome, so the guarantee does not depend
         // on the caller remembering to pre-filter.
         assertTrue(
-            "the fenced helper must treat a Superseded outcome as refused on its own",
-            source.contains("if (!controller.stillApplies(outcome)) return"),
+            "the fenced helper must treat a Superseded outcome as refused on its own, which " +
+                "applyForOutcome does by returning null for a Superseded outcome",
+            source.contains("controller.applyForOutcome(outcome)"),
         )
         // EVERY outcome-driven side effect is fenced, not just the release (reviewer a65eef2f).
         // The withdrawal branches previously mutated the global stop with no check at all.
@@ -76,15 +78,25 @@ class SettingsStopWiringTest {
             "the stop/clear effects must pass through one fenced entry point",
             source.contains("applyStopEffect("),
         )
+        // The decision and the effect must run inside the AUTHORITY's critical section, not a
+        // caller-side lock: issue/supersede do not acquire a UI lock, so a fragment lock cannot close
+        // the gap between the check and the effect (reviewer 60647af3).
         assertTrue(
-            "that entry point must perform the stillApplies check",
-            source.contains("if (!controller.stillApplies(outcome)) return"),
+            "the effect must be applied through the controller's fenced entry point",
+            source.contains("controller.applyForOutcome(outcome)"),
+        )
+        assertFalse(
+            "a caller-side lock must not be presented as the serialization boundary; the authority owns it",
+            source.contains("synchronized(stopEffectLock)"),
         )
         // The fence and the mutation must be indivisible: checking then mutating unlocked leaves
         // the same window one level down.
+        // The decision and the effect run inside the AUTHORITY's critical section, not a lock owned
+        // by this screen: issue/supersede never acquire a UI lock, so a fragment-local lock cannot
+        // close the gap between the check and the effect (reviewer 60647af3).
         assertTrue(
-            "the fence check and the mutation must run under the same lock",
-            source.contains("synchronized(stopEffectLock)"),
+            "the effect must be applied through the controller's fenced entry point",
+            source.contains("controller.applyForOutcome(outcome)"),
         )
         // The fragment must not mutate the store directly any more: a direct call is an unfenced
         // branch by definition, and it is exactly how the withdrawal paths escaped the fence.

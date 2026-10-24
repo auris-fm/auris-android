@@ -10,6 +10,15 @@ import kotlinx.coroutines.Job
  * not just readable in the service's source text (reviewer 9294defb).
  */
 internal object EngineQuiescence {
+    /**
+     * The cause of an abnormal finish, or null for a clean one.
+     *
+     * `Job.join()` returns normally even when the job FAILED (verified by a one-off probe: 1.11.0), so completion alone is not proof of a healthy finish. The caller supplies the cause
+     * because `getCompletionExceptionOrNull` is not public API in this coroutines version; a
+     * cancelled job is not abnormal, since the teardown itself cancels these jobs.
+     */
+    private fun abnormalCause(job: Job, completionCause: (Job) -> Throwable?): Throwable? = if (!job.isCompleted) null else completionCause(job)
+
     /** Bounded re-sampling rounds; exhaustion is a failure, never a licence to release. */
     const val MAX_ROUNDS = 8
 
@@ -22,6 +31,14 @@ internal object EngineQuiescence {
 
         /** Waiting for owned work threw: it has not been proven finished, so release nothing. */
         data class JoinFailed(val error: Throwable) : Verdict
+
+        /**
+         * A job finished ABNORMALLY. `Job.join()` returns normally even when the job threw, so
+         * completion alone is not proof of a healthy finish (verified by a one-off probe: coroutines 1.11.0).
+         * The caller supplies the cause, because Job exposes no public failure-cause accessor in this
+         * coroutines version. Release nothing.
+         */
+        data class AbnormallyFinished(val error: Throwable) : Verdict
 
         /** Work kept appearing past the round bound: release nothing. */
         data class Residual(val remaining: Int) : Verdict
@@ -39,6 +56,7 @@ internal object EngineQuiescence {
         unfinished: () -> List<Job>,
         join: suspend (Job) -> Unit,
         maxRounds: Int = MAX_ROUNDS,
+        completionCause: (Job) -> Throwable? = { null },
     ): Verdict {
         val stopResult = runCatching { stop() }
         stopResult.exceptionOrNull()?.let { return Verdict.StopFailed(it) }
@@ -58,7 +76,13 @@ internal object EngineQuiescence {
             }
             // Quiescence is "nothing UNFINISHED remains", not "the list is empty": the engine keeps
             // completed jobs listed until their completion callback prunes them.
-            if (unfinished().none { !it.isCompleted }) return Verdict.Settled
+            if (unfinished().none { !it.isCompleted }) {
+                // COMPLETION IS NOT SUCCESS: a failed job joins cleanly. Inspect the cause before
+                // calling the engine settled.
+                val abnormal = unfinished()
+                    .firstNotNullOfOrNull { job -> abnormalCause(job, completionCause) }
+                return if (abnormal == null) Verdict.Settled else Verdict.AbnormallyFinished(abnormal)
+            }
             round += 1
         }
         // Rounds exhausted and work is STILL unfinished: this is the residual verdict, and it is

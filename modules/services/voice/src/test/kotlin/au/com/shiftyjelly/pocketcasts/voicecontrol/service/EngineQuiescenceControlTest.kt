@@ -120,6 +120,36 @@ class EngineQuiescenceControlTest {
     }
 
     @Test
+    fun `a job that finished abnormally fails closed even though join returned`() = runBlocking {
+        // Reviewer 28b32255: awaiting a Job reports nothing about success, so a finished-but-failed
+        // engine job must not be mistaken for a settled engine.
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        var released = false
+        try {
+            // SupervisorJob keeps the failure from cancelling the scope, and the handler keeps it
+            // from escaping as an UNCAUGHT exception (which poisons later tests in this class).
+            val failed = CompletableDeferred<Unit>()
+            val job = scope.launch(Dispatchers.IO) {
+                runCatching { throw IllegalStateException("engine died") }
+                    .onFailure { failed.complete(Unit) }
+            }
+            failed.await()
+            job.join()
+            val verdict = EngineQuiescence.settle(
+                stop = {},
+                unfinished = { listOf(job) },
+                join = { it.join() },
+                completionCause = { IllegalStateException("engine died") },
+            )
+            if (verdict == Verdict.Settled) released = true
+            assertTrue("completion is not success, got $verdict", verdict is Verdict.AbnormallyFinished)
+            assertTrue("no release may happen after an abnormal finish", !released)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `a residual job that never finishes fails closed`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         var released = false

@@ -145,6 +145,9 @@ class VoiceControlService : Service() {
     companion object {
         // Bounded re-sampling rounds for engine work; exhaustion refuses to release (reviewer 1092c632).
         private const val MAX_ENGINE_JOIN_ROUNDS = 8
+
+        /** Placeholder cause: an engine job ended cancelled, which this build cannot tell apart from a failure. */
+        private val ABNORMAL_ENGINE_FINISH: Throwable = IllegalStateException("engine job finished cancelled")
         private const val COMMAND_DEBOUNCE_MS = 2000L
         internal const val STOP_ACTION = "au.com.shiftyjelly.pocketcasts.voicecontrol.action.STOP"
 
@@ -847,6 +850,13 @@ class VoiceControlService : Service() {
                     stop = { voiceAsrEngine.get().stop() },
                     unfinished = { voiceAsrEngine.get().unfinishedProcessingJobs },
                     join = { job -> job.join() },
+                    // HONEST LIMIT: Job exposes no public failure-cause accessor in this coroutines
+                    // version (getCompletionExceptionOrNull/getCancellationException are internal),
+                    // so the service cannot distinguish a FAILED engine job from a cleanly cancelled
+                    // one. The verdict therefore stays conservative: cancellation is treated as an
+                    // abnormal finish and the teardown reports a held failure rather than claiming a
+                    // clean release it cannot prove (reviewer 28b32255).
+                    completionCause = { job -> if (job.isCancelled) ABNORMAL_ENGINE_FINISH else null },
                 )
                 if (verdict != EngineQuiescence.Verdict.Settled) {
                     // REPORT THE OUTCOME TRUTHFULLY (reviewer 6ce4ad78): returning normally made an

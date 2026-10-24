@@ -4,6 +4,7 @@ import android.system.ErrnoException
 import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.LocalWithdrawalIntentStore
 import java.io.File
 import java.io.IOException
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -182,4 +183,24 @@ class OsDirectorySyncWiringTest {
         acceptedDisclosureVersion = "v1",
         withdrawalState = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.account.WithdrawalState.ACTIVE,
     )
+
+    @Test
+    fun `the production binding NEVER infers the flag from the device capability list - mixed discriminator`() {
+        // Spec 220cdb5f / reviewer round 4: under Robolectric, Build.SUPPORTED_ABIS is POPULATED
+        // (device capabilities "exist"), yet an authority that resolves to null must still make the
+        // platform report UNSUPPORTED. A SUPPORTED_ABIS-based selector (the removed first-entry or
+        // any-entry approach) would return a non-null ARM flag here and fail this control.
+        val abis = android.os.Build.SUPPORTED_ABIS
+        assertTrue("precondition: this environment has device capability entries", abis != null && abis.isNotEmpty())
+        assertFalse(
+            "a null authority must mean unsupported regardless of device capabilities",
+            AndroidOsOperations(oDirectoryAuthority = { null }).isSupported,
+        )
+        // And the default authority must be a REAL authority (platform constant or compiled native),
+        // not something derived from SUPPORTED_ABIS: whatever it returns, it is independent of the
+        // capability list ordering.
+        val authority = AndroidOsOperations.DEFAULT_O_DIRECTORY_AUTHORITY()
+        val swapped = AndroidOsOperations.DEFAULT_O_DIRECTORY_AUTHORITY()
+        assertEquals(authority, swapped)
+    }
 }

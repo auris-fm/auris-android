@@ -5,6 +5,7 @@ import java.io.File
 import java.io.FileDescriptor
 import java.io.IOException
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -65,25 +66,20 @@ class OsDirectorySyncTest {
     private fun newDir(name: String): File = File(System.getProperty("java.io.tmpdir"), "os-sync-" + name + "-" + System.nanoTime()).apply { mkdirs() }
 
     @Test
-    fun `the PREFERRED ABI selects the flags by EXACT name - mixed lists take the first entry, unknown names are unsupported`() {
-        // Round 3 (reviewer 87e2e450): SUPPORTED_ABIS is a device capability list, so an ARM entry
-        // on an x86-prefixed device must not choose the syscall flags - only the FIRST entry (the
-        // preferred ABI) decides. Values still swap per bionic headers: asm-arm/asm-arm64
-        // O_DIRECTORY = 040000 = 0x4000; asm-generic (x86, x86_64) = 0200000 = 0x10000. Matching is
-        // EXACT name, not prefix - "arm-future" must not inherit an unverified value.
-        assertEquals(0x4000, AndroidOsOperations.directoryOpenFlags("arm64-v8a"))
-        assertEquals(0x4000, AndroidOsOperations.directoryOpenFlags("armeabi-v7a"))
-        assertEquals(0x10000, AndroidOsOperations.directoryOpenFlags("x86_64"))
-        assertEquals(0x10000, AndroidOsOperations.directoryOpenFlags("x86"))
-        // Mixed-family lists: the PREFERRED entry decides, whichever family it is.
-        assertEquals(0x10000, AndroidOsOperations.directoryOpenFlags("x86_64")) // x86-prefixed device that could run arm
-        assertEquals(0x4000, AndroidOsOperations.directoryOpenFlags("arm64-v8a")) // arm device that could run x86
-        // Unknown / future / absent names are unsupported, never guessed.
-        assertNull(AndroidOsOperations.directoryOpenFlags("arm-future"))
-        assertNull(AndroidOsOperations.directoryOpenFlags("riscv64"))
-        assertNull(AndroidOsOperations.directoryOpenFlags("mips64"))
-        assertNull(AndroidOsOperations.directoryOpenFlags(null))
-        assertTrue(AndroidOsOperations.O_DIRECTORY_ARM != AndroidOsOperations.O_DIRECTORY_X86)
+    fun `the default flag authority resolves the PLATFORM constant or the COMPILED native one - never a device capability list`() {
+        // Round 4 (reviewer 87e2e450; spec 220cdb5f): Build.SUPPORTED_ABIS describes what a device
+        // CAN run, not the flag this process's syscalls expect, so NO code path may consult it.
+        // On this plain JVM: the android.jar stub has no OsConstants.O_DIRECTORY field and no
+        // native helper .so exists, so the default authority MUST be null (=> unsupported), even
+        // though any SUPPORTED_ABIS-based selector would have "known" an ARM value here.
+        // Robolectric-side mixed discriminator lives in OsDirectorySyncWiringTest, where
+        // Build.SUPPORTED_ABIS is populated.
+        assertNull(
+            "a non-null default on the JVM means a device-capability or guessed fallback exists",
+            AndroidOsOperations.DEFAULT_O_DIRECTORY_AUTHORITY(),
+        )
+        assertFalse("no authority => unsupported", AndroidOsOperations(oDirectoryAuthority = { null }).isSupported)
+        assertTrue("a resolvable authority => supported", AndroidOsOperations(oDirectoryAuthority = { 0x4000 }).isSupported)
     }
 
     @Test

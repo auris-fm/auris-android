@@ -27,15 +27,20 @@ interface OsOperations {
 }
 
 /** Production binding to the real `android.system.Os`. */
-class AndroidOsOperations : OsOperations {
-    // Supported ONLY when the PREFERRED ABI's O_DIRECTORY value is known. Build.SUPPORTED_ABIS is a
-    // DEVICE capability list (ordered, preferred first - Build.java), not one-ABI-per-process;
-    // the process's syscall ABI is its FIRST entry. An unknown ABI must fail, never open with a
-    // guessed flag (a wrong flag is O_DIRECT, not O_DIRECTORY, and the open fails or - worse - is
-    // simply not a directory handle).
-    override val isSupported: Boolean = directoryOpenFlags(android.os.Build.SUPPORTED_ABIS.firstOrNull()) != null
+class AndroidOsOperations(
+    // The O_DIRECTORY AUTHORITY (reviewer 87e2e450, round 4; spec 220cdb5f): the platform's OWN
+    // OsConstants.O_DIRECTORY when the running android exposes it, else the value COMPILED INTO
+    // the native helper library for the running ABI (DirectoryFlagJni.cpp reads <fcntl.h> from the
+    // NDK, so it is arch-correct by construction). There is deliberately NO device-capability
+    // inference: Build.SUPPORTED_ABIS describes what a device CAN run, not the flag this process's
+    // syscalls expect, and a wrong guess is O_DIRECT - the open simply fails or is not a directory
+    // handle. Null (neither authority resolvable) makes the platform report UNSUPPORTED and fail
+    // loudly; there is no unsupported-runtime success fallback.
+    private val oDirectoryAuthority: () -> Int? = DEFAULT_O_DIRECTORY_AUTHORITY,
+) : OsOperations {
+    override val isSupported: Boolean = oDirectoryAuthority() != null
 
-    override fun openDirectory(path: String): FileDescriptor = Os.open(path, directoryOpenFlags(android.os.Build.SUPPORTED_ABIS.firstOrNull())!! or OsConstants.O_RDONLY, 0)
+    override fun openDirectory(path: String): FileDescriptor = Os.open(path, oDirectoryAuthority()!! or OsConstants.O_RDONLY, 0)
 
     override fun fsync(fd: FileDescriptor) {
         Os.fsync(fd)
@@ -46,31 +51,15 @@ class AndroidOsOperations : OsOperations {
     }
 
     internal companion object {
-        // O_DIRECTORY is absent from this SDK's android.jar stub of OsConstants AND its value is
-        // architecture-dependent in bionic's kernel uapi headers, so the value is selected per
-        // RUNNING ABI (reviewer 87e2e450, second round):
-        //   - asm-arm / asm-arm64 fcntl.h: O_DIRECTORY = 040000 octal = 0x4000 (O_DIRECT = 0x10000)
-        //   - asm-generic fcntl.h (x86, x86_64): O_DIRECTORY = 0200000 octal = 0x10000 (O_DIRECT = 0x4000)
-        // A universal literal is wrong on one family whichever value it picks - the first pin
-        // (0x10000) broke ARM, a flat 0x4000 breaks x86_64, which voice/build.gradle.kts also
-        // builds. An UNKNOWN ABI returns null, which makes the platform report unsupported and
-        // fail loudly instead of opening with a guessed flag. Internal so the JVM controls can pin
-        // BOTH architectures; the static Os.open call itself cannot be intercepted on the JVM.
-        internal const val O_DIRECTORY_ARM = 0x4000
-        internal const val O_DIRECTORY_X86 = 0x10000
-
-        // EXACT known ABI names only, and the PREFERRED (first) entry decides: SUPPORTED_ABIS lists
-        // what a device CAN run, so an ARM entry on an x86-prefixed device must not choose the
-        // syscall flags (reviewer 87e2e450, round 3), and prefix matching would accept names like
-        // "arm-future" that no pinned value was verified against. Unknown -> null -> unsupported.
-        private val ABI_FLAGS: Map<String, Int> = mapOf(
-            "arm64-v8a" to O_DIRECTORY_ARM,
-            "armeabi-v7a" to O_DIRECTORY_ARM,
-            "x86_64" to O_DIRECTORY_X86,
-            "x86" to O_DIRECTORY_X86,
-        )
-
-        internal fun directoryOpenFlags(preferredAbi: String?): Int? = preferredAbi?.let { ABI_FLAGS[it] }
+        // Order matters: the platform's own constant outranks the compiled one because it is the
+        // same surface Os.open documents. On real devices OsConstants.O_DIRECTORY exists since the
+        // API where directory fsync is documented; this SDK's android.jar compile stub omits it,
+        // so reflection is used and the missing-field case (plain JVM tests, stripped builds) falls
+        // through to the compiled native authority, then to null = unsupported.
+        internal val DEFAULT_O_DIRECTORY_AUTHORITY: () -> Int? = {
+            runCatching { OsConstants::class.java.getField("O_DIRECTORY").getInt(null) }.getOrNull()
+                ?: DirectoryFlagJni.oDirectoryOrNull()
+        }
     }
 }
 

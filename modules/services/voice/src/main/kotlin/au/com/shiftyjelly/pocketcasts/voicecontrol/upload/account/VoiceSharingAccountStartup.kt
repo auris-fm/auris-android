@@ -85,6 +85,12 @@ class VoiceSharingAccountStartup @Inject constructor(
         // Results are fenced to the owner session they were issued under, so an account switch
         // mid-flight cannot apply one account's outcome to another's screen.
         ownerSession = { ownership.authoritySnapshot().session },
+        // The currency decision and its durable effect run INSIDE the owner lock, so an account switch
+        // cannot land between "is this still current?" and "apply it" (reviewer e313b32c). A snapshot
+        // taken outside would be stale the moment the owner changed.
+        underOwnerTransaction = { block ->
+            ownership.transaction { block() }
+        },
     )
 
     /** The live session token, or null when no session is current (nothing may be mutated). */

@@ -127,7 +127,31 @@ class MutationFence {
      * for a durable stop: an effect applied for a superseded or foreign action is indistinguishable
      * from a real one.
      */
-    fun <T> applyIfCurrent(attempt: Attempt, liveSession: () -> Long, effect: () -> T): T? = synchronized(this) {
+    fun <T> applyIfCurrent(
+        attempt: Attempt,
+        liveSession: () -> Long,
+        /**
+         * Optional OWNER-TRANSACTION scope. When supplied, the session reading, the currency decision
+         * and the effect all run INSIDE the owner lock, so an account transition cannot land between
+         * them (reviewer e313b32c).
+         *
+         * Without it, `liveSession()` takes its own snapshot under a different authority's lock: the
+         * session could change immediately after the snapshot and the effect would then apply to an
+         * account the decision never described. Holding the fence lock alone does not stop that,
+         * because the OWNER does not take the fence lock.
+         */
+        underOwnerTransaction: ((() -> T?) -> T?)? = null,
+        effect: () -> T,
+    ): T? {
+        if (underOwnerTransaction != null) {
+            // The owner transaction is the OUTERMOST scope and the fence lock nests inside it, so the
+            // two are never acquired in opposite orders.
+            return underOwnerTransaction { decideLocked(attempt, liveSession, effect) }
+        }
+        return decideLocked(attempt, liveSession, effect)
+    }
+
+    private fun <T> decideLocked(attempt: Attempt, liveSession: () -> Long, effect: () -> T): T? = synchronized(this) {
         // Inlined rather than delegating to isCurrent: isCurrent is itself synchronized on `this`,
         // and re-entering it here would be correct but obscure the fact that one lock covers both
         // the decision and the effect. The condition is kept textually identical to isCurrent.

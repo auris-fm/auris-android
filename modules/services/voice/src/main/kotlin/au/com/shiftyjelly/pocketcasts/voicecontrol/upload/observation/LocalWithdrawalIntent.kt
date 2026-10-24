@@ -106,9 +106,13 @@ class LocalWithdrawalIntentStore(private val persistence: WithdrawalIntentPersis
     /** An explicit new opt-in is a fresh user action and releases the local stop. */
     fun clearOnUserEnrollment(): Boolean {
         val written = persistence.write(false)
-        // Only a DURABLE clear releases the latch. A failed clear leaves the session stopped, which is
-        // the safe direction and matches what the on-disk marker now says.
-        if (written) stopCouldNotPersist = false
+        // SET THE LATCH ON EVERY FAILED CLEAR, including the case that used to slip through (reviewer
+        // e313b32c): the latch was false, write(false) installed CLEARED, and only the DIRECTORY SYNC
+        // failed. Then read() sees CLEARED and permits, the latch is still false, and nothing is
+        // stopped - a durable-release claim resting on a barrier that did not complete. A failed clear
+        // must leave the session stopped in MEMORY as well as on disk, because the two can disagree
+        // exactly in that window.
+        stopCouldNotPersist = !written
         return written
     }
 }

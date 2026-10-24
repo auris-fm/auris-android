@@ -87,6 +87,13 @@ class EnrollmentController(
     private val clearLocalPending: () -> Unit,
     /** Owner session each operation is issued under; a change drops in-flight results. */
     private val ownerSession: () -> Long,
+    /**
+     * Runs a block under the OWNER transaction, so an account/session transition cannot interleave
+     * with a currency decision and its effect (reviewer e313b32c). Absent in tests that have no owner
+     * authority; the fence lock still applies, but only the owner transaction makes the session
+     * reading atomic WITH the transition that changes it.
+     */
+    private val underOwnerTransaction: ((() -> Any?) -> Any?)? = null,
     private val fence: MutationFence = MutationFence(),
 ) {
     private val mutableState = MutableStateFlow<EnrollmentState>(EnrollmentState.Idle)
@@ -157,7 +164,17 @@ class EnrollmentController(
     fun <T> applyForOutcome(outcome: EnrollmentOutcome, effect: () -> T): T? {
         if (outcome is EnrollmentOutcome.Superseded) return null
         val attempt = outcome.attempt ?: return null
-        return fence.applyIfCurrent(attempt, ownerSession, effect)
+
+        // The controller stores the owner scope non-generically; here it is narrowed to this call's
+        // effect type. The scope only wraps the call, never inspects the value, so the cast is sound.
+        @Suppress("UNCHECKED_CAST")
+        val scoped = underOwnerTransaction as ((() -> T?) -> T?)?
+        return fence.applyIfCurrent(
+            attempt = attempt,
+            liveSession = ownerSession,
+            underOwnerTransaction = scoped,
+            effect = effect,
+        )
     }
 
     /**

@@ -87,6 +87,34 @@ class LocalWithdrawalIntentTest {
     }
 
     @Test
+    fun `a clear that installs CLEARED but fails its barrier still stops collection`() {
+        // The exact path reviewer e313b32c named, and the one my previous fix missed. The latch starts
+        // FALSE, the clear reaches the disk and installs CLEARED, and then the DURABILITY BARRIER
+        // fails. read() therefore sees CLEARED and permits, while a latch that is only updated on
+        // success never gets set - so nothing is stopped and a durable release is claimed on a barrier
+        // that did not complete.
+        val persistence = PartialClearPersistence()
+        val intent = LocalWithdrawalIntentStore(persistence)
+
+        assertTrue(
+            "precondition: with the latch unset and a permitted marker, collection is permitted",
+            intent.collectionPermittedByLocalIntent(projection()),
+        )
+
+        assertFalse(
+            "a clear whose barrier failed must report failure",
+            intent.clearOnUserEnrollment(),
+        )
+        // The marker on disk really does say CLEARED - this is what makes the case non-obvious.
+        assertFalse("fixture sanity: the marker itself now permits", persistence.read())
+        assertFalse(
+            "a clear that installed CLEARED but failed its barrier must STILL refuse collection: " +
+                "the durability claim rests on the barrier, so its failure cannot leave us permitting",
+            intent.collectionPermittedByLocalIntent(projection()),
+        )
+    }
+
+    @Test
     fun `a failed CLEAR does not release the latch`() {
         val persistence = FailingIntentPersistence()
         val intent = LocalWithdrawalIntentStore(persistence)
@@ -173,5 +201,21 @@ class FailingIntentPersistence(var failWrites: Boolean = true) : WithdrawalInten
         if (failWrites) return false
         stored = requested
         return true
+    }
+}
+
+/**
+ * Models the precise case: the marker write lands (read() returns CLEARED) but the durability barrier
+ * after it fails, so write() reports false while the disk looks permissive.
+ */
+class PartialClearPersistence : WithdrawalIntentPersistence {
+    private var stored: Boolean = false
+
+    override fun read(): Boolean = stored
+
+    override fun write(requested: Boolean): Boolean {
+        // The bytes land either way; only a CLEAR fails (at its directory barrier).
+        stored = requested
+        return requested
     }
 }

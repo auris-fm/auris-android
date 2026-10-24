@@ -229,6 +229,65 @@ class EnrollmentControllerTest {
     }
 
     @Test
+    fun `an account transition cannot interleave with the currency decision and its effect`() = runTest {
+        // The second half of reviewer e313b32c: ownerSession() snapshots the authority under a
+        // DIFFERENT lock than the fence holds, so a session change can land after the snapshot but
+        // before the effect - the effect then applies to an account the decision never described.
+        // Holding the fence lock does not prevent this because the OWNER does not take that lock.
+        //
+        // The fix is the owner transaction: the session read, the decision and the effect all run
+        // inside the owner lock, so a competing transition cannot complete until the effect returns.
+        // As in the gap control above, the competing transition is issued from INSIDE the effect,
+        // which is the tightest possible placement.
+        val ownerLock = Any()
+        val session = java.util.concurrent.atomic.AtomicLong(7L)
+        val subject = EnrollmentController(
+            enrollOperation = { VoiceSharingMutationResult.Failure },
+            withdrawOperation = { VoiceSharingMutationResult.Failure },
+            deleteOperation = { null },
+            clearLocalPending = {},
+            ownerSession = { session.get() },
+            underOwnerTransaction = { block ->
+                synchronized(ownerLock) { block() }
+            },
+        )
+        val outcome = subject.enroll(acceptedDisclosureVersion = "v1")
+
+        val transitionFinished = java.util.concurrent.atomic.AtomicBoolean(false)
+        val startTransition = java.util.concurrent.CountDownLatch(1)
+        val competing = Thread {
+            startTransition.await()
+            // An account switch: takes the OWNER lock. If the effect runs inside the owner
+            // transaction, this cannot complete until the effect has returned.
+            synchronized(ownerLock) { session.set(99L) }
+            transitionFinished.set(true)
+        }
+        competing.isDaemon = true
+        competing.start()
+
+        var observedTransitionDuringEffect = false
+        subject.applyForOutcome(outcome) {
+            startTransition.countDown()
+            val deadline = System.currentTimeMillis() + 400
+            while (System.currentTimeMillis() < deadline) {
+                if (transitionFinished.get()) {
+                    observedTransitionDuringEffect = true
+                    break
+                }
+                Thread.sleep(5)
+            }
+        }
+        competing.join(2_000)
+
+        assertFalse(
+            "the owner transition completed WHILE the effect was still running, so the session read, " +
+                "the currency decision and the effect are not inside the owner transaction - the " +
+                "effect can land on an account the decision never described",
+            observedTransitionDuringEffect,
+        )
+    }
+
+    @Test
     fun `a late enrollment success cannot restore sharing-on after the user turned it off`() = runTest {
         // The exact user-visible defect: tap on, tap off, the slow ON finally returns. Without
         // fencing the controller applies Applied and the screen says sharing is on again.

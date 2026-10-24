@@ -40,26 +40,6 @@ class VoicePlaybackIntentExecutor @Inject constructor(
     suspend fun execute(
         intent: VoiceIntent,
         onOutcome: ((VoiceActionOutcome) -> Unit)? = null,
-    ): VoiceResponse {
-        // ONE action in flight per executor: the playback sink's reporter is a per-sink slot, so
-        // serializing sink entry keeps it unambiguous while the fact itself stays invocation-local
-        // in onOutcome.
-        return actionMutex.withLock {
-            val playback = playbackSink as? PlaybackManagerPlaybackSink
-            playback?.actionReporter = onOutcome
-            try {
-                executeLocked(intent, onOutcome)
-            } finally {
-                playback?.actionReporter = null
-            }
-        }
-    }
-
-    private val actionMutex = kotlinx.coroutines.sync.Mutex()
-
-    private suspend fun executeLocked(
-        intent: VoiceIntent,
-        onOutcome: ((VoiceActionOutcome) -> Unit)?,
     ): VoiceResponse = executeIntent(intent, onOutcome)
 
     private suspend fun executeIntent(

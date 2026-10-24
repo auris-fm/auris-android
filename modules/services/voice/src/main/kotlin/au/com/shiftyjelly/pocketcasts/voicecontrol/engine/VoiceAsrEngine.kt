@@ -117,8 +117,13 @@ class VoiceAsrEngine @Inject constructor(
      */
     data class InvocationToken(val id: Long, val captureId: java.util.UUID)
 
+    /** One dispatch's identity plus the fact recorded so far (null = nothing observed). */
+    internal class InvocationRecord(val token: InvocationToken) {
+        var outcome: ExecutionOutcome? = null
+    }
+
     /** Open invocations awaiting finalization; guarded by [invocationLock]. */
-    private val openInvocations = java.util.concurrent.ConcurrentHashMap<Long, InvocationToken>()
+    private val openInvocations = java.util.concurrent.ConcurrentHashMap<Long, InvocationRecord>()
 
     /** Serializes one-shot token consumption against settle/stop. */
     private val invocationLock = Any()
@@ -325,8 +330,12 @@ class VoiceAsrEngine @Inject constructor(
      * or from a restarted lifecycle — is refused rather than attributed to some other capture.
      */
     fun reportExecutionResult(token: InvocationToken, outcome: ExecutionOutcome): Boolean = synchronized(invocationLock) {
-        if (openInvocations.remove(token.id) != token) return false
-        finalizePublication(token, outcome)
+        // The FACT is recorded; the invocation stays OPEN. Publication happens once, at explicit
+        // settlement — a first fact no longer pre-empts a later observed failure, and the
+        // finalize boundary remains the single publication point (reviewer dab802ec).
+        val record = openInvocations[token.id] ?: return false
+        if (record.outcome != null) return false
+        record.outcome = outcome
         true
     }
 
@@ -337,8 +346,10 @@ class VoiceAsrEngine @Inject constructor(
      * reported, the honest schema unknown (dispatch alone is not a result; spec 3ed49695).
      */
     fun settleInvocation(token: InvocationToken) {
-        val open: Boolean = synchronized(invocationLock) { openInvocations.remove(token.id) == token }
-        if (open) finalizePublication(token, null)
+        val record = synchronized(invocationLock) { openInvocations.remove(token.id) }
+        // ONE publication per invocation: the recorded fact if a sink reported one, otherwise the
+        // explicit schema unknown. Never both, never neither.
+        record?.let { finalizePublication(it.token, it.outcome) }
     }
 
     private fun finalizePublication(token: InvocationToken, outcome: ExecutionOutcome?) {
@@ -352,12 +363,14 @@ class VoiceAsrEngine @Inject constructor(
      * an abandoned capture still publishes instead of leaking retained.
      */
     private fun clearInvocationOwnership() {
-        val abandoned: List<InvocationToken> = synchronized(invocationLock) {
+        val abandoned: List<InvocationRecord> = synchronized(invocationLock) {
             val open = openInvocations.values.toList()
             openInvocations.clear()
             open
         }
-        abandoned.forEach { finalizePublication(it, null) }
+        // An abandoned invocation publishes with whatever fact was recorded before the stop —
+        // never an invented unknown over a known fact (spec e62305a2), never silence over a loss.
+        abandoned.forEach { finalizePublication(it.token, it.outcome) }
     }
 
     /**
@@ -371,7 +384,7 @@ class VoiceAsrEngine @Inject constructor(
         val capture = pendingExecutionContext
         pendingExecutionContext = null
         val token = capture?.let { InvocationToken(id = nextInvocationId.incrementAndGet(), captureId = it.captureId) }
-        if (token != null) synchronized(invocationLock) { openInvocations[token.id] = token }
+        if (token != null) synchronized(invocationLock) { openInvocations[token.id] = InvocationRecord(token) }
         handler(intent, token)
     }
 

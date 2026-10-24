@@ -494,6 +494,47 @@ class VoicePlaybackIntentExecutorTest {
         assertEquals(listOf(VoiceActionOutcome.Dispatched), bFacts)
     }
 
+    @Test
+    fun `a held cloud stream does not block a pause from entering`() {
+        // THE BARGE-IN CONTROL (reviewer dab802ec/spec 72e66366): the executor must NOT serialize
+        // unrelated voice work — a second turn, pause or stop cannot wait for a long-lived cloud
+        // stream. A held routeToCloud runs on its own thread; a Pause dispatched meanwhile must
+        // complete while the cloud turn is still held.
+        val sinks = FakeSinks()
+        val executor = sinks.executor()
+        val cloudHeld = java.util.concurrent.CountDownLatch(1)
+        val releaseCloud = java.util.concurrent.CountDownLatch(1)
+        sinks.cloudRoute.whileInFlight = {
+            cloudHeld.countDown()
+            releaseCloud.await(10, java.util.concurrent.TimeUnit.SECONDS)
+        }
+        val cloudThread = Thread {
+            kotlinx.coroutines.runBlocking { executor.execute(VoiceIntent.CloudRoute(request = "q", tier = VoiceIntent.CloudTier.Unknown, context = PlaybackContext())) }
+        }
+        cloudThread.start()
+        assertTrue(cloudHeld.await(10, java.util.concurrent.TimeUnit.SECONDS))
+
+        val pauseFacts = mutableListOf<VoiceActionOutcome>()
+        val pauseDone = java.util.concurrent.CountDownLatch(1)
+        var pauseCompleted = false
+        val pauseThread = Thread {
+            kotlinx.coroutines.runBlocking {
+                executor.execute(VoiceIntent.Playback.Pause) { pauseFacts += it }
+                pauseCompleted = true
+                pauseDone.countDown()
+            }
+        }
+        pauseThread.start()
+        val enteredWhileHeld = pauseDone.await(2, java.util.concurrent.TimeUnit.SECONDS)
+        releaseCloud.countDown()
+        cloudThread.join(10_000)
+        pauseThread.join(10_000)
+
+        assertTrue("pause must enter while the cloud stream is held", enteredWhileHeld)
+        assertTrue(pauseCompleted)
+        assertEquals(listOf(VoiceActionOutcome.Dispatched), pauseFacts)
+    }
+
     // The deprecated requestAudioFocus overload is what the sink itself calls (suppressing there is
     // the documented smaller change); the control mirrors the production call, so it suppresses too.
     @Suppress("DEPRECATION")

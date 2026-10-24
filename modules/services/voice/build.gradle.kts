@@ -93,3 +93,6 @@ tasks.configureEach {
             .withPathSensitivity(PathSensitivity.RELATIVE)
     }
 }
+
+// Task-scoped approved-pin wiring for the Worker parity tests (see voice-upload-parity.gradle.kts).
+apply(from = "voice-upload-parity.gradle.kts")

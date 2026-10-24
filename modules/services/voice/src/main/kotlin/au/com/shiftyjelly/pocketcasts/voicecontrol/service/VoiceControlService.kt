@@ -173,6 +173,10 @@ class VoiceControlService : Service() {
         // Handle models first: defer mode observation until readiness completes.
         // This avoids lazy init on first utterance — both whisper and the
         // LFM inference runtime are fully prepared before audio capture.
+        // ALL-EXIT OWNERSHIP CLEANUP (reviewer dab802ec): invokeOnCompletion runs even when the
+        // coroutine is cancelled BEFORE its body first runs (a launch finally does not), and the
+        // try/catch below covers a launch that fails before the Job exists. Settlement is one-shot
+        // in the engine, so every exit path converges on exactly one publication.
         serviceScope.launch(Dispatchers.IO) {
             ensureModelsReady()
             launch(Dispatchers.Main) {
@@ -680,7 +684,13 @@ class VoiceControlService : Service() {
         lastIntentType = intentType
         lastCommandTime = now
 
-        serviceScope.launch(Dispatchers.IO) {
+        // ALL-EXIT OWNERSHIP CLEANUP (reviewer dab802ec): invokeOnCompletion runs even when the
+        // coroutine is cancelled BEFORE its body first runs (a launch finally does not). The token
+        // is captured OUTSIDE the coroutine so the completion handler can settle without it.
+        // Settlement is one-shot in the engine, so every exit converges on one publication.
+        val engine = voiceAsrEngine.get()
+        val token = invocationToken
+        val job = serviceScope.launch(Dispatchers.IO) {
             // THE ACTION-RESULT CHANNEL (spec 03c96924 + reviewer 268d8cf0): the SINK reports what
             // it actually did, at its own decision point, through the executor's reportAction.
             // Presentation is rendered but NEVER read here — an earcon is a thing the user hears,
@@ -688,8 +698,6 @@ class VoiceControlService : Service() {
             // after the clear was really dispatched; duck() renders Silent on grant AND denial).
             // Results are addressed by the INVOCATION TOKEN captured before dispatch, so identical
             // overlapping intents stay two different dispatches bound to two different captures.
-            val engine = voiceAsrEngine.get()
-            val token = invocationToken
             // INVOCATION-LOCAL reporter (reviewer 3fb01865): the fact channel is a parameter of
             // THIS execute call, not a shared executor slot — overlapping dispatches cannot
             // overwrite each other, and one dispatch's cleanup cannot detach another's reporter.
@@ -698,33 +706,36 @@ class VoiceControlService : Service() {
                     executionOutcomeOf(fact)?.let { engine.reportExecutionResult(token, it) }
                 }
             }
-            try {
-                val response = try {
-                    voicePlaybackIntentExecutor.execute(intent, onOutcome)
-                } catch (t: kotlinx.coroutines.CancellationException) {
-                    // Cancellation is NOT "the user cancelled" and NOT "the action did not happen":
-                    // a scope teardown looks identical here, and work may already have run. The
-                    // settle boundary below leaves the outcome unobserved (provenance: unknown) —
-                    // a claim only someone who can attribute the cancellation may make.
-                    throw t
-                } catch (t: Throwable) {
-                    // The sink threw before it could report: the attempt failed, and this call
-                    // site is the only place that observed it.
-                    if (token != null) engine.reportExecutionResult(token, ExecutionOutcome.Failure)
-                    throw t
-                }
-                audioFeedbackRenderer.render(response)
-                gracePeriodSignal.onCommandRecognized(
-                    fromGeneration = intent.windowGenerationOf(),
-                    restoresAllowance = intent.restoresAllowance(),
-                )
-            } finally {
-                // THE BOUNDED FINALIZATION BOUNDARY: this dispatch is over. No result can arrive
-                // later through this token; settling finalizes publication with the observed
-                // result — or schema unknown when none was reported — exactly once (one-shot
-                // consumption refuses duplicates).
+            val response = try {
+                voicePlaybackIntentExecutor.execute(intent, onOutcome)
+            } catch (t: kotlinx.coroutines.CancellationException) {
+                // Cancellation is NOT "the user cancelled" and NOT "the action did not happen":
+                // a scope teardown looks identical here, and work may already have run. The
+                // settle boundary below leaves the outcome unobserved (provenance: unknown) —
+                // a claim only someone who can attribute the cancellation may make.
+                throw t
+            } catch (t: Throwable) {
+                // NO throw→failure inference (reviewer dab802ec): a generic throw after an
+                // unobserved effect cannot prove action_failed. If a sink reported a fact, that
+                // fact stands; otherwise settlement records the explicit schema unknown.
+                throw t
+            }
+            audioFeedbackRenderer.render(response)
+            gracePeriodSignal.onCommandRecognized(
+                fromGeneration = intent.windowGenerationOf(),
+                restoresAllowance = intent.restoresAllowance(),
+            )
+            // Normal-completion settlement for the body that ran (the launch-level handler below
+            // covers every other exit; settlement is one-shot either way).
+            if (token != null) engine.settleInvocation(token)
+        }
+        try {
+            job.invokeOnCompletion { _ ->
                 if (token != null) engine.settleInvocation(token)
             }
+        } catch (t: Throwable) {
+            // The launch itself failed before a Job existed: this call site is the only observer.
+            if (token != null) engine.settleInvocation(token)
         }
     }
 

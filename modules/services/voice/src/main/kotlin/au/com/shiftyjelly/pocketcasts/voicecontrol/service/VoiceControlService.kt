@@ -46,10 +46,12 @@ import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -111,7 +113,7 @@ class VoiceControlService : Service() {
     private var startInFlightJob: Job? = null
 
     /** The teardown currently running, so a stop can return a job that really completes. */
-    private var stopInFlightJob: Job? = null
+    private var stopInFlightJob: Deferred<TeardownResult>? = null
     private var lastIntentType: String? = null
     private var lastCommandTime: Long = 0L
     private val engineStart = EngineStartState()
@@ -799,7 +801,7 @@ class VoiceControlService : Service() {
      * the returned job is a truthful completion signal. `serviceScope` is cancelled first so nothing
      * can be restarted behind the join.
      */
-    private fun stopVoiceControl(): Job {
+    private fun stopVoiceControl(): Deferred<TeardownResult> {
         // Idempotent for BOTH cases: a running teardown is joined, and a COMPLETED teardown keeps its
         // identity, so a later stop cannot release resources a second time.
         stopInFlightJob?.let { return it }
@@ -830,7 +832,7 @@ class VoiceControlService : Service() {
         // The completion authority, dispatched OUTSIDE the cancelled scope. It joins the root (so
         // every owned child has really finished) and THEN releases the resources those children
         // were using. Its completion therefore means: users finished AND resources released.
-        return CoroutineScope(Dispatchers.IO).launch {
+        return CoroutineScope(Dispatchers.IO).async {
             withContext(NonCancellable) {
                 runCatching { rootJob?.join() }
                     .onFailure { Timber.w(it, "[VoicePipeline] teardown join failed") }
@@ -859,29 +861,57 @@ class VoiceControlService : Service() {
                     completionCause = { job -> if (job.isCancelled) ABNORMAL_ENGINE_FINISH else null },
                 )
                 if (verdict != EngineQuiescence.Verdict.Settled) {
-                    // REPORT THE OUTCOME TRUTHFULLY (reviewer 6ce4ad78): returning normally made an
-                    // unsafe, resources-held teardown indistinguishable from a clean one. The job
-                    // now FAILS, so completion means "released", not merely "returned".
+                    // REPORT THE OUTCOME TRUTHFULLY, WITHOUT THROWING (reviewers 6ce4ad78 + 3104ba44):
+                    // a resources-held teardown must not look like a clean one, but throwing from this
+                    // unrouted launch would be an UNCAUGHT exception and could take the process down.
+                    // The outcome is returned instead, and recorded for observers.
                     Timber.e("[VoicePipeline] engine not settled ($verdict); skipping resource release")
-                    teardownFailure = TeardownFailure(verdict)
-                    throw IllegalStateException("voice teardown did not release: $verdict")
+                    return@withContext TeardownResult.Held(TeardownFailure(verdict))
                 }
                 // The releases themselves run on MAIN: the media session and the feedback renderer
                 // own Main-confined state (the renderer's scope is Dispatchers.Main.immediate), so
                 // touching them from this IO job would be an off-thread release.
-                withContext(Dispatchers.Main) {
-                    wiredBackend?.release()
-                    wiredBackend = null
-                    mediaSession?.isActive = false
-                    mediaSession?.release()
-                    mediaSession = null
-                    voiceRecognizer.release()
-                    audioFeedbackRenderer.release()
-                    notificationManager.cancelNotification()
-                    stopForeground(STOP_FOREGROUND_REMOVE)
+                runCatching {
+                    withContext(Dispatchers.Main) {
+                        wiredBackend?.release()
+                        wiredBackend = null
+                        mediaSession?.isActive = false
+                        mediaSession?.release()
+                        mediaSession = null
+                        voiceRecognizer.release()
+                        audioFeedbackRenderer.release()
+                        notificationManager.cancelNotification()
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                    }
+                }.fold(
+                    onSuccess = { TeardownResult.Released },
+                    // A THROWING RELEASE IS A HELD TEARDOWN TOO (reviewer 3104ba44): the outcome is
+                    // reported, never thrown out of this unrouted launch.
+                    onFailure = { error ->
+                        Timber.e(error, "[VoicePipeline] resource release failed")
+                        TeardownResult.Held(TeardownFailure(EngineQuiescence.Verdict.Residual(remaining = 0, error = error)))
+                    },
+                )
+            }
+        }.also { teardown ->
+            stopInFlightJob = teardown
+            // RECORD THE OBSERVED OUTCOME (reviewers 6ce4ad78 + 3104ba44). A resources-held result
+            // keeps the failure visible to status and health surfaces, so a hold is never mistaken
+            // for a clean teardown just because nothing threw.
+            CoroutineScope(Dispatchers.IO).launch {
+                val outcome = runCatching { teardown.await() }
+                teardownFailure = when (val settled = outcome.getOrNull()) {
+                    null -> {
+                        Timber.e(outcome.exceptionOrNull(), "[VoicePipeline] teardown itself failed")
+                        TeardownFailure(EngineQuiescence.Verdict.Residual(remaining = 0, error = outcome.exceptionOrNull()))
+                    }
+
+                    is TeardownResult.Released -> null
+
+                    is TeardownResult.Held -> settled.failure
                 }
             }
-        }.also { stopInFlightJob = it }
+        }
     }
 
     private fun hasRequiredPermissions(): Boolean {

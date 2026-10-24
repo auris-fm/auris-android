@@ -177,7 +177,7 @@ class TeardownOrderContractTest {
     /** The real production function, read from the source tree (no Service instantiation needed). */
     private fun productionStopVoiceControlSource(): String {
         val source = productionFileSource()
-        val start = source.indexOf("private fun stopVoiceControl(): Job {")
+        val start = source.indexOf("private fun stopVoiceControl(): Deferred<TeardownResult> {")
         assertTrue("stopVoiceControl must exist in the production source", start >= 0)
         return source.substring(start, source.indexOf("\n    }", start))
     }
@@ -289,14 +289,23 @@ class TeardownOrderContractTest {
     }
 
     @Test
-    fun `a teardown that holds resources does not complete as a success`() {
-        // Reviewer 6ce4ad78: returning normally from a non-released teardown made an unsafe outcome
-        // indistinguishable from a clean one, and the retained job blocked any retry.
+    fun `a teardown that holds resources reports a Held result and never throws`() {
+        // Reviewers 6ce4ad78 + 3104ba44: a resources-held teardown must not look like a clean one,
+        // but throwing from this unrouted launch would be an UNCAUGHT exception and could take the
+        // process down. The outcome must be RETURNED, and a throwing release must be reported too.
         val source = productionStopVoiceControlSource()
         assertTrue(
-            "a non-Settled verdict must record a failure and fail the teardown job, not just log",
-            source.contains("teardownFailure = TeardownFailure(verdict)") &&
-                source.contains("throw IllegalStateException(\"voice teardown did not release"),
+            "a non-Settled verdict must return Held rather than throw",
+            source.contains("return@withContext TeardownResult.Held(") &&
+                !source.contains("throw IllegalStateException(\"voice teardown did not release"),
+        )
+        assertTrue(
+            "the teardown must be a Deferred so its outcome is observable",
+            productionFileSource().contains("private fun stopVoiceControl(): Deferred<TeardownResult>"),
+        )
+        assertTrue(
+            "a throwing release must be reported as Held, not escape the launch",
+            source.contains("TeardownResult.Held(TeardownFailure(EngineQuiescence.Verdict.Residual(remaining = 0, error = error)))"),
         )
     }
 

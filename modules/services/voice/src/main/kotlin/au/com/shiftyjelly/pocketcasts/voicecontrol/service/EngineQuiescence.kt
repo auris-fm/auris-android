@@ -41,7 +41,7 @@ internal object EngineQuiescence {
         data class AbnormallyFinished(val error: Throwable) : Verdict
 
         /** Work kept appearing past the round bound: release nothing. */
-        data class Residual(val remaining: Int) : Verdict
+        data class Residual(val remaining: Int, val error: Throwable? = null) : Verdict
     }
 
     /**
@@ -102,4 +102,17 @@ internal object EngineQuiescence {
 internal data class TeardownFailure(val verdict: EngineQuiescence.Verdict) {
     /** Human-readable reason, suitable for logs and status text. */
     val reason: String get() = verdict.toString()
+}
+
+/**
+ * How a teardown ended.
+ *
+ * Returned rather than thrown: the teardown runs in an unrouted coroutine, so an exception would be
+ * uncaught and could take the process down (reviewer 3104ba44). A [Held] result means the engine
+ * could not be proven settled and the dependent resources were deliberately NOT released.
+ */
+internal sealed interface TeardownResult {
+    data object Released : TeardownResult
+
+    data class Held(val failure: TeardownFailure) : TeardownResult
 }

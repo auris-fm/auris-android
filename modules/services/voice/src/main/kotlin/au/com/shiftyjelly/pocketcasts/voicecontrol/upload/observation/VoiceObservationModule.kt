@@ -103,6 +103,18 @@ object VoiceObservationModule {
      * enrollment/withdrawal post-commit hook, policy disable flow, exact lease-deadline purge.
      * Called from the app surface once at startup; idempotent inside the watcher.
      */
+    // Spec 64ce2de6: the withdrawal marker's directory barrier is the android.system.Os adapter in
+    // production, bound HERE at the Android construction boundary. A failed clear still reports
+    // false and sets the admission latch; there is no unsupported-runtime success fallback.
+    @Provides
+    @Singleton
+    fun provideWithdrawalIntentPersistence(
+        @dagger.hilt.android.qualifiers.ApplicationContext context: android.content.Context,
+    ): WithdrawalIntentPersistence = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation.FileWithdrawalIntentPersistence(
+        context,
+        directorySyncOverride = au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.DirectorySync.PRODUCTION,
+    )
+
     @Provides
     @Singleton
     fun provideLossWatcher(

@@ -26,7 +26,23 @@ fun interface DirectorySync {
     fun sync(directory: File)
 
     companion object {
-        /** Production implementation: a real directory fsync. */
+        /**
+         * The PRODUCTION directory barrier: the documented `android.system.Os` surface
+         * (open(O_DIRECTORY)/fsync/close) via [OsDirectorySync].
+         *
+         * This replaced `FileChannel.force` as the default so that every durable publication and every
+         * failed-stop clear goes through the DOCUMENTED API rather than one verified on a single device.
+         * There is NO unsupported-runtime success fallback: an unsupported platform or any errno
+         * propagates as a failure, which callers already treat as "not durable" (spec 64ce2de6).
+         *
+         * Tests keep injecting their own [DirectorySync] and never reach this binding.
+         */
+        // Lazily bound: an eager `val PRODUCTION = OsDirectorySync(...)` would run android.system.Os
+        // class loading in EVERY JVM unit test that merely touches this companion, failing them all
+        // with ExceptionInInitializerError before any injected barrier could matter.
+        val PRODUCTION: DirectorySync by lazy { OsDirectorySync(AndroidOsOperations()) }
+
+        /** The former default, retained as a selectable alternative and for reference. */
         val REAL: DirectorySync = DirectorySync { directory ->
             if (!directory.isDirectory) {
                 throw IOException("cannot sync a non-directory: ${directory.name}")

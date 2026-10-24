@@ -1,11 +1,10 @@
 package au.com.shiftyjelly.pocketcasts.voicecontrol.upload.observation
 
 import android.content.Context
+import au.com.shiftyjelly.pocketcasts.voicecontrol.upload.queue.DirectorySync
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
-import java.io.FileInputStream
 import java.io.FileOutputStream
-import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
@@ -29,9 +28,26 @@ import javax.inject.Singleton
  * ever written", not reachable by any ordinary crash during an update.
  */
 @Singleton
-class FileWithdrawalIntentPersistence @Inject constructor(
+class FileWithdrawalIntentPersistence constructor(
     @ApplicationContext private val context: Context,
+    /**
+     * The DIRECTORY BARRIER for the marker's entry. Injected so tests can refuse it, and so the
+     * production binding is the SAME documented `android.system.Os` adapter the queue uses.
+     *
+     * This replaced `FileInputStream(dir).fd.sync()`, which is not a supported directory barrier on
+     * Android (reviewer 60647af3) - the file descriptor was opened on a DIRECTORY through the FILE
+     * api, and whether that fsyncs the entry is unspecified. No unsupported-runtime success fallback:
+     * a failure here reports false, and the store keeps the admission latch set.
+     */
+    directorySyncOverride: DirectorySync? = null,
 ) : WithdrawalIntentPersistence {
+
+    /**
+     * The barrier actually used. The DEFAULT is the JVM-runnable FileChannel barrier so Robolectric
+     * tests construct this directly without touching android.system.Os; production binds the
+     * android.system.Os adapter at the Hilt boundary (VoiceObservationModule), per spec 64ce2de6.
+     */
+    private val directorySync: DirectorySync = directorySyncOverride ?: DirectorySync.REAL
 
     private val file: File
         get() = File(context.filesDir, "voice-sharing-local-stop")
@@ -149,13 +165,13 @@ class FileWithdrawalIntentPersistence @Inject constructor(
     /**
      * Forces the DIRECTORY ENTRY created by the rename.
      *
-     * A rename is durable only relative to its parent directory. Opening the directory as a
-     * [FileInputStream] is the mechanism available through the Java API on Android, and it is NOT a
-     * demonstrated directory barrier on every platform - so this reports what it actually achieved
-     * rather than assuming success, and the caller decides what an unproven barrier means.
+     * A rename is durable only relative to its parent directory. The barrier is [DirectorySync],
+     * which in production is the documented `android.system.Os` open(O_DIRECTORY)/fsync/close surface.
+     * A thrown sync (errno OR unsupported platform) is reported as false - never as a durable clear -
+     * and the caller decides what that means; for a failed CLEAR the admission latch stays set.
      */
     private fun syncDirectory(dir: File): Boolean = try {
-        FileInputStream(dir).use { it.fd.sync() }
+        directorySync.sync(dir)
         true
     } catch (e: Exception) {
         false

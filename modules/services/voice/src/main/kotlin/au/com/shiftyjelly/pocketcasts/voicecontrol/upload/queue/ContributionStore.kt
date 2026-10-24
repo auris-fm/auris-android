@@ -54,9 +54,12 @@ class ContributionStore(
     /**
      * Directory-entry durability. Injected so tests can OBSERVE that it runs and that a failure is not
      * swallowed; production uses the real fsync. This replaced a no-op stub that left the ready
-     * marker's durability unsubstantiated (review f003b49f finding 2).
+     * marker's durability unsubstantiated (review f003b49f finding 2). The default is the JVM-runnable
+     * FileChannel barrier so plain unit tests run without touching android.system.Os; the PRODUCTION
+     * (android.system.Os) adapter is bound at the Android construction boundary (VoiceUploadModule),
+     * per spec 64ce2de6. Tests keep injecting.
      */
-    private val directorySync: DirectorySync = DirectorySync.REAL,
+    directorySync: DirectorySync = DirectorySync.REAL,
     /**
      * File-CONTENT durability, injected for the same reason as [directorySync]: a directory force
      * persists a name, not what the file contains, so sidecars written with writeText were durable in
@@ -2702,10 +2705,11 @@ class ContributionStore(
     /**
      * Directory-entry durability, never swallowed.
      *
-     * This was a no-op stub because opening a stream on a directory is not portable.
-     * [DirectorySync.REAL] uses FileChannel.force, which is verified to work on the target
-     * platform. A failure means the entry is not known durable, so it propagates rather than
-     * being reported as a successful publication.
+     * This was a no-op stub because opening a stream on a directory is not portable. Production now
+     * uses [DirectorySync.PRODUCTION] - the documented android.system.Os open(O_DIRECTORY)/fsync/close
+     * surface - which has NO unsupported-runtime success fallback. A failure (errno or unsupported)
+     * means the entry is not known durable, so it propagates rather than being reported as a
+     * successful publication.
      */
     private fun syncDirectoryOrFail(directory: File) = directorySync.sync(directory)
 
@@ -2732,7 +2736,8 @@ class ContributionStore(
     // Defaults to the REAL barrier, NOT to `directorySync`. A fault aimed at the queue must not be able to
     // make disposal intent unrecordable: intent is most needed exactly when the queue is unhealthy. Tests
     // that want to fault intent recording pass the override explicitly.
-    private val intentDirectorySync: DirectorySync = intentDirectorySyncOverride ?: DirectorySync.REAL
+    private val intentDirectorySync: DirectorySync = intentDirectorySyncOverride
+        ?: DirectorySync.REAL
 
     companion object {
         private const val DIR_NAME = "contributions"

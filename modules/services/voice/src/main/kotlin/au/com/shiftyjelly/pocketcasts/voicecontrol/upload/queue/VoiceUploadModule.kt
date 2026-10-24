@@ -44,6 +44,13 @@ object VoiceUploadModule {
     ): ContributionStore = ContributionStore(
         File(context.filesDir, CAPTURES_ROOT),
         QueueLimits.defaults(),
+        // Spec 64ce2de6: the android.system.Os platform adapter is bound HERE, at the Android
+        // construction boundary, so every durable publication in production uses the documented
+        // open(O_DIRECTORY)/fsync/close surface. Unit tests construct the store directly with the
+        // JVM-runnable default or their own injected barrier. There is NO unsupported-runtime
+        // success fallback: an unsupported platform propagates a failure, never a claimed sync.
+        directorySync = DirectorySync.PRODUCTION,
+        intentDirectorySyncOverride = DirectorySync.PRODUCTION,
     )
 
     @Provides
